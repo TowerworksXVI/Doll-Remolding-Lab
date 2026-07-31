@@ -76,11 +76,12 @@ public class DroppedPngConfirmTests
     }
 
     /// <summary>The first drop is what makes the part's maps unrevertible one at a time, so it is the drop
-    /// that has to say so — not only the second one landing on an already-authored card.</summary>
+    /// that has to say so — not only the second one landing on an already-authored card. The line leads with
+    /// what the modder loses, not with what the app can't offer.</summary>
     [Fact]
     public void DonorRoute_CarriesTheNoRevertLineAndTheDangerStyling()
     {
-        Assert.EndsWith("\n\nNo revert for this map. Reverting the part takes it back, and the mesh edit with it.",
+        Assert.EndsWith("\n\nThe only way back is reverting the part, which discards its mesh edit too.",
             Body(Donor()));
         Assert.True(Danger(Donor()));
     }
@@ -115,7 +116,50 @@ public class DroppedPngConfirmTests
         Assert.DoesNotContain("already carr", Body(Donor(3, authoredLanding: 0)));
     }
 
-    // ---- the authored route: the SECOND drop, over a map the replacement already carries ----
+    // ---- the SECOND drop, over a map the replacement already carries: the same donor route ----
+
+    /// <summary>The card shows one of the replacement's own maps, so there is no game texture the drop
+    /// leaves alone and naming one would only confuse. The route is named by what it does replace.</summary>
+    [Fact]
+    public void DonorRoute_OnAnAlreadyAuthoredCard_NamesTheMapItReplaces_NotAGameTexture()
+    {
+        var ask = Donor(authoredLanding: 1) with { IsAuthored = true };
+        var body = Body(ask);
+
+        Assert.StartsWith("Apply paint.png as body1's Base color?", body);
+        Assert.Contains("This replaces body1's own Base color map.", body);
+        Assert.DoesNotContain("is untouched", body);
+        Assert.DoesNotContain("c_stem_body1_d", body);
+        Assert.Contains("Replaces the map 1 submesh already carries.", body);
+        Assert.True(Danger(ask));
+    }
+
+    /// <summary>An authored card's re-drop reaches every submesh the map dresses, same as a first drop, and
+    /// the RMO's mask still comes off the game map. Where the overwrite covers that whole reach, ONE sentence
+    /// carries the number: two counts of the same submeshes read as two different reaches.</summary>
+    [Fact]
+    public void DonorRoute_OnAnAlreadyAuthoredCard_CountsTheSameSubmeshesOnce()
+    {
+        var body = Body(Donor(submeshes: 2, authoredLanding: 2, slot: DonorMapSlot.Rmo) with { IsAuthored = true });
+
+        Assert.DoesNotContain("Applies to", body);
+        Assert.Contains("Replaces the maps 2 submeshes already carry.", body);
+        Assert.Contains(MainWindowViewModel.DroppedRmoAlphaNote, body);
+        Assert.EndsWith("\n\n" + MainWindowViewModel.DroppedMapNoRevert, body);
+    }
+
+    /// <summary>Where the two counts differ they are two facts: the drop reaches three submeshes and two of
+    /// them already carry a map.</summary>
+    [Fact]
+    public void DonorRoute_ReachingMoreSubmeshesThanItOverwrites_StatesBoth()
+    {
+        var body = Body(Donor(submeshes: 3, authoredLanding: 2) with { IsAuthored = true });
+
+        Assert.Contains("Applies to 3 submeshes.", body);
+        Assert.Contains("Replaces the maps 2 submeshes already carry.", body);
+    }
+
+    // ---- the in-place overwrite, for a card whose replacement the build would no longer ship ----
 
     /// <summary>The card's game texture is not what this drop touches, and the file may have come from
     /// either route — a Blender send or an earlier drop — so the body names the part and the slot and

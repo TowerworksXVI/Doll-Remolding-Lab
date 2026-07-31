@@ -628,12 +628,18 @@ public class BuildPaneVmTests : IDisposable
     // ---- which warnings the pane shows ----
 
     [Fact]
-    public void A_run_that_owns_the_surface_replaces_the_derivations_warnings_wholesale()
+    public void A_warning_the_live_derivation_raises_reaches_the_pane_behind_a_completed_run()
     {
+        // the field case: a build ran, then an edit made the list warn. A run that owned the surface alone
+        // would draw its own empty warning set over the one line the modder has to read.
         var shown = BuildWarningSource.Current(
-            runWarnings: Array.Empty<string>(), derivationWarnings: new[] { "stale" });
+            runWarnings: Array.Empty<string>(),
+            derivationWarnings: new[] { "'body' is replaced. Its replacement already carries its own RMO "
+                + "map, so the texture edit is not in this build. Drop the edited image on the part's map "
+                + "card to use it instead" });
 
-        Assert.Empty(shown);
+        Assert.Single(shown.Lines);
+        Assert.Equal(1, shown.Count);
     }
 
     [Fact]
@@ -645,7 +651,11 @@ public class BuildPaneVmTests : IDisposable
             runWarnings: new[] { same, "a tier can't serve the swap", same },
             derivationWarnings: Array.Empty<string>());
 
-        Assert.Equal(new[] { same, "a tier can't serve the swap" }, shown);
+        Assert.Equal(new[] { BuildWarningSource.LastBuildLeadIn, same, "a tier can't serve the swap" },
+            shown.Lines);
+        // …and the footer's tally counts the warnings, not the lines: it must match the box it sits under
+        Assert.Equal(2, shown.Count);
+        Assert.Equal("Built a mod · 2 warning(s)", BuildFooter.Idle.Built("a mod", shown.Count).Text);
     }
 
     [Fact]

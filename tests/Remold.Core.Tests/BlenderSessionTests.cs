@@ -989,18 +989,20 @@ public class BlenderSessionTests
     [Fact]
     public void SendBackSummary_SeveralPartsApplied_Counts()
     {
-        Assert.Equal("Applied Blender edits to 3 parts. 2 textures authored in Blender came back.",
+        // "authored", not "authored in Blender": the count also carries a sibling map linked in the shader
+        // editor and an untouched own map with a texture edit behind it, neither of which Blender painted.
+        Assert.Equal("Applied Blender edits to 3 parts. 2 maps authored.",
             MainWindowViewModel.SendBackSummary(new[] { "a", "b", "c" }, Nothing, Nothing, Maps(authored: 2)));
     }
 
-    /// <summary>A blanked slot ships no file, so counting it as an authored texture promises one that never
+    /// <summary>A blanked slot ships no file, so counting it as an authored map promises one that never
     /// arrives. The two are separate news on one line.</summary>
     [Fact]
-    public void SendBackSummary_BlankedSlots_AreCountedApartFromAuthoredTextures()
+    public void SendBackSummary_BlankedSlots_AreCountedApartFromAuthoredMaps()
     {
         Assert.Equal("Applied Blender edit to body1. 2 slots blanked.",
             MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(blanked: 2)));
-        Assert.Equal("Applied Blender edit to body1. 1 texture authored in Blender came back · 1 slot blanked.",
+        Assert.Equal("Applied Blender edit to body1. 1 map authored · 1 slot blanked.",
             MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(1, 1)));
     }
 
@@ -1009,7 +1011,7 @@ public class BlenderSessionTests
     [Fact]
     public void SendBackSummary_WhatTheIntakeGaveUpOn_IsSaidOnce()
     {
-        Assert.Equal("Applied Blender edits to 2 parts. 1 texture authored in Blender came back. Couldn't read body_r.png.",
+        Assert.Equal("Applied Blender edits to 2 parts. 1 map authored. Couldn't read body_r.png.",
             MainWindowViewModel.SendBackSummary(new[] { "a", "b" }, Nothing, Nothing,
                 Maps(1, 0, "Couldn't read body_r.png.", "Couldn't read body_r.png.")));
     }
@@ -1144,51 +1146,6 @@ public class BlenderSessionTests
         Assert.Equal(4, total.Authored);
         Assert.Equal(2, total.Blanked);
         Assert.Equal(new[] { "first", "second" }, total.Notes);
-    }
-
-    // ---------------------------------------------------------------- the keep-one-previous copy
-
-    [Fact]
-    public void KeepPreviousGlb_CopiesTheFileBlenderIsAboutToOverwrite()
-    {
-        // Every glb handed to Blender — a part's workspace file and the combined outfit session alike — is
-        // overwritten in place by Send. The copy has to be taken at LAUNCH; by receive it is already gone.
-        using var g = new TempGame();
-        var glb = g.At("_combined.glb");
-        File.WriteAllText(glb, "before the session");
-
-        MainWindowViewModel.KeepPreviousGlb(glb);
-
-        var prev = glb + MainWindowViewModel.PreviousGlbSuffix;
-        Assert.Equal("before the session", File.ReadAllText(prev));
-        // outside the .glb extension, so nothing that enumerates meshes picks it up
-        Assert.False(prev.EndsWith(".glb", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public void KeepPreviousGlb_KeepsOneCopy_NotAHistory()
-    {
-        using var g = new TempGame();
-        var glb = g.At("_combined.glb");
-        File.WriteAllText(glb, "first");
-        MainWindowViewModel.KeepPreviousGlb(glb);
-        File.WriteAllText(glb, "second");
-
-        MainWindowViewModel.KeepPreviousGlb(glb);
-
-        Assert.Equal("second", File.ReadAllText(glb + MainWindowViewModel.PreviousGlbSuffix));
-    }
-
-    [Fact]
-    public void KeepPreviousGlb_NothingToCopy_WritesNothing()
-    {
-        // Best-effort by design: a missing or locked file must never cost the modder the launch.
-        using var g = new TempGame();
-        var glb = g.At("never_built.glb");
-
-        MainWindowViewModel.KeepPreviousGlb(glb);
-
-        Assert.False(File.Exists(glb + MainWindowViewModel.PreviousGlbSuffix));
     }
 
     // ---------------------------------------------------------------- fixtures

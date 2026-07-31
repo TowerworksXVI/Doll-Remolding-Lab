@@ -443,6 +443,33 @@ public class PrewarmWiringTests
         Assert.Empty(vm.Prewarm.Pending);
     }
 
+    /// <summary>The property behind the close guard, on the flags a test can actually raise: a batch, an
+    /// asked-for materialize and a mod build each hold it, and each lets go again. The speculative half is
+    /// the control — a guess costs the modder no wait, so it is never work the close asks about.</summary>
+    [Fact]
+    public void TheCloseGuardReadsTheHoldersThatRaiseItsFlags()
+    {
+        using var jobs = new Jobs();
+        var vm = new MainWindowViewModel(startLoad: false, jobs.Run);
+        Assert.False(vm.IsWorkInFlight);
+
+        vm.Workbench.IsMaterializingAll = true;
+        Assert.True(vm.IsWorkInFlight);
+        vm.Workbench.IsMaterializingAll = false;
+        Assert.False(vm.IsWorkInFlight);
+
+        vm.IsModBuilding = true;
+        Assert.True(vm.IsWorkInFlight);
+        vm.IsModBuilding = false;
+
+        using (vm.BeginMaterialize(Subject("Vesna", 1101, "VesnaSSR01"), disarmWatchers: false))
+            Assert.True(vm.IsWorkInFlight);
+        Assert.False(vm.IsWorkInFlight);
+
+        using (vm.BeginMaterialize(Subject("Vesna", 1101, "VesnaSSR01"), disarmWatchers: false, background: true))
+            Assert.False(vm.IsWorkInFlight);
+    }
+
     // ---- the watchers a speculative run leaves up ----
 
     [Fact]
@@ -633,6 +660,7 @@ public class PrewarmWiringTests
         public Task CopyTextAsync(string? text) => Task.CompletedTask;
         public void GoToBuild() { }
         public void AutoSaveProject() { }
+        public string? AdoptSubjectTextureEdits(WorkbenchSubjectRef s, Remold.Core.Workbench.SubjectModel m) => null;
     }
 
     private sealed class Sink : IProgress<string>

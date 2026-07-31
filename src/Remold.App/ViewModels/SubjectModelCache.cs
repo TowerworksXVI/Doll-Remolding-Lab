@@ -25,6 +25,12 @@ public sealed class SubjectModelCache
         return _models.GetOrAdd(key, build());
     }
 
+    /// <summary>The model for a subject IF one is already memoized, else null — a peek that never builds.
+    /// For a caller on the UI thread that has something better to do than stall the window for seconds on a
+    /// subject nothing has read yet.</summary>
+    public SubjectModel? TryGet(string character, string stem) =>
+        _models.TryGetValue(new MainWindowViewModel.SubjectKey(character, stem), out var hit) ? hit : null;
+
     /// <summary>Drop every memoized model, for a re-read of the game.</summary>
     public void Clear() => _models.Clear();
 

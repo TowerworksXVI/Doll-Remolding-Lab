@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Remold.App.ViewModels;
 using Remold.Core.Project;
 using Xunit;
@@ -207,15 +208,43 @@ public class BuildFooterTests
 
     // ---- which warnings show ----------------------------------------------------------------------
 
+    /// <summary>A run's warnings describe the folder it built and the derivation's describe the list as it
+    /// stands, so both are drawn — the run's under a lead-in that says which is which. A run owning the
+    /// surface alone would hide every warning an edit made since the build raises; the two mixed unlabelled
+    /// would leave no way to tell a fact about the built folder from one about the list on screen.</summary>
     [Fact]
-    public void A_completed_run_owns_the_warning_list_until_its_result_clears()
+    public void A_completed_run_and_the_live_derivation_both_keep_their_warnings()
     {
         var derivation = new List<string> { "'body' is replaced. Its texture edit is not in this build" };
         var run = new List<string>
             { "tier 'c_vesna01_body_lod1' can't serve the swap (no bone table). Its vanilla draw is left running" };
 
-        Assert.Equal(derivation, BuildWarningSource.Current(null, derivation));
-        Assert.Equal(run, BuildWarningSource.Current(run, derivation));
-        Assert.Equal(derivation, BuildWarningSource.Current(null, derivation));
+        // no run owns the surface: the live lines stand alone, with nothing to introduce
+        var live = BuildWarningSource.Current(null, derivation);
+        Assert.Equal(derivation, live.Lines);
+        Assert.Equal(1, live.Count);
+
+        var both = BuildWarningSource.Current(run, derivation);
+        Assert.Equal(new[] { BuildWarningSource.LastBuildLeadIn }.Concat(run).Concat(derivation), both.Lines);
+        Assert.Equal(2, both.Count);   // the lead-in is not a warning
+
+        var nothing = BuildWarningSource.Current(null, new List<string>());
+        Assert.Empty(nothing.Lines);
+        Assert.Equal(0, nothing.Count);
+    }
+
+    /// <summary>A build derives the same list the pane does, so the two sources overlap almost entirely: the
+    /// shared sentences read once, and they read as LIVE — a fact about the list on screen is the more
+    /// actionable of the two readings, and the lead-in is left with nothing to introduce.</summary>
+    [Fact]
+    public void One_warning_both_sources_reach_reads_once_and_reads_as_live()
+    {
+        var line = new List<string> { "'body' is replaced. Its texture edit is not in this build" };
+
+        var surface = BuildWarningSource.Current(line, line);
+
+        Assert.Equal(line, surface.Lines);
+        Assert.Equal(1, surface.Count);
+        Assert.DoesNotContain(BuildWarningSource.LastBuildLeadIn, surface.Lines);
     }
 }

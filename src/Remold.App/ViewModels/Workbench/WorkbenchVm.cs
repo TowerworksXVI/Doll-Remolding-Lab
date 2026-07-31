@@ -292,8 +292,19 @@ public sealed partial class WorkbenchVm : ObservableObject
             Nodes.Add(root);
         }
 
+        // The models are in hand — the one input the edit-time adoption can't build for itself — so the
+        // subject's edits get their pass before the flags below are read off the project. Each sweep hands
+        // back what it took rather than saying it: the count line below is written after them all, and
+        // several subjects would in any case leave only the last one's line standing.
+        var adopted = new List<string>();
+        foreach (var (_, model, subject) in built)
+            if (_shell?.AdoptSubjectTextureEdits(subject, model) is { Length: > 0 } line) adopted.Add(line);
+
         IsBuilding = false;
-        Status = Count(Nodes.Count, "item");
+        // The pane shows ONE line. A build with nothing to announce reports its size; a build that adopted
+        // something reports that instead — the tree's size is on screen either way, and what just happened
+        // to the mod is not. Several subjects join the way one subject's own halves do.
+        Status = adopted.Count > 0 ? string.Join(" ", adopted) : Count(Nodes.Count, "item");
         OnPropertyChanged(nameof(HasNodes));
         ApplyFilter();
         RefreshNodeStates();   // seed ✎ / materialized flags from the project
@@ -1035,40 +1046,12 @@ public sealed partial class WorkbenchVm : ObservableObject
  .Select(m => m.Maps.FirstOrDefault(map => MaterialResolver.IsRmo(map.Slot)))
  .ToArray(),
         };
-        var bound = BoundSubmeshesByMap(part.Materials);
+        var bound = DonorMapBinding.BoundSubmeshesByMap(part.Materials);
         for (int mi = 0; mi < part.Materials.Count; mi++)
             node.Children.Add(BuildMaterialNode(part.Materials[mi], mi, part.Token, part.SlotName, subject,
                 ownersByTexture, bound));
         return node;
     }
-
-    /// <summary>(map slot kind, texture, bundle) → the part's renderer material slots binding it, in slot
-    /// order. Material order IS submesh order, so this is also which donor submeshes a map authored on one of
-    /// those cards lands on: one stock map dressing three of the part's slots is one image on three
-    /// submeshes, which is how the game draws it. A map whose slot is none of the three shippable kinds is
-    /// absent — nothing can be authored for it.</summary>
-    private static Dictionary<(DonorMapSlot Slot, string Texture, string Bundle), List<int>>
-        BoundSubmeshesByMap(IReadOnlyList<SubjectMaterial> materials)
-    {
-        var bound = new Dictionary<(DonorMapSlot, string, string), List<int>>();
-        for (int mi = 0; mi < materials.Count; mi++)
-            foreach (var map in materials[mi].Maps)
-            {
-                if (DonorSlotOf(map.Slot) is not { } slot) continue;
-                var key = (slot, map.TextureName, map.BundleId);
-                if (!bound.TryGetValue(key, out var list)) bound[key] = list = new List<int>();
-                if (!list.Contains(mi)) list.Add(mi);
-            }
-        return bound;
-    }
-
-    /// <summary>The donor slot a shader texture slot ships as, or null when the build has no slot for it.
-    /// THE map from shader slot to donor slot, so the card, the drop and the record agree.</summary>
-    internal static DonorMapSlot? DonorSlotOf(string shaderSlot) =>
-        MaterialResolver.IsBaseColor(shaderSlot) ? DonorMapSlot.BaseColor
-        : MaterialResolver.IsNormal(shaderSlot) ? DonorMapSlot.Normal
-        : MaterialResolver.IsRmo(shaderSlot) ? DonorMapSlot.Rmo
-        : null;
 
     private static WorkbenchNodeVm BuildMaterialNode(SubjectMaterial mat, int materialIndex, string partToken,
         string partMeshName, WorkbenchSubjectRef subject, Dictionary<string, List<string>> ownersByTexture,
@@ -1096,7 +1079,7 @@ public sealed partial class WorkbenchVm : ObservableObject
             node.Maps.Add(WorkbenchNodeVm.MapRow(map, subject,
                 ownersByTexture.TryGetValue(map.TextureName, out var o) ? o : ownFallback,
                 partToken,
-                DonorSlotOf(map.Slot) is { } slot
+                DonorMapBinding.DonorSlotOf(map.Slot) is { } slot
                 && boundSubmeshes.TryGetValue((slot, map.TextureName, map.BundleId), out var bound)
                     ? bound : null));
         return node;
@@ -1420,8 +1403,9 @@ public sealed partial class WorkbenchVm : ObservableObject
     }
 
     /// <summary>A verb refused because another one holds the gate. The buttons disable per NODE, so a verb
-    /// on a second node looks live and its click would otherwise land on nothing said at all.</summary>
-    private void ReportVerbBusy() => Status = "Busy with the current step. Try again when it finishes.";
+    /// on a second node looks live and its click would otherwise land on nothing said at all. A drop reaches
+    /// it too: that path is skipped rather than queued, and has no button of its own to carry the cue.</summary>
+    private void ReportVerbBusy() => Status = BlenderGate.Busy;
 
     /// <summary>A mesh verb refused because the part's mesh can't be replaced. Same line the disabled button
     /// carries, said on the status channel for a click that reached the command another way.</summary>
@@ -1523,19 +1507,24 @@ public sealed partial class WorkbenchVm : ObservableObject
     [RelayCommand]
     private async Task RevertPart(WorkbenchNodeVm? node)
     {
-        if (_shell is null || node is not { Kind: WorkbenchNodeKind.Part, Subject: { } subj } || !node.CanRevert) return;
-        if (VerbsBusy) { ReportVerbBusy(); return; }
+        if (_shell is null || node is not { Kind: WorkbenchNodeKind.Part, Subject: { } subj }) return;
+        // Ahead of the busy gate, as in OpenPart: a part with no mesh edit to undo has nothing this verb
+        // could do later either, and a wait would imply the click works once the gate lets go.
+        if (!node.HasEditToRevert) return;
+        if (node.IsBusy || VerbsBusy) { ReportVerbBusy(); return; }
         _verbInFlight = true; node.IsBusy = true;
         try { await _shell.RevertPartAsync(subj, node.PartToken, StatusProgress); }
         finally { node.IsBusy = false; EndVerb(); RefreshNodeStates(); }
     }
 
     /// <summary>Flip a part's Hide toggle: workbench STATE the build derives a Hide verb from, never a verb
-    /// authored here. Instant — hiding needs no editable copy.</summary>
+    /// authored here. Instant — hiding needs no editable copy, so it takes no turn at the gate; it only waits
+    /// behind one, since the project it writes is the one a send-back apply is mid-write in.</summary>
     [RelayCommand]
     private void ToggleHidden(WorkbenchNodeVm? node)
     {
         if (_shell is null || node is not { Kind: WorkbenchNodeKind.Part, Subject: { } subj, Recipe: { } recipe }) return;
+        if (node.IsBusy || VerbsBusy) { ReportVerbBusy(); return; }
         var proj = _project();
         bool hidden = !node.IsHiddenInMod;
         proj.SetHidden(subj.Character, subj.Stem, recipe.SlotName, hidden);
@@ -1688,8 +1677,11 @@ public sealed partial class WorkbenchVm : ObservableObject
     [RelayCommand]
     private async Task RevertMap(WorkbenchMapVm? map)
     {
-        if (_shell is null || map is not { Subject: { } subj } || !map.CanRevert) return;
-        if (VerbsBusy) { ReportVerbBusy(); return; }
+        if (_shell is null || map is not { Subject: { } subj }) return;
+        // Ahead of the busy gate, as in OpenPart: a card with no map edit to undo has nothing this verb
+        // could do later either, and a wait would imply the click works once the gate lets go.
+        if (!map.HasEditToRevert) return;
+        if (map.IsBusy || VerbsBusy) { ReportVerbBusy(); return; }
         _verbInFlight = true; map.IsBusy = true;
         try { await _shell.RevertMapAsync(subj, map.TextureName, map.BundleId, StatusProgress); }
         finally { map.IsBusy = false; EndVerb(); RefreshNodeStates(); }
@@ -2311,7 +2303,7 @@ public sealed partial class WorkbenchVm : ObservableObject
     private async Task HandleCardDropAsync(WorkbenchMapVm map, string path)
     {
         if (map.Subject is null) return;
-        if (map.IsBusy || VerbsBusy) { ReportDropBusy(path); return; }
+        if (map.IsBusy || VerbsBusy) { ReportVerbBusy(); return; }
         if (!CanDropPng(map, path)) return;   // refuse BEFORE the confirm — no pointless dialog
         var donor = DonorDropFor(map, out var refusal, out int authoredLanding);
         if (refusal is not null) { Status = $"{Path.GetFileName(path)} {refusal}"; return; }
@@ -2335,20 +2327,22 @@ public sealed partial class WorkbenchVm : ObservableObject
     /// <summary>The donor-map authoring this card's drop is, or null when the drop is an ordinary map
     /// edit. A card on a REPLACED part shows a stock map the build no longer ships, so an image dropped
     /// there is meant for the replacement, landing as the same per-submesh authored record a Blender
-    /// session's map would. A card the mesh edit already authored keeps its own route: that file IS the
-    /// record. A slot kind outside base colour/normal/RMO is NOT this route's — the replacement leaves
-    /// the game texture drawing there — so this returns null. <paramref name="refusal"/>: the status-line
-    /// tail for a drop this route owns and still can't take. <paramref name="authoredLanding"/>: landing
-    /// submeshes that ALREADY name a file on this slot — the drop overwrites every one, including files
-    /// authored from a card it didn't land on, so the confirm says how many.</summary>
+    /// session's map would. A card the replacement ALREADY authored takes the same route: the map is
+    /// rebuilt rather than overwritten in place, which is what gives an RMO back the emissive mask a
+    /// straight file copy would drop. A slot kind outside base colour/normal/RMO is NOT this route's — the
+    /// replacement leaves the game texture drawing there — so this returns null.
+    /// <paramref name="refusal"/>: the status-line tail for a drop this route owns and still can't take.
+    /// <paramref name="authoredLanding"/>: landing submeshes that ALREADY name a file on this slot — the
+    /// drop overwrites every one, including files authored from a card it didn't land on, so the confirm
+    /// says how many.</summary>
     private DonorMapDrop? DonorDropFor(WorkbenchMapVm map, out string? refusal, out int authoredLanding)
     {
         refusal = null;
         authoredLanding = 0;
-        if (map.AuthoredPath is not null || map.PartToken.Length == 0 || map.Subject is not { } s) return null;
+        if (map.PartToken.Length == 0 || map.Subject is not { } s) return null;
         var proj = _project();
         if (!PartMeshEdited(proj, s, map.PartToken)) return null;
-        if (DonorSlotOf(map.SlotName) is not { } slot) return null;
+        if (DonorMapBinding.DonorSlotOf(map.SlotName) is not { } slot) return null;
         // The build refuses a row past the donor's own submesh count, so the drop refuses first. The donor's
         // material list is what the replacement came back carrying; without one there is no shape to check
         // against and nothing that could be authored in range.
@@ -2432,45 +2426,51 @@ public sealed partial class WorkbenchVm : ObservableObject
             ? (w, h) : null;
     }
 
-    /// <summary>Whether this card has anything a dropped PNG could become — the rule the DRAG-OVER cursor
-    /// reads. A game texture to edit, a map the replacement already carries to overwrite, or a replaced
-    /// part's submesh to author for: the third is what gives a submesh the edit ADDED its affordance, since
-    /// such a card carries neither a bundle nor, until something lands there, a file. Says nothing on the
-    /// status line: a hover is not a refusal yet.</summary>
+    /// <summary>Whether this card has anything a dropped PNG could become. A game texture to edit, a
+    /// replaced part's submesh to author for, or a map the replacement already carries: the second is what
+    /// gives a submesh the edit ADDED its affordance, since such a card carries neither a bundle nor, until
+    /// something lands there, a file.</summary>
+    private bool HasDropTarget(WorkbenchMapVm map) =>
+        map.HasBundle || DonorDropFor(map, out _, out _) is not null || map.AuthoredPath is not null;
+
+    /// <summary>The rule the DRAG-OVER cursor reads: what the card could take, and the SAME busy gate the
+    /// drop itself checks. Both halves have to be here — a cursor reading only the first offers a copy on a
+    /// card whose verb is running, and the drop then refuses it. Says nothing on the status line: a hover is
+    /// not a refusal yet.</summary>
     internal bool CanAcceptDrop(WorkbenchMapVm map) =>
-        map.HasBundle || map.AuthoredPath is not null || DonorDropFor(map, out _, out _) is not null;
+        !map.IsBusy && !VerbsBusy && HasDropTarget(map);
 
     /// <summary>Whether a dropped PNG can apply here, reporting why not when it can't. A row with neither an
-    /// authored file nor a bundle has nothing to replace, and would hunt on an empty bundle id.</summary>
+    /// authored file nor a bundle has nothing to replace, and would hunt on an empty bundle id. A blanked
+    /// donor row names no texture at all — the build's own flat map stands where an image would — so it says
+    /// what the card holds instead of reading a name off it.</summary>
     private bool CanDropPng(WorkbenchMapVm map, string path)
     {
-        if (CanAcceptDrop(map)) return true;
-        Status = $"{Path.GetFileName(path)} can't apply here. {map.TextureName} isn't on disk.";
+        if (HasDropTarget(map)) return true;
+        Status = $"{Path.GetFileName(path)} can't apply here. "
+            + (map.TextureName.Length > 0 ? $"{map.TextureName} isn't on disk."
+                                          : "This slot has no image to replace.");
         return false;
     }
 
-    /// <summary>Ingest a dropped PNG into the file this card actually shows: the authored PNG when the row
-    /// has one, the replacement's own map when the part is replaced (<paramref name="donor"/>), else the game
+    /// <summary>Ingest a dropped PNG into what this card actually stands for: the replacement's own map when
+    /// the part is replaced (<paramref name="donor"/>), first drop and re-drop alike; the authored PNG in
+    /// place for a card whose record no longer names a replacement the build would ship; else the game
     /// texture's workspace copy.</summary>
     private async Task DropPngAsync(WorkbenchMapVm map, string path, DonorMapDrop? donor = null)
     {
         if (!CanDropPng(map, path)) return;
-        if (map.IsBusy || VerbsBusy) { ReportDropBusy(path); return; }
+        if (map.IsBusy || VerbsBusy) { ReportVerbBusy(); return; }
         _verbInFlight = true; map.IsBusy = true;
         try
         {
-            if (map.AuthoredPath is { } authored)
-                await _shell!.ApplyDroppedPngToAuthoredAsync(authored, map.PartToken, map.MapLabel, path, StatusProgress);
-            else if (donor is not null)
+            if (donor is not null)
                 await _shell!.ApplyDroppedPngToDonorMapAsync(map.Subject!, donor, map.MapLabel, path, StatusProgress);
+            else if (map.AuthoredPath is { } authored)
+                await _shell!.ApplyDroppedPngToAuthoredAsync(authored, map.PartToken, map.MapLabel, path, StatusProgress);
             else
                 await _shell!.ApplyDroppedPngAsync(map.Subject!, map.TextureName, map.BundleId, map.OwnerMeshNames, path, StatusProgress);
         }
         finally { map.IsBusy = false; EndVerb(); RefreshNodeStates(); }
     }
-
-    /// <summary>A drop arriving while another verb holds the gate is skipped, not queued — say so, since the
-    /// drop path has no disabled button to carry the cue.</summary>
-    private void ReportDropBusy(string path) =>
-        Status = $"Busy with the current step. Drop {Path.GetFileName(path)} again when it finishes.";
 }

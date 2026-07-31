@@ -26,8 +26,10 @@ public static class SendBackGeometry
     /// byte-compare against <c>originals/</c> still reads the part as untouched and the donor record still
     /// describes what is in the file.</para>
     ///
-    /// <para><paramref name="beforeWrite"/> reaches the caller only once the returned part has parsed and the
-    /// re-split has agreed to write, for a caller keeping a copy of the file it is overwriting.</para>
+    /// <para><paramref name="beforeWrite"/> is the observation point for the write itself: it fires only once
+    /// the returned part has parsed and the re-split has agreed to write, so a run that answers "nothing to
+    /// take" and a re-split that refuses both leave it silent. That is the invariant the tests hold this
+    /// method to; no production caller passes one.</para>
     ///
     /// <para><paramref name="recordGlb"/> names the glb the map-origin record was written beside, which is
     /// what settles the stock maps the rewrite embeds; a combined send arrives under a name of its own, so

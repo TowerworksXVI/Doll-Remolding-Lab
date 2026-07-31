@@ -311,6 +311,10 @@ public sealed partial class MigotoEmitter
     /// Null = solve fresh, write nothing.</summary>
     public string? OperatorCacheDir { get; init; }
 
+    /// <summary>Most cores the operator solve may spread across (see <see cref="SolveOperators"/>). Null =
+    /// every logical processor.</summary>
+    public int? CpuLimit { get; init; }
+
     // The draw probes these ps-t slots for the anchor's stock maps. 0..6 covers every slot layout
     // measured across environments (albedo at t0..t3; normal/RMO up to t6); the probe reads the slot
     // actually bound at draw time, so an unmeasured environment costs nothing but a slot in this range.
@@ -512,6 +516,35 @@ public sealed partial class MigotoEmitter
             }
             copiedFrom[bn] = src;
             File.Copy(src, Path.Combine(req.OutDir, bn), overwrite: true);
+        }
+
+        // One replacement's authored per-submesh maps, taken the same way whichever route the replacement
+        // goes down: the ini binds by basename, so every authored file is copied in and the slot rewritten
+        // to it. drawCount is that replacement's own submesh count.
+        SubmeshMaps?[] SubMapsFor(string sfx, IEnumerable<KeyValuePair<int, SubmeshMaps>> overrides, int drawCount)
+        {
+            MapSlot Ship(MapSlot slot)
+            {
+                if (slot.File is not { } src) return slot;
+                CopyNamed(src, "textures");
+                return MapSlot.From(Path.GetFileName(src));
+            }
+            var subMaps = new SubmeshMaps?[drawCount];
+            foreach (var kv in overrides)
+            {
+                // refused before the range check: a row asking for something that cannot exist is a caller
+                // fault whichever submesh it names, and skipping it would hide the fault behind a warning
+                if (kv.Value.Albedo.IsNeutral)
+                    throw new InvalidOperationException(
+                        $"{sfx}: submesh {kv.Key} asks for a neutral base color. Only normal and RMO ship one");
+                if (kv.Key < 0 || kv.Key >= drawCount)
+                {
+                    warnings.Add($"{sfx}: texture for submesh {kv.Key} is out of range ({drawCount} submeshes). Skipped");
+                    continue;
+                }
+                subMaps[kv.Key] = new SubmeshMaps(Ship(kv.Value.Albedo), Ship(kv.Value.Normal), Ship(kv.Value.Rmo));
+            }
+            return subMaps;
         }
 
         var pipes = new List<PipelineEmission>();
@@ -759,28 +792,7 @@ public sealed partial class MigotoEmitter
             var draws = submeshes.Select(s => (s.IndexCount, Start: s.FirstByte / bpi, s.BaseVertex)).ToList();
 
             // ---- per-submesh maps ---------------------------------------------------------------------
-            // the ini binds by basename, so every authored file is copied in and the slot rewritten to it
-            var subMaps = new SubmeshMaps?[draws.Count];
-            MapSlot Ship(MapSlot slot)
-            {
-                if (slot.File is not { } src) return slot;
-                CopyNamed(src, "textures");
-                return MapSlot.From(Path.GetFileName(src));
-            }
-            foreach (var kv in subTexOverrides)
-            {
-                // refused before the range check: a row asking for something that cannot exist is a caller
-                // fault whichever submesh it names, and skipping it would hide the fault behind a warning
-                if (kv.Value.Albedo.IsNeutral)
-                    throw new InvalidOperationException(
-                        $"{sfx}: submesh {kv.Key} asks for a neutral base color. Only normal and RMO ship one");
-                if (kv.Key < 0 || kv.Key >= draws.Count)
-                {
-                    warnings.Add($"{sfx}: texture for submesh {kv.Key} is out of range ({draws.Count} submeshes). Skipped");
-                    continue;
-                }
-                subMaps[kv.Key] = new SubmeshMaps(Ship(kv.Value.Albedo), Ship(kv.Value.Normal), Ship(kv.Value.Rmo));
-            }
+            var subMaps = SubMapsFor(sfx, subTexOverrides, draws.Count);
 
             pipes.Add(new PipelineEmission(sfx, partMeta, anchorIdx, capHashes, ub, vcount, vb1Stride,
                 ibFmt, draws, subMaps,
@@ -826,26 +838,7 @@ public sealed partial class MigotoEmitter
                 else
                     draws.Add((File.ReadAllBytes(Path.Combine(r.DonorDir, "ib.buf")).Length / bpi, 0, 0));
 
-                // the ini binds by basename, so every authored file is copied in and the slot rewritten to it
-                var subMaps = new SubmeshMaps?[draws.Count];
-                foreach (var kv in r.SubTextures ?? new Dictionary<int, SubmeshMaps>())
-                {
-                    if (kv.Value.Albedo.IsNeutral)
-                        throw new InvalidOperationException(
-                            $"{sfx}: submesh {kv.Key} asks for a neutral base color. Only normal and RMO ship one");
-                    if (kv.Key < 0 || kv.Key >= draws.Count)
-                    {
-                        warnings.Add($"{sfx}: texture for submesh {kv.Key} is out of range ({draws.Count} submeshes). Skipped");
-                        continue;
-                    }
-                    MapSlot Ship(MapSlot slot)
-                    {
-                        if (slot.File is not { } src) return slot;
-                        CopyNamed(src, "textures");
-                        return MapSlot.From(Path.GetFileName(src));
-                    }
-                    subMaps[kv.Key] = new SubmeshMaps(Ship(kv.Value.Albedo), Ship(kv.Value.Normal), Ship(kv.Value.Rmo));
-                }
+                var subMaps = SubMapsFor(sfx, r.SubTextures ?? new Dictionary<int, SubmeshMaps>(), draws.Count);
 
                 rigids.Add(new RigidEmission(sfx, r.Hashes.ToList(),
                     streams.FirstOrDefault(s => s.Stream == 0).Stride,
@@ -1931,10 +1924,10 @@ public sealed partial class MigotoEmitter
     /// <summary>Solve every distinct (name, dump dir) operator ahead of the emission that consumes them.
     /// <see cref="BuildOperator"/> is pure and the build's dominant cost, so the set is solved in parallel;
     /// everything order-dependent (diagnostics, writes, failures) stays in the emission's own sequence. A
-    /// pair the emission never reaches is solved and discarded, its failure never raised. Degree of
-    /// parallelism is the core count: MathNet parallelises inside a single matrix product through the same
-    /// thread pool, so the fan-out claims the cores and the per-product loops find less to steal rather
-    /// than oversubscribing it.</summary>
+    /// pair the emission never reaches is solved and discarded, its failure never raised. Parallelism is
+    /// capped by <see cref="CpuLimit"/>, and by the machine's logical processor count without one. This is
+    /// the ONLY fan-out on the route — <see cref="BuildOperator"/> and everything under it run serially — so
+    /// that cap is the whole width the solve takes.</summary>
     Dictionary<(string Name, string Dir), OperatorSolve> SolveOperators(PoolBuildRequest req,
         Func<string, StreamsLoad> load, Func<string, PoolMath.UnionInput> unionInput,
         Func<string, Matrix4x4?> conversion)
@@ -1951,7 +1944,7 @@ public sealed partial class MigotoEmitter
 
         var solved = new ConcurrentDictionary<(string, string), OperatorSolve>();
         Parallel.ForEach(jobs,
-            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount) },
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, CpuLimit ?? Environment.ProcessorCount) },
             job =>
             {
                 OperatorSolve result;
@@ -2296,46 +2289,50 @@ public sealed partial class MigotoEmitter
         }
 
         int k = kStart;
+        // One bone's level: its own selection, its own solve, its own slot in the three result arrays. No
+        // bone reads another's, so the outcome is the same whatever order the level runs in. It runs SERIALLY
+        // under the caller's fan-out over parts, which is what the CPU limit bounds — a parallel loop nested
+        // inside a capped one multiplies past that bound rather than composing with it.
+        void SolveBone(int b)
+        {
+            bool needs = picked[b] is null || (!denseWeak[b] && FailsSlimGate(err[b]));
+            if (!needs) return;
+            var pk = PoolMath.SelectAnchorRows(load.P, load.W, load.BI, b, k);
+            if (pk.Length == 0)
+            {
+                picked[b] = new[] { 0 };
+                rows[b] = new[] { new double[1], new double[1], new double[1], new double[1] };
+                err[b] = double.PositiveInfinity;
+                return;
+            }
+            var (bestRows, bestErr) = Solve(b, pk);
+            if (FailsSlimGate(bestErr))
+            {
+                // the defect of a failing bone is usually its co-bones' contribution, which its own
+                // vertices cannot separate out. Rows that pin the co-bones without carrying the bone can,
+                // and cost only their own width.
+                var disc = PoolMath.SelectDiscriminatorRows(load.P, load.W, load.BI, b, pk, nb, k);
+                if (disc.Length > 0)
+                {
+                    var wide = pk.Concat(disc).ToArray();
+                    Array.Sort(wide);
+                    var (dRows, dErr) = Solve(b, wide);
+                    if (BetterDefect(dErr, bestErr)) { bestRows = dRows; bestErr = dErr; pk = wide; }
+                }
+            }
+            // a wider K that solves this bone WORSE keeps its narrower selection: the reported defect
+            // and the rows it describes must be the same solve
+            if (picked[b] is null || BetterDefect(bestErr, err[b]))
+            {
+                rows[b] = bestRows;
+                err[b] = bestErr;
+                picked[b] = pk;
+            }
+        }
+
         while (true)
         {
-            // Per bone: its own selection, its own solve, its own slot in the three result arrays. No bone
-            // reads another's, so the outcome is the same whatever order the level runs in.
-            Parallel.For(0, nb, b =>
-            {
-                bool needs = picked[b] is null || (!denseWeak[b] && FailsSlimGate(err[b]));
-                if (!needs) return;
-                var pk = PoolMath.SelectAnchorRows(load.P, load.W, load.BI, b, k);
-                if (pk.Length == 0)
-                {
-                    picked[b] = new[] { 0 };
-                    rows[b] = new[] { new double[1], new double[1], new double[1], new double[1] };
-                    err[b] = double.PositiveInfinity;
-                    return;
-                }
-                var (bestRows, bestErr) = Solve(b, pk);
-                if (FailsSlimGate(bestErr))
-                {
-                    // the defect of a failing bone is usually its co-bones' contribution, which its own
-                    // vertices cannot separate out. Rows that pin the co-bones without carrying the bone can,
-                    // and cost only their own width.
-                    var disc = PoolMath.SelectDiscriminatorRows(load.P, load.W, load.BI, b, pk, nb, k);
-                    if (disc.Length > 0)
-                    {
-                        var wide = pk.Concat(disc).ToArray();
-                        Array.Sort(wide);
-                        var (dRows, dErr) = Solve(b, wide);
-                        if (BetterDefect(dErr, bestErr)) { bestRows = dRows; bestErr = dErr; pk = wide; }
-                    }
-                }
-                // a wider K that solves this bone WORSE keeps its narrower selection: the reported defect
-                // and the rows it describes must be the same solve
-                if (picked[b] is null || BetterDefect(bestErr, err[b]))
-                {
-                    rows[b] = bestRows;
-                    err[b] = bestErr;
-                    picked[b] = pk;
-                }
-            });
+            for (int b = 0; b < nb; b++) SolveBone(b);
             bool ok = true;
             for (int b = 0; b < nb && ok; b++) ok = denseWeak[b] || !FailsSlimGate(err[b]);
             if (ok || k >= kCap) break;

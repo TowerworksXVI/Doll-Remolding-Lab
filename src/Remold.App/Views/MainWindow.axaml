@@ -597,7 +597,7 @@
             </Border>
 
             <!-- disclosures with nothing to fix: an edit's reach beyond the picked subject and how the
-                 run scoped it. Run-owned, so the block appears only after a build. -->
+                 run scoped it. -->
             <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
                     BorderThickness="1" CornerRadius="3" Padding="12,8" IsVisible="{Binding HasBuildInfos}">
               <ScrollViewer MaxHeight="140" VerticalScrollBarVisibility="Auto">
@@ -630,10 +630,17 @@
                         Margin="0,0,12,0"
                         Command="{Binding BuildModCommand}" IsEnabled="{Binding CanBuildMod}"
                         ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding BuildButtonTip}" />
+                <!-- one cell, two buttons, one of them visible: with no usable loader there is nothing to
+                     install into, so the cell offers the way to set the path instead of a dead Install. -->
                 <Button Grid.Column="1" Content="Install" Command="{Binding InstallBuildCommand}"
                         VerticalAlignment="Center" Margin="0,0,12,0"
+                        IsVisible="{Binding HasMigotoLoader}"
                         IsEnabled="{Binding CanInstallBuild}"
                         ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding InstallButtonTip}" />
+                <Button Grid.Column="1" Content="{Binding SetMigotoPathLabel}" Click="OnSettings"
+                        VerticalAlignment="Center" Margin="0,0,12,0"
+                        IsVisible="{Binding NeedsMigotoLoader}"
+                        ToolTip.Tip="{Binding SetMigotoPathTip}" />
                 <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="12"
                            Foreground="{StaticResource HudSubtextBrush}"
                            TextTrimming="CharacterEllipsis"

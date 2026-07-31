@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Remold.App.ViewModels;
 using Remold.App.ViewModels.Workbench;
 using Remold.Core.Export;
 using Remold.Core.Model;
@@ -91,6 +92,7 @@ public class WorkbenchDropRoutingTests
         public Task CopyTextAsync(string? text) => Task.CompletedTask;
         public void GoToBuild() { }
         public void AutoSaveProject() { }
+        public string? AdoptSubjectTextureEdits(WorkbenchSubjectRef s, Remold.Core.Workbench.SubjectModel m) => null;
     }
 
     private static WorkbenchVm NewVm(RecordingShell shell, ModProject? project = null) => new(
@@ -197,7 +199,7 @@ public class WorkbenchDropRoutingTests
 
         Assert.Equal(0, shell.ConfirmCalls);
         Assert.Equal(0, shell.ApplyPngCalls);
-        Assert.Contains("Busy", vm.Status);
+        Assert.Equal(BlenderGate.Busy, vm.Status);
     }
 
     [Fact]
@@ -336,6 +338,30 @@ public class WorkbenchDropRoutingTests
             + "Send body1 back from Blender to add them.", vm.Status);
     }
 
+    /// <summary>A blanked donor row stands for the build's own flat map: no bundle, no file, no texture name.
+    /// Where its part no longer carries a replacement there is nothing to author, and the refusal has to say
+    /// what the card is — the name it would otherwise read off the card is empty.</summary>
+    [Fact]
+    public async Task CardDrop_OnABlankedDonorRow_WithNothingToAuthor_SaysWhatTheCardIs()
+    {
+        using var temp = new TempGame();
+        var shell = new RecordingShell();
+        var vm = NewVm(shell, new ModProject());   // the part carries no mesh edit at all
+        var blanked = new WorkbenchMapVm("Normal", "_BumpMap", "", "")
+        {
+            Subject = new WorkbenchSubjectRef("char", "stem", "c_stem_slg_",
+                new Outfit(0, "stem", OutfitKind.Base)),
+            PartToken = "body1",
+            BoundSubmeshes = new[] { 0 },
+        };
+
+        await vm.HandleDropAsync(new[] { TestImages.WritePng(temp.At("relief.png")) }, blanked);
+
+        Assert.Equal(0, shell.ConfirmCalls);
+        Assert.Equal(0, shell.ApplyDonorMapCalls);
+        Assert.Equal("relief.png can't apply here. This slot has no image to replace.", vm.Status);
+    }
+
     [Fact]
     public async Task CardDrop_OnAnUNreplacedPart_StillEditsTheGameTexture()
     {
@@ -365,13 +391,54 @@ public class WorkbenchDropRoutingTests
         Assert.Equal(0, shell.ApplyDonorMapCalls);
     }
 
+    /// <summary>A re-drop is authored the same way a first drop is. Copying the file in place would ship an
+    /// RMO with whatever alpha the dropped image happened to carry; re-authoring rebuilds the emissive mask
+    /// off the game map, which is the only thing that puts it back.</summary>
     [Fact]
-    public async Task CardDrop_OnAnAlreadyAuthoredCardOfAReplacedPart_KeepsTheAuthoredRoute()
+    public async Task CardDrop_OnAnAlreadyAuthoredCardOfAReplacedPart_TakesTheDonorRoute()
     {
-        // That file IS the record the build ships; overwriting it in place changes nothing else.
+        using var temp = new TempGame();
+        var shell = new RecordingShell();
+        var vm = NewVm(shell, ReplacedPart(donorSubmeshes: 1, authoredAlbedo: new[] { 0 }));
+        var card = PartCard("c_stem_body1_d");
+        card.AuthoredPath = temp.At("body1_s0_base.png");
+
+        await vm.HandleDropAsync(new[] { TestImages.WritePng(temp.At("skin.png")) }, card);
+
+        Assert.Equal(1, shell.ApplyDonorMapCalls);
+        Assert.Equal(0, shell.ApplyAuthoredPngCalls);
+        Assert.Equal(0, shell.ApplyPngCalls);
+        Assert.Equal(new[] { 0 }, shell.LastDonorDrop!.Submeshes);
+        // the confirm still knows the card shows the replacement's own map, so it names no game texture
+        Assert.True(shell.LastConfirmAuthored);
+        Assert.Equal(1, shell.LastConfirm!.AuthoredLanding);
+    }
+
+    [Fact]
+    public async Task CardDrop_OnAnAlreadyAuthoredRmoCard_TakesTheDonorRoute()
+    {
         using var temp = new TempGame();
         var shell = new RecordingShell();
         var vm = NewVm(shell, ReplacedPart());
+        var card = PartCard("c_stem_body1_rmo", "_RMOTex", "RMO");
+        card.AuthoredPath = temp.At("body1_s0_rmo.png");
+
+        await vm.HandleDropAsync(new[] { TestImages.WritePng(temp.At("rough.png")) }, card);
+
+        Assert.Equal(1, shell.ApplyDonorMapCalls);
+        Assert.Equal(DonorMapSlot.Rmo, shell.LastDonorDrop!.Slot);
+        Assert.Equal(0, shell.ApplyAuthoredPngCalls);
+    }
+
+    /// <summary>The card can outlive the record behind it: a Revert between the refresh and the drop leaves
+    /// an authored path on a part the build would no longer replace. There is no donor row to author, so the
+    /// drop rewrites the one file the card names and says nothing about a replacement.</summary>
+    [Fact]
+    public async Task CardDrop_OnAnAuthoredCard_WhosePartIsNoLongerReplaced_OverwritesTheFileInPlace()
+    {
+        using var temp = new TempGame();
+        var shell = new RecordingShell();
+        var vm = NewVm(shell, UnreplacedPart(temp));
         var card = PartCard("c_stem_body1_d");
         card.AuthoredPath = temp.At("body1_s0_base.png");
 
@@ -380,6 +447,7 @@ public class WorkbenchDropRoutingTests
         Assert.Equal(1, shell.ApplyAuthoredPngCalls);
         Assert.Equal(0, shell.ApplyDonorMapCalls);
         Assert.Equal(0, shell.ApplyPngCalls);
+        Assert.Null(shell.LastConfirmDonor);
     }
 
     // ---- what the confirm is told about the maps the drop is about to overwrite ----
@@ -438,11 +506,11 @@ public class WorkbenchDropRoutingTests
         Assert.Equal(0, shell.LastConfirm!.AuthoredLanding);
     }
 
-    /// <summary>The asymmetry the two cards of one shared map have. The card whose own submesh is authored
-    /// overwrites that file alone; its sibling, which shows no authored file, re-authors the whole landing
-    /// set — the same gesture on two cards of the same image, with different reach.</summary>
+    /// <summary>The two cards of one shared map behave alike. Either one re-authors the whole landing set,
+    /// so the image the modder dropped is what every submesh that map dresses draws — the card that happens
+    /// to show an authored file does not reach a submesh less.</summary>
     [Fact]
-    public async Task CardDrop_OnTheAuthoredCard_ReachesOneSubmesh_OnItsSibling_ReachesBoth()
+    public async Task CardDrop_OnEitherCardOfASharedMap_ReachesEverySubmeshItDresses()
     {
         using var temp = new TempGame();
         var png = TestImages.WritePng(temp.At("skin.png"));
@@ -453,14 +521,15 @@ public class WorkbenchDropRoutingTests
         authored.AuthoredPath = temp.At("body1_s0_base.png");   // what the refresh hangs on submesh 0's card
         await vm.HandleDropAsync(new[] { png }, authored);
 
-        Assert.Equal(1, shell.ApplyAuthoredPngCalls);
-        Assert.Equal(0, shell.ApplyDonorMapCalls);
-        Assert.Equal("body1", shell.LastAuthoredPart);
-        Assert.Equal("Base color", shell.LastAuthoredRole);
+        Assert.Equal(1, shell.ApplyDonorMapCalls);
+        Assert.Equal(0, shell.ApplyAuthoredPngCalls);
+        Assert.Equal("body1", shell.LastDonorDrop!.PartToken);
+        Assert.Equal(new[] { 0, 2 }, shell.LastDonorDrop.Submeshes);
+        Assert.Equal("Base color", shell.LastDonorRole);
 
         await vm.HandleDropAsync(new[] { png }, PartCard("c_stem_body1_d", submeshes: new[] { 0, 2 }));
 
-        Assert.Equal(1, shell.ApplyDonorMapCalls);
+        Assert.Equal(2, shell.ApplyDonorMapCalls);
         Assert.Equal(new[] { 0, 2 }, shell.LastDonorDrop!.Submeshes);
     }
 

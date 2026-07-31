@@ -16,6 +16,10 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class GameLaunchTests
 {
+    /// <summary>A host whose ini tree carries the texture hook — what every reading here that is about
+    /// something ELSE stands on, so no assertion about a path accidentally turns on the hook rule.</summary>
+    private static readonly MigotoIniFacts Hooked = new(Found: true, StartsTheGame: false, HasTextureHook: true);
+
     // ---- the enablement matrix ------------------------------------------------
 
     [Fact]
@@ -51,8 +55,23 @@ public class GameLaunchTests
     {
         var exe = @"C:\ssmt\GF2\Run.exe";
         Assert.Equal(InstallGate.NoModsFolder(exe),
-            InstallGate.Reason(hasBuild: true, exe, loaderExists: true, modsFolder: null));
-        Assert.Null(InstallGate.Reason(true, exe, true, @"C:\ssmt\GF2\Mods"));
+            InstallGate.Reason(hasBuild: true, exe, loaderExists: true, modsFolder: null, Hooked));
+        Assert.Null(InstallGate.Reason(true, exe, true, @"C:\ssmt\GF2\Mods", Hooked));
+    }
+
+    /// <summary>A mod fires through the host's texture hook, so a 3DMigoto that doesn't carry one takes an
+    /// install that does nothing. The reason names the hosts that do rather than a setting to edit.</summary>
+    [Fact]
+    public void Install_refuses_a_3DMigoto_that_carries_no_texture_hook()
+    {
+        var exe = @"C:\ssmt\GF2\Run.exe";
+        var mods = @"C:\ssmt\GF2\Mods";
+
+        Assert.Equal(InstallGate.NoLoaderIni(exe),
+            InstallGate.Reason(true, exe, true, mods, default));
+        Assert.Equal(InstallGate.NoTextureHook,
+            InstallGate.Reason(true, exe, true, mods, new MigotoIniFacts(true, false, false)));
+        Assert.Null(InstallGate.Reason(true, exe, true, mods, Hooked));
     }
 
     // ---- the status bar's 3DMigoto cell ---------------------------------------
@@ -60,7 +79,7 @@ public class GameLaunchTests
     [Fact]
     public void An_unset_loader_warns_and_says_what_actually_needs_it()
     {
-        var f = MainWindowViewModel.MigotoFacet(null, loaderExists: false, modsFolder: null);
+        var f = MainWindowViewModel.MigotoFacet(null, loaderExists: false, modsFolder: null, default);
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains("not set", f.Text);
@@ -71,7 +90,7 @@ public class GameLaunchTests
     [Fact]
     public void A_set_but_missing_loader_names_the_path_that_moved()
     {
-        var f = MainWindowViewModel.MigotoFacet(@"C:\gone\Run.exe", loaderExists: false, modsFolder: null);
+        var f = MainWindowViewModel.MigotoFacet(@"C:\gone\Run.exe", loaderExists: false, modsFolder: null, default);
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains(@"C:\gone\Run.exe", f.Detail);
@@ -81,7 +100,7 @@ public class GameLaunchTests
     [Fact]
     public void A_loader_with_no_mods_folder_says_launch_still_works()
     {
-        var f = MainWindowViewModel.MigotoFacet(@"C:\tools\Run.exe", loaderExists: true, modsFolder: null);
+        var f = MainWindowViewModel.MigotoFacet(@"C:\tools\Run.exe", loaderExists: true, modsFolder: null, Hooked);
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains("no Mods folder", f.Text);
@@ -91,7 +110,7 @@ public class GameLaunchTests
     [Fact]
     public void A_loader_with_its_mods_folder_reads_clean()
     {
-        var f = MainWindowViewModel.MigotoFacet(@"C:\3dmigoto\3DMigoto Loader.exe", true, @"C:\3dmigoto\Mods");
+        var f = MainWindowViewModel.MigotoFacet(@"C:\3dmigoto\3DMigoto Loader.exe", true, @"C:\3dmigoto\Mods", Hooked);
 
         Assert.Equal("✓", f.Glyph);
         Assert.Equal("3DMigoto", f.Text);
@@ -101,8 +120,8 @@ public class GameLaunchTests
     [Fact]
     public void A_blank_loader_reads_as_unset_not_as_missing()
     {
-        Assert.Equal(MainWindowViewModel.MigotoFacet(null, false, null),
-            MainWindowViewModel.MigotoFacet("   ", false, null));
+        Assert.Equal(MainWindowViewModel.MigotoFacet(null, false, null, default),
+            MainWindowViewModel.MigotoFacet("   ", false, null, default));
     }
 
     // ---- the Mods folder beside the loader ------------------------------------
@@ -515,6 +534,51 @@ public class GameLaunchTests
         Assert.Equal(30, MainWindowViewModel.FirstPidOutside(new[] { 50, 30, 10, 44 }, before));
         Assert.Equal(30, MainWindowViewModel.FirstPidOutside(new[] { 30, 44, 50, 10 }, before));
         Assert.Equal(30, MainWindowViewModel.FirstPidOutside(new[] { 44, 50, 10, 30 }, before));
+    }
+
+    // ---- a launch behind a host that already started the game -------------------
+
+    /// <summary>The one state where the whole sequence starts nothing: the host owns the game start, it was
+    /// already up when the button was pressed, and the game was already among the pids read at the entry.
+    /// Anything else still has a start to make, or a snapshot that tells this launch's copy from an older
+    /// one.</summary>
+    [Fact]
+    public void A_host_already_up_with_the_game_already_running_has_nothing_left_to_start()
+    {
+        Assert.True(MainWindowViewModel.HostAlreadyStartedGame(
+            loaderWasAlreadyRunning: true, gameAlreadyUp: true));
+
+        // this launch started the loader, so the game it starts is still coming
+        Assert.False(MainWindowViewModel.HostAlreadyStartedGame(
+            loaderWasAlreadyRunning: false, gameAlreadyUp: true));
+        // the host was up but has no game running yet — the start is the host's to make, and the watch has
+        // a pid to wait for
+        Assert.False(MainWindowViewModel.HostAlreadyStartedGame(
+            loaderWasAlreadyRunning: true, gameAlreadyUp: false));
+        Assert.False(MainWindowViewModel.HostAlreadyStartedGame(
+            loaderWasAlreadyRunning: false, gameAlreadyUp: false));
+    }
+
+    /// <summary>Nothing was started, so the watch is handed an EMPTY snapshot and the game already running
+    /// is the pid it adopts — the same rule the watch uses behind a real start, asked of nothing.</summary>
+    [Fact]
+    public void With_nothing_started_the_watch_adopts_the_game_that_is_already_up()
+    {
+        var running = new[] { 4242 };
+
+        Assert.Equal(4242, MainWindowViewModel.FirstPidOutside(running, new HashSet<int>()));
+        // …where following the entry snapshot would have found nothing, for the whole appear window
+        Assert.Equal(MainWindowViewModel.NoPid,
+            MainWindowViewModel.FirstPidOutside(running, new HashSet<int>(running)));
+    }
+
+    /// <summary>The two lines a host that starts the game itself can end on say different things: one is a
+    /// start on its way, the other is a state already reached.</summary>
+    [Fact]
+    public void A_launch_that_started_nothing_does_not_claim_a_start_is_coming()
+    {
+        Assert.Equal("Game is already running", MainWindowViewModel.GameAlreadyStartedLine.Text);
+        Assert.Equal("3DMigoto is starting the game", MainWindowViewModel.LoaderStartsGameLine.Text);
     }
 
     // ---- a pid that dies right after appearing ---------------------------------

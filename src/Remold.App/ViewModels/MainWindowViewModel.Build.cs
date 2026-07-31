@@ -98,12 +98,14 @@ public partial class MainWindowViewModel
     [ObservableProperty] private BuildFooter _footer = BuildFooter.Idle;
 
     /// <summary>User-facing: the authored edit won't show or will look wrong, and there is something the
-    /// author can do about it. The derivation's warnings while idle, the run's once one completes. The
-    /// build's diagnostics never come here — they go to the build log alone.</summary>
+    /// author can do about it. The live derivation's and a completed run's stand together
+    /// (<see cref="BuildWarningSource"/>). The build's diagnostics never come here — they go to the build
+    /// log alone.</summary>
     public ObservableCollection<string> BuildWarnings { get; } = new();
 
-    /// <summary>User-facing disclosures with nothing to fix: an edit's reach beyond the picked subject
-    /// and how the run scoped it. The completed run's alone — a derivation makes none.</summary>
+    /// <summary>User-facing disclosures with nothing to fix: an edit's reach beyond the picked subject and
+    /// how the run scoped it. A completed run owns this surface alone — nothing outside a build produces a
+    /// disclosure.</summary>
     public ObservableCollection<string> BuildInfos { get; } = new();
 
     /// <summary>Why the Build action is off, or null when it can run. A failed build is NOT a reason — the
@@ -120,9 +122,35 @@ public partial class MainWindowViewModel
     /// on hover are the same answer, so a disabled Install always says what to do about it.</summary>
     public string? InstallDisabledReason => IsModBuilding
         ? BuildRunningReason
-        : InstallGate.Reason(HasLastBuild, _settings.MigotoLoaderExe, _loaderExeExists, _modsFolder);
+        : InstallGate.Reason(HasLastBuild, _settings.MigotoLoaderExe, _loaderExeExists, _modsFolder,
+            _loaderIni);
     public bool CanInstallBuild => !IsModBuilding && InstallDisabledReason is null;
     public string InstallButtonTip => InstallDisabledReason ?? InstallGate.Ready;
+
+    /// <summary>Whether the configured 3DMigoto install can take a mod at all. False and the pane offers the
+    /// way to SET the path where Install would be: a disabled Install is the right answer for "not built
+    /// yet", but for a loader nobody has pointed at it is a dead end with the remedy two menus away.</summary>
+    public bool HasMigotoLoader => LoaderProblem is null;
+    public bool NeedsMigotoLoader => !HasMigotoLoader;
+
+    /// <summary>Why the configured 3DMigoto can't take a mod, or null when it can — ONE reading behind the
+    /// stand-in button's label, its tip and the Install gate itself.</summary>
+    private string? LoaderProblem =>
+        InstallGate.LoaderReason(_settings.MigotoLoaderExe, _loaderExeExists, _modsFolder, _loaderIni);
+
+    /// <summary>Whether a path has been set at all. Blank is the untouched state; anything else is a path
+    /// the modder chose, which is a different thing to say about it.</summary>
+    private bool LoaderPathSet => !string.IsNullOrWhiteSpace(_settings.MigotoLoaderExe);
+
+    /// <summary>What the stand-in button says. A path nobody has set is a step not taken; a path that IS
+    /// set and can't take a mod is something to go back to, and the two read differently on the button.</summary>
+    public string SetMigotoPathLabel => LoaderPathSet ? "Fix 3DMigoto path" : "Set 3DMigoto path";
+
+    /// <summary>What the stand-in button says on hover: which file to pick while nothing is set, and what is
+    /// wrong with the one that is — the modder who already pointed at a 3DMigoto needs the diagnosis, not
+    /// the instruction they already followed.</summary>
+    public string SetMigotoPathTip => LoaderPathSet ? LoaderProblem ?? InstallGate.SetLoader
+        : InstallGate.SetLoader;
 
     public const string InstallConflictTitle = "Replace conflicting mod?";
 
@@ -143,6 +171,8 @@ public partial class MainWindowViewModel
     private List<string> _derivationWarnings = new();
     /// <summary>The last completed run's warnings; null = no run owns the list.</summary>
     private List<string>? _runWarnings;
+    /// <summary>The last completed run's disclosures; null = no run owns the surface.</summary>
+    private List<string>? _runInfos;
     /// <summary>Refresh stamp: a completing refresh whose stamp is stale drops its result rather than
     /// painting a list nobody asked for.</summary>
     private int _refreshGeneration;
@@ -238,6 +268,7 @@ public partial class MainWindowViewModel
         _refreshGeneration++;   // any refresh still in flight belongs to the mod we're leaving
         Footer = Footer.Cleared();
         ShowWarnings();
+        ShowInfos();
         RaiseBuildGate();
     }
 
@@ -251,15 +282,16 @@ public partial class MainWindowViewModel
         BuildSizeSummary = "";
         BuildResultStale = false;
         _runWarnings = null;
-        BuildInfos.Clear();
+        _runInfos = null;
         ShowWarnings();
+        ShowInfos();
     }
 
     /// <summary>Re-read whether the result bar still describes what the list would ship: the signature now
     /// against the one the last build consumed. The bar keeps its actions either way — the folder it names
     /// is still on disk and still installable — and only the line comes and goes, so an input put back the
     /// way the build found it takes the line back off again.</summary>
-    private void RefreshBuildResultStale() =>
+    internal void RefreshBuildResultStale() =>
         BuildResultStale = HasLastBuild && CurrentBuildSignature() != _builtSignature;
 
     /// <summary>What the build owning the result bar consumed, as a signature; null = no build owns the
@@ -276,10 +308,10 @@ public partial class MainWindowViewModel
     internal void CaptureBuildBaseline() => _pendingSignature = CurrentBuildSignature();
 
     /// <summary>Everything a build reads that this pane can change while a result is on screen: the mod
-    /// identity, and every listed change with its tick and its whole key binding. Excluded rows are IN
-    /// it — re-ticking one is a real difference from what shipped. Separators are control characters, so
-    /// no field value can imitate one. Row ORDER counts: derivation order is deterministic, so two
-    /// readings differ in order only when the authored list itself moved.</summary>
+    /// identity, every listed change with its tick and its whole key binding, and the MAPS each change
+    /// would ship. Excluded rows are IN it — re-ticking one is a real difference from what shipped.
+    /// Separators are control characters, so no field value can imitate one. Row ORDER counts: derivation
+    /// order is deterministic, so two readings differ in order only when the authored list itself moved.</summary>
     private string CurrentBuildSignature()
     {
         const char field = (char)0x1f, record = (char)0x1e;
@@ -293,8 +325,28 @@ public partial class MainWindowViewModel
                 .Append(row.IsIncluded ? '1' : '0').Append(field)
                 .Append(ModKeys.Normalize(row.ToggleKey)).Append(field)
                 .Append(row.HideWhenOff ? '1' : '0').Append(field)
-                .Append(row.StartsOff ? '1' : '0').Append(record);
+                .Append(row.StartsOff ? '1' : '0').Append(field)
+                .Append(DonorMapAsks(row)).Append(record);
         return sb.ToString();
+    }
+
+    /// <summary>The maps a change row's replacement would ship, read off the PROJECT rather than the row:
+    /// an adoption or a card drop can author a donor slot on a mesh whose row was derived before it had any,
+    /// and a row that carried its own snapshot would report that as no change at all. Only a Replace ships
+    /// donor maps; a retexture's own files are named by the rows the derivation built from them.
+    ///
+    /// <para>The target is picked on the SAME predicate the derivation and the adoption pick theirs on —
+    /// present and edited, not merely named the same. A subject can hold more than one target for one mesh
+    /// slot, and reading a stale or absent one would sign the build with maps it is not going to ship.</para></summary>
+    private string DonorMapAsks(BuildRowVm row)
+    {
+        if (row.Verb != EditVerbs.Replace) return "";
+        var target = _project.Targets.FirstOrDefault(t => t.AssetType == "Mesh"
+            && string.Equals(t.ObjectName, row.Mesh, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(t.SubjectCharacter, row.Character, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(t.SubjectOutfit, row.Outfit, StringComparison.OrdinalIgnoreCase)
+            && _project.IsTargetPresent(t) && _project.IsEdited(t));
+        return BuildRowVm.DonorMapSignature(target?.DonorTextures);
     }
 
     /// <summary>Recompute the change list off-thread. A derivation failure takes the footer instead of
@@ -318,11 +370,7 @@ public partial class MainWindowViewModel
                 Dispatcher.UIThread.Post(() =>
                 {
                     if (!IsCurrentRefresh(generation, project)) return;
-                    // the last good list stays on screen; there is just nothing to build from it
-                    _derivationFailure = BuildFooter.BlockedLine(e.Message);
-                    Footer = Footer.Blocked(e.Message);
-                    BuildListEnabled = !IsModBuilding;
-                    RaiseBuildGate();
+                    BlockBuild(e.Message);
                 });
                 return;
             }
@@ -336,6 +384,7 @@ public partial class MainWindowViewModel
                 BuildEmptyText = BuildGate.NothingDerived;
                 _derivationWarnings = warnings;
                 ShowWarnings();
+                ShowInfos();
                 RefreshKeyCollisions();
                 // the list under a result bar was just replaced, so whether the bar still matches it is a
                 // fresh question — a run's own re-derivation lands here
@@ -345,6 +394,16 @@ public partial class MainWindowViewModel
                 RaiseBuildGate();
             });
         });
+    }
+
+    /// <summary>A derivation that couldn't run: the last good list stays on screen — there is just nothing to
+    /// build from it — and the footer and the Build gate give the same reason.</summary>
+    private void BlockBuild(string message)
+    {
+        _derivationFailure = BuildFooter.BlockedLine(message);
+        Footer = Footer.Blocked(message);
+        BuildListEnabled = !IsModBuilding;
+        RaiseBuildGate();
     }
 
     /// <summary>Take one derived group onto the list, wired to the pane's handlers. A group reaches the list
@@ -489,12 +548,28 @@ public partial class MainWindowViewModel
         return BuildReadyCounts.From(rows.Count, rows.Where(r => r.IsIncluded).Select(r => r.Verb));
     }
 
-    /// <summary>The completed run's warnings while one owns the surface, else the derivation's own.</summary>
+    /// <summary>How many warnings the box is rendering, lead-in excluded — what the Built footer counts, so
+    /// the tally and the box under it describe the same set.</summary>
+    private int _shownWarningCount;
+
+    /// <summary>Both sources at once: a completed run's warnings under their own lead-in, then the live
+    /// derivation's. <see cref="BuildWarningSource"/> owns which line belongs where and what collapses.</summary>
     private void ShowWarnings()
     {
+        var surface = BuildWarningSource.Current(_runWarnings, _derivationWarnings);
         BuildWarnings.Clear();
-        foreach (var w in BuildWarningSource.Current(_runWarnings, _derivationWarnings))
-            BuildWarnings.Add(w);
+        foreach (var w in surface.Lines) BuildWarnings.Add(w);
+        _shownWarningCount = surface.Count;
+        RaiseBuildMessageCounts();
+    }
+
+    /// <summary>The completed run's disclosures, identical sentences collapsed to one — a run reaches the
+    /// same fact once per material map or once per claimant, and the list would otherwise repeat itself.</summary>
+    private void ShowInfos()
+    {
+        BuildInfos.Clear();
+        foreach (var i in (_runInfos ?? Enumerable.Empty<string>()).Distinct(StringComparer.Ordinal))
+            BuildInfos.Add(i);
         RaiseBuildMessageCounts();
     }
 
@@ -507,40 +582,42 @@ public partial class MainWindowViewModel
         var (ok, reason) = TrySaveProject();
         if (!ok) { Footer = Footer.Failed($"couldn't save the mod. {reason}"); return; }
         CaptureBuildBaseline();   // what THIS run consumes; the Edit pane can move the list while it runs
-        IsModBuilding = true;
-        BuildListEnabled = false;
-        // the previous result is no longer what the folder holds
-        ClearBuildResult();
-        var project = _project;
-        var vfs = _vfs;
-        // the sharing measurement decides edit scope; a build waits for whatever of it is still running.
-        // A faulted/cancelled measurement builds unscoped, which the build's own output says.
-        //
-        // The wait line comes BEFORE "Building…" and is the status cell's own, streamed word for word: the
-        // same work must not read as two different things in two places, and the count is what says the
-        // wait is finite. A pass with nothing to re-read reports no line and the wait is a blink.
-        SharingIndex? sharing = null;
-        if (_sharingTask is { } sharingTask)
-        {
-            if (!sharingTask.IsCompleted) { _buildWaitingOnSharing = true; RefreshBackgroundStatus(); }
-            try { sharing = await sharingTask; } catch { }
-            _buildWaitingOnSharing = false;
-        }
-        Footer = Footer.Streaming("Building…");
-        var env = new BuildEnv(
-            ResolveSubjectForBuild,
-            a => vfs.Catalog.ResolveAddress(a),
-            TryDeobfuscateBundle,
-            vfs.CatalogVersion,
-            typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(),
-            sharing);
         string outRoot = _settings.ResolvedPublishedRoot;
         // The log is named for the package this run produces, so two mods never overwrite each other's
         // transcript. Known before the build so a failed run still files its log under the right name.
         string logPackage = PublishedPackageName();
         var logLines = new List<string>();
+        IsModBuilding = true;
+        BuildListEnabled = false;
+        // Everything past the busy flags runs inside the try, so a throw from the setup lands on the same
+        // catch/finally a failed run does and the pane never keeps reporting a run that stopped.
         try
         {
+            // the previous result is no longer what the folder holds
+            ClearBuildResult();
+            var project = _project;
+            var vfs = _vfs;
+            // the sharing measurement decides edit scope; a build waits for whatever of it is still running.
+            // A faulted/cancelled measurement builds unscoped, which the build's own output says.
+            //
+            // The wait line comes BEFORE "Building…" and is the status cell's own, streamed word for word: the
+            // same work must not read as two different things in two places, and the count is what says the
+            // wait is finite. A pass with nothing to re-read reports no line and the wait is a blink.
+            SharingIndex? sharing = null;
+            if (_sharingTask is { } sharingTask)
+            {
+                if (!sharingTask.IsCompleted) { _buildWaitingOnSharing = true; RefreshBackgroundStatus(); }
+                try { sharing = await sharingTask; } catch { }
+                _buildWaitingOnSharing = false;
+            }
+            Footer = Footer.Streaming("Building…");
+            var env = new BuildEnv(
+                ResolveSubjectForBuild,
+                a => vfs.Catalog.ResolveAddress(a),
+                TryDeobfuscateBundle,
+                vfs.CatalogVersion,
+                typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(),
+                sharing);
             var result = await Task.Run(() => ModBuilder.Build(project, env, outRoot, msg =>
             {
                 lock (logLines) logLines.Add(msg);
@@ -551,12 +628,14 @@ public partial class MainWindowViewModel
             BuiltPackage = Path.GetFileName(result.OutDir);
             logPackage = BuiltPackage;   // the folder that actually landed, whatever the form now says
             _runWarnings = result.Warnings.ToList();
+            _runInfos = result.Infos.ToList();
             ShowWarnings();
-            BuildInfos.Clear();
-            foreach (var i in result.Infos) BuildInfos.Add(i);
-            RaiseBuildMessageCounts();
+            ShowInfos();
             BuildSizeSummary = await Task.Run(() => BuildOutputSummary(result.OutDir));
-            Footer = Footer.Built(BuiltPackage, result.Warnings.Count);
+            // the count is what the box above it renders — the union, collapsed — not the run's raw list: a
+            // footer promising more warnings than the box shows sends the modder looking for lines that
+            // were only ever duplicates
+            Footer = Footer.Built(BuiltPackage, _shownWarningCount);
             WriteBuildLog(outRoot, logPackage, logLines, result.Warnings, result.Infos, result.Diagnostics, null);
         }
         catch (Exception e)
@@ -567,9 +646,12 @@ public partial class MainWindowViewModel
         }
         finally
         {
+            // no run is parked on the measurement any more, so its line stops being re-streamed here
+            _buildWaitingOnSharing = false;
             _buildLogPath = BuildLogPath(outRoot, logPackage);
             HasBuildLog = File.Exists(_buildLogPath);
             IsModBuilding = false;
+            TakeHeldAdoptions();   // edits made while the run read the project, applied before the list is re-read
             RefreshBuildPreview();
             RunQueuedRescan();   // this run was one of the holds a rescan waits behind
         }

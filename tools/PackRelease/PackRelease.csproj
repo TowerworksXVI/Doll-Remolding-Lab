@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- the official apphost writer: embeds the app-dll path, sets the GUI subsystem bit, and copies
+         the icon/version resources — the same machinery the SDK itself uses at build time -->
+    <PackageReference Include="Microsoft.NET.HostModel" Version="3.1.16" />
+  </ItemGroup>
+</Project>

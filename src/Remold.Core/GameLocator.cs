@@ -8,13 +8,25 @@ namespace Remold.Core;
 
 /// <summary>
 /// Locates the GF2 <c>AssetBundles_Windows</c> directory without assuming Steam: GF2 ships both via
-/// Steam and standalone, so auto-detect tries every Steam library (registry + <c>libraryfolders.vdf</c>)
-/// then common standalone roots. A candidate is accepted only with the GF2 sentinels — a current
-/// catalog plus the game's VFS manifest — so a look-alike cache is refused with a reason.
+/// Steam and standalone, so auto-detect tries every Steam library (registry + <c>libraryfolders.vdf</c>),
+/// then the standalone launcher's registry traces — resolved through the launcher's own
+/// <c>config.ini</c>, since the game folder is freely named and movable — then a bounded sweep of
+/// common roots for the launcher's default <c>GF2 Game</c> layout. A candidate is accepted only with
+/// the GF2 sentinels — a current catalog plus the game's VFS manifest — so a look-alike cache is
+/// refused with a reason.
 /// </summary>
 public static class GameLocator
 {
     private const string GameFolder = "GIRLS' FRONTLINE 2 EXILIUM";
+
+    /// <summary>The standalone launcher's default game folder name, inside the launcher's own directory.
+    /// A default only — the user can name and place the game folder freely; the launcher's
+    /// <c>config.ini</c> records where it really is.</summary>
+    private const string StandaloneGameFolder = "GF2 Game";
+
+    /// <summary>The launcher's config file, beside its exe. Its <c>game_install_path</c> line is the
+    /// authority on where the game folder is.</summary>
+    private const string LauncherConfigFile = "config.ini";
     private static readonly string Rel =
         Path.Combine("GF2_Exilium_Data", "LocalCache", "Data", "AssetBundles_Windows");
 
@@ -48,14 +60,19 @@ public static class GameLocator
     /// root is the one path stored and passed around; every bundle/table path derives from it.</summary>
     public static string BundleDirOf(string gameRoot) => Path.Combine(gameRoot, Rel);
 
-    /// <summary>Resolve a path (a game root, the bundle dir, or a Steam <c>common</c> dir) to the game
-    /// <b>root</b> — the one canonical location. <c>Problem</c> says why the best candidate failed when none
-    /// passes ("best" = the first existing, correctly named dir).</summary>
+    /// <summary>Resolve a path (a game root, the bundle dir, a Steam <c>common</c> dir, or a standalone
+    /// launcher directory holding the game in its <c>GF2 Game</c> subfolder) to the game <b>root</b> — the
+    /// one canonical location. <c>Problem</c> says why the best candidate failed when none passes
+    /// ("best" = the first existing, correctly named dir).</summary>
     public static (string? Dir, string? Problem) ValidateDetailed(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return (null, "No folder given.");
         string? problem = null;
-        foreach (var c in new[] { path, Path.Combine(path, Rel), Path.Combine(path, GameFolder, Rel) })
+        foreach (var c in new[]
+        {
+            path, Path.Combine(path, Rel),
+            Path.Combine(path, GameFolder, Rel), Path.Combine(path, StandaloneGameFolder, Rel),
+        })
         {
             if (!Directory.Exists(c)) continue;
             var full = Path.GetFullPath(c.TrimEnd(Path.DirectorySeparatorChar));
@@ -106,15 +123,198 @@ public static class GameLocator
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    /// <summary>Best-effort auto-detect → the game root, or null: every Steam library first, then common
-    /// standalone roots. Overrides and remembered paths are the caller's concern.</summary>
+    /// <summary>Best-effort auto-detect → the game root, or null. Order: every Steam library; the
+    /// standalone launcher's registry traces (each resolved directly or through its <c>config.ini</c>);
+    /// then a bounded one-level sweep of common roots for the launcher's default <c>GF2 Game</c> layout —
+    /// the backup for a launcher that left no usable trace. The sentinel accept-test guards every
+    /// candidate, so neither the loose registry match nor the sweep can accept a look-alike. Overrides
+    /// and remembered paths are the caller's concern.</summary>
     public static string? Find()
     {
         foreach (var common in SteamCommonDirs())
             if (Validate(Path.Combine(common, GameFolder)) is { } v) return v;
+        foreach (var cand in RegistryCandidates())
+            if (ValidateLauncherCandidate(cand) is { } v) return v;
         foreach (var root in StandaloneRoots())
-            if (Validate(Path.Combine(root, GameFolder)) is { } v) return v;
+        {
+            if (Validate(root) is { } v) return v;
+            foreach (var cand in StandaloneGameDirsUnder(root))
+                if (Validate(cand) is { } c) return c;
+        }
         return null;
+    }
+
+    /// <summary>Resolve a directory that may be the game root, a launcher directory holding the game
+    /// under its default name, or a launcher directory whose <c>config.ini</c> says where the game
+    /// really is — the game folder is freely named and movable, so the config redirect is the
+    /// authoritative route when the direct resolve misses.</summary>
+    public static string? ValidateLauncherCandidate(string? dir)
+    {
+        if (Validate(dir) is { } v) return v;
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+        string? ini;
+        try
+        {
+            var p = Path.Combine(dir, LauncherConfigFile);
+            // A launcher config is tiny; a huge same-named file is not it, and is not worth reading.
+            ini = File.Exists(p) && new FileInfo(p).Length <= 1_000_000 ? File.ReadAllText(p) : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { ini = null; }
+        return ini is null ? null : Validate(GameInstallPathFrom(ini));
+    }
+
+    /// <summary>The <c>game_install_path</c> value in a launcher <c>config.ini</c> body, or null.
+    /// Line-oriented key=value; the key is matched case-insensitively and the value is trimmed of
+    /// whitespace and quotes.</summary>
+    public static string? GameInstallPathFrom(string? iniText)
+    {
+        const string key = "game_install_path";
+        foreach (var raw in (iniText ?? "").Split('\n'))
+        {
+            var line = raw.Trim();
+            if (!line.StartsWith(key, StringComparison.OrdinalIgnoreCase)) continue;
+            var rest = line[key.Length..].TrimStart();
+            if (rest.Length == 0 || rest[0] != '=') continue;   // a longer key that merely starts the same
+            var val = rest[1..].Trim().Trim('"');
+            if (val.Length > 0) return val;
+        }
+        return null;
+    }
+
+    /// <summary>Candidate launcher/install directories the registry records, matched loosely because
+    /// names vary by channel and region: GF2-named vendor keys (the launcher's own, holding path values
+    /// like <c>InstPath</c>) and GF2-named uninstall entries (path/location values plus the
+    /// <c>UninstallString</c>'s directory). A hit only nominates a candidate for the accept-test.</summary>
+    private static IEnumerable<string> RegistryCandidates()
+    {
+        if (!OperatingSystem.IsWindows()) yield break;
+        foreach (var (hive, key) in new[]
+        {
+            (Registry.LocalMachine, @"SOFTWARE"),
+            (Registry.LocalMachine, @"SOFTWARE\WOW6432Node"),
+            (Registry.CurrentUser, @"Software"),
+        })
+            foreach (var dir in VendorKeyPathValues(hive, key))
+                yield return dir;
+        foreach (var (hive, key) in new[]
+        {
+            (Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        })
+            foreach (var dir in UninstallEntryPaths(hive, key))
+                yield return dir;
+    }
+
+    /// <summary>Every path-named string value under GF2-named subkeys of <paramref name="keyPath"/> —
+    /// the launcher registers itself as a vendor key (e.g. <c>WOW6432Node\GF2Exilium</c> with
+    /// <c>InstPath</c>), and the value name is matched loosely for the same channel-variance reason as
+    /// the key name. Only key names are enumerated broadly; values are read from matched keys alone.</summary>
+    private static IEnumerable<string> VendorKeyPathValues(RegistryKey hive, string keyPath)
+    {
+        if (!OperatingSystem.IsWindows()) yield break;
+        var found = new List<string>();
+        try
+        {
+            using var k = hive.OpenSubKey(keyPath);
+            if (k is not null)
+                foreach (var name in k.GetSubKeyNames())
+                {
+                    if (!LooksLikeGf2(name)) continue;
+                    using var sub = k.OpenSubKey(name);
+                    if (sub is null) continue;
+                    foreach (var vn in sub.GetValueNames())
+                        if (vn.Contains("path", StringComparison.OrdinalIgnoreCase)
+                            && sub.GetValue(vn) is string s && !string.IsNullOrWhiteSpace(s))
+                            found.Add(s);
+                }
+        }
+        catch (Exception) { /* registry unreadable → no candidates from this hive */ }
+        foreach (var f in found) yield return f;
+    }
+
+    /// <summary>Directory candidates from GF2-named uninstall entries under <paramref name="keyPath"/>:
+    /// path/location string values, plus the directory of the <c>UninstallString</c>'s executable — the
+    /// uninstaller lives in the launcher folder, which is a candidate even when no location value is
+    /// written.</summary>
+    private static IEnumerable<string> UninstallEntryPaths(RegistryKey hive, string keyPath)
+    {
+        if (!OperatingSystem.IsWindows()) yield break;
+        var found = new List<string>();
+        try
+        {
+            using var k = hive.OpenSubKey(keyPath);
+            if (k is not null)
+                foreach (var name in k.GetSubKeyNames())
+                {
+                    using var e = k.OpenSubKey(name);
+                    if (e is null) continue;
+                    if (!LooksLikeGf2(name) && !LooksLikeGf2(e.GetValue("DisplayName") as string)) continue;
+                    foreach (var vn in e.GetValueNames())
+                        if ((vn.Contains("path", StringComparison.OrdinalIgnoreCase)
+                             || vn.Contains("location", StringComparison.OrdinalIgnoreCase))
+                            && e.GetValue(vn) is string s && !string.IsNullOrWhiteSpace(s))
+                            found.Add(s);
+                    if (ExeDirFromCommand(e.GetValue("UninstallString") as string) is { } ud)
+                        found.Add(ud);
+                }
+        }
+        catch (Exception) { /* registry unreadable → no candidates from this hive */ }
+        foreach (var f in found) yield return f;
+    }
+
+    /// <summary>The directory of the executable a command line names — a quoted command up to its closing
+    /// quote, an unquoted one up to the end of its <c>.exe</c> token (so an unquoted launcher path with
+    /// spaces still parses; the recorded string is the uninstaller's path, e.g.
+    /// <c>&lt;launcher&gt;\uninst.exe</c>), falling back to the first space — or null when nothing with a
+    /// directory parses out. A misparse only costs a failed candidate.</summary>
+    public static string? ExeDirFromCommand(string? command)
+    {
+        var c = command?.Trim();
+        if (string.IsNullOrEmpty(c)) return null;
+        string exe;
+        if (c[0] == '"')
+        {
+            var close = c.IndexOf('"', 1);
+            exe = close > 1 ? c[1..close] : c[1..];
+        }
+        else
+        {
+            var exeEnd = c.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+            var sp = c.IndexOf(' ');
+            exe = exeEnd > 0 ? c[..(exeEnd + ".exe".Length)] : sp > 0 ? c[..sp] : c;
+        }
+        try { return Path.GetDirectoryName(exe) is { Length: > 0 } d ? d : null; }
+        catch (ArgumentException) { return null; }
+    }
+
+    /// <summary>Whether a registry key name or display name reads as this game. Loose on purpose —
+    /// channel and region namings vary — since a hit only nominates a candidate for the accept-test.</summary>
+    public static bool LooksLikeGf2(string? name) =>
+        name is { Length: > 0 } &&
+        (name.Contains("frontline 2", StringComparison.OrdinalIgnoreCase)
+         || name.Contains("exilium", StringComparison.OrdinalIgnoreCase)
+         || name.Contains("gf2", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The most children examined per root by <see cref="StandaloneGameDirsUnder"/> — a hard
+    /// bound so the backup sweep stays a handful of existence probes and can never grow into a crawl.</summary>
+    private const int SweepChildCap = 512;
+
+    /// <summary>The <c>GF2 Game</c> dirs one level under <paramref name="root"/> — the launcher's default
+    /// layout under a directory whose own name only a sweep can find. One existence probe per child,
+    /// capped at <see cref="SweepChildCap"/> children; an unreadable or missing root yields nothing.</summary>
+    public static IEnumerable<string> StandaloneGameDirsUnder(string root)
+    {
+        string[] children;
+        try { children = Directory.Exists(root) ? Directory.GetDirectories(root) : Array.Empty<string>(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { yield break; }
+        var examined = 0;
+        foreach (var child in children)
+        {
+            if (++examined > SweepChildCap) yield break;
+            var cand = Path.Combine(child, StandaloneGameFolder);
+            if (Directory.Exists(cand)) yield return cand;
+        }
     }
 
     /// <summary>The library paths inside a <c>libraryfolders.vdf</c> body. VDF escapes path separators
@@ -188,10 +388,26 @@ public static class GameLocator
     {
         foreach (var v in new[] { "ProgramFiles", "ProgramFiles(x86)" })
             if (Environment.GetEnvironmentVariable(v) is { Length: > 0 } r) yield return r;
-        yield return @"C:\Games";
-        yield return @"D:\Games";
-        yield return @"E:\Games";
-        yield return @"C:\";
-        yield return @"D:\";
+        foreach (var drive in FixedDriveRoots())
+        {
+            yield return Path.Combine(drive, "Games");
+            yield return drive;
+        }
+    }
+
+    /// <summary>Every ready fixed drive's root (<c>C:\</c>, <c>D:\</c>, …), so an install on any local
+    /// disk is reachable; removable and network drives are not scan targets.</summary>
+    private static IEnumerable<string> FixedDriveRoots()
+    {
+        DriveInfo[] drives;
+        try { drives = DriveInfo.GetDrives(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { yield break; }
+        foreach (var d in drives)
+        {
+            bool fixedReady;
+            try { fixedReady = d.DriveType == DriveType.Fixed && d.IsReady; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+            if (fixedReady) yield return d.RootDirectory.FullName;
+        }
     }
 }

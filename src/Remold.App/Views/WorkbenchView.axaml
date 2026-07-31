@@ -216,7 +216,8 @@
                         ToolTip.Tip="{Binding SelectedNode.BlenderHint}" />
                 <Button Content="Materialize all files" Command="{Binding MaterializeAllCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
-                        ToolTip.Tip="Prepare editable copies of every part and texture and add them to the mod" />
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.MaterializeAllHint}" />
                 <!-- M5b: reveal the subject's files in the OS browser (the Build page's reveal idiom). -->
                 <Button Content="Show in folder" Command="{Binding ShowSubjectFolderCommand}"
                         CommandParameter="{Binding SelectedNode}"
@@ -225,7 +226,8 @@
                      other). Same confirm + revert path — drops the subject from the mod entirely. -->
                 <Button Content="Remove from mod" Command="{Binding RemoveSubjectCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
-                        ToolTip.Tip="Drop this subject and its materialized/edited files from the mod" />
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.RemoveSubjectHint}" />
               </StackPanel>
 
               <!-- shared: a note / chip -->
@@ -267,11 +269,12 @@
                    needed → image editor) and Revert action row below the dimensions line. -->
               <StackPanel IsVisible="{Binding SelectedNode.HasMaps}" Spacing="6">
                 <TextBlock Text="MAP SET" FontSize="11" Foreground="{StaticResource HudSubtextBrush}" />
-                <!-- The only drop route left in the pane, said where the cards are — a .png ON a card. There
-                     is no pane-wide name match and no mesh drag-in, so this is the whole affordance. The
-                     second sentence is the half a card cannot show: on a replaced part the card still names
-                     the game texture, and the drop authors the replacement's map instead. -->
-                <TextBlock Text="Drop a .png on a card to replace that map. On a replaced part it becomes the replacement's own map." FontSize="11"
+                <!-- Both routes onto a card's map, said where the cards are: a .png dropped ON a card, and
+                     the card's own Open, which hands the file to the image editor and takes the save back.
+                     There is no pane-wide name match and no mesh drag-in, so this is the whole affordance.
+                     The second sentence is the half a card cannot show: on a replaced part the card still
+                     names the game texture, and EITHER route authors the replacement's map instead. -->
+                <TextBlock Text="Drop a .png on a card to replace that map, or Open it, edit and save. On a replaced part either way becomes the replacement's own map." FontSize="11"
                            Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap" />
                 <!-- when any map's preview failed, name the cause and the way out (the note itself picks
                      between a held game file and a missing authored map). Appears/disappears live as maps
@@ -360,7 +363,7 @@
                                UV guide (the wireframe of every island that lands on this texture) + Revert -->
                           <StackPanel Orientation="Horizontal" Spacing="6">
                             <Button Content="Open" Padding="10,2" FontSize="11"
-                                    ToolTip.Tip="Edit this texture in an image editor"
+                                    ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding OpenHint}"
                                     IsEnabled="{Binding !IsBusy}"
                                     Command="{Binding $parent[UserControl].((wb:WorkbenchVm)DataContext).OpenMapCommand}"
                                     CommandParameter="{Binding}" />

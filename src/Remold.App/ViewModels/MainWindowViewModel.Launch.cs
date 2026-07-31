@@ -41,6 +41,11 @@ public partial class MainWindowViewModel
     /// Install half of the same reads.</summary>
     private string? _modsFolder;
 
+    /// <summary>What the configured loader's ini tree says it supports — the texture hook a built mod fires
+    /// through, chief among them. Taken with the other loader reads rather than on every binding
+    /// evaluation.</summary>
+    private MigotoIniFacts _loaderIni;
+
     /// <summary>What the launch is doing, or why it failed. Its own channel beside the button: the status
     /// bar's notice cell carries the load's warnings, which a launch must not overwrite.</summary>
     [ObservableProperty] private StatusFacet _launchStatus = StatusFacet.None;
@@ -72,12 +77,16 @@ public partial class MainWindowViewModel
     public string LaunchButtonTip => LaunchDisabledReason ?? LaunchGate.Ready;
 
     /// <summary>The disk reads both loader gates stand on, taken when the gates are raised rather than
-    /// on every binding evaluation. The loader is user-set only — nothing detects it.</summary>
+    /// on every binding evaluation. The loader is user-set only — nothing detects it. The ini read is the
+    /// expensive one of the three: a measured SSMT profile splits its configuration across a couple of dozen
+    /// small files, so the walk opens that many rather than the one the two existence checks suggest. They
+    /// are small and they sit beside the exe, and this runs on a gate raise rather than on a binding.</summary>
     private void ReadModsFolderState()
     {
         var exe = _settings.MigotoLoaderExe;
         _loaderExeExists = exe is { } e && e.Trim().Length > 0 && File.Exists(e);
         _modsFolder = MigotoLoader.FindModsFolder(exe);
+        _loaderIni = _loaderExeExists ? MigotoIni.Read(exe) : default;
     }
 
     /// <summary>The status bar's 3DMigoto cell, reflecting the configured loader. Recomputed by
@@ -88,7 +97,8 @@ public partial class MainWindowViewModel
     /// missing, never that the app is blocked: Install and Launch are the only two things that want the
     /// loader, and a mod can be picked, edited and built without ever setting one. Pure — the disk reads
     /// are the caller's.</summary>
-    internal static StatusFacet MigotoFacet(string? loaderExe, bool loaderExists, string? modsFolder) =>
+    internal static StatusFacet MigotoFacet(string? loaderExe, bool loaderExists, string? modsFolder,
+        MigotoIniFacts ini) =>
         string.IsNullOrWhiteSpace(loaderExe)
             ? StatusFacet.Warn("3DMigoto · not set",
                 "Set the 3DMigoto loader in Settings. Needed for Install and Launch only.")
@@ -98,6 +108,12 @@ public partial class MainWindowViewModel
         : modsFolder is null
             ? StatusFacet.Warn("3DMigoto · no Mods folder",
                 $"{InstallGate.NoModsFolder(loaderExe)}. Install stays off; Launch still works.")
+        : !ini.Found
+            ? StatusFacet.Warn("3DMigoto · no ini",
+                $"{InstallGate.NoLoaderIni(loaderExe)}. Install stays off; Launch still works.")
+        : !ini.HasTextureHook
+            ? StatusFacet.Warn("3DMigoto · no texture hook",
+                $"{InstallGate.NoTextureHook} Install stays off; Launch still works.")
             : StatusFacet.Good("3DMigoto");
 
     /// <summary>Re-take the loader disk reads and re-raise BOTH gates standing on them — Install and
@@ -106,13 +122,18 @@ public partial class MainWindowViewModel
     private void RaiseModsFolderGates()
     {
         ReadModsFolderState();
-        MigotoStatus = MigotoFacet(_settings.MigotoLoaderExe, _loaderExeExists, _modsFolder);
+        MigotoStatus = MigotoFacet(_settings.MigotoLoaderExe, _loaderExeExists, _modsFolder, _loaderIni);
         OnPropertyChanged(nameof(LaunchDisabledReason));
         OnPropertyChanged(nameof(CanLaunchGame));
         OnPropertyChanged(nameof(LaunchButtonTip));
         OnPropertyChanged(nameof(InstallDisabledReason));
         OnPropertyChanged(nameof(CanInstallBuild));
         OnPropertyChanged(nameof(InstallButtonTip));
+        // whether the pane shows Install at all, or the way to set the path in its place
+        OnPropertyChanged(nameof(HasMigotoLoader));
+        OnPropertyChanged(nameof(NeedsMigotoLoader));
+        OnPropertyChanged(nameof(SetMigotoPathLabel));
+        OnPropertyChanged(nameof(SetMigotoPathTip));
     }
 
     /// <summary>Start 3DMigoto, wait for it, then start the game. A Steam-library install starts through
@@ -129,8 +150,14 @@ public partial class MainWindowViewModel
     /// already-elevated app — nothing re-launches, so the started process IS the loader and its liveness
     /// is the confirmation.</para>
     ///
-    /// <para>Process starts and the launch-plan resolve run off the UI thread: a shell execute blocks for
-    /// as long as the UAC prompt stands, and the window must keep painting.</para></summary>
+    /// <para>Process starts, the launch-plan resolve and the loader's own ini read all run off the UI
+    /// thread: a shell execute blocks for as long as the UAC prompt stands, and the window must keep
+    /// painting.</para>
+    ///
+    /// <para>A host whose ini carries an active <c>launch</c> starts the game ITSELF the moment it is up, so
+    /// this starts only the loader. Starting the game as well would bring up a second copy — or hand the
+    /// first one to a launcher that already owns it — and the modder would be looking at two windows with no
+    /// idea which one is hooked.</para></summary>
     [RelayCommand]
     private async Task LaunchGameAsync()
     {
@@ -150,6 +177,16 @@ public partial class MainWindowViewModel
         try
         {
             LaunchStatus = StatusFacet.Loading("Starting 3DMigoto…");
+            // Read before anything starts: it decides whether this launch starts the game at all, and with
+            // it WHEN the game's pids have to be read. A host that starts the game itself can have it up
+            // before the warmup ends, so the snapshot the watch measures against is taken here — after the
+            // loader is running it would already carry the game this launch brought up, and the watch would
+            // follow nothing.
+            bool loaderStartsGame = await Task.Run(() => MigotoIni.Read(loader).StartsTheGame);
+            string gameName = plan.ProcessName;
+            var gameBefore = loaderStartsGame
+                ? await Task.Run(() => PidsNamed(gameName))
+                : null;
             // The loader's pids as they stand BEFORE anything is started: both the entry read and the set the
             // wait's successor test excludes. One read, so nothing that appears alongside the start can pass
             // for the elevated copy.
@@ -226,30 +263,52 @@ public partial class MainWindowViewModel
                 return;
             }
 
-            LaunchStatus = StatusFacet.Loading("Launching the game…");
-            // The game's pids as they stand BEFORE the start, so a copy that was already up cannot pass for
-            // the one this launch brings. Read here rather than at the entry: the loader wait sits between,
-            // and a game started during it is not this launch's.
-            string gameName = plan.ProcessName;
-            var gameBefore = await Task.Run(() => PidsNamed(gameName));
-            try
+            // A host that starts the game itself, that was ALREADY up when the button was pressed, with the
+            // game already among the pids read at the entry: this launch starts nothing, and the copy on
+            // screen is the one that host started.
+            bool gameAlreadyUp = HostAlreadyStartedGame(proof == LoaderProof.AlreadyRunning,
+                gameBefore is { Count: > 0 });
+
+            StatusFacet launched;
+            if (loaderStartsGame)
             {
-                (await Task.Run(() => Process.Start(new ProcessStartInfo(plan.Target) { UseShellExecute = true })))
-                    ?.Dispose();
+                launched = gameAlreadyUp ? GameAlreadyStartedLine : LoaderStartsGameLine;
             }
-            catch (Exception e)
+            else
             {
-                LaunchStatus = StatusFacet.Bad("Game didn't launch", $"{plan.Target} · {e.Message}");
-                return;
+                LaunchStatus = StatusFacet.Loading("Launching the game…");
+                // The game's pids as they stand BEFORE the start, so a copy that was already up cannot pass
+                // for the one this launch brings. Read here rather than at the entry: the loader wait sits
+                // between, and a game started during it is not this launch's.
+                gameBefore = await Task.Run(() => PidsNamed(gameName));
+                try
+                {
+                    (await Task.Run(() => Process.Start(new ProcessStartInfo(plan.Target) { UseShellExecute = true })))
+                        ?.Dispose();
+                }
+                catch (Exception e)
+                {
+                    LaunchStatus = StatusFacet.Bad("Game didn't launch", $"{plan.Target} · {e.Message}");
+                    return;
+                }
+                launched = plan.Note is { } note
+                    ? StatusFacet.Warn("Game launched", note)
+                    : StatusFacet.Good("Game launched");
             }
-            var launched = plan.Note is { } note
-                ? StatusFacet.Warn("Game launched", note)
-                : StatusFacet.Good("Game launched");
             LaunchStatus = launched;
-            // The start hands back no game process — through Steam it is the client's — so the cell follows
-            // the game by name among the pids the read above did not carry. The line just written goes with
-            // it, so the exit can retire it without clobbering a newer one.
-            if (gameName.Length > 0) _ = WatchLaunchedGameAsync(gameName, gameBefore, plan.Kind, launched);
+            // The start hands back no game process — through Steam it is the client's, and a host that
+            // starts the game itself never hands one over at all — so the cell follows the game by NAME
+            // among the pids the snapshot did not carry. The line just written goes with it, so the exit can
+            // retire it without clobbering a newer one.
+            //
+            // When nothing was started the snapshot is EMPTY, which makes the game already up the pid the
+            // watch adopts: the cell reads running at once, and the exit re-reads the install the same way
+            // it does behind a start of this app's own. Following the entry snapshot instead would hunt for
+            // its whole appear window for a process that is never coming.
+            if (gameName.Length > 0)
+                _ = WatchLaunchedGameAsync(gameName,
+                    gameAlreadyUp ? new HashSet<int>() : gameBefore ?? new HashSet<int>(),
+                    WatchedStartKind(plan.Kind, loaderStartsGame), launched);
         }
         finally
         {
@@ -257,6 +316,34 @@ public partial class MainWindowViewModel
             IsLaunching = false;
         }
     }
+
+    /// <summary>What the launch reports for a host that starts the game itself: this app started only the
+    /// loader, and the game is on its way from somewhere the app doesn't drive. The label says the state
+    /// rather than claiming a start this app didn't make; the detail says why nothing else is coming, so the
+    /// wait doesn't read as the button having done half its job.</summary>
+    internal static StatusFacet LoaderStartsGameLine => StatusFacet.Good("3DMigoto is starting the game")
+        with { Detail = "This 3DMigoto starts the game itself, so the Lab didn't start a second copy." };
+
+    /// <summary>What the launch reports when the whole sequence had nothing left to do: a host that starts
+    /// the game itself was already up, and the game it started is already running. Saying it is STARTING
+    /// would promise something no one is going to do.</summary>
+    internal static StatusFacet GameAlreadyStartedLine => StatusFacet.Good("Game is already running")
+        with
+        {
+            Detail = "This 3DMigoto starts the game itself and was already running, so both were already up.",
+        };
+
+    /// <summary>Whether a launch behind a host that starts the game itself has anything left to start. The
+    /// two readings are taken BEFORE anything is started: a loader that was already up had already had its
+    /// chance to start the game, and a game standing at that same moment is the copy it started. Nothing in
+    /// the sequence starts a process in that state, so the launch reports what is running rather than
+    /// announcing a start and then watching its whole appear window for a pid that never comes.
+    ///
+    /// <para>Only asked where the HOST owns the game start. When this app starts the game, the snapshot is
+    /// what tells its own copy from one that was already up, and a game already running is no reason not to
+    /// start the one the modder just asked for.</para></summary>
+    internal static bool HostAlreadyStartedGame(bool loaderWasAlreadyRunning, bool gameAlreadyUp) =>
+        loaderWasAlreadyRunning && gameAlreadyUp;
 
     // ---- the game this app launched -----------------------------------------------------------------
 
@@ -304,12 +391,12 @@ public partial class MainWindowViewModel
     /// did not already find comes up, and re-read the install when it exits, so the files the game held
     /// come back readable without a click.
     ///
-    /// <para>The pid followed is one carrying the game's name that the pre-start read did not list — a
-    /// name snapshot, not ownership: a copy the user starts inside the appear window is adopted just the
-    /// same, but a game ALREADY up keeps the load's reading of the cell. A pid that dies within
-    /// <see cref="GameReArmGrace"/> of appearing is read as a launcher handoff, not an exit: the watch
-    /// re-snapshots and waits once more, briefly. A process that never appears reports nothing — a launch
-    /// Steam swallowed has no running game to announce.</para></summary>
+    /// <para>The pid followed is one carrying the game's name that <paramref name="before"/> does not list —
+    /// a name snapshot, not ownership: a copy the user starts inside the appear window is adopted just the
+    /// same, and a launch that started nothing hands an EMPTY snapshot so the game already up is what gets
+    /// followed. A pid that dies within <see cref="GameReArmGrace"/> of appearing is read as a launcher
+    /// handoff, not an exit: the watch re-snapshots and waits once more, briefly. A process that never
+    /// appears reports nothing — a launch Steam swallowed has no running game to announce.</para></summary>
     private async Task WatchLaunchedGameAsync(string processName, IReadOnlySet<int> before,
         GameLauncher.LaunchKind kind, StatusFacet launchLine)
     {
@@ -361,6 +448,15 @@ public partial class MainWindowViewModel
         if (ReferenceEquals(LaunchStatus, launchLine)) LaunchStatus = StatusFacet.None;
         RefreshAfterGameExit();
     }
+
+    /// <summary>Which kind of start the watch is following. A host that starts the game itself starts the
+    /// EXE — nothing hands it a steam:// uri — so the launcher may still answer by starting its own copy,
+    /// and the watch has to wait past that handoff exactly as it does for a direct start of this app's own.
+    /// The resolved plan describes how THIS app would have started the game, which in that case it
+    /// didn't.</summary>
+    internal static GameLauncher.LaunchKind WatchedStartKind(GameLauncher.LaunchKind planned,
+        bool loaderStartsGame) =>
+        loaderStartsGame ? GameLauncher.LaunchKind.DirectExe : planned;
 
     /// <summary>Whether a followed pid's exit is a launcher handoff rather than the game closing, as a
     /// pure decision. Only a direct exe start can be answered by a launcher starting its own copy (Steam

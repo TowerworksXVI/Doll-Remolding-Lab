@@ -131,18 +131,49 @@ public class DonorMapDropTests
         var root = Seed(g);
         var vm = new MainWindowViewModel(startLoad: false);
         Assert.True(await vm.OpenModAsync(root));
-        var reported = new List<string>();
+        var reported = new Lines();   // Progress posts, so its callbacks can still be in flight at the assert
 
         await vm.ApplyDroppedPngToDonorMapAsync(Subject,
             new DonorMapDrop("body1", DonorMapSlot.Rmo, new[] { 0 }), "RMO",
-            Dropped(g), new Progress<string>(reported.Add));
+            Dropped(g), reported);
 
         var shipped = Path.Combine(root, "textures", $"{ModNaming.Slug(Mesh)}_s0_rmo.png");
         using var img = Image.Load<Rgba32>(shipped);
         Assert.Equal(0, img[0, 0].A);                      // a plain copy would have kept the source's 255
         Assert.Equal(new Rgba32(10, 20, 30, 0), img[0, 0]);  // colour untouched
         Assert.Equal(SlotOrigin.Authored, Assert.Single(Reloaded(root).DonorTextures!).RmoAsk);
-        Assert.Contains(reported, m => m.Contains("emissive mask", StringComparison.Ordinal));
+        Assert.Contains(reported.Reported, m => m.Contains("emissive mask", StringComparison.Ordinal));
+    }
+
+    /// <summary>The re-drop is where the mask went missing: a copy over the authored file took the dropped
+    /// image whole, alpha included, and an RMO's alpha IS the emissive mask. Re-authoring rebuilds it, so
+    /// the second drop ships what the first one did.</summary>
+    [Fact]
+    public async Task AnRmoDroppedOverAMapThePartAlreadyCarries_RebuildsTheMask()
+    {
+        using var g = new TempGame();
+        using var settings = new SettingsSnapshot();
+        var root = Seed(g, tweak: t => t.DonorTextures = new List<SubmeshTextures>
+        {
+            new()
+            {
+                Submesh = 0, Rmo = $"textures/{ModNaming.Slug(Mesh)}_s0_rmo.png",
+                RmoOrigin = SlotOrigin.Authored,
+            },
+        });
+        Directory.CreateDirectory(Path.Combine(root, "textures"));
+        using (var earlier = new Image<Rgba32>(2, 2, new Rgba32(200, 100, 50, 255)))
+            earlier.SaveAsPng(DonorMap(root, 0, "rmo"));
+        var vm = new MainWindowViewModel(startLoad: false);
+        Assert.True(await vm.OpenModAsync(root));
+
+        await vm.ApplyDroppedPngToDonorMapAsync(Subject,
+            new DonorMapDrop("body1", DonorMapSlot.Rmo, new[] { 0 }), "RMO",
+            Dropped(g), new Progress<string>());
+
+        using var landed = Image.Load<Rgba32>(DonorMap(root, 0, "rmo"));
+        Assert.Equal(new Rgba32(10, 20, 30, 0), landed[0, 0]);   // a copy would have kept the source's 255
+        Assert.Equal(SlotOrigin.Authored, Assert.Single(Reloaded(root).DonorTextures!).RmoAsk);
     }
 
     [Fact]

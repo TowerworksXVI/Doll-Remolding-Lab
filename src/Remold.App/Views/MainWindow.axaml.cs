@@ -74,7 +74,9 @@ public partial class MainWindow : Window
         if (!string.IsNullOrEmpty(path)) await vm.OpenModAsync(path!);
     }
 
-    /// <summary>Tools → Settings… — tool paths, the mods folder, the new-mod author default.</summary>
+    /// <summary>Tools → Settings… — tool paths, the mods folder, the new-mod author default. The Build
+    /// pane's "Set 3DMigoto path" opens the same dialog: the loader row's Browse is the app's one picker for
+    /// that exe, so the pane offers it rather than forking a second one.</summary>
     private async void OnSettings(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
@@ -120,16 +122,20 @@ public partial class MainWindow : Window
             vm.CancelSpeculativeWork();
         if (_closeConfirmed)
             return;
-        // Work in flight: ask before abandoning it, then cancel cleanly and run the normal save-first close.
-        // Precedes the dirty gate — the work often produces the changes that gate would save.
+        // Work in flight: ask before abandoning it, then run the normal save-first close. Precedes the dirty
+        // gate — the work often produces the changes that gate would save. The cancel is LAST, past every
+        // confirm: its token is terminal, so a window that stays open behind a declined confirm would keep a
+        // dead one and silently no-op every later open or materialize.
         if (vm.IsWorkInFlight)
         {
             e.Cancel = true;
             Dispatcher.UIThread.Post(async () =>
             {
                 if (!await vm.ConfirmCloseWithWorkAsync()) return;   // keep working — stay open
+                if (!await vm.ConfirmAppCloseAsync()) return;        // the save-first gate said no — stay open
                 vm.CancelInFlightWork();
-                if (await vm.ConfirmAppCloseAsync()) { _closeConfirmed = true; Close(); }
+                _closeConfirmed = true;
+                Close();
             });
             return;
         }

@@ -57,7 +57,9 @@ public static class MeshGltf
         // glTF requires unit-length normals; half-precision scene/prop normals can be off-unit or zero,
         // which SharpGLTF rejects ("Invalid Normal"). A zero normal falls back to +Z.
         var normals = mesh.Has("Normal") ? Normalize(Map3(mesh, "Normal", AxisConvention.Normal)) : null;
-        var tangents = mesh.Has("Tangent") ? Map4(mesh, "Tangent", AxisConvention.Tangent) : null;
+        var tangents = mesh.Has("Tangent")
+            ? SanitizeTangents(Map4(mesh, "Tangent", AxisConvention.Tangent), normals)
+            : null;
         var uv0 = Uv0(mesh);
 
         // ONE shared vertex pool for the whole mesh: build the attribute accessors once, then point every
@@ -228,9 +230,9 @@ public static class MeshGltf
     /// leaves the part on the stock maps alone.</para>
     ///
     /// <para><paramref name="beforeWrite"/> is handed <paramref name="outPath"/> immediately before that file
-    /// is written, and only when it is about to be: everything that can refuse the re-split has already run,
-    /// so a caller keeping a copy of the file it overwrites never spends that copy on a send that throws.
-    /// </para>
+    /// is written, and only when it is about to be: everything that can refuse the re-split runs ahead of it,
+    /// so a refusal leaves it silent. That ordering is the invariant the tests hold this method to; no
+    /// production caller passes one.</para>
     ///
     /// <para><paramref name="recordGlb"/> names the glb the map-origin record was written beside, as in
     /// <see cref="ReadSubmeshMaps(ParsedGlb, string?, string?)"/>: the stock maps re-embedded here are the
@@ -387,7 +389,9 @@ public static class MeshGltf
         var positions = Map3(mesh, "Vertex", AxisConvention.Position);
         // Unit-length normals, as the plain Write path does (see its note).
         var normals = mesh.Has("Normal") ? Normalize(Map3(mesh, "Normal", AxisConvention.Normal)) : null;
-        var tangents = mesh.Has("Tangent") ? Map4(mesh, "Tangent", AxisConvention.Tangent) : null;
+        var tangents = mesh.Has("Tangent")
+            ? SanitizeTangents(Map4(mesh, "Tangent", AxisConvention.Tangent), normals)
+            : null;
         var uv0 = Uv0(mesh);
 
         MeshPrimitive? shared = null;
@@ -810,6 +814,49 @@ public static class MeshGltf
             r[i] = len > 1e-6f ? v[i] / len : new Vector3(0, 0, 1);
         }
         return r;
+    }
+
+    /// <summary>How far from unit length a tangent's xyz may sit and still ship as it arrived. Tighter than
+    /// the reader's own tolerance, so nothing a validator would reject slips through untouched.</summary>
+    private const float TangentUnitTolerance = 1e-4f;
+
+    /// <summary>Tangents glTF accepts: xyz of unit length, w exactly ±1. Some game meshes ship neither, and
+    /// the writer rejects the whole file over one such vertex ("Invalid Tangent"), so the part cannot
+    /// materialize at all. A tangent already meeting both is passed through as it came; one whose xyz will
+    /// not normalize (zero, infinite or NaN) is rebuilt perpendicular to the vertex normal with w = +1, and
+    /// any other keeps its normalized xyz with w snapped to the nearer of ±1. Blender recomputes tangents on
+    /// import, so a rebuilt one costs the edit nothing.</summary>
+    /// <param name="normals">the same unit normals the export writes, in glTF space; null where the mesh
+    /// carries no normal channel, which leaves the rebuilt tangents on +X.</param>
+    private static IReadOnlyList<Vector4> SanitizeTangents(IReadOnlyList<Vector4> tangents,
+        IReadOnlyList<Vector3>? normals)
+    {
+        Vector4[]? sanitized = null;
+        for (int i = 0; i < tangents.Count; i++)
+        {
+            var t = tangents[i];
+            var xyz = new Vector3(t.X, t.Y, t.Z);
+            float len = xyz.Length();                                   // NaN/∞ propagates into the length
+            bool usableXyz = float.IsFinite(len) && len > 1e-6f;
+            if (usableXyz && Math.Abs(len - 1f) <= TangentUnitTolerance && (t.W == 1f || t.W == -1f)) continue;
+            (sanitized ??= tangents.ToArray())[i] = usableXyz
+                ? new Vector4(xyz / len, float.IsFinite(t.W) && t.W < 0f ? -1f : 1f)
+                : new Vector4(Perpendicular(normals is not null && i < normals.Count ? normals[i] : default), 1f);
+        }
+        return sanitized ?? tangents;
+    }
+
+    /// <summary>A unit vector perpendicular to <paramref name="n"/>. The cross is taken against whichever
+    /// axis the normal leans on least, so it stays well conditioned; a normal that is itself unusable gives
+    /// +X, which is perpendicular to nothing in particular but is at least a legal tangent.</summary>
+    private static Vector3 Perpendicular(Vector3 n)
+    {
+        float len = n.Length();
+        if (!float.IsFinite(len) || len <= 1e-6f) return new Vector3(1, 0, 0);
+        n /= len;
+        var t = Vector3.Cross(n, Math.Abs(n.X) < 0.9f ? new Vector3(1, 0, 0) : new Vector3(0, 1, 0));
+        float tl = t.Length();
+        return tl > 1e-6f ? t / tl : new Vector3(1, 0, 0);
     }
 
     private static IReadOnlyList<Vector3> Map3(UnityMesh m, string ch, System.Func<Vector3, Vector3>? f) =>

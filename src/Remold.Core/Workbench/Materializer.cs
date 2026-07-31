@@ -102,16 +102,7 @@ public static class Materializer
     private static Dictionary<string, List<ProjectTarget>> PartTokenMap(ModProject project, string character,
         string stem, string meshPrefix)
     {
-        var sub = SubjectFolder(character, stem);
-        var mine = new List<ProjectTarget>();
-        foreach (var t in project.Targets)
-        {
-            if (t.AssetType != "Mesh") continue;
-            var rel = t.ReplaceFile.Replace('\\', '/');
-            int slash = rel.IndexOf('/');
-            if (slash < 0 || !rel.AsSpan(0, slash).Equals(sub, StringComparison.OrdinalIgnoreCase)) continue;
-            mine.Add(t);
-        }
+        var mine = SubjectMeshTargets(project, character, stem);
         // The rule is a WHOLE-SUBJECT question (a short token is declined when something already derives
         // it), so it is built once over every one of the subject's mesh targets.
         var names = mine.Select(t => t.ObjectName).ToList();
@@ -132,6 +123,24 @@ public static class Materializer
             list.Add(t);
         }
         return map;
+    }
+
+    /// <summary>Every Mesh target under this subject's folder. The <see cref="SubjectFolder"/> segment
+    /// leading each target's ReplaceFile is what scopes a target to one outfit, so the filter reads it
+    /// rather than any name convention.</summary>
+    public static List<ProjectTarget> SubjectMeshTargets(ModProject project, string character, string stem)
+    {
+        var sub = SubjectFolder(character, stem);
+        var mine = new List<ProjectTarget>();
+        foreach (var t in project.Targets)
+        {
+            if (t.AssetType != "Mesh") continue;
+            var rel = t.ReplaceFile.Replace('\\', '/');
+            int slash = rel.IndexOf('/');
+            if (slash < 0 || !rel.AsSpan(0, slash).Equals(sub, StringComparison.OrdinalIgnoreCase)) continue;
+            mine.Add(t);
+        }
+        return mine;
     }
 
     /// <summary>True when a Mesh target for this part already exists (the part-grain idempotency guard).</summary>

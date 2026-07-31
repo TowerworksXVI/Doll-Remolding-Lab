@@ -109,6 +109,109 @@ public class GameLocatorTests
     }
 
     [Fact]
+    public void Validate_ResolvesFromAStandaloneLauncherRoot()
+    {
+        // The standalone launcher installs into "<chosen dir>\GF2 Game"; pointing at the chosen dir
+        // resolves to the game root inside it.
+        using var g = new TempGame();
+        var gameRoot = Path.Combine(g.Root, "GF2 Game");
+        var data = Path.Combine(gameRoot, "GF2_Exilium_Data", "LocalCache", "Data");
+        MakeBundleDir(data);
+        Assert.Equal(Path.GetFullPath(gameRoot), GameLocator.Validate(g.Root));
+    }
+
+    [Fact]
+    public void StandaloneGameDirsUnder_SweepsToTheLauncherLayout_AndTheCandidateValidates()
+    {
+        // A launcher install one level under a scan root (<root>\<chosen dir>\GF2 Game): the sweep
+        // proposes exactly the game dir, and the sentinel accept-test resolves it.
+        using var g = new TempGame();   // g.Root stands in for a drive root
+        var gameRoot = Path.Combine(g.Root, "GF2Exilium", "GF2 Game");
+        MakeBundleDir(Path.Combine(gameRoot, "GF2_Exilium_Data", "LocalCache", "Data"));
+        Directory.CreateDirectory(Path.Combine(g.Root, "SomethingElse"));   // no GF2 Game inside → not a candidate
+        var cand = Assert.Single(GameLocator.StandaloneGameDirsUnder(g.Root));
+        Assert.Equal(Path.Combine(g.Root, "GF2Exilium", "GF2 Game"), cand);
+        Assert.Equal(Path.GetFullPath(gameRoot), GameLocator.Validate(cand));
+    }
+
+    [Fact]
+    public void StandaloneGameDirsUnder_MissingRoot_YieldsNothing()
+    {
+        Assert.Empty(GameLocator.StandaloneGameDirsUnder(@"Z:\nope\does\not\exist"));
+    }
+
+    [Fact]
+    public void ValidateLauncherCandidate_FollowsTheConfigRedirect_ToAFreelyNamedGameFolder()
+    {
+        // The launcher folder holds no game, only a config.ini naming where the user moved it — a game
+        // folder with an arbitrary name resolves through the redirect.
+        using var g = new TempGame();
+        var gameRoot = Path.Combine(g.Root, "Anything At All");
+        MakeBundleDir(Path.Combine(gameRoot, "GF2_Exilium_Data", "LocalCache", "Data"));
+        var launcher = Path.Combine(g.Root, "Launcher");
+        Directory.CreateDirectory(launcher);
+        File.WriteAllText(Path.Combine(launcher, "config.ini"),
+            "some_other_key=1\r\ngame_install_path=" + gameRoot + "\r\n");
+        Assert.Equal(Path.GetFullPath(gameRoot), GameLocator.ValidateLauncherCandidate(launcher));
+    }
+
+    [Fact]
+    public void ValidateLauncherCandidate_StillResolvesTheDefaultLayout_WithoutAConfig()
+    {
+        using var g = new TempGame();
+        var gameRoot = Path.Combine(g.Root, "GF2 Game");
+        MakeBundleDir(Path.Combine(gameRoot, "GF2_Exilium_Data", "LocalCache", "Data"));
+        Assert.Equal(Path.GetFullPath(gameRoot), GameLocator.ValidateLauncherCandidate(g.Root));
+    }
+
+    [Fact]
+    public void ValidateLauncherCandidate_NoGameNoConfig_IsNull()
+    {
+        using var g = new TempGame();
+        Assert.Null(GameLocator.ValidateLauncherCandidate(g.Root));
+        Assert.Null(GameLocator.ValidateLauncherCandidate(null));
+    }
+
+    [Theory]
+    [InlineData("game_install_path=C:\\GF2Exilium\\GF2 Game", "C:\\GF2Exilium\\GF2 Game")]
+    [InlineData("Game_Install_Path = \"D:\\My Games\\gf2\" ", "D:\\My Games\\gf2")]   // case, spaces, quotes
+    [InlineData("other=1\ngame_install_path=E:\\g\nmore=2", "E:\\g")]
+    [InlineData("game_install_path_backup=X:\\old\ngame_install_path=E:\\g", "E:\\g")]   // longer key must not match
+    [InlineData("game_install_path=", null)]
+    [InlineData("no_such_key=1", null)]
+    [InlineData(null, null)]
+    public void GameInstallPathFrom_ParsesTheLauncherConfigLine(string? ini, string? expected)
+        => Assert.Equal(expected, GameLocator.GameInstallPathFrom(ini));
+
+    [Theory]
+    [InlineData("\"C:\\GF2Exilium\\uninst.exe\" /S", "C:\\GF2Exilium")]
+    [InlineData("C:\\GF2Exilium\\uninst.exe", "C:\\GF2Exilium")]
+    [InlineData("C:\\GF2 Launcher\\uninst.exe", "C:\\GF2 Launcher")]   // unquoted, spaces in the path
+    [InlineData("C:\\GF2 Launcher\\uninst.exe /S", "C:\\GF2 Launcher")]
+    [InlineData("C:\\Tools\\un.exe -flag", "C:\\Tools")]
+    [InlineData("uninst.exe", null)]   // no directory to take
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void ExeDirFromCommand_TakesTheExecutablesDirectory(string? command, string? expected)
+        => Assert.Equal(expected, GameLocator.ExeDirFromCommand(command));
+
+    [Theory]
+    [InlineData("GIRLS' FRONTLINE 2: EXILIUM")]   // the Steam channel's uninstall entry, as recorded
+    [InlineData("Girls' Frontline 2 Exilium")]
+    [InlineData("GF2Exilium")]                    // the standalone launcher's key name, as recorded
+    [InlineData("EXILIUM")]
+    public void LooksLikeGf2_AcceptsTheGameAcrossChannelNamings(string displayName)
+        => Assert.True(GameLocator.LooksLikeGf2(displayName));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Girls und Panzer")]
+    [InlineData("Some Other Game 2")]
+    public void LooksLikeGf2_RejectsOtherEntries(string? displayName)
+        => Assert.False(GameLocator.LooksLikeGf2(displayName));
+
+    [Fact]
     public void Validate_RejectsAnEmptyBundleDir()
     {
         using var g = new TempGame();

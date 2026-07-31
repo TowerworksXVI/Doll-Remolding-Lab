@@ -102,11 +102,44 @@ public class CloseFlowSaveTests
     public void LeaveProceedsWithoutPrompt_SaveFailed_FallsBackToPrompt()
         => Assert.False(MainWindowViewModel.LeaveProceedsWithoutPrompt(saveNeeded: true, saveOk: false));
 
+    // ---- what counts as work the close has to ask about -------------------------------------------------
+
+    /// <summary>Each holder on its own is enough. They are separate flags because they start and end at
+    /// different places, so a composition that dropped one would let the close walk past that work in
+    /// silence — the exact way the rig build was missed.</summary>
+    [Theory]
+    [InlineData(false, false, false, false, false, false)]   // idle: the close asks nothing
+    [InlineData(true, false, false, false, false, true)]     // a Materialize-all batch
+    [InlineData(false, true, false, false, false, true)]     // an asked-for materialize
+    [InlineData(false, false, true, false, false, true)]     // an Open-all's rig build, between scopes
+    [InlineData(false, false, false, true, false, true)]     // a send-back apply
+    [InlineData(false, false, false, false, true, true)]     // a mod build
+    public void WorkInFlight_IsHeldByEveryOneOfItsFlags(
+        bool materializingAll, bool materializing, bool buildingRig, bool applyingSend, bool building,
+        bool expected)
+        => Assert.Equal(expected, MainWindowViewModel.WorkInFlight(
+            materializingAll, materializing, buildingRig, applyingSend, building));
+
+    /// <summary>What the confirm SAYS, per state, in the order it decides. The two that cannot be stopped
+    /// lead and name what quitting leaves behind; the two that cancel cleanly say so.</summary>
+    [Fact]
+    public void TheCloseConfirmNamesTheWorkThatIsActuallyRunning()
+    {
+        Assert.StartsWith("A mod is still building.",
+            MainWindowViewModel.CloseWithWorkBody(building: true, applyingSend: true, buildingRig: true));
+        Assert.StartsWith("A part from Blender is still being applied.",
+            MainWindowViewModel.CloseWithWorkBody(building: false, applyingSend: true, buildingRig: true));
+        Assert.StartsWith("The outfit rig for Blender is still building.",
+            MainWindowViewModel.CloseWithWorkBody(building: false, applyingSend: false, buildingRig: true));
+        Assert.StartsWith("Materializing files is still running.",
+            MainWindowViewModel.CloseWithWorkBody(building: false, applyingSend: false, buildingRig: false));
+    }
+
     // ---- when a save may rename the project folder -----------------------------------------------------
 
     [Theory]
     [InlineData(false, false, false, true)]    // idle: the rename may land
-    [InlineData(true, false, false, false)]    // a materialize captured the old folder and is still writing into it
+    [InlineData(true, false, false, false)]    // a materialize (or the rig build) captured the old folder and is still writing into it
     [InlineData(false, true, false, false)]    // a build reads the persisted workspace for its whole run
     [InlineData(false, false, true, false)]    // a send-back apply rewrites glbs it resolved before it left the UI thread
     [InlineData(true, true, true, false)]

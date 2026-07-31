@@ -194,6 +194,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     /// <summary>The memo, for tests that pin the hit and the rescan's drop.</summary>
     internal SubjectModelCache SubjectModels => _subjectModels;
 
+    /// <summary>The open mod, for tests that drive a seam reading it without a mod folder on disk.</summary>
+    internal ModProject OpenProject => _project;
+
     public MainWindowViewModel() : this(startLoad: true) { }
 
     /// <summary>The app always constructs through the parameterless form. <paramref name="startLoad"/> is
@@ -412,10 +415,18 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     public bool CanCloseSilently => !LeaveNeedsSave(IsDirty, ShowHome);
 
     /// <summary>Long-running work the modder ASKED for is in flight, so the close handler asks first. A
-    /// speculative prewarm is not in this: the close cancels it and goes. GAP: the Open-all combined rig
-    /// build (<see cref="AssetExporter.BuildRiggedGlbs"/>) runs outside a materialize scope with no flag,
-    /// so a close during that phase isn't trapped.</summary>
-    public bool IsWorkInFlight => Workbench.IsMaterializingAll || _materializing || IsModBuilding;
+    /// speculative prewarm is not in this: the close cancels it and goes. An asked-for Open-all's rig build
+    /// runs between materialize scopes rather than inside one, so it is read off its own flag; a send-back
+    /// apply is in flight for as long as <see cref="_applyingSend"/> stands.</summary>
+    public bool IsWorkInFlight =>
+        WorkInFlight(Workbench.IsMaterializingAll, _materializing, _buildingCombinedRig, _applyingSend, IsModBuilding);
+
+    /// <summary>The composition behind <see cref="IsWorkInFlight"/> — ANY holder counts, and each is its own
+    /// flag because they start and end at different places. Pure so every contributing flag can be exercised
+    /// without standing up the window.</summary>
+    internal static bool WorkInFlight(bool materializingAll, bool materializing, bool buildingRig,
+        bool applyingSend, bool building) =>
+        materializingAll || materializing || buildingRig || applyingSend || building;
 
     /// <summary>Drop every speculative prewarm. Only a close that actually goes through calls it — a
     /// declined close leaves the app open on the subject the guess was preparing.</summary>
@@ -427,18 +438,29 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     public static bool CloseDropsSpeculativeWork(bool closeConfirmed, bool workInFlight, bool canCloseSilently) =>
         closeConfirmed || (!workInFlight && canCloseSilently);
 
-    /// <summary>Confirm closing while work runs. A build can't be stopped mid-flight, so its prompt says
-    /// what quitting actually does.</summary>
+    /// <summary>Confirm closing while work runs. The button pair is the siblings' — a verb and a plain way
+    /// back — and the body names the work that is actually running.</summary>
     public async Task<bool> ConfirmCloseWithWorkAsync()
     {
         if (MainWindow is not { } owner) return true;   // headless — don't trap the close
-        return IsModBuilding
-            ? await ConfirmWindow.Show(owner, "Work in progress",
-                "A mod is still building. Quitting abandons the run. Its temporary files are cleaned by the next build.",
-                "Quit anyway", "Keep working", danger: true)
-            : await ConfirmWindow.Show(owner, "Work in progress",
-                "Materializing files is still running. Cancel it and quit?", "Cancel and quit", "Keep working", danger: true);
+        return await ConfirmWindow.Show(owner, "Work in progress",
+            CloseWithWorkBody(IsModBuilding, _applyingSend, _buildingCombinedRig),
+            "Quit anyway", "Keep working", danger: true);
     }
+
+    /// <summary>What quitting does to the work in flight, per state. ORDERED by what quitting COSTS: a mod
+    /// build and a send-back apply are abandoned mid-run — neither carries a token to stop — so they lead and
+    /// say what is left behind. The rig build and the materialize are cancelled cleanly, and say so. Pure, so
+    /// the wording is settled without standing up the window.</summary>
+    internal static string CloseWithWorkBody(bool building, bool applyingSend, bool buildingRig) =>
+        building
+            ? "A mod is still building. Quitting abandons the run. Its temporary files are cleaned by the next build."
+        : applyingSend
+            ? "A part from Blender is still being applied. Quitting abandons it partway and can leave that part "
+              + "half-written. Send it again from Blender to redo it."
+        : buildingRig
+            ? "The outfit rig for Blender is still building. Quitting cancels it."
+        : "Materializing files is still running. Quitting cancels it.";
 
     /// <summary>Cancel every in-flight materialize so a confirmed close stops the work cleanly.</summary>
     public void CancelInFlightWork()
@@ -470,7 +492,8 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     private void EnsureFolderMatchesName()
     {
         if (_project.RootDir is null) return;
-        if (!CanRenameProjectFolder(_materializing || _prewarming, IsModBuilding, _applyingSend)) return;
+        if (!CanRenameProjectFolder(_materializing || _prewarming || _buildingCombinedRig, IsModBuilding,
+                _applyingSend)) return;
         var root = _project.RootDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var desired = ModNaming.Slug(ProjectName);
         // A dedup form (`desired-2`, `desired-5`, …) is ALREADY the right home. Treating one as a mismatch
@@ -498,8 +521,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     /// <summary>Whether the project folder may be renamed to match the mod name right now. Every holder
     /// captured the old path and is still writing into it: a materialize's background read, a build's
-    /// whole run, a send-back apply's workspace rewrites. A speculative prewarm counts as a materialize —
-    /// the rule turns on the writing, not on who asked. The next autosave picks the rename up.</summary>
+    /// whole run, a send-back apply's workspace rewrites. A speculative prewarm and the rig build that an
+    /// Open-all runs off-thread both count as a materialize — the rule turns on the writing, not on who
+    /// asked, and a rename under the rig build strands its glb in a folder the session sends back to. The
+    /// next autosave picks the rename up.</summary>
     internal static bool CanRenameProjectFolder(bool materializing, bool building, bool applyingSend) =>
         !materializing && !building && !applyingSend;
 
@@ -721,9 +746,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     private async Task RemoveSubjectNoConfirmAsync(string character, string stem, string meshPrefix, string label)
     {
         var key = new SubjectKey(character, stem);
-        _prewarmed.Remove(key);   // its workspace is going: a re-add is an outfit to prepare again
         await _prewarm.CancelAsync(key);
-        _prewarmed.Remove(key);   // again: a visit landing during the drain records an outfit about to lose its files
+        // After the drain, not before: for as long as the record stands, a visit landing mid-drain enqueues
+        // nothing, so dropping it here is one fewer window for a preparation of the workspace about to go.
+        // That workspace IS going, so a re-add is an outfit to prepare again.
+        _prewarmed.Remove(key);
         SubjectRemoval.Remove(_project, character, stem, meshPrefix, RemainingSubjectPrefix);
         Workbench.NotifyProjectChanged();
         SyncSubjectsFromLedger();
@@ -1326,7 +1353,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
                 // resolved — the only copy that survives a lone re-open. That published combined is also
                 // the "did this part change" baseline: the file the session was opened from.
                 var taken = await Step(() => SendBackGeometry.Take(returned, t.ObjectName, wsGlb, collected.Asks,
-                    KeepPreviousGlb, recordGlb, authored, baselineGlb: recordGlb));
+                    recordGlb: recordGlb, authoredMaps: authored, baselineGlb: recordGlb));
                 if (!StillOpen()) { Workbench.ReportStatus(SendModNotOpen); return; }
                 if (taken)
                 {
@@ -1561,9 +1588,12 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (newSubmeshes > 0)
             bits.Add($"The send added {newSubmeshes} submesh{(newSubmeshes == 1 ? "" : "es")}.");
         if (hidden.Count > 0) bits.Add($"Hidden in the mod: {string.Join(", ", hidden)}.");
-        // a blanked slot ships nothing, so counting it as an authored texture would promise a file
+        // a blanked slot ships nothing, so counting it as an authored map would promise a file
         var slots = new List<string>();
-        if (maps.Authored > 0) slots.Add($"{maps.Authored} texture{S(maps.Authored)} authored in Blender came back");
+        // An authored slot is not always a map painted in Blender: a sibling part's map linked in the shader
+        // editor and an untouched own map with a texture edit behind it are recorded the same way, and both
+        // reach this count. The word covers all three.
+        if (maps.Authored > 0) slots.Add($"{maps.Authored} map{S(maps.Authored)} authored");
         if (maps.Blanked > 0) slots.Add($"{maps.Blanked} slot{S(maps.Blanked)} blanked");
         if (slots.Count > 0) bits.Add(string.Join(" · ", slots) + ".");
         if (maps.Notes.Count > 0) bits.Add(string.Join(" ", maps.Notes.Distinct()));
@@ -1574,18 +1604,6 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
         static string S(int n) => n == 1 ? "" : "s";
     }
-
-    /// <summary>Keep ONE previous copy of a workspace glb beside it. Not a history — a second overwrite
-    /// replaces it. Best-effort: a locked file must never cost the modder the edit that is arriving.</summary>
-    internal static void KeepPreviousGlb(string glbPath)
-    {
-        try { if (File.Exists(glbPath)) File.Copy(glbPath, glbPath + PreviousGlbSuffix, overwrite: true); }
-        catch { /* best-effort backup */ }
-    }
-
-    /// <summary>Suffix of the kept-previous workspace glb. Outside the <c>.glb</c> extension so nothing
-    /// that enumerates meshes picks it up.</summary>
-    internal const string PreviousGlbSuffix = ".prev";
 
     /// <summary>The subject a <c>meshes/</c> folder belongs to, derived forward from the ledger (each
     /// entry's <see cref="Materializer.SubjectFolder"/> IS the folder name) rather than by taking a folder
@@ -1618,22 +1636,129 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         catch { return false; }
     }
 
-    /// <summary>An image editor saved over a workspace texture, or a PNG was dropped: flag the target,
-    /// refresh its card, and persist.</summary>
+    /// <summary>An image editor saved over a workspace texture: flag the target, take whatever adoption the
+    /// edit opens, refresh its card, and persist.</summary>
     private void OnTextureEdited(string pngPath)
     {
         var full = Path.GetFullPath(pngPath);
-        MarkTargetEdited(pngPath);
-        Workbench.NotifyTextureFileChanged(full);
+        var target = MarkTargetEdited(pngPath);
+        var line = AdoptTextureEdit(target);
+        Workbench.NotifyTextureFileChanged(full);   // the adoption moved donor rows the cards read
         AutoSave();
+        if (line is not null) Workbench.ReportStatus(line);
     }
 
     /// <summary>Flag the target whose replace file is this glb as edited, dropping the donor record the
-    /// file's previous contents left (<see cref="ModProject.MarkFileReplaced"/>).</summary>
-    private void MarkTargetEdited(string glbPath)
+    /// file's previous contents left (<see cref="ModProject.MarkFileReplaced"/>). Returns the target, or
+    /// null when no target owns the file.</summary>
+    private ProjectTarget? MarkTargetEdited(string glbPath)
     {
-        if (_project.RootDir is null) return;
-        _project.MarkFileReplaced(glbPath);
+        if (_project.RootDir is null) return null;
+        return _project.MarkFileReplaced(glbPath);
+    }
+
+    /// <summary>Texture edits whose adoption a running build held back, each with the project it was made
+    /// in: a mod switched while the run was in flight leaves entries that are no longer this project's, and
+    /// writing them onto the mod now open would move rows the modder never edited.</summary>
+    private readonly List<(ModProject Project, ProjectTarget Texture)> _heldAdoptions = new();
+
+    /// <summary>A game texture just became edited, so the replacement that rebinds its slot takes it over as
+    /// its own map HERE, where the modder acted: the project as it stands decides it, and ② Edit says what
+    /// happened in one line. Returns that line, or null when there is nothing to say. The project is written
+    /// but not persisted — the callers save the edit mark and the donor rows together.
+    ///
+    /// <para>A run in flight is reading the project, so the adoption is HELD and taken when the run ends. A
+    /// subject whose model the workbench doesn't hold is skipped: the edit stays plain, and the build's own
+    /// warning is the backstop that reports it.</para></summary>
+    internal string? AdoptTextureEdit(ProjectTarget? texture)
+    {
+        if (texture is null || texture.AssetType != "Texture2D") return null;
+        if (IsModBuilding) { _heldAdoptions.Add((_project, texture)); return null; }
+        return TakeAdoptions(_project, new[] { texture }).Line;
+    }
+
+    /// <summary>The workbench built this subject's model, so the edits that were made while nothing held one
+    /// get their pass through the same seam. Without it an edit made before the subject was ever opened —
+    /// the model is a peek, never a build, on the UI thread — stays plain until the modder saves the file
+    /// again; the tree landing is exactly the moment the missing input arrives. It also heals a replacement
+    /// whose donor record a failed send-back read wiped: the adopted maps went with it, and this puts them
+    /// back.
+    ///
+    /// <para>Only what was TAKEN is announced. A held slot is a standing state, not something that just
+    /// happened, and the tree is rebuilt on every hop into ② Edit — the build pane's warning is where that
+    /// state is reported, once, with its remedy.</para>
+    ///
+    /// <para>The line goes BACK to the caller rather than onto the status line. The tree build sweeps every
+    /// subject and then writes the pane's one line itself, so anything written from here would be gone
+    /// before it was read.</para></summary>
+    public string? AdoptSubjectTextureEdits(Workbench.WorkbenchSubjectRef subject, SubjectModel model)
+    {
+        var edited = _project.Targets
+            .Where(t => t.AssetType == "Texture2D"
+                && string.Equals(t.SubjectCharacter, subject.Character, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(t.SubjectOutfit, subject.Stem, StringComparison.OrdinalIgnoreCase)
+                && _project.IsTargetPresent(t) && _project.IsEdited(t))
+            .ToList();
+        if (edited.Count == 0) return null;
+        if (IsModBuilding)
+        {
+            // the run is reading the project; the same hold the watcher's own edits take
+            foreach (var t in edited) _heldAdoptions.Add((_project, t));
+            return null;
+        }
+        var taken = new List<TextureAdoption>();
+        foreach (var texture in edited)
+            taken.AddRange(TextureAdoptions.Apply(_project,
+                TextureAdoptions.CandidatesFor(_project, model, texture)));
+        if (taken.Count == 0) return null;
+        AutoSave();
+        Workbench.RefreshNodeStates();
+        return TextureAdoptions.Adopted(taken);
+    }
+
+    /// <summary>Take every adoption these texture edits open, and give back the one line ② Edit shows for
+    /// them. BOTH halves are reported: a map shared across parts can adopt on one and find another's slot
+    /// already spoken for, and announcing only the half that worked would report that as plain success. The
+    /// adopted line leads, the held slots follow. <c>Changed</c> is true when the project was written and
+    /// needs persisting.</summary>
+    private (string? Line, bool Changed) TakeAdoptions(ModProject project,
+        IReadOnlyList<ProjectTarget> textures)
+    {
+        var taken = new List<TextureAdoption>();
+        var blocked = new List<AdoptionBlocked>();
+        foreach (var texture in textures)
+        {
+            if (SubjectModelInHand(texture) is not { } model) continue;
+            taken.AddRange(TextureAdoptions.Apply(project,
+                TextureAdoptions.CandidatesFor(project, model, texture, blocked)));
+        }
+        var parts = new List<string>();
+        if (taken.Count > 0) parts.Add(TextureAdoptions.Adopted(taken));
+        if (TextureAdoptions.SlotTaken(blocked) is { Length: > 0 } held) parts.Add(held);
+        return (parts.Count > 0 ? string.Join(" ", parts) : null, taken.Count > 0);
+    }
+
+    /// <summary>The subject model the workbench already holds for a target's subject, or null. A PEEK, never
+    /// a build: this runs on the UI thread at the moment of an edit, and building a model there costs bundle
+    /// deobfuscation plus prefab reads with the window frozen behind them.</summary>
+    private SubjectModel? SubjectModelInHand(ProjectTarget target) =>
+        target.SubjectCharacter is { } character && target.SubjectOutfit is { } stem
+            ? _subjectModels.TryGet(character, stem)
+            : null;
+
+    /// <summary>Take the adoptions a run held back, now that it has ended. Same seam, one pass later: the
+    /// candidates are computed against the project as the run left it, so an edit made mid-build reaches the
+    /// replacement instead of being orphaned.</summary>
+    internal void TakeHeldAdoptions()
+    {
+        if (_heldAdoptions.Count == 0) return;
+        var pending = _heldAdoptions.Where(x => ReferenceEquals(x.Project, _project))
+            .Select(x => x.Texture).ToList();
+        _heldAdoptions.Clear();
+        if (pending.Count == 0) return;
+        var (line, changed) = TakeAdoptions(_project, pending);
+        if (changed) { AutoSave(); Workbench.RefreshNodeStates(); }
+        if (line is not null) Workbench.ReportStatus(line);
     }
 
     /// <summary>Flag the target edited after a send that would NOT read back. Which transition that is
@@ -1735,8 +1860,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     /// <summary>Whether a rescan has to wait. <see cref="ReloadRoster"/> drops the VFS, cancels the
     /// sharing measurement and empties the trees, so anything reading them mid-flight — a load, a build,
-    /// a materialize (speculative or asked for), a send-back apply — would fail on vanished state.</summary>
-    private bool RescanMustWait => IsScanning || IsModBuilding || _materializing || _prewarming || _applyingSend;
+    /// a materialize (speculative or asked for), an Open-all's rig build, a send-back apply — would fail on
+    /// vanished state.</summary>
+    private bool RescanMustWait => IsScanning || IsModBuilding || _materializing || _prewarming
+        || _buildingCombinedRig || _applyingSend;
 
     /// <summary>The notice while a queued rescan waits on whatever is holding the roster. ONE line for every
     /// route that can queue one, so a wait the modder can't see the cause of always reads the same.</summary>
@@ -2065,7 +2192,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
                 // mid-fill drops that outfit LOUDLY, collected and surfaced in the final status.
                 int confirmedChars = 0;
                 Parallel.ForEach(candidates,
-                    new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+                    new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = Math.Max(1, _settings.EncoderCpuLimit ?? Environment.ProcessorCount),
+                    },
                     cand =>
                     {
                         var confirmed = new List<(Outfit Outfit, IReadOnlyList<string> Parts)>();
@@ -2446,6 +2576,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     // than who asked.
     private bool _materializing;
     private bool _prewarming;
+    /// <summary>An asked-for Open-all is building the union-armature rig. That phase sits between materialize
+    /// scopes rather than inside one, so it carries its own flag — the close guard reads it. UI-thread only,
+    /// like the two above.</summary>
+    private bool _buildingCombinedRig;
     private (string Character, string Stem)? _busySubject;
 
     // Every materialize not already carrying the workbench build token runs under this one, so
@@ -2933,7 +3067,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (launch)
         {
             blender = BlenderLocator.Find(BlenderOverride());
-            if (blender is null) { status.Report("Blender not found. Set the path in Settings."); return; }
+            if (blender is null) { status.Report(BlenderGate.NotFound); return; }
             script = BridgeScriptPath();
             if (!File.Exists(script)) { status.Report("Bridge script missing from the app install."); return; }
         }
@@ -3034,14 +3168,23 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         // The temp's existence is the only success signal; a failure leaves the old file and fingerprint.
         var tmp = combined + "." + Guid.NewGuid().ToString("N") + ".tmp";
         bool combinedBusy = false;
-        await Task.Run(() =>
+        // Only the ASKED-FOR route: a speculative prewarm's rig build costs the modder no wait and blocks
+        // no close, exactly as the prepares that precede it don't.
+        _buildingCombinedRig = launch;
+        try
         {
-            try { AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, subject.Character, spec, texDir, status, combinedOut: tmp,
-                      recordedTextureBundles: recordedTex, vanillaFallbacks: fellBackToGame, ct: ct); }
-            // a game-locked read propagates from BuildRiggedGlbs — surface the BUSY remedy below
-            catch (IOException) { combinedBusy = true; }
-            catch { /* leave it unbuilt — the temp simply won't exist, so nothing is published below */ }
-        });
+            await Task.Run(() =>
+            {
+                try { AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, subject.Character, spec, texDir, status, combinedOut: tmp,
+                          recordedTextureBundles: recordedTex, vanillaFallbacks: fellBackToGame, ct: ct); }
+                // a game-locked read propagates from BuildRiggedGlbs — surface the BUSY remedy below
+                catch (IOException) { combinedBusy = true; }
+                catch { /* leave it unbuilt — the temp simply won't exist, so nothing is published below */ }
+            });
+        }
+        // This phase is one of the holds a rescan waits behind, so releasing it drains the queue the way a
+        // materialize scope's exit does.
+        finally { _buildingCombinedRig = false; RunQueuedRescan(); }
         if (combinedBusy)
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best-effort temp cleanup */ }
@@ -3317,13 +3460,19 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         catch { status.Report("No original on record."); return; }
         if (!File.Exists(orig)) { status.Report("No original on record."); return; }
         // Reverting overwrites the edited glb irreversibly. The authored maps belong to the mesh they were
-        // bound to — whether a Blender session or a card drop authored them — so the prompt names both.
+        // bound to — whether a Blender session or a card drop authored them — so the prompt names both. An
+        // ADOPTED map is different: its file is a texture target's own workspace PNG, so that edit outlives
+        // the replacement and ships as a plain texture edit — the prompt must not promise it back to stock.
         bool authoredMaps = target.DonorTextures is { Count: > 0 };
+        bool adoptedEditStays = target.DonorTextures?.Any(r =>
+            ReferencesEditedTexture(r.Albedo) || ReferencesEditedTexture(r.Normal)
+            || ReferencesEditedTexture(r.Rmo)) == true;
         if (MainWindow is not { } owner) return;
         if (!await ConfirmWindow.Show(owner, "Revert to original",
-                authoredMaps
+                (authoredMaps
                     ? $"Discard {partToken}'s mesh edit and its authored maps? The game mesh and its stock maps come back."
-                    : $"Discard edits to {partToken} and restore the original game mesh?",
+                    : $"Discard edits to {partToken} and restore the original game mesh?")
+                + (adoptedEditStays ? " A texture edit the replacement adopted stays, and ships as its own edit." : ""),
                 "Revert", "Cancel", danger: true)) return;
         try
         {
@@ -3335,12 +3484,21 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             target.DonorMaterials = null;
             AutoSave();
             Workbench.NotifyMeshEdited(glb);
-            status.Report(authoredMaps
-                ? $"Reverted {partToken}. Its maps are back to stock."
-                : $"Reverted {partToken}.");
+            status.Report(
+                authoredMaps && adoptedEditStays
+                    ? $"Reverted {partToken}. Adopted texture edits stay as their own."
+                    : authoredMaps ? $"Reverted {partToken}. Its maps are back to stock."
+                    : $"Reverted {partToken}.");
         }
         catch (Exception e) { status.Report($"Revert failed: {e.Message}"); }
     }
+
+    /// <summary>Whether a donor-row file is an EDITED texture target's own workspace PNG — an adopted map
+    /// whose edit outlives the part's replacement as a plain texture edit.</summary>
+    private bool ReferencesEditedTexture(string? donorFile) =>
+        donorFile is not null && _project.Targets.Any(x =>
+            x.AssetType == "Texture2D" && _project.IsEdited(x)
+            && TextureAdoptions.SameFile(x.ReplaceFile, donorFile));
 
     public async Task RevertMapAsync(Workbench.WorkbenchSubjectRef subject, string textureName, string bundleId,
         IProgress<string> status)
@@ -3351,19 +3509,34 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         try { png = _project.Resolve(t.ReplaceFile); orig = _project.Resolve(t.OriginalFile); }
         catch { status.Report("No original on record."); return; }
         if (!File.Exists(orig)) { status.Report("No original on record."); return; }
-        // Reverting overwrites the edited PNG irreversibly.
+        // Reverting overwrites the edited PNG irreversibly. On an adopted map it is also the modder
+        // DECLINING the adoption, and the confirm says both halves.
+        var meshTargets = Materializer.SubjectMeshTargets(_project, subject.Character, subject.Stem);
+        bool adopted = TextureAdoptions.CarriesAdoption(meshTargets, t);
         if (MainWindow is not { } owner) return;
         if (!await ConfirmWindow.Show(owner, "Revert to original",
-                $"Discard edits to {textureName} and restore the original?",
+                adopted
+                    ? $"Discard edits to {textureName} and restore the original? The replacement returns to the stock map too."
+                    : $"Discard edits to {textureName} and restore the original?",
                 "Revert", "Cancel", danger: true)) return;
         try
         {
             _texWatcher?.SuppressPath(png);   // our own write shouldn't re-trigger the watcher
             await Task.Run(() => File.Copy(orig, png, overwrite: true));
             t.Edited = false;
+            // The donor slots shipping this file go back to stock with it, so the replacement and the card
+            // agree the edit is gone.
+            int returned = TextureAdoptions.Unadopt(meshTargets, t);
             AutoSave();
             Workbench.NotifyTextureFileChanged(Path.GetFullPath(png));
-            status.Report($"Reverted {textureName}.");
+            // One map dressing several submeshes or several parts returns several slots, and a line saying
+            // "the stock map" about that reports a smaller undo than the one that happened.
+            status.Report(returned switch
+            {
+                0 => $"Reverted {textureName}.",
+                1 => $"Reverted {textureName}. The replacement is back on the stock map.",
+                _ => $"Reverted {textureName}. The replacement is back on the stock maps.",
+            });
         }
         catch (Exception e) { status.Report($"Revert failed: {e.Message}"); }
     }
@@ -3379,10 +3552,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         try
         {
             if (!SamePath(path, png)) { _texWatcher?.SuppressPath(png); File.Copy(path, png, overwrite: true); }
-            MarkTargetEdited(png);
+            var line = AdoptTextureEdit(MarkTargetEdited(png));
             AutoSave();
-            Workbench.NotifyTextureFileChanged(Path.GetFullPath(png));
-            status.Report($"Applied {Path.GetFileName(path)} to {textureName}.");
+            Workbench.NotifyTextureFileChanged(Path.GetFullPath(png));   // the adoption moved donor rows too
+            status.Report($"Applied {Path.GetFileName(path)} to {textureName}."
+                + (line is null ? "" : " " + line));
         }
         catch (Exception e) { status.Report($"Import failed: {e.Message}"); }
     }
@@ -3409,22 +3583,24 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         catch (Exception e) { status.Report($"Import failed: {e.Message}"); }
     }
 
-    /// <summary>What both replacement routes end on. Neither has a map-grain way back, and the verb that
-    /// does undo them costs the mesh edit as well — the same sentence the card's Revert tooltip gives.</summary>
+    /// <summary>What both replacement routes end on. Neither has a map-grain way back, so the line leads
+    /// with the consequence of the only route that does: the part's Revert, which the card's own tooltip
+    /// names the same way.</summary>
     internal const string DroppedMapNoRevert =
-        "No revert for this map. Reverting the part takes it back, and the mesh edit with it.";
+        "The only way back is reverting the part, which discards its mesh edit too.";
 
     /// <summary>Said before the drop rather than after: the emissive mask is rebuilt from the game map,
     /// and glTF has no channel for it, so a mask painted into the dropped image never ships.</summary>
     internal const string DroppedRmoAlphaNote =
         "Alpha comes from the game map's emissive mask. The dropped file's own alpha doesn't ship.";
 
-    /// <summary>Confirm applying a PNG dropped ON a map card. Each of the three routes says what it does:
-    /// a game-texture edit names the card's role/texture and the shared map's reach; a drop on a REPLACED
-    /// part reads as the replacement's own map; a drop over a map the replacement already carries reaches
-    /// that submesh alone. A size mismatch adds a line stating what happens — the drop applies either way.
-    /// The two replacement routes are irreversible at the map grain and carry the danger styling.
-    /// Declined resolves false so the caller no-ops.</summary>
+    /// <summary>Confirm applying a PNG dropped ON a map card. Each route says what it does: a game-texture
+    /// edit names the card's role/texture and the shared map's reach; a drop on a REPLACED part reads as the
+    /// replacement's own map, and where the card already shows one of those maps it names that map rather
+    /// than a game texture the drop never touches. A size mismatch adds a line
+    /// stating what happens — the drop applies either way. Anything landing on the replacement is
+    /// irreversible at the map grain and carries the danger styling. Declined resolves false so the caller
+    /// no-ops.</summary>
     public async Task<bool> ConfirmApplyDroppedPngAsync(Workbench.DroppedPngConfirm ask)
     {
         if (MainWindow is not { } owner) return false;
@@ -3443,13 +3619,20 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
                 : $"Apply {ask.FileName} to {ask.MapRole}?";
         if (ask.Donor is { } donor)
         {
-            body += $"\n\n{donor.PartToken} is replaced, so this becomes the replacement's own map. "
-                  + $"{ask.TextureName} is untouched.";
-            if (donor.Submeshes.Count > 1) body += $"\n\nApplies to {donor.Submeshes.Count} submeshes.";
+            // A card already showing one of the replacement's own maps has no game texture left to leave
+            // alone, so its route is named without one and what the drop overwrites is counted below.
+            body += ask.IsAuthored
+                ? $"\n\nThis replaces {donor.PartToken}'s own {ask.MapRole} map."
+                : $"\n\n{donor.PartToken} is replaced, so this becomes the replacement's own map. "
+                    + $"{ask.TextureName} is untouched.";
+            // The reach is its own sentence only where it says something the overwrite count doesn't: two
+            // counts of the same set of submeshes read as two different reaches.
+            if (donor.Submeshes.Count > 1 && ask.AuthoredLanding != donor.Submeshes.Count)
+                body += $"\n\nApplies to {donor.Submeshes.Count} submeshes.";
             if (donor.Slot == DonorMapSlot.Rmo) body += "\n\n" + DroppedRmoAlphaNote;
         }
-        // The overwrite reaches ONE submesh: the file behind this card is the only one rewritten, whichever
-        // route authored it, and the replacement's other submeshes keep the maps they have.
+        // The card shows one of the replacement's maps but the record no longer names a replacement the
+        // build would ship, so the drop rewrites that one file in place and nothing else.
         else if (ask.IsAuthored)
             body += "\n\nReplaces the map the replacement carries on this submesh. No other submesh changes.";
         else if (ask.OtherWearers > 0)
@@ -3469,7 +3652,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     /// the donor naming convention through the SAME intake a Blender send-back's maps use (so an authored
     /// RMO's emissive mask is rebuilt from the stock map), then record the authored slot on each covered
     /// submesh. The result is byte-for-byte the record a session-authored map produces, so the build's
-    /// donor path binds it with nothing new — and the part's Revert drops it with the mesh edit.</summary>
+    /// donor path binds it with nothing new — and the part's Revert drops it with the mesh edit. A slot the
+    /// part already carries a map on lands here too: the naming convention puts the rebuilt file back over
+    /// the old one, which is what keeps the mask on a re-drop.</summary>
     public async Task ApplyDroppedPngToDonorMapAsync(Workbench.WorkbenchSubjectRef subject,
         Workbench.DonorMapDrop donor, string mapRole, string path, IProgress<string> status)
     {
@@ -3710,7 +3895,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         string partToken, bool unskinned, IProgress<string> status)
     {
         var blender = BlenderLocator.Find(BlenderOverride());
-        if (blender is null) { status.Report("Blender not found. Set the path in Settings."); return; }
+        if (blender is null) { status.Report(BlenderGate.NotFound); return; }
         var script = BridgeScriptPath();
         if (!File.Exists(script)) { status.Report("Bridge script missing from the app install."); return; }
         if (_project.RootDir is null) return;
@@ -3718,9 +3903,6 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         var glbPath = _project.Resolve(target.ReplaceFile);
         void Launch()
         {
-            // Blender's Send overwrites this exact file in place, so the keep-one-previous copy must be
-            // taken here — by receive the file the modder might want back is already gone.
-            KeepPreviousGlb(glbPath);
             try { BlenderBridge.WriteSession(glbPath, target.ObjectName,
                       new[] { new SessionPart(target.ObjectName, _project.IsEdited(target), Unskinned: unskinned) }); }
             catch (Exception e) { status.Report($"Could not describe the Blender session: {e.Message}"); return; }

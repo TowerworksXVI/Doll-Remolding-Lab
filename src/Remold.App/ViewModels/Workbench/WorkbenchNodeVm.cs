@@ -177,6 +177,8 @@ public sealed partial class WorkbenchNodeVm : ObservableObject
     [NotifyPropertyChangedFor(nameof(BlenderHint))]
     [NotifyPropertyChangedFor(nameof(BlenderAloneHint))]
     [NotifyPropertyChangedFor(nameof(ReferencesHint))]
+    [NotifyPropertyChangedFor(nameof(MaterializeAllHint))]
+    [NotifyPropertyChangedFor(nameof(RemoveSubjectHint))]
     private bool _isBusy;
 
     /// <summary>A Blender executable was located. Detection belongs to the shell, which pushes the answer
@@ -261,14 +263,32 @@ public sealed partial class WorkbenchNodeVm : ObservableObject
         ?? BlenderGate.ReadyPart;
 
     public bool HasEditBadge => IsEdited;
-    /// <summary>Enabled only when materialized AND its MESH is edited AND idle: a texture-only edit does NOT
-    /// enable the mesh Revert.</summary>
-    public bool CanRevert => IsMaterialized && MeshEdited && !IsBusy;
+    /// <summary>There IS a mesh edit to undo: materialized AND its MESH edited. A texture-only edit does NOT
+    /// count. Kept apart from <see cref="CanRevert"/> so the verb can refuse an ineligible node before it
+    /// reports a wait, and so the hint can tell "nothing to revert" from "not right now".</summary>
+    public bool HasEditToRevert => IsMaterialized && MeshEdited;
+    /// <summary>Enabled only when there is a mesh edit to undo AND the node is idle.</summary>
+    public bool CanRevert => HasEditToRevert && !IsBusy;
     /// <summary>The Revert tooltip: the hint when enabled, else why it's off (shown via
-    /// ToolTip.ShowOnDisabled). A texture-only edit names the verb that DOES undo it.</summary>
+    /// ToolTip.ShowOnDisabled). ORDERED the way the verb refuses — what this button can never undo first, a
+    /// wait after it, so a line promising "try again" is never shown for a click that will never work. A
+    /// texture-only edit names the verb that DOES undo it, and "nothing to revert" is left for a node that
+    /// truly has none.</summary>
     public string RevertHint => CanRevert ? "Restore the original game mesh"
         : IsEdited && !MeshEdited ? "Only textures are edited here. Revert them on the map cards."
+        : HasEditToRevert ? BlenderGate.Busy   // eligible and still off: the wait is all that is left
         : "Nothing to revert yet";
+
+    /// <summary>The subject Materialize-all tooltip: why it's off when it is (shown via
+    /// ToolTip.ShowOnDisabled), else what the verb does. The row's own verb running is the only thing that
+    /// turns the button off.</summary>
+    public string MaterializeAllHint => IsBusy ? BlenderGate.Busy
+        : "Prepare editable copies of every part and texture and add them to the mod";
+
+    /// <summary>The subject Remove tooltip, on the same one gate as
+    /// <see cref="MaterializeAllHint"/>.</summary>
+    public string RemoveSubjectHint => IsBusy ? BlenderGate.Busy
+        : "Drop this subject and its materialized/edited files from the mod";
 
     public ObservableCollection<WorkbenchNodeVm> Children { get; } = new();
 
@@ -558,8 +578,8 @@ public sealed partial class WorkbenchMapVm : ObservableObject
     [NotifyPropertyChangedFor(nameof(RevertHint))]
     private bool _isEdited;
 
-    /// <summary>Absolute path of the authored texture a send-back bound where this stock map was; null means
-    /// the part samples the vanilla map here.</summary>
+    /// <summary>Absolute path of the map the replacement carries where this stock map was — a send-back's, a
+    /// card drop's, or an adopted texture edit; null means the part samples the vanilla map here.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasEditBadge))]
     [NotifyPropertyChangedFor(nameof(RevertHint))]
@@ -593,23 +613,41 @@ public sealed partial class WorkbenchMapVm : ObservableObject
     [NotifyPropertyChangedFor(nameof(CanRevert))]
     [NotifyPropertyChangedFor(nameof(RevertHint))]
     [NotifyPropertyChangedFor(nameof(CanOpenUvGuide))]
+    [NotifyPropertyChangedFor(nameof(OpenHint))]
     private bool _isBusy;
 
     public bool HasEditBadge => IsEdited || AuthoredPath is not null;
 
-    /// <summary>Enabled only when materialized AND edited AND idle.</summary>
-    public bool CanRevert => IsMaterialized && IsEdited && !IsBusy;
-    /// <summary>The Revert tooltip: the hint when enabled, else why it's off. Neither an authored map nor a
-    /// blanked slot has a map-grain way back — both belong to the part's replacement, and the part's own
-    /// Revert is what drops them.</summary>
-    public string RevertHint => CanRevert ? "Restore the original texture"
+    /// <summary>There IS a map edit to undo: materialized AND edited. Kept apart from
+    /// <see cref="CanRevert"/> so the verb can refuse an ineligible card before it reports a wait, and so the
+    /// hint can tell "nothing to revert" from "not right now".</summary>
+    public bool HasEditToRevert => IsMaterialized && IsEdited;
+    /// <summary>Enabled only when there is a map edit to undo AND the card is idle.</summary>
+    public bool CanRevert => HasEditToRevert && !IsBusy;
+    /// <summary>The Revert tooltip: the hint when enabled, else why it's off. ORDERED the way the verb
+    /// refuses — what this button can never undo first, a wait after it, so a line promising "try again" is
+    /// never shown for a click that will never work. Neither an authored map nor a blanked slot has a
+    /// map-grain way back: both belong to the part's replacement, and the part's own Revert is what drops
+    /// them.</summary>
+    public string RevertHint => CanRevert
+        ? AuthoredPath is not null
+            // The card is BOTH an edited game texture and the replacement's adopted map, so one revert
+            // settles both: the edit goes, and the slot returns to the stock map.
+            ? "Restore the original texture. The replacement returns to the stock map too."
+            : "Restore the original texture"
         : AuthoredPath is not null
             ? "This map belongs to the replacement. Revert the part to restore the game texture. "
               + "That discards the part's mesh edit too."
         : IsBlanked
             ? "This slot was blanked by the mesh edit. Revert the part to restore the game texture. "
               + "That discards the part's mesh edit too."
+        : HasEditToRevert ? BlenderGate.Busy   // eligible and still off: the wait is all that is left
         : "Nothing to revert yet";
+
+    /// <summary>The card's Open tooltip: why it's off when it is (shown via ToolTip.ShowOnDisabled), else
+    /// what the verb does. The card's own verb running is the only thing that turns the button off — a row
+    /// with no file to open stays live and answers on the status line.</summary>
+    public string OpenHint => IsBusy ? BlenderGate.Busy : "Edit this texture in an image editor";
 
     /// <summary>The guide is drawn from the GAME mesh keyed by (bundle, name), so a donor-derived row has no
     /// guide to build.</summary>

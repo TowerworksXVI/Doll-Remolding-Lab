@@ -33,33 +33,21 @@ public static class VerbDerivation
             .ToList();
 
     /// <summary>Every derived edit, build-excluded ones included — the Build pane's change list. Builds
-    /// call <see cref="Derive"/>.</summary>
+    /// call <see cref="Derive"/>. Pure: nothing here writes to the project, so a texture edit a replacement
+    /// could have taken over is a WARNING here, never a change made on the way past.</summary>
     public static List<MeshEdit> DeriveAll(ModProject project,
         Func<string, string, SubjectModel?> resolveSubject, IList<string> warnings)
     {
         var edits = new List<MeshEdit>();
-        // one REPLACE per physical mesh across ALL subjects — outfits share meshes and two pipelines
-        // capturing the same draw would fight. Hide/Retexture pass through per subject; ModBuilder dedupes
+        // One REPLACE per physical mesh across ALL subjects; the rule and its key live in ReplaceClaims,
+        // which the edit-time adoption asks too. A collision WARNS naming both subjects and does not mark
+        // the part replaced for this subject, so the loss is visible and this subject's texture edits are
+        // accounted for rather than swallowed. Hide/Retexture pass through per subject; ModBuilder dedupes
         // those by mesh CONTENT (ib hash), since same-named parts across outfits can carry different bytes.
-        //
-        // The claim is keyed on NAME and path id, which is all this pass knows: no mesh bytes are read here
-        // and an address-resolved part carries no path id. The key is therefore coarser than identity, and
-        // two subjects whose parts merely share a name collide on it. A collision WARNS naming both subjects
-        // and does not mark the part replaced for this subject, so the loss is visible and this subject's
-        // texture edits are accounted for rather than swallowed. Whether it really was one mesh is settled
-        // at build time against the hashes (see Migoto.ModBuilder), which is where the identity lives.
-        var replaceClaims = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // the subject already holding this mesh's Replace, or null when this call takes the claim
-        string? ClaimReplace(string mesh, long? pathId, string subject)
-        {
-            string key = mesh + "\0" + pathId;
-            if (replaceClaims.TryGetValue(key, out var holder)) return holder;
-            replaceClaims[key] = subject;
-            return null;
-        }
+        var replaceClaims = ReplaceClaims.Of(project);
         foreach (var sel in project.Selection)
         {
-            string subject = $"{sel.Character} · {sel.Outfit}";
+            string subject = ReplaceClaims.SubjectLabel(sel.Character, sel.Outfit);
             var meshTargets = project.Targets
                 .Where(t => t.AssetType == "Mesh" && OwnedBy(t, sel.Character, sel.Outfit))
                 .ToList();
@@ -106,18 +94,19 @@ public static class VerbDerivation
             var claimedElsewhere = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var t in editedMeshes)
             {
-                if (!partsByName.ContainsKey(t.ObjectName))
+                if (!partsByName.TryGetValue(t.ObjectName, out var editedPart))
                     throw new InvalidOperationException(
                         $"edited mesh '{t.ObjectName}' is not in {sel.Character} · {sel.Outfit}'s roster (stale after a game update?)");
                 if (IsHiddenMesh(t.ObjectName))
                 {
-                    warnings.Add($"'{t.ObjectName}' is hidden. Its mesh edit is not in this build");
+                    warnings.Add($"'{editedPart.Token}' is hidden. Its mesh edit is not in this build");
                     continue;
                 }
-                if (ClaimReplace(t.ObjectName, t.PathId, subject) is { } holder)
+                if (!replaceClaims.Ships(t))
                 {
+                    var holder = replaceClaims.HolderOf(t.ObjectName, t.PathId) ?? subject;
                     claimedElsewhere[t.ObjectName] = holder;
-                    warnings.Add($"'{t.ObjectName}' is replaced on both {holder} and {subject}. One "
+                    warnings.Add($"'{editedPart.Token}' is replaced on both {holder} and {subject}. One "
                         + $"replacement per part name ships, so {subject}'s is not in this build. Build the "
                         + "two subjects as separate mods");
                     continue;
@@ -144,32 +133,65 @@ public static class VerbDerivation
                 .ToList();
             if (editedTextures.Count == 0) continue;
 
-            bool BindsAnEditedTexture(SubjectPart p, Func<string, bool>? onSlot = null,
-                Func<ProjectTarget, bool>? where = null) =>
-                p.Materials.Any(m => m.Maps.Any(map =>
-                    (onSlot is null || onSlot(map.Slot))
-                    && editedTextures.Any(x =>
-                        (where is null || where(x))
-                        && string.Equals(x.ObjectName, map.TextureName, StringComparison.Ordinal)
-                        && string.Equals(x.Bundle, map.BundleId, StringComparison.Ordinal))));
+            bool BindsAnEditedTexture(SubjectPart p) =>
+                p.Materials.Any(m => m.Maps.Any(map => editedTextures.Any(x => Binds(x, map))));
+
+            // Every (donor slot, edited texture) pair the part binds on a slot the Replace rebinds and whose
+            // file no donor row of that replacement names — the edits a build drops. One pair per texture and
+            // slot: a map dressing several of the part's material slots is one adoption over all of them.
+            //
+            // Which shader slots those are is DonorMapBinding's answer, the same one the edit-time adoption
+            // and the map cards read, so a slot that adopts is never one this pass calls un-emitted. Base
+            // colour therefore covers _MainTex as well as _BaseMap; no material in the measured GFL2 corpus
+            // binds _MainTex, so the two readings agree on every subject the game ships.
+            List<(DonorMapSlot Slot, ProjectTarget Texture)> ReboundEdits(SubjectPart p, ProjectTarget mesh)
+            {
+                var found = new List<(DonorMapSlot Slot, ProjectTarget Texture)>();
+                foreach (var map in p.Materials.SelectMany(m => m.Maps))
+                {
+                    if (DonorMapBinding.DonorSlotOf(map.Slot) is not { } slot) continue;
+                    foreach (var x in editedTextures)
+                    {
+                        if (!Binds(x, map) || TextureAdoptions.ReplacementCarries(mesh, x)) continue;
+                        if (!found.Any(f => f.Slot == slot && ReferenceEquals(f.Texture, x)))
+                            found.Add((slot, x));
+                    }
+                }
+                return found;
+            }
 
             foreach (var p in model.Parts)
             {
-                // A Replace rebinds the three slots its donor textures carry, and only those; every other
-                // slot on the part's materials keeps drawing the game texture. So the replacement takes the
-                // three away from a texture edit and leaves the rest to it. An edit the send-back adopted
-                // as one of the replacement's own donor maps ships WITH the Replace; only a rebound-slot
-                // edit no donor row references is lost — and said.
+                // A Replace rebinds the slots its donor textures carry — the ones DonorMapBinding maps to a
+                // donor slot, and only those; every other slot on the part's materials keeps drawing the
+                // game texture. So the replacement takes those away from a texture edit and leaves the rest
+                // to it. An edit one of the replacement's donor maps carries ships WITH the Replace; a
+                // rebound-slot edit no donor row references is one the adoption could not take, and is
+                // warned about with its reason.
                 bool replaced = replacedMeshes.Contains(p.SlotName);
-                if (replaced && BindsAnEditedTexture(p, ReboundByAReplace,
-                        x => !ReplacementCarries(replacedTargets[p.SlotName], x)))
-                    warnings.Add($"'{p.SlotName}' is replaced. Its texture edit is not in this build");
+                if (replaced)
+                {
+                    var mesh = replacedTargets[p.SlotName];
+                    var stray = ReboundEdits(p, mesh);
+                    if (stray.Count > 0)
+                    {
+                        var bound = DonorMapBinding.BoundSubmeshesByMap(p.Materials);
+                        foreach (var (slot, texture) in stray)
+                        {
+                            var all = bound.TryGetValue((slot, texture.ObjectName, texture.Bundle), out var b)
+                                ? b : (IReadOnlyList<int>)Array.Empty<int>();
+                            var (inRange, landing) =
+                                TextureAdoptions.Landing(mesh, slot, texture.ReplaceFile, all);
+                            warnings.Add(StrayEditWarning(p.Token, mesh, slot, inRange, landing.Count > 0));
+                        }
+                    }
+                }
                 // the part another subject's Replace already claimed: this build ships one replacement for
                 // that mesh, so a texture edit here has no draw of its own left to land on either
                 if (claimedElsewhere.TryGetValue(p.SlotName, out var claimant))
                 {
                     if (BindsAnEditedTexture(p))
-                        warnings.Add($"'{p.SlotName}' is replaced by {claimant}. "
+                        warnings.Add($"'{p.Token}' is replaced by {claimant}. "
                             + "Its texture edit is not in this build");
                     continue;
                 }
@@ -177,7 +199,7 @@ public static class VerbDerivation
                 if (IsHiddenMesh(p.SlotName))
                 {
                     if (BindsAnEditedTexture(p))
-                        warnings.Add($"'{p.SlotName}' is hidden. Its texture edit is not in this build");
+                        warnings.Add($"'{p.Token}' is hidden. Its texture edit is not in this build");
                     continue;
                 }
                 var perSubmesh = new Dictionary<int, SubmeshTextures>();
@@ -185,23 +207,23 @@ public static class VerbDerivation
                 {
                     foreach (var map in p.Materials[mi].Maps)
                     {
-                        var t = editedTextures.FirstOrDefault(x =>
-                            string.Equals(x.ObjectName, map.TextureName, StringComparison.Ordinal)
-                            && string.Equals(x.Bundle, map.BundleId, StringComparison.Ordinal));
+                        var t = editedTextures.FirstOrDefault(x => Binds(x, map));
                         if (t is null) continue;
-                        // the three the replacement rebound are already accounted for above
-                        if (replaced && ReboundByAReplace(map.Slot)) continue;
+                        if (DonorMapBinding.DonorSlotOf(map.Slot) is not { } slot)
+                        {
+                            warnings.Add($"'{map.TextureName}' binds as {map.Slot} on '{p.Token}'. "
+                                + "That slot isn't emitted yet; the edit doesn't show on this mesh");
+                            continue;
+                        }
+                        // the slots the replacement rebound are already accounted for above
+                        if (replaced) continue;
                         if (!perSubmesh.TryGetValue(mi, out var st))
                             perSubmesh[mi] = st = new SubmeshTextures { Submesh = mi };
-                        switch (map.Slot)
+                        switch (slot)
                         {
-                            case "_BaseMap": st.Albedo = t.ReplaceFile; break;
-                            case "_BumpMap": st.Normal = t.ReplaceFile; break;
-                            case "_RMOTex": st.Rmo = t.ReplaceFile; break;
-                            default:
-                                warnings.Add($"'{map.TextureName}' binds as {map.Slot} on '{p.SlotName}'. "
-                                    + "That slot isn't emitted yet; the edit doesn't show on this mesh");
-                                break;
+                            case DonorMapSlot.BaseColor: st.Albedo = t.ReplaceFile; break;
+                            case DonorMapSlot.Normal: st.Normal = t.ReplaceFile; break;
+                            default: st.Rmo = t.ReplaceFile; break;
                         }
                     }
                 }
@@ -219,22 +241,36 @@ public static class VerbDerivation
         return edits;
     }
 
-    /// <summary>The slots a <see cref="EditVerbs.Replace"/> rebinds on its own submeshes — the three a
-    /// donor texture set carries, which are the same three the retexture emitter has cases for. A material's
-    /// other slots are untouched by a replacement and keep drawing the game texture.</summary>
-    static bool ReboundByAReplace(string slot) => slot is "_BaseMap" or "_BumpMap" or "_RMOTex";
+    /// <summary>What a texture edit the replacement can't take over says: why it isn't in the build, and
+    /// what to do about it. Three states reach here — a map dressing only submeshes the replacement doesn't
+    /// have, a map whose every landing slot the modder already spoke for, and one with a free slot that the
+    /// edit-time adoption never saw (an edit made with no subject model in hand). Each names its own way
+    /// out, the free-slot one by the two gestures that re-run the adoption.</summary>
+    /// <param name="part">The part token the Edit tree labels the replacement by, so a warning and the
+    /// change row above it name one part once.</param>
+    /// <param name="inRange">The submeshes the map dresses that the replacement has at all.</param>
+    /// <param name="adoptable">A submesh is free to take the map, so there is a landing and no reason to
+    /// name.</param>
+    static string StrayEditWarning(string part, ProjectTarget mesh, DonorMapSlot slot,
+        IReadOnlyList<int> inRange, bool adoptable)
+    {
+        if (inRange.Count == 0)
+            return $"'{part}' is replaced. This map dresses submeshes {part}'s replacement doesn't have. "
+                + $"Send {part} back from Blender to add them";
+        if (adoptable)
+            return $"'{part}' is replaced. Its texture edit is not in this build. Save the texture again in "
+                + "② Edit, or drop the edited image on the part's map card";
+        return $"'{part}' is replaced. Its replacement {TextureAdoptions.Holder(mesh, slot, inRange)}, so "
+            + "the texture edit is not in this build. Drop the edited image on the part's map card to use "
+            + "it instead";
+    }
 
-    /// <summary>Whether the replacement's donor rows reference this texture's workspace file. The send-back
-    /// records a retextured own map as the replacement's donor map, and a row carrying it means the edit
-    /// ships with the Replace.</summary>
-    static bool ReplacementCarries(ProjectTarget mesh, ProjectTarget texture) =>
-        mesh.DonorTextures is { Count: > 0 } rows && rows.Any(r =>
-            PathEq(r.Albedo, texture.ReplaceFile) || PathEq(r.Normal, texture.ReplaceFile)
-            || PathEq(r.Rmo, texture.ReplaceFile));
-
-    static bool PathEq(string? a, string? b) =>
-        a is not null && b is not null
-        && string.Equals(a.Replace('\\', '/'), b.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase);
+    /// <summary>Whether a materialized texture target IS the one a material's map binds. Identity is the
+    /// (name, bundle) pair the game carries the asset under: same-named textures in different bundles are
+    /// distinct assets.</summary>
+    static bool Binds(ProjectTarget texture, SubjectMap map) =>
+        string.Equals(texture.ObjectName, map.TextureName, StringComparison.Ordinal)
+        && string.Equals(texture.Bundle, map.BundleId, StringComparison.Ordinal);
 
     static bool OwnedBy(ProjectTarget t, string character, string stem) =>
         t.SubjectCharacter is not null && t.SubjectOutfit is not null

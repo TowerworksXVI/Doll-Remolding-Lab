@@ -150,18 +150,48 @@ public static class BuildRefresh
         stamp == latest && ReferenceEquals(derivedFor, current);
 }
 
-/// <summary>Which warning set the pane shows.</summary>
+/// <summary>What the pane's warning box renders, and how many warnings that actually is —
+/// <see cref="Lines"/> carries the lead-in, <see cref="Count"/> does not, so the footer's tally and the box
+/// under it can't disagree.</summary>
+public readonly record struct BuildWarningSurface(IReadOnlyList<string> Lines, int Count);
+
+/// <summary>Which warnings the pane shows.</summary>
 public static class BuildWarningSource
 {
-    /// <summary>A completed run's warnings replace the derivation's wholesale; with no run owning the
-    /// surface the derivation's own stand, so its "not in this build" lines are readable before a build.
+    /// <summary>The line the last run's own warnings sit under. Staleness vocabulary, matching the result
+    /// bar's: those lines describe the folder that was built, not the list on screen.</summary>
+    public const string LastBuildLeadIn = "From the last build:";
+
+    /// <summary>Both sources stand, the run's first and under their own lead-in: a completed run's warnings
+    /// describe the folder it built, and the derivation's describe the list as it stands NOW. Letting the
+    /// run own the surface alone would hide every warning an edit made since raises — the run holds the
+    /// surface until the next one starts, so a live "not in this build" line would never be drawn — and
+    /// letting the two mix unlabelled leaves the modder no way to tell a fact about the built folder from
+    /// one about the list in front of them.
     ///
-    /// <para>Identical sentences collapse to one. A warning is written about a FACT — a map that won't bind,
-    /// a texture two changes claim — and the same fact is reachable more than once in a run (once per
-    /// material map, once per claimant), so the list would otherwise repeat itself.</para></summary>
-    public static IReadOnlyList<string> Current(
-        IReadOnlyList<string>? runWarnings, IReadOnlyList<string> derivationWarnings) =>
-        (runWarnings ?? derivationWarnings).Distinct(StringComparer.Ordinal).ToList();
+    /// <para>Identical sentences collapse to one, into the LIVE group: a warning is written about a FACT —
+    /// a map that won't bind, a texture two changes claim — the same fact is reachable more than once in a
+    /// run (once per material map, once per claimant), and a build derives the same list the pane does, so
+    /// the two sources overlap almost entirely. A sentence both raise is about the list as it stands, which
+    /// is the more actionable reading of it. With nothing left that only the run said, the lead-in has
+    /// nothing to introduce and is not drawn.</para></summary>
+    public static BuildWarningSurface Current(
+        IReadOnlyList<string>? runWarnings, IReadOnlyList<string> derivationWarnings)
+    {
+        var live = derivationWarnings.Distinct(StringComparer.Ordinal).ToList();
+        var runOnly = (runWarnings ?? Array.Empty<string>())
+            .Distinct(StringComparer.Ordinal)
+            .Where(w => !live.Contains(w, StringComparer.Ordinal))
+            .ToList();
+        var lines = new List<string>();
+        if (runOnly.Count > 0)
+        {
+            lines.Add(LastBuildLeadIn);
+            lines.AddRange(runOnly);
+        }
+        lines.AddRange(live);
+        return new BuildWarningSurface(lines, runOnly.Count + live.Count);
+    }
 }
 
 /// <summary>ONE pure rule for the Edit pane's Open-in-Blender verbs, the same shape as
@@ -171,12 +201,17 @@ public static class BuildWarningSource
 public static class BlenderGate
 {
     public const string NotFound = "Blender not found. Set the Blender path in Settings.";
-    public const string Busy = "Working on this already.";
+    /// <summary>Another verb holds the workbench's gate. The line the disabled button carries on hover and
+    /// the line a click that got past it reports are the same one, so the answer can't read two ways. It
+    /// names an ACTION rather than a step: "step" is the ① Pick / ② Edit / ③ Build wording everywhere
+    /// else.</summary>
+    public const string Busy = "Another action is still running. Try again when it finishes.";
     public const string AlreadyOpen = "Already open in Blender.";
     public const string ReadyPart = "The rest of the outfit comes along as context. Send to Lab returns this part.";
     public const string ReadyPartAlone = "No outfit around it. Opens without building the combined file.";
     public const string ReadyAll = "Open every part in one Blender session. Send to Lab returns the edits";
-    public const string BlendShapes = "This mesh uses expressions and cannot be replaced.";
+    public const string BlendShapes =
+        "This mesh uses expressions and cannot be replaced. Hide and retexture still work.";
     public const string SkinLayout = "This mesh's skin is reduced, and replacement needs a full poseable one. Hide and retexture still work.";
     public const string StaticOnly = "Static parts open one at a time. Select a part and use Open in Blender.";
     public const string StaticPart = "Static parts open on their own. Use Open in Blender.";
@@ -217,6 +252,11 @@ public static class InstallGate
     public const string NoLoader = "Set the 3DMigoto loader in Settings first.";
     public const string Ready = "Copy the built folder into the loader's Mods folder.";
 
+    /// <summary>What the Build pane's stand-in for Install says on hover. The pane offers the way to set the
+    /// path instead of a dead button, so the tip names the file to pick rather than repeating the gate.</summary>
+    public const string SetLoader =
+        "Select the loader exe: 3DMigoto Loader.exe, or SSMT's per-game Run.exe.";
+
     /// <summary>A set path that isn't there — a renamed or moved 3DMigoto install. Naming the path is the
     /// whole remedy: the modder recognises it and re-points Settings at the exe that moved.</summary>
     public static string LoaderNotFound(string? path) => $"3DMigoto loader not found: {path}";
@@ -225,15 +265,42 @@ public static class InstallGate
     /// an install stripped of its folder.</summary>
     public static string NoModsFolder(string? loaderExe) => $"No Mods folder beside {loaderExe}";
 
+    /// <summary>A loader whose configuration isn't there. Nothing can be said about what it supports, and a
+    /// 3DMigoto with no ini does not run.</summary>
+    public static string NoLoaderIni(string? loaderExe) =>
+        $"No {MigotoIni.FileName} beside {loaderExe}";
+
+    /// <summary>A 3DMigoto whose ini tree carries no texture hook. A mod built here would install and fire
+    /// nothing, so the sentence names the OUTCOME rather than the mechanism — the modder has no hook to
+    /// reason about. Names the two hosts that carry one rather than the setting to edit: this is not
+    /// something to fix in the ini by hand.
+    /// <para>The Settings loader row shows the same sentence — see
+    /// <see cref="Views.SettingsValidation.LoaderNoHook"/> — so the two surfaces agree word for word.</para></summary>
+    public const string NoTextureHook =
+        "Mods won't show up in game with this 3DMigoto. "
+        + "Use the GFL2 loader from Nexus, or an SSMT profile.";
+
     /// <summary>The blocking reason, or null when Install can run. ORDERED by what the modder has to do
-    /// first: there is nothing to install before there is a build. <paramref name="loaderExists"/> and
-    /// <paramref name="modsFolder"/> are the caller's disk reads, so this stays pure.</summary>
-    public static string? Reason(bool hasBuild, string? loaderExe, bool loaderExists, string? modsFolder)
+    /// first: there is nothing to install before there is a build. <paramref name="loaderExists"/>,
+    /// <paramref name="modsFolder"/> and <paramref name="ini"/> are the caller's disk reads, so this stays
+    /// pure.</summary>
+    public static string? Reason(bool hasBuild, string? loaderExe, bool loaderExists, string? modsFolder,
+        MigotoIniFacts ini) =>
+        !hasBuild ? NoBuild : LoaderReason(loaderExe, loaderExists, modsFolder, ini);
+
+    /// <summary>The LOADER half alone: why the configured 3DMigoto install can't take a mod, or null when it
+    /// can. Asked on its own by the Build pane, which shows the way to set the path in place of Install
+    /// while this answers — so "can Install run at all" and "is the loader usable" are one rule. ORDERED
+    /// outward from the path: an exe that isn't there says nothing about its folder, and a host with no ini
+    /// says nothing about its hook.</summary>
+    public static string? LoaderReason(string? loaderExe, bool loaderExists, string? modsFolder,
+        MigotoIniFacts ini)
     {
-        if (!hasBuild) return NoBuild;
         if (string.IsNullOrWhiteSpace(loaderExe)) return NoLoader;
         if (!loaderExists) return LoaderNotFound(loaderExe);
         if (modsFolder is null) return NoModsFolder(loaderExe);
+        if (!ini.Found) return NoLoaderIni(loaderExe);
+        if (!ini.HasTextureHook) return NoTextureHook;
         return null;
     }
 }

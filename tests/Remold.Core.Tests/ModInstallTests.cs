@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.App.ViewModels;
+using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Xunit;
 
@@ -252,14 +253,28 @@ public class ModInstallTests : IDisposable
     [InlineData(true, "   ", false, InstallGate.NoLoader)]
     public void Install_is_off_until_there_is_a_build_and_a_loader(
         bool hasBuild, string? loaderExe, bool exists, string reason) =>
-        Assert.Equal(reason, InstallGate.Reason(hasBuild, loaderExe, exists, modsFolder: null));
+        Assert.Equal(reason,
+            InstallGate.Reason(hasBuild, loaderExe, exists, modsFolder: null, Hooked));
 
     [Fact]
     public void A_loader_that_is_set_but_gone_names_the_path_it_looked_for() =>
         Assert.Equal(@"3DMigoto loader not found: D:\moved\Run.exe",
-            InstallGate.Reason(hasBuild: true, @"D:\moved\Run.exe", loaderExists: false, modsFolder: null));
+            InstallGate.Reason(hasBuild: true, @"D:\moved\Run.exe", loaderExists: false, modsFolder: null,
+                Hooked));
 
     [Fact]
     public void Install_is_on_with_a_build_and_a_loader_with_its_mods_folder() =>
-        Assert.Null(InstallGate.Reason(true, "C:/3dm/Run.exe", true, "C:/3dm/Mods"));
+        Assert.Null(InstallGate.Reason(true, "C:/3dm/Run.exe", true, "C:/3dm/Mods", Hooked));
+
+    /// <summary>The host's texture hook is what a built mod fires through, so it belongs to the same one
+    /// rule the path and the folder do — asked LAST, since a loader that isn't there says nothing about
+    /// its configuration.</summary>
+    [Fact]
+    public void Install_is_off_for_a_3DMigoto_with_no_texture_hook() =>
+        Assert.Equal(InstallGate.NoTextureHook,
+            InstallGate.Reason(true, "C:/3dm/Run.exe", true, "C:/3dm/Mods",
+                new MigotoIniFacts(Found: true, StartsTheGame: false, HasTextureHook: false)));
+
+    private static readonly MigotoIniFacts Hooked =
+        new(Found: true, StartsTheGame: false, HasTextureHook: true);
 }

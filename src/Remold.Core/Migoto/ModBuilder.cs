@@ -1386,7 +1386,11 @@ public static class ModBuilder
             // ---- emit -------------------------------------------------------------------------------
             log?.Invoke("final assembly: operators, buffers, ini");
             MigotoEmitter.Result emitted;
-            var emitter = new MigotoEmitter { OperatorCacheDir = caches?.OperatorDir };
+            var emitter = new MigotoEmitter
+            {
+                OperatorCacheDir = caches?.OperatorDir,
+                CpuLimit = encoderCpuLimit,
+            };
             if (pipelines.Count > 0 || rigids.Count > 0)
             {
                 emitted = emitter.Build(new PoolBuildRequest

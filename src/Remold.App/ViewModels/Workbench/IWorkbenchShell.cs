@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Remold.Core.Export;
 using Remold.Core.Model;
 using Remold.Core.Project;
+using Remold.Core.Workbench;
 
 namespace Remold.App.ViewModels.Workbench;
 
@@ -36,17 +37,17 @@ public static class DonorDropRefusal
 }
 
 /// <summary>What a dropped PNG is about to land on: everything the confirm's body is written from, in one
-/// payload rather than a widening parameter list. Exactly one of the three routes applies —
-/// <see cref="Donor"/> set is the replacement's own map, <see cref="IsAuthored"/> is an overwrite of a map
-/// the replacement already carries, and neither is an ordinary game-texture edit.</summary>
+/// payload rather than a widening parameter list. <see cref="Donor"/> set is the replacement's own map,
+/// first drop and re-drop alike; unset is an ordinary game-texture edit, or the in-place overwrite a card
+/// whose replacement the build would no longer ship falls back to.</summary>
 /// <param name="FileName">The dropped file's name, which the card's map name need not match.</param>
 /// <param name="MapRole">The card's role label, so the dialog and the card read alike.</param>
 /// <param name="TextureName">The GAME texture the card names. Meaningful on the game route; on the other
 /// two the card shows it while the part draws something else.</param>
 /// <param name="PartToken">The part the card's material belongs to; empty on a card outside a part tree.</param>
 /// <param name="Donor">The replaced part's map this drop authors, or null on the other two routes.</param>
-/// <param name="IsAuthored">The card already shows a map the replacement carries, so the drop overwrites
-/// that file. No map-grain revert stands behind it.</param>
+/// <param name="IsAuthored">The card already shows a map the replacement carries, so there is no game
+/// texture behind it for the body to speak for. No map-grain revert stands behind it either.</param>
 /// <param name="AuthoredLanding">Donor route only: how many of the landing submeshes ALREADY name a file on
 /// this slot. Above zero, the drop overwrites maps that are on record — including ones authored from a card
 /// the drop didn't land on.</param>
@@ -123,25 +124,29 @@ public interface IWorkbenchShell
     Task ApplyDroppedPngAsync(WorkbenchSubjectRef subject, string textureName, string bundleId,
         IReadOnlyList<string> ownerMeshNames, string path, IProgress<string> status);
 
-    /// <summary>Apply a dropped <c>.png</c> to a map the REPLACEMENT already carries, whichever route
-    /// authored it. The file is already what the build ships for that submesh, so there is no target to
-    /// materialize or flag — its bytes are the whole edit, and it reaches that submesh alone.
-    /// <paramref name="partToken"/> and <paramref name="mapRole"/> are what the status line reports, at the
-    /// same grain as the donor route: the generated file name is not the modder's vocabulary.</summary>
+    /// <summary>Overwrite an authored map in place, for a card that shows one while the record no longer
+    /// names a replacement the build would ship. A drop on a card whose part IS replaced goes to
+    /// <see cref="ApplyDroppedPngToDonorMapAsync"/> instead, first drop and re-drop alike, so the map is
+    /// rebuilt rather than copied over. The file is already what a build would ship for that submesh, so
+    /// there is no target to materialize or flag — its bytes are the whole edit, and it reaches that submesh
+    /// alone. <paramref name="partToken"/> and <paramref name="mapRole"/> are what the status line reports,
+    /// at the same grain as the donor route: the generated file name is not the modder's vocabulary.</summary>
     Task ApplyDroppedPngToAuthoredAsync(string authoredPath, string partToken, string mapRole, string path,
         IProgress<string> status);
 
     /// <summary>Author a dropped <c>.png</c> as a REPLACED part's own map: write it into the mod's
     /// <c>textures/</c> under the donor naming convention and record the authored slot on the part's mesh
-    /// target, producing exactly what a Blender session's map would have. The part's Revert drops it with the
-    /// mesh edit it belongs to. Autosaves.</summary>
+    /// target, producing exactly what a Blender session's map would have. A slot the part already carries a
+    /// map on comes through here too, so an RMO's emissive mask is rebuilt off the game map every time
+    /// rather than only on the first drop. The part's Revert drops it with the mesh edit it belongs to.
+    /// Autosaves.</summary>
     Task ApplyDroppedPngToDonorMapAsync(WorkbenchSubjectRef subject, DonorMapDrop donor, string mapRole,
         string path, IProgress<string> status);
 
     /// <summary>Confirm applying a PNG dropped ON a map card, regardless of filename. The body is written
-    /// from <paramref name="ask"/> alone, so each of the three routes states what it actually does — which is
-    /// the one thing the modder cannot tell from the card, since a replaced part's card still shows the game
-    /// texture. The two irreversible routes carry the app's danger styling. Declined resolves false.</summary>
+    /// from <paramref name="ask"/> alone, so each route states what it actually does — which is the one thing
+    /// the modder cannot tell from the card, since a replaced part's card still shows the game texture.
+    /// Anything landing on a replacement carries the app's danger styling. Declined resolves false.</summary>
     Task<bool> ConfirmApplyDroppedPngAsync(DroppedPngConfirm ask);
 
     /// <summary>The tree landed on a node of this subject: start preparing the whole outfit in the
@@ -165,6 +170,14 @@ public interface IWorkbenchShell
 
     /// <summary>Persist a workbench state mutation with no materializing verb of its own.</summary>
     void AutoSaveProject();
+
+    /// <summary>This subject's model just landed: take whatever adoptions its edited textures now open. The
+    /// edit-time seam peeks the model memo rather than building one on the UI thread, so an edit made before
+    /// anything read the subject adopts nothing at the time — this is where the missing input arrives.
+    /// <para>Gives back the line for what it TOOK, or null when it took nothing. The caller owns the status
+    /// line: the tree build sweeps every subject and then writes once, so a line written from in here would
+    /// be overwritten by the build finishing — and by the next subject's sweep before that.</para></summary>
+    string? AdoptSubjectTextureEdits(WorkbenchSubjectRef subject, SubjectModel model);
 }
 
 /// <summary>Whether the part is usable to edit, plus any non-fatal <see cref="Warning"/> — today, that the

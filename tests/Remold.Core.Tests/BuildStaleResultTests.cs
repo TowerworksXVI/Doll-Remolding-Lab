@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Remold.App.ViewModels;
 using Remold.Core.Project;
 using Xunit;
@@ -273,6 +274,118 @@ public class BuildStaleResultTests
         // the folder it named belongs to the mod being left
         Assert.False(vm.HasLastBuild);
         Assert.False(vm.BuildResultStale);
+    }
+
+    /// <summary>A mod with one shipping mesh target and a built result on screen, both on disk under
+    /// <paramref name="root"/> — the signature reads the target the same way the build does, which means
+    /// asking whether its file is really there.</summary>
+    private static (MainWindowViewModel Vm, ProjectTarget Target) ReplacedPane(string root, string file = "body.glb")
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.OpenProject.RootDir = root;
+        var target = Replaced(vm.OpenProject, root, file);
+        var group = new BuildGroupVm
+        {
+            Character = "Vesna", RawCharacter = "vesna", Outfit = "VesnaSSR01", OutfitLabel = "Base",
+        };
+        group.Rows.Add(new BuildRowVm(Edit(EditVerbs.Replace, "c_vesna01_body_lod0"), "body", included: true));
+        vm.AddBuildGroup(group);
+        vm.CaptureBuildBaseline();
+        vm.LastBuildDir = @"C:\published\a mod";
+        Assert.False(vm.BuildResultStale);
+        return (vm, target);
+    }
+
+    /// <summary>A shipping mesh target for the body slot: its workspace file on disk, no original on record
+    /// (which is what "edited" means for a replacement).</summary>
+    private static ProjectTarget Replaced(ModProject project, string root, string file)
+    {
+        File.WriteAllText(Path.Combine(root, file), "glb");
+        var target = new ProjectTarget
+        {
+            AssetType = "Mesh", Bundle = "b0", ObjectName = "c_vesna01_body_lod0",
+            SubjectCharacter = "Vesna", SubjectOutfit = "VesnaSSR01", ReplaceFile = file, OriginalFile = null,
+        };
+        project.Targets.Add(target);
+        return target;
+    }
+
+    private static List<SubmeshTextures> OneMap(string png) => new()
+    {
+        new() { Submesh = 0, Albedo = png, AlbedoOrigin = SlotOrigin.Authored },
+    };
+
+    /// <summary>A change row says WHICH part a build replaces, never which maps that replacement ships. An
+    /// adoption or a card drop after the build changes the second without touching the first, and Install
+    /// would otherwise copy the pre-edit folder under a ✓ that still reads clean.</summary>
+    [Fact]
+    public void A_map_the_replacement_took_on_after_the_build_makes_the_result_stale()
+    {
+        using var temp = new TempRoot();
+        var (vm, target) = ReplacedPane(temp.Root);
+
+        // what an adoption writes: the edited workspace PNG becomes the replacement's own base colour
+        target.DonorTextures = OneMap("skin_d.png");
+        vm.RefreshBuildResultStale();
+
+        Assert.True(vm.BuildResultStale);
+
+        // …and putting the map back the way the build found it takes the line off again
+        target.DonorTextures = null;
+        vm.RefreshBuildResultStale();
+        Assert.False(vm.BuildResultStale);
+    }
+
+    /// <summary>One subject can hold more than one target for the same mesh slot — a stranded one an earlier
+    /// materialize left behind, beside the one that ships. The signature has to read the SHIPPING one: a map
+    /// taken on since the build would otherwise be answered for by a target the build never shipped, and the
+    /// bar would read clean over a folder that no longer matches the mod.</summary>
+    [Fact]
+    public void With_two_targets_for_one_slot_the_signature_reads_the_one_that_ships()
+    {
+        using var temp = new TempRoot();
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.OpenProject.RootDir = temp.Root;
+
+        // the stranded one comes FIRST in the list, so a pick by name alone lands on it
+        var stranded = new ProjectTarget
+        {
+            AssetType = "Mesh", Bundle = "b0", ObjectName = "c_vesna01_body_lod0",
+            SubjectCharacter = "Vesna", SubjectOutfit = "VesnaSSR01", ReplaceFile = "gone/body.glb",
+        };
+        vm.OpenProject.Targets.Add(stranded);
+        var shipping = Replaced(vm.OpenProject, temp.Root, "body.glb");
+        var group = new BuildGroupVm
+        {
+            Character = "Vesna", RawCharacter = "vesna", Outfit = "VesnaSSR01", OutfitLabel = "Base",
+        };
+        group.Rows.Add(new BuildRowVm(Edit(EditVerbs.Replace, "c_vesna01_body_lod0"), "body", included: true));
+        vm.AddBuildGroup(group);
+        vm.CaptureBuildBaseline();
+        vm.LastBuildDir = @"C:\published\a mod";
+        Assert.False(vm.BuildResultStale);
+
+        // a map on the target that ships is a real difference from what the build shipped
+        shipping.DonorTextures = OneMap("skin_d.png");
+        vm.RefreshBuildResultStale();
+        Assert.True(vm.BuildResultStale);
+
+        shipping.DonorTextures = null;
+        vm.RefreshBuildResultStale();
+        Assert.False(vm.BuildResultStale);
+
+        // …and one on the stranded target is not: nothing about it reaches the built folder
+        stranded.DonorTextures = OneMap("stranded.png");
+        vm.RefreshBuildResultStale();
+        Assert.False(vm.BuildResultStale);
+    }
+
+    private sealed class TempRoot : IDisposable
+    {
+        public string Root { get; } =
+            Path.Combine(Path.GetTempPath(), "remold-stale-" + Guid.NewGuid().ToString("N"));
+        public TempRoot() => Directory.CreateDirectory(Root);
+        public void Dispose() { try { Directory.Delete(Root, recursive: true); } catch { } }
     }
 
     [Fact]

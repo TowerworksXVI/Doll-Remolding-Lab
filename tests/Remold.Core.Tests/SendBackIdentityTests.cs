@@ -45,11 +45,11 @@ public class SendBackIdentityTests
         Assert.False(SendBackGeometry.Take(returned, "cloth1_lod0", ws, hasMapAsks: false, backedUp.Add));
 
         Assert.Equal(before, File.ReadAllBytes(ws));   // the byte-compare against originals/ still reads untouched
-        Assert.Empty(backedUp);                        // and nothing was copied aside for an overwrite that never came
+        Assert.Empty(backedUp);                        // and the pre-write hook never fired for a write that never came
     }
 
-    /// <summary>One vertex moved is an edit, and an edit takes the whole path: the file is copied aside,
-    /// rewritten, and the geometry that lands in it is the one that came back.</summary>
+    /// <summary>One vertex moved is an edit, and an edit takes the whole path: the pre-write hook fires, the
+    /// file is rewritten, and the geometry that lands in it is the one that came back.</summary>
     [Fact]
     public void APartWithOneVertexMoved_IsAnEdit_AndIsWrittenThrough()
     {
@@ -419,10 +419,10 @@ public class SendBackIdentityTests
         Assert.True(SendBackGeometry.Take(returned, "cloth1_lod0", ws, hasMapAsks: false));
     }
 
-    /// <summary>The kept-previous copy is the one way back to what the workspace glb held before the send, so
-    /// a re-split that refuses must not have spent it. Everything that can refuse runs before the copy.</summary>
+    /// <summary>The pre-write hook is handed the file about to be overwritten, so a re-split that refuses must
+    /// not have fired it. Everything that can refuse runs before the hook.</summary>
     [Fact]
-    public void AReSplitThatRefuses_LeavesTheKeptPreviousCopyUnspent()
+    public void AReSplitThatRefuses_NeverFiresThePreWriteHook()
     {
         using var g = new TempGame();
         var ws = g.At("cloth1_lod0.glb");
@@ -966,8 +966,9 @@ public class SendBackIdentityTests
         string workspaceGlb, MainWindowViewModel.SendBackCollect collected, string? recordGlb = null)
     {
         if (!SendBackGeometry.Take(returned, t.ObjectName, workspaceGlb, collected.Asks,
-                MainWindowViewModel.KeepPreviousGlb, recordGlb,
-                MainWindowViewModel.AuthoredMapPaths(project, collected.Rows), baselineGlb: recordGlb))
+                recordGlb: recordGlb,
+                authoredMaps: MainWindowViewModel.AuthoredMapPaths(project, collected.Rows),
+                baselineGlb: recordGlb))
             return false;
         MainWindowViewModel.RecordTakenPart(project, t, workspaceGlb, collected);
         return true;

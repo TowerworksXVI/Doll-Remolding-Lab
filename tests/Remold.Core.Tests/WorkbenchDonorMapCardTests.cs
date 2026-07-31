@@ -97,6 +97,7 @@ public class WorkbenchDonorMapCardTests
         public Task CopyTextAsync(string? text) => Task.CompletedTask;
         public void GoToBuild() { }
         public void AutoSaveProject() { }
+        public string? AdoptSubjectTextureEdits(WorkbenchSubjectRef s, Remold.Core.Workbench.SubjectModel m) => null;
     }
 
     private static WorkbenchVm NewVm(RecordingShell shell, ModProject? project = null,

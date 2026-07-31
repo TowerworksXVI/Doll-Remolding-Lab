@@ -115,6 +115,18 @@ public sealed partial class BuildRowVm : ObservableObject
         new(TextureMap.RmoLabel, e.Textures?.Any(t => t.Rmo is not null) == true,
             Workbench.WorkbenchMapVm.RmoChannels, Blanks(e, f => f.Rmo));
 
+    /// <summary>One submesh's donor maps as a signature field: the ask on each slot and the file it names,
+    /// in submesh order. What the stale-result read folds in beside the row's own fields, so a map that
+    /// changed under a change that didn't takes the ✓ bar's line back off the folder it no longer
+    /// describes. Empty for a change shipping no donor maps at all.</summary>
+    internal static string DonorMapSignature(IReadOnlyList<SubmeshTextures>? rows)
+    {
+        if (rows is not { Count: > 0 }) return "";
+        const char part = (char)0x1d;
+        return string.Join(part, rows.OrderBy(r => r.Submesh).Select(r => string.Join(part,
+            r.Submesh, (int)r.AlbedoAsk, r.Albedo, (int)r.NormalAsk, r.Normal, (int)r.RmoAsk, r.Rmo)));
+    }
+
     /// <summary>Whether the build ships a flat map on this slot for any submesh of the edit. A chip cannot
     /// read this off the file names: every way a slot goes flat names no file, so an authored-only chip
     /// would show the whole state as no change at all. The rule itself is the build's own

@@ -39,8 +39,11 @@ public class VerbDerivationTests : IDisposable
         new SubjectPart("hair", "c_vesna01_hair_lod0", "addr_hair", Array.Empty<SubjectMaterial>()),
     }, Skeleton: null, Problems: Array.Empty<string>());
 
+    /// <summary>A mesh target whose replacement came back with <paramref name="donorSubmeshes"/> materials —
+    /// the shape a texture edit can be adopted onto. Zero is the replacement whose submeshes the map's
+    /// bindings all fall outside of, which the warnings say separately.</summary>
     private ProjectTarget AddMesh(ModProject p, string mesh, bool edited, string file = "body.glb",
-        string outfit = "VesnaSSR01")
+        string outfit = "VesnaSSR01", int donorSubmeshes = 1)
     {
         File.WriteAllText(Path.Combine(_root, file), "glb-edited");
         string? orig = null;
@@ -54,6 +57,7 @@ public class VerbDerivationTests : IDisposable
             AssetType = "Mesh", Bundle = "b0", ObjectName = mesh,
             SubjectCharacter = "Vesna", SubjectOutfit = outfit,
             ReplaceFile = file, OriginalFile = orig,
+            DonorMaterials = Enumerable.Range(0, donorSubmeshes).Select(i => $"m{i}").ToList(),
         };
         p.Targets.Add(t);
         return t;
@@ -188,7 +192,8 @@ public class VerbDerivationTests : IDisposable
         Derive(p, out var warnings);
 
         Assert.Contains(warnings,
-            w => w == "'c_vesna01_body_lod0' is replaced. Its texture edit is not in this build");
+            w => w == "'body' is replaced. Its texture edit is not in this build. Save the texture "
+                    + "again in ② Edit, or drop the edited image on the part's map card");
     }
 
     [Fact]
@@ -221,7 +226,8 @@ public class VerbDerivationTests : IDisposable
         Derive(p, out var warnings);
 
         Assert.Contains(warnings,
-            w => w == "'c_vesna01_body_lod0' is replaced. Its texture edit is not in this build");
+            w => w == "'body' is replaced. Its texture edit is not in this build. Save the texture "
+                    + "again in ② Edit, or drop the edited image on the part's map card");
     }
 
     /// <summary>A Replace rebinds base colour, normal and RMO on its own submeshes and nothing else, so the
@@ -238,9 +244,10 @@ public class VerbDerivationTests : IDisposable
         Derive(p, out var warnings);
 
         Assert.DoesNotContain(warnings,
-            w => w == "'c_vesna01_body_lod0' is replaced. Its texture edit is not in this build");
+            w => w == "'body' is replaced. Its texture edit is not in this build. Save the texture "
+                    + "again in ② Edit, or drop the edited image on the part's map card");
         Assert.Contains(warnings,
-            w => w == "'tex_ramp' binds as _RampMap on 'c_vesna01_body_lod0'. "
+            w => w == "'tex_ramp' binds as _RampMap on 'body'. "
                     + "That slot isn't emitted yet; the edit doesn't show on this mesh");
     }
 
@@ -255,7 +262,8 @@ public class VerbDerivationTests : IDisposable
         var edits = Derive(p, out var warnings);
 
         Assert.Contains(warnings,
-            w => w == "'c_vesna01_body_lod0' is replaced. Its texture edit is not in this build");
+            w => w == "'body' is replaced. Its texture edit is not in this build. Save the texture "
+                    + "again in ② Edit, or drop the edited image on the part's map card");
         Assert.Contains(warnings, w => w.Contains("_RampMap", StringComparison.Ordinal));
         // and neither warning invents a Retexture: the emitter still ships only the three slots
         Assert.DoesNotContain(edits, x => x.Verb == EditVerbs.Retexture);
@@ -271,7 +279,7 @@ public class VerbDerivationTests : IDisposable
         Derive(p, out var warnings);
 
         Assert.Contains(warnings,
-            w => w == "'c_vesna01_body_lod0' is hidden. Its texture edit is not in this build");
+            w => w == "'body' is hidden. Its texture edit is not in this build");
     }
 
     [Fact]
@@ -338,7 +346,7 @@ public class VerbDerivationTests : IDisposable
         var e = Assert.Single(edits);
         Assert.Equal(EditVerbs.Replace, e.Verb);
         Assert.Equal("VesnaSSR01", e.Outfit);         // the first claim stands
-        Assert.Contains(warnings, w => w == "'c_vesna01_body_lod0' is replaced on both Vesna · VesnaSSR01 "
+        Assert.Contains(warnings, w => w == "'body' is replaced on both Vesna · VesnaSSR01 "
             + "and Vesna · VesnaAlt. One replacement per part name ships, so Vesna · VesnaAlt's is not in "
             + "this build. Build the two subjects as separate mods");
     }
@@ -360,11 +368,12 @@ public class VerbDerivationTests : IDisposable
 
         Assert.Contains(warnings, w => w.Contains("so Vesna · VesnaAlt's is not in this build",
             StringComparison.Ordinal));
-        Assert.Contains(warnings, w => w == "'c_vesna01_body_lod0' is replaced by Vesna · VesnaSSR01. "
+        Assert.Contains(warnings, w => w == "'body' is replaced by Vesna · VesnaSSR01. "
             + "Its texture edit is not in this build");
         // and the claiming subject still gets its own, differently worded, one
         Assert.Contains(warnings,
-            w => w == "'c_vesna01_body_lod0' is replaced. Its texture edit is not in this build");
+            w => w == "'body' is replaced. Its texture edit is not in this build. Save the texture "
+                    + "again in ② Edit, or drop the edited image on the part's map card");
     }
 
     [Fact]

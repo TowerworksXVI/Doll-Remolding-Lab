@@ -43,8 +43,10 @@ public sealed class LabSettings
     /// <summary>Manual override for the Blender executable (null → auto-detect), so a user with several
     /// Blenders can point at the exact one.</summary>
     public string? PreferredBlender { get; set; }
-    /// <summary>Optional cap on CPU cores for the package-time encoder (BCn encode + the per-texture
-    /// parallel loop). Null = all cores; a settings.json without the key deserializes to null.</summary>
+    /// <summary>Optional cap on CPU cores for the app's wide parallel work: the package-time encoder (BCn
+    /// encode + the per-texture loop), the build's operator solve, and the roster fill scan. Null = all
+    /// cores; a settings.json without the key deserializes to null. The key name is what released installs
+    /// persist, so it stays as it is.</summary>
     public int? EncoderCpuLimit { get; set; }
     /// <summary>Recent mod projects, most-recent-first.</summary>
     public List<RecentMod> RecentMods { get; set; } = new();

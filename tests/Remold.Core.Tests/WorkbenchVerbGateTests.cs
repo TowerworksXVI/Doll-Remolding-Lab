@@ -31,6 +31,8 @@ public class WorkbenchVerbGateTests
         public int OpenPartCalls;
         public int OpenPartAloneCalls;
         public int AutoSaveCalls;
+        public int RevertPartCalls;
+        public int RevertMapCalls;
 
         public void Release() => _open.TrySetResult();
 
@@ -68,14 +70,25 @@ public class WorkbenchVerbGateTests
         public Task OpenAllPartsInBlenderAsync(WorkbenchSubjectRef s, IReadOnlyList<RecipePart> r, IProgress<string> p) => Task.CompletedTask;
         public Task OpenAuthoredMapAsync(string authoredPath, IProgress<string> p) => Task.CompletedTask;
         public Task<int> MaterializeAllAsync(WorkbenchSubjectRef s, IReadOnlyList<MaterializeItem> i, IProgress<string> p, CancellationToken c) => Task.FromResult(0);
-        public Task RevertPartAsync(WorkbenchSubjectRef s, string t, IProgress<string> p) => Task.CompletedTask;
+        public Task RevertPartAsync(WorkbenchSubjectRef s, string t, IProgress<string> p)
+        {
+            RevertPartCalls++;
+            return Task.CompletedTask;
+        }
+
         public Task OpenMapUvGuideAsync(WorkbenchSubjectRef s, string t, string b, IReadOnlyList<(string, string, int, string?)> u, IProgress<string> p) => Task.CompletedTask;
-        public Task RevertMapAsync(WorkbenchSubjectRef s, string t, string b, IProgress<string> p) => Task.CompletedTask;
+
+        public Task RevertMapAsync(WorkbenchSubjectRef s, string t, string b, IProgress<string> p)
+        {
+            RevertMapCalls++;
+            return Task.CompletedTask;
+        }
         public void PrewarmSubject(WorkbenchSubjectRef s) { }
         public void ShowSubjectInFolder(WorkbenchSubjectRef s) { }
         public Task CopyTextAsync(string? text) => Task.CompletedTask;
         public void GoToBuild() { }
         public void AutoSaveProject() => AutoSaveCalls++;
+        public string? AdoptSubjectTextureEdits(WorkbenchSubjectRef s, Remold.Core.Workbench.SubjectModel m) => null;
     }
 
     private static readonly WorkbenchSubjectRef Subject =
@@ -107,7 +120,7 @@ public class WorkbenchVerbGateTests
         await vm.OpenMapCommand.ExecuteAsync(other);        // the OTHER card's button never disabled
 
         Assert.Equal(1, shell.OpenMapCalls);                // refused before the shell
-        Assert.Contains("Busy", vm.Status);                 // …and the click is not swallowed
+        Assert.Equal(BlenderGate.Busy, vm.Status);                 // …and the click is not swallowed
 
         shell.Release();
         await running;
@@ -127,7 +140,7 @@ public class WorkbenchVerbGateTests
         await vm.RemoveSubjectCommand.ExecuteAsync(node);
 
         Assert.Equal(0, shell.RemoveCalls);
-        Assert.Contains("Busy", vm.Status);
+        Assert.Equal(BlenderGate.Busy, vm.Status);
 
         shell.Release();
         await running;
@@ -197,11 +210,145 @@ public class WorkbenchVerbGateTests
         await vm.OpenMapCommand.ExecuteAsync(Card("tex_body"));
 
         Assert.Equal(1, shell.OpenMapCalls);
-        Assert.Contains("Busy", vm.Status);
+        Assert.Equal(BlenderGate.Busy, vm.Status);
 
         shell.Release();
         await running;
         using var held = await hold;
+    }
+
+    // ---- Revert: a wait is said, a dead end is not -------------------------------------------------
+    // Revert disables on the row's OWN verb, so the hover has to tell a row that is merely waiting from one
+    // that has nothing to undo. The verb follows the same split: it refuses an ineligible row in silence and
+    // reports the wait only for a row the click would work on later.
+
+    [Fact]
+    public async Task AnEditedPartsRevertRefusedByAnotherVerbSaysSo()
+    {
+        var shell = new GateShell();
+        var vm = NewVm(shell);
+        var hair = PartNode("hair");
+        hair.IsMaterialized = true; hair.MeshEdited = true;   // there IS a mesh edit to undo…
+        var running = vm.OpenMapCommand.ExecuteAsync(Card("tex_face"));   // …and another verb holds the gate
+
+        await vm.RevertPartCommand.ExecuteAsync(hair);
+
+        Assert.Equal(0, shell.RevertPartCalls);
+        Assert.Equal(BlenderGate.Busy, vm.Status);
+
+        shell.Release();
+        await running;
+    }
+
+    [Fact]
+    public async Task APartWithNothingToRevertStaysSilentWhileTheGateIsHeld()
+    {
+        var shell = new GateShell();
+        var vm = NewVm(shell);
+        var hair = PartNode("hair");                                      // never materialized
+        var running = vm.OpenMapCommand.ExecuteAsync(Card("tex_face"));
+        vm.ReportStatus("unchanged");
+
+        await vm.RevertPartCommand.ExecuteAsync(hair);
+
+        Assert.Equal(0, shell.RevertPartCalls);
+        Assert.Equal("unchanged", vm.Status);   // a wait would imply the click works once the gate lets go
+
+        shell.Release();
+        await running;
+    }
+
+    [Fact]
+    public async Task AnEditedMapsRevertRefusedByAnotherVerbSaysSo()
+    {
+        var shell = new GateShell();
+        var vm = NewVm(shell);
+        var edited = Card("tex_body");
+        edited.IsMaterialized = true; edited.IsEdited = true;
+        var running = vm.OpenMapCommand.ExecuteAsync(Card("tex_face"));
+
+        await vm.RevertMapCommand.ExecuteAsync(edited);
+
+        Assert.Equal(0, shell.RevertMapCalls);
+        Assert.Equal(BlenderGate.Busy, vm.Status);
+
+        shell.Release();
+        await running;
+    }
+
+    [Fact]
+    public async Task AMapWithNothingToRevertStaysSilentWhileTheGateIsHeld()
+    {
+        var shell = new GateShell();
+        var vm = NewVm(shell);
+        var running = vm.OpenMapCommand.ExecuteAsync(Card("tex_face"));
+        vm.ReportStatus("unchanged");
+
+        await vm.RevertMapCommand.ExecuteAsync(Card("tex_body"));
+
+        Assert.Equal(0, shell.RevertMapCalls);
+        Assert.Equal("unchanged", vm.Status);
+
+        shell.Release();
+        await running;
+    }
+
+    /// <summary>The hover half of the same split, on the row's own busy state — the one that actually
+    /// disables the button. An edited row waiting reads as waiting; a row with nothing to undo keeps its own
+    /// line however busy it is; and a texture-only edit still names the verb that DOES undo it.</summary>
+    [Fact]
+    public void TheDisabledRevertHoverTellsAWaitFromADeadEnd()
+    {
+        var edited = PartNode("hair");
+        edited.IsMaterialized = true; edited.MeshEdited = true; edited.IsEdited = true; edited.IsBusy = true;
+        var nothing = PartNode("body");
+        nothing.IsBusy = true;
+        var textureOnly = PartNode("face");
+        textureOnly.IsMaterialized = true; textureOnly.IsEdited = true; textureOnly.IsBusy = true;
+
+        Assert.False(edited.CanRevert);
+        Assert.Equal(BlenderGate.Busy, edited.RevertHint);
+        Assert.Equal("Nothing to revert yet", nothing.RevertHint);
+        Assert.Equal("Only textures are edited here. Revert them on the map cards.", textureOnly.RevertHint);
+    }
+
+    /// <summary>The map card's twin of the rule above.</summary>
+    [Fact]
+    public void TheDisabledMapRevertHoverTellsAWaitFromADeadEnd()
+    {
+        var edited = Card("tex_body");
+        edited.IsMaterialized = true; edited.IsEdited = true; edited.IsBusy = true;
+        var nothing = Card("tex_face");
+        nothing.IsBusy = true;
+
+        Assert.False(edited.CanRevert);
+        Assert.Equal(BlenderGate.Busy, edited.RevertHint);
+        Assert.Equal("Nothing to revert yet", nothing.RevertHint);
+    }
+
+    /// <summary>Every route that reports the gate reports ONE line: the button hovers, the refused verb and
+    /// the refused drop can't drift into three phrasings of the same answer.</summary>
+    [Fact]
+    public async Task TheRefusedVerbTheRefusedDropAndTheHoverAllSayTheOneBusyLine()
+    {
+        var shell = new GateShell();
+        var vm = NewVm(shell);
+        var busyRow = PartNode("hair");
+        busyRow.IsMaterialized = true; busyRow.MeshEdited = true; busyRow.IsBusy = true;
+        var running = vm.OpenMapCommand.ExecuteAsync(Card("tex_face"));
+
+        await vm.RemoveSubjectCommand.ExecuteAsync(
+            new WorkbenchNodeVm { Kind = WorkbenchNodeKind.Subject, Title = "subject", Subject = Subject });
+        var fromVerb = vm.Status;
+        await vm.HandleDropAsync(new[] { @"C:\tmp\face.png" }, Card("tex_body"));
+        var fromDrop = vm.Status;
+
+        Assert.Equal(BlenderGate.Busy, fromVerb);
+        Assert.Equal(BlenderGate.Busy, fromDrop);
+        Assert.Equal(BlenderGate.Busy, busyRow.RevertHint);
+
+        shell.Release();
+        await running;
     }
 
     // ---- a part whose mesh can't be replaced ------------------------------------------------------
@@ -235,7 +382,7 @@ public class WorkbenchVerbGateTests
         face.MeshReplaceBlock = StreamDump.SkinRefusal.BlendShapes;
 
         Assert.False(face.CanOpenInBlender);
-        Assert.Equal("This mesh uses expressions and cannot be replaced.", face.BlenderHint);
+        Assert.Equal("This mesh uses expressions and cannot be replaced. Hide and retexture still work.", face.BlenderHint);
 
         await vm.OpenPartInBlenderCommand.ExecuteAsync(face);
 
@@ -267,7 +414,7 @@ public class WorkbenchVerbGateTests
         await clicked;
 
         Assert.Equal(0, shell.OpenPartCalls);                        // the answer arrived and refused
-        Assert.Equal("This mesh uses expressions and cannot be replaced.", vm.Status);
+        Assert.Equal("This mesh uses expressions and cannot be replaced. Hide and retexture still work.", vm.Status);
     }
 
     [Fact]
