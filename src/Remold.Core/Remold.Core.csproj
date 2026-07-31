@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Kept in step with Remold.App: the two ship as one product. -->
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Remold.Core.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AssetsTools.NET" Version="3.0.2" />
+    <PackageReference Include="AssetsTools.NET.Addressables" Version="3.0.2" />
+    <PackageReference Include="AssetsTools.NET.Texture" Version="3.0.2" />
+    <!-- BCnEncoder.Net (MIT OR Unlicense): pure-managed BC1/3/4/5/7 encode+decode. Every BCn DECODE the
+         app does runs through it, and it is the BC7 encoder used where no Direct3D device can be had. -->
+    <PackageReference Include="BCnEncoder.Net" Version="2.3.0" />
+    <!-- DirectXTexNet (MIT): DirectXTex's BC7 compressor on a Direct3D 11 device. Its implementation
+         assembly is mixed-mode, which is what rules single-file publish out (see the publish profile). -->
+    <PackageReference Include="DirectXTexNet" Version="1.0.7" />
+    <!-- MathNet.Numerics (MIT): SVD-based pseudoinverse for the palette-recovery operator. -->
+    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.3" />
+    <!-- ImageSharp pinned to 3.x: Six Labors Split License (Apache-2.0 terms for qualifying
+         open-source use). v4+ requires a commercial Six Labors license. -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+  </ItemGroup>
+</Project>

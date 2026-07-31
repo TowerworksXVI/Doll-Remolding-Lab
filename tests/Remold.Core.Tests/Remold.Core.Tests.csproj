@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Remold.Core\Remold.Core.csproj" />
+    <!-- App is a WinExe; referenced only for the pure, UI-runtime-free view-model logic the
+         workbench tests drive — no AppBuilder is started. -->
+    <ProjectReference Include="..\..\src\Remold.App\Remold.App.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Read-back libs for the export round-trip tests; pinned to Core's versions. -->
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.3" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Golden emitted-text assets (the emission contract, pinned from synthetic inputs). -->
+    <None Include="Migoto\golden\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the shipped sharing measurement, so its committed shape is under test -->
+    <None Include="..\..\data\sharing_seed.json" Link="data\sharing_seed.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,21 @@
+{
+ "unionBones": 4,
+ "order": [
+  "101",
+  "102",
+  "201",
+  "202"
+ ],
+ "parts": [
+  {
+   "part": "alpha",
+   "verts": 64,
+   "bones": 2
+  },
+  {
+   "part": "beta",
+   "verts": 64,
+   "bones": 2
+  }
+ ]
+}

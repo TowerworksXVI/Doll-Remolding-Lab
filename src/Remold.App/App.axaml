@@ -1,0 +1,71 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Remold.App.App"
+             RequestedThemeVariant="Dark">
+  <Application.Styles>
+    <!-- Fluent derives every implicit accent surface — checkbox ticks, list selection, TextBox focus and
+         caret, tab indicators, combo boxes — from SystemAccentColor and the six shades around it. Left alone
+         it takes those from the OS personalization colour, so the app wears whatever accent Windows is set
+         to. Accent publishes all seven, pinned here to the HudAccent copper (the literal, not a
+         StaticResource: a Style in Application.Styles can't reach the sibling Application.Resources at
+         app-parse time). -->
+    <FluentTheme>
+      <FluentTheme.Palettes>
+        <ColorPaletteResources x:Key="Dark" Accent="#C97B55" />
+        <ColorPaletteResources x:Key="Light" Accent="#C97B55" />
+      </FluentTheme.Palettes>
+    </FluentTheme>
+
+    <!-- Shared HUD button styles, app-global so every window (incl. the code-built Settings) reads them.
+         primary = accent fill (main action). -->
+    <Style Selector="Button.primary">
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <!-- DynamicResource, not Static: a Style in Application.Styles can't resolve a StaticResource from the
+         sibling Application.Resources at app-parse time (it can from a Window's scope). -->
+    <Style Selector="Button.primary /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudAccentBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudBgBrush}" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- The hover lift is the one tint with no token of its own: HudAccent lightened. Retune it with
+         HudAccent or the button flashes an off-palette colour. -->
+    <Style Selector="Button.primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#DD8F69" />
+      <Setter Property="Foreground" Value="{DynamicResource HudBgBrush}" />
+    </Style>
+    <Style Selector="Button.primary:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudAccentDimBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudBgBrush}" />
+    </Style>
+    <Style Selector="Button.primary:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudAccentDimBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudSubtextBrush}" />
+    </Style>
+  </Application.Styles>
+
+  <Application.Resources>
+    <!-- dark HUD palette: slate ground, copper accent, gold warning, cream text -->
+    <Color x:Key="HudBg">#10171E</Color>
+    <Color x:Key="HudPanel">#17222B</Color>
+    <Color x:Key="HudPanelAlt">#1D2A35</Color>
+    <Color x:Key="HudBorder">#2B3946</Color>
+    <Color x:Key="HudAccent">#C97B55</Color>
+    <Color x:Key="HudAccentDim">#8A5138</Color>
+    <Color x:Key="HudAmber">#E4BE71</Color>
+    <Color x:Key="HudText">#E8E2D6</Color>
+    <Color x:Key="HudSubtext">#93A0A8</Color>
+    <Color x:Key="HudError">#E5484D</Color>
+
+    <SolidColorBrush x:Key="HudBgBrush" Color="{StaticResource HudBg}" />
+    <SolidColorBrush x:Key="HudPanelBrush" Color="{StaticResource HudPanel}" />
+    <SolidColorBrush x:Key="HudPanelAltBrush" Color="{StaticResource HudPanelAlt}" />
+    <SolidColorBrush x:Key="HudBorderBrush" Color="{StaticResource HudBorder}" />
+    <SolidColorBrush x:Key="HudAccentBrush" Color="{StaticResource HudAccent}" />
+    <SolidColorBrush x:Key="HudAccentDimBrush" Color="{StaticResource HudAccentDim}" />
+    <SolidColorBrush x:Key="HudAmberBrush" Color="{StaticResource HudAmber}" />
+    <SolidColorBrush x:Key="HudTextBrush" Color="{StaticResource HudText}" />
+    <SolidColorBrush x:Key="HudSubtextBrush" Color="{StaticResource HudSubtext}" />
+    <SolidColorBrush x:Key="HudErrorBrush" Color="{StaticResource HudError}" />
+  </Application.Resources>
+</Application>

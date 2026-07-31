@@ -1,0 +1,433 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wb="using:Remold.App.ViewModels.Workbench"
+             xmlns:vm="using:Remold.App.ViewModels"
+             xmlns:conv="using:Avalonia.Data.Converters"
+             x:Class="Remold.App.Views.WorkbenchView"
+             x:DataType="wb:WorkbenchVm">
+
+  <UserControl.Styles>
+    <!-- default-expanded / filter-collapse straight off each node VM (reflection binding tolerates
+         nodes whose type lacks the property) -->
+    <Style Selector="TreeViewItem">
+      <Setter Property="IsExpanded" Value="{ReflectionBinding IsExpanded, Mode=TwoWay, FallbackValue=True}" />
+      <Setter Property="IsVisible" Value="{ReflectionBinding IsVisible, FallbackValue=True}" />
+    </Style>
+    <!-- pulsing throbber dot, copied minimal from MainWindow's Window.Styles (not reachable as a resource
+         from this UserControl) — marks the two "reading…" waits. -->
+    <Style Selector="TextBlock.pulse">
+      <Setter Property="Foreground" Value="{StaticResource HudAccentBrush}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="INFINITE">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1.0" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <!-- shimmer placeholder that holds a map-set card's thumbnail slot until its thumb lands: the same
+         opacity-pulse idiom as the throbber, on a filled tile. The fill is HudPanelBrush (darker than the card's
+         own HudPanelAltBrush) plus a pulsing accent underline, so the animation actually reads as motion against
+         the card instead of a same-colour tile that looks static. -->
+    <Style Selector="Border.shimmer">
+      <Setter Property="Background" Value="{StaticResource HudPanelBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource HudAccentBrush}" />
+      <Setter Property="BorderThickness" Value="0,0,0,2" />
+      <Style.Animations>
+        <Animation Duration="0:0:1.4" IterationCount="INFINITE">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.3" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="0.85" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.3" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <!-- the pane's left-out dim, at the same opacity the change list dims a row it won't ship. Declared here
+         for the same reason the throbber and the shimmer are: a Window.Styles selector is not reachable from
+         this UserControl's own templates. -->
+    <Style Selector="Image.off">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+  </UserControl.Styles>
+
+  <!-- AllowDrop must sit on the pane: without it the AddHandler drop handlers never fire anywhere inside,
+       map cards included. The cursor gate in code-behind refuses everything off-card; what a drop that
+       arrives actually DOES is decided in WorkbenchVm.HandleDropAsync. -->
+  <Grid RowDefinitions="Auto,Auto,*,Auto" DragDrop.AllowDrop="True">
+    <!-- 10 below the title, matching Pick's header block — at 4 the title read as a label ON the filter box. -->
+    <TextBlock Grid.Row="0" Text="Edit" FontSize="15" Foreground="{StaticResource HudTextBrush}" Margin="0,0,0,10" />
+
+    <!-- filter (the status line lives in the footer row — a long verb status in an Auto column here
+         crushed the filter box to slivers) -->
+    <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,0,10">
+      <TextBox Grid.Column="0" Text="{Binding Filter}" Watermark="Filter parts, materials, textures…" />
+      <Button Grid.Column="1" Content="✕" Margin="6,0,0,0" Padding="9,4" Command="{Binding ClearFilterCommand}"
+              ToolTip.Tip="Clear filter" />
+    </Grid>
+
+    <!-- tree (left) + inspector (right) -->
+    <Grid Grid.Row="2" ColumnDefinitions="350,*">
+
+      <Border Grid.Column="0" Background="{StaticResource HudPanelBrush}" Margin="0,0,10,0"
+              BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+        <Panel>
+          <!-- the two "reading…" waits carry the app's pulsing throbber dot. -->
+          <StackPanel Orientation="Horizontal" Spacing="8" Margin="14" IsVisible="{Binding IsReadingGame}">
+            <TextBlock Classes="pulse" Text="◌" />
+            <TextBlock Text="Reading game files…" Foreground="{StaticResource HudSubtextBrush}"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="8" Margin="14" IsVisible="{Binding IsBuilding}">
+            <TextBlock Classes="pulse" Text="◌" />
+            <TextBlock Text="Reading structure…" Foreground="{StaticResource HudSubtextBrush}"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+          <!-- game load failed: a STATIC state (no pulse, no fake progress) with the way out, instead of
+               "Reading game files…" spinning forever. Cleared when a later load succeeds. -->
+          <TextBlock Text="Game files unavailable. Use Tools · Locate game…, then Tools · Rescan game files."
+                     Margin="14" TextWrapping="Wrap" Foreground="{StaticResource HudSubtextBrush}"
+                     IsVisible="{Binding GameUnavailable}" />
+          <!-- the size is the pane's own, not the theme's larger default; the line height is explicit and
+               generous because the circled step glyph (①) ascends and descends past Latin metrics, so a line
+               box measured from the font's own metrics clips it top and bottom -->
+          <TextBlock Text="Nothing in this mod yet. Check subjects in ① Pick, then double-click one to open it here."
+                     Margin="14" FontSize="12" LineHeight="20" TextWrapping="Wrap"
+                     Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding IsEmpty}" />
+          <!-- a non-empty filter that hides everything gets a message, not a blank panel. -->
+          <TextBlock Text="No parts, materials, or textures match." Margin="14" TextWrapping="Wrap"
+                     Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding NoMatches}" />
+          <TreeView ItemsSource="{Binding Nodes}" SelectedItem="{Binding SelectedNode}"
+                    Background="Transparent" Padding="6" IsVisible="{Binding HasNodes}">
+            <TreeView.DataTemplates>
+              <TreeDataTemplate DataType="wb:WorkbenchNodeVm" ItemsSource="{Binding Children}">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Glyph}" IsVisible="{Binding HasGlyph}"
+                             Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
+                  <TextBlock Text="{Binding Title}" Foreground="{StaticResource HudTextBrush}"
+                             VerticalAlignment="Center" />
+                  <TextBlock Text="{Binding Subtitle}" IsVisible="{Binding HasSubtitle}"
+                             Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
+                             TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                  <TextBlock Text="⚠" IsVisible="{Binding HasProblem}" Foreground="{StaticResource HudAmberBrush}"
+                             VerticalAlignment="Center"
+                             ToolTip.Tip="{Binding Problem}" />
+                  <!-- ✎ edited badge: part → subject rollup, from the target Edited flag -->
+                  <TextBlock Text="✎" IsVisible="{Binding HasEditBadge}" Foreground="{StaticResource HudAccentBrush}"
+                             VerticalAlignment="Center" ToolTip.Tip="Edited" />
+                  <!-- hidden badge: the part's Hide toggle is on -->
+                  <TextBlock Text="∅" IsVisible="{Binding IsHiddenInMod}" Foreground="{StaticResource HudSubtextBrush}"
+                             VerticalAlignment="Center" ToolTip.Tip="Hidden. Doesn't draw in the built mod" />
+                  <!-- M8: a local busy cue on the acting row while its own verb runs (first-touch materialize can
+                       take seconds); the pulsing dot reuses the pane's throbber idiom. -->
+                  <TextBlock Classes="pulse" Text="◌" IsVisible="{Binding IsBusy}" ToolTip.Tip="Working…" />
+                </StackPanel>
+              </TreeDataTemplate>
+            </TreeView.DataTemplates>
+          </TreeView>
+        </Panel>
+      </Border>
+
+      <!-- inspector. The inset lives HERE (outside the scroll), never on the ScrollViewer: SV Padding
+           double-counts into the extent (measured live: content desired 481, extent 481-2×16=449, viewport
+           466 → overflow up to 32px shows NO bar while the content clips). -->
+      <Border Grid.Column="1" Background="{StaticResource HudPanelBrush}" Padding="16"
+              BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+        <Panel>
+          <!-- The pane's editing model, said only while nothing is selected — it goes away the moment the
+               inspector has real content to show. -->
+          <TextBlock Text="Select a node to inspect it. Parts open in Blender, maps in an image editor."
+                     TextWrapping="Wrap"
+                     Foreground="{StaticResource HudSubtextBrush}"
+                     IsVisible="{Binding SelectedNode, Converter={x:Static conv:ObjectConverters.IsNull}}" />
+
+          <!-- P1: persistent bar when overflowing (AllowAutoHide=False); horizontal scroll disabled so the
+               content wraps at the viewport width and a stray overlay H-bar can't clip the bottom row. -->
+          <ScrollViewer VerticalScrollBarVisibility="Auto" AllowAutoHide="False"
+                        HorizontalScrollBarVisibility="Disabled"
+                        IsVisible="{Binding SelectedNode, Converter={x:Static conv:ObjectConverters.IsNotNull}}">
+            <StackPanel Spacing="10">
+              <!-- header (shared) -->
+              <StackPanel Spacing="2">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock Grid.Column="0" Text="{Binding SelectedNode.InspectorHeader}" FontSize="16" FontWeight="SemiBold"
+                             Foreground="{StaticResource HudTextBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                  <!-- copy the material name (only on a material node — the map card's copy idiom moved here).
+                       Binds to the workbench VM's own copy verb, not the hosting window's clipboard command. -->
+                  <Button Grid.Column="1" Content="copy name" Padding="6,1" FontSize="11" Margin="6,0,0,0"
+                          VerticalAlignment="Top" ToolTip.Tip="Copy material name"
+                          IsVisible="{Binding SelectedNode.IsMaterial}"
+                          Command="{Binding CopyNameCommand}"
+                          CommandParameter="{Binding SelectedNode.InspectorHeader}" />
+                </Grid>
+                <TextBlock Text="{Binding SelectedNode.InspectorDetail}" Foreground="{StaticResource HudSubtextBrush}"
+                           FontSize="12" TextWrapping="Wrap" />
+              </StackPanel>
+
+              <!-- part mesh preview: eager async shimmer → textured geometry OR quiet no-preview. The framed
+                   backdrop separates the transparent-background render from the app chrome. -->
+              <StackPanel IsVisible="{Binding SelectedNode.IsPart}" Spacing="5">
+                <TextBlock Text="MESH PREVIEW" FontSize="11" Foreground="{StaticResource HudSubtextBrush}" />
+                <Border Height="220" CornerRadius="3" Background="{StaticResource HudPanelAltBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" Padding="6">
+                  <Panel>
+                    <Border Classes="shimmer" CornerRadius="3"
+                            IsVisible="{Binding SelectedNode.IsMeshPreviewLoading}" />
+                    <Image Source="{Binding SelectedNode.MeshPreview}" Stretch="Uniform"
+                           IsVisible="{Binding SelectedNode.HasMeshPreview}" />
+                    <TextBlock Text="no preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               IsVisible="{Binding SelectedNode.IsMeshPreviewFailed}"
+                               Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
+                  </Panel>
+                </Border>
+                <TextBlock Text="Previews unavailable. The game may be holding files. Select the part again to retry."
+                           IsVisible="{Binding SelectedNode.HasMeshPreviewFailureCause}" TextWrapping="Wrap"
+                           Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
+              </StackPanel>
+
+              <!-- part actions: the two Blender opens + Revert. Materialize-if-needed rides both opens;
+                   Revert is enabled only when materialized AND edited. Buttons disable while the op runs. -->
+              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding SelectedNode.IsPart}">
+                <Button Content="Open in Blender" Command="{Binding OpenPartAloneInBlenderCommand}"
+                        CommandParameter="{Binding SelectedNode}"
+                        IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.BlenderAloneHint}" />
+                <Button Content="Open with References" Command="{Binding OpenPartInBlenderCommand}"
+                        CommandParameter="{Binding SelectedNode}"
+                        IsEnabled="{Binding SelectedNode.CanOpenWithReferences}"
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.ReferencesHint}" />
+                <Button Content="Revert" Command="{Binding RevertPartCommand}"
+                        CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding SelectedNode.CanRevert}"
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.RevertHint}" />
+                <Button Content="{Binding SelectedNode.HideLabel}" Command="{Binding ToggleHiddenCommand}"
+                        CommandParameter="{Binding SelectedNode}"
+                        ToolTip.Tip="A hidden mesh doesn't draw in the built mod. Edits stay in the workspace" />
+              </StackPanel>
+
+              <!-- subject actions: open the whole outfit in one Blender session, or materialize
+                   every part + texture (capture-only, no Blender pre-build). -->
+              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding SelectedNode.IsSubject}">
+                <Button Content="Open all parts in Blender" Command="{Binding OpenAllPartsCommand}"
+                        CommandParameter="{Binding SelectedNode}"
+                        IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding SelectedNode.BlenderHint}" />
+                <Button Content="Materialize all files" Command="{Binding MaterializeAllCommand}"
+                        CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
+                        ToolTip.Tip="Prepare editable copies of every part and texture and add them to the mod" />
+                <!-- M5b: reveal the subject's files in the OS browser (the Build page's reveal idiom). -->
+                <Button Content="Show in folder" Command="{Binding ShowSubjectFolderCommand}"
+                        CommandParameter="{Binding SelectedNode}"
+                        ToolTip.Tip="Reveal this subject's files in the file browser" />
+                <!-- S9 inc4: the second entry point to the subject-scoped remove (the Pick uncheck is the
+                     other). Same confirm + revert path — drops the subject from the mod entirely. -->
+                <Button Content="Remove from mod" Command="{Binding RemoveSubjectCommand}"
+                        CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
+                        ToolTip.Tip="Drop this subject and its materialized/edited files from the mod" />
+              </StackPanel>
+
+              <!-- shared: a note / chip -->
+              <Border IsVisible="{Binding SelectedNode.HasInspectorNote}" Background="{StaticResource HudPanelAltBrush}"
+                      CornerRadius="3" Padding="8,5">
+                <TextBlock Text="{Binding SelectedNode.InspectorNote}" Foreground="{StaticResource HudSubtextBrush}"
+                           FontSize="12" TextWrapping="Wrap" />
+              </Border>
+
+              <!-- shared: a per-node problem -->
+              <Border IsVisible="{Binding SelectedNode.HasProblem}" BorderBrush="{StaticResource HudAmberBrush}"
+                      BorderThickness="1" CornerRadius="3" Padding="8,5">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="⚠" Foreground="{StaticResource HudAmberBrush}" />
+                  <TextBlock Text="{Binding SelectedNode.Problem}" Foreground="{StaticResource HudAmberBrush}"
+                             FontSize="12" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <!-- subject: rolled-up problems -->
+              <StackPanel IsVisible="{Binding SelectedNode.HasInspectorProblems}" Spacing="3">
+                <TextBlock Text="Problems" FontWeight="SemiBold" Foreground="{StaticResource HudTextBrush}" />
+                <ItemsControl ItemsSource="{Binding SelectedNode.InspectorProblems}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,1">
+                        <TextBlock Text="⚠" Foreground="{StaticResource HudAmberBrush}" />
+                        <TextBlock Text="{Binding}" Foreground="{StaticResource HudSubtextBrush}"
+                                   FontSize="12" TextWrapping="Wrap" />
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+
+              <!-- material: the map-set as CARDS. Thumbnail on top (~104px), then map role,
+                   texture name (dim), and dimensions. A shimmer holds the slot until the eager thumb lands;
+                   a failed thumb shows a quiet "no preview" tile. Each card carries its Open (materialize-if-
+                   needed → image editor) and Revert action row below the dimensions line. -->
+              <StackPanel IsVisible="{Binding SelectedNode.HasMaps}" Spacing="6">
+                <TextBlock Text="MAP SET" FontSize="11" Foreground="{StaticResource HudSubtextBrush}" />
+                <!-- The only drop route left in the pane, said where the cards are — a .png ON a card. There
+                     is no pane-wide name match and no mesh drag-in, so this is the whole affordance. The
+                     second sentence is the half a card cannot show: on a replaced part the card still names
+                     the game texture, and the drop authors the replacement's map instead. -->
+                <TextBlock Text="Drop a .png on a card to replace that map. On a replaced part it becomes the replacement's own map." FontSize="11"
+                           Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap" />
+                <!-- when any map's preview failed, name the cause and the way out (the note itself picks
+                     between a held game file and a missing authored map). Appears/disappears live as maps
+                     settle (WorkbenchNodeVm.AnyThumbFailed re-raises on each map's IsThumbFailed change). -->
+                <TextBlock Text="{Binding SelectedNode.ThumbFailureNote}"
+                           IsVisible="{Binding SelectedNode.AnyThumbFailed}" TextWrapping="Wrap"
+                           Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
+                <ItemsControl ItemsSource="{Binding SelectedNode.Maps}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <WrapPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="wb:WorkbenchMapVm">
+                      <!-- ~210px card: thumbnail, role + ✎, wrapping texture name (≤2 lines,
+                           tooltip keeps the full name), dimensions, then the Open/Revert action row. The card's
+                           copy button is dropped (the material header's "copy name" covers it) to leave room. -->
+                      <Border Width="210" Margin="0,0,8,8" Background="{StaticResource HudPanelAltBrush}"
+                              BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3"
+                              Padding="8,8">
+                        <StackPanel Spacing="5">
+                          <!-- thumbnail slot: shimmer → image OR "no preview", exactly one visible -->
+                          <Panel Height="104">
+                            <Border Classes="shimmer" CornerRadius="2" IsVisible="{Binding IsThumbLoading}" />
+                            <!-- a blanked slot's card still shows the game texture, which the build will not
+                                 ship: dimmed, so the picture stops arguing with the word under it -->
+                            <Image Source="{Binding Thumbnail}" Stretch="Uniform" IsVisible="{Binding HasThumb}"
+                                   Classes.off="{Binding IsBlanked}" />
+                            <Border IsVisible="{Binding IsThumbFailed}" CornerRadius="2"
+                                    Background="{StaticResource HudPanelBrush}"
+                                    BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1">
+                              <TextBlock Text="no preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                         Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
+                            </Border>
+                            <!-- M8: a local busy cue on the acting card while its own Open/Revert runs (first-touch
+                                 materialize can take seconds) — the shimmer idiom over the thumb slot. -->
+                            <Border Classes="shimmer" CornerRadius="2" IsVisible="{Binding IsBusy}" />
+                          </Panel>
+                          <!-- meta (F11: no raw shader-slot token; MapLabel + texture name carry identity) -->
+                          <StackPanel Spacing="1">
+                            <Grid ColumnDefinitions="*,Auto">
+                              <!-- the role line carries the channel legend for a packed map (RMO); a row
+                                   whose role name says everything binds a null tip, shows no glyph, and the
+                                   line reads as a plain label. The ℹ is the invitation to hover — a bare
+                                   acronym gives no cue that anything is behind it. The transparent
+                                   background makes the whole line hit-testable, not just the glyphs. -->
+                              <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4"
+                                          Background="Transparent" ToolTip.Tip="{Binding MapInfo}">
+                                <TextBlock Text="{Binding MapLabel}" Foreground="{StaticResource HudTextBrush}"
+                                           FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                <TextBlock Text="ℹ" IsVisible="{Binding HasMapInfo}" FontSize="11"
+                                           Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
+                              </StackPanel>
+                              <TextBlock Grid.Column="1" Text="✎" IsVisible="{Binding HasEditBadge}"
+                                         Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center"
+                                         ToolTip.Tip="Edited" />
+                            </Grid>
+                            <TextBlock Text="{Binding TextureName}" Foreground="{StaticResource HudSubtextBrush}"
+                                       FontSize="11" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
+                                       ToolTip.Tip="{Binding TextureName}" />
+                            <!-- an authored card shows the send-back's own image, so the name line above it
+                                 names a game texture the card is no longer showing. The origin line is what
+                                 tells the two kinds of card apart at a glance; the file itself is on hover. -->
+                            <TextBlock Text="{x:Static wb:WorkbenchMapVm.AuthoredOrigin}"
+                                       IsVisible="{Binding HasOrigin}" FontSize="11"
+                                       Foreground="{StaticResource HudAccentBrush}"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTip.Tip="{Binding AuthoredFileName}" />
+                            <!-- a blanked slot names no file, so the card still shows the game texture it
+                                 replaces. This line is the only thing that says the slot ships flat, and it
+                                 carries the role line's ℹ for the same reason: one word whose meaning lives
+                                 in the tooltip gives no cue that anything is behind it. -->
+                            <StackPanel Orientation="Horizontal" Spacing="4" Background="Transparent"
+                                        IsVisible="{Binding IsBlanked}"
+                                        ToolTip.Tip="The build ships a flat map on this slot, not the part's own.">
+                              <TextBlock Text="{x:Static wb:WorkbenchMapVm.BlankedNote}" FontSize="11"
+                                         Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
+                              <TextBlock Text="ℹ" FontSize="11" Foreground="{StaticResource HudSubtextBrush}"
+                                         VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="{Binding Dimensions}" Foreground="{StaticResource HudSubtextBrush}"
+                                       FontSize="11" />
+                          </StackPanel>
+                          <!-- action row: Open (materialize-if-needed, then image editor) +
+                               UV guide (the wireframe of every island that lands on this texture) + Revert -->
+                          <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Button Content="Open" Padding="10,2" FontSize="11"
+                                    ToolTip.Tip="Edit this texture in an image editor"
+                                    IsEnabled="{Binding !IsBusy}"
+                                    Command="{Binding $parent[UserControl].((wb:WorkbenchVm)DataContext).OpenMapCommand}"
+                                    CommandParameter="{Binding}" />
+                            <Button Content="UV" Padding="10,2" FontSize="11"
+                                    ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding UvHint}"
+                                    IsEnabled="{Binding CanOpenUvGuide}"
+                                    Command="{Binding $parent[UserControl].((wb:WorkbenchVm)DataContext).OpenMapUvGuideCommand}"
+                                    CommandParameter="{Binding}" />
+                            <Button Content="Revert" Padding="10,2" FontSize="11"
+                                    ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding RevertHint}"
+                                    IsEnabled="{Binding CanRevert}"
+                                    Command="{Binding $parent[UserControl].((wb:WorkbenchVm)DataContext).RevertMapCommand}"
+                                    CommandParameter="{Binding}" />
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+
+              <!-- skeleton: a read-only, collapsible bone tree. Every node collapsed by default; the
+                   shared TreeViewItem style two-way binds each node's IsExpanded, and expanding a single-child
+                   node chain-expands its child (SkeletonNodeVm). -->
+              <TreeView IsVisible="{Binding SelectedNode.HasSkeletonTree}" MaxHeight="360"
+                        ItemsSource="{Binding SelectedNode.SkeletonTree}" Background="Transparent" Padding="0">
+                <TreeView.DataTemplates>
+                  <TreeDataTemplate DataType="wb:SkeletonNodeVm" ItemsSource="{Binding Children}">
+                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudSubtextBrush}"
+                               FontSize="12" FontFamily="Consolas,monospace" VerticalAlignment="Center" />
+                  </TreeDataTemplate>
+                </TreeView.DataTemplates>
+              </TreeView>
+
+              <!-- animations / loose: a simple line list -->
+              <ScrollViewer IsVisible="{Binding SelectedNode.HasInspectorLines}" MaxHeight="360"
+                            VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding SelectedNode.InspectorLines}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <TextBlock Text="{Binding}" Foreground="{StaticResource HudSubtextBrush}"
+                                 FontSize="12" FontFamily="Consolas,monospace" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </StackPanel>
+          </ScrollViewer>
+        </Panel>
+      </Border>
+    </Grid>
+
+    <!-- Forward affordance to Build (S9 inc4: no Check step), styled like the Pick footer's "Next: Edit ▸";
+         ungated — Build validates what it ships and refuses there.
+         Binds to the workbench VM's own GoToBuild verb (which routes through the shell) — the footer never
+         reaches the hosting window. The star column carries the verb status line — trimmed, full text on hover. -->
+    <Grid Grid.Row="3" Margin="0,10,0,0" ColumnDefinitions="Auto,*,Auto">
+      <!-- explicit Cancel for the navigation-proof Materialize-all batch — visible only while it runs -->
+      <Button Grid.Column="0" Content="Cancel" IsVisible="{Binding IsMaterializingAll}" Margin="0,0,10,0"
+              Padding="12,6" Command="{Binding CancelMaterializeAllCommand}"
+              ToolTip.Tip="Stop materializing the remaining files" />
+      <TextBlock Grid.Column="1" Text="{Binding Status}" VerticalAlignment="Center" Margin="0,0,10,0"
+                 Foreground="{StaticResource HudTextBrush}" FontSize="13"
+                 TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis"
+                 ToolTip.Tip="{Binding Status}" />
+      <Button Grid.Column="2" Content="Next: Build ▸" Classes="primary" FontSize="15" Padding="18,10"
+              Command="{Binding GoToBuildCommand}" />
+    </Grid>
+  </Grid>
+</UserControl>

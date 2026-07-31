@@ -1,0 +1,815 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Remold.App.ViewModels"
+        xmlns:core="using:Remold.Core"
+        xmlns:views="using:Remold.App.Views"
+        x:Class="Remold.App.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="1200" Height="800"
+        MinWidth="760" MinHeight="480"
+        Background="{StaticResource HudBgBrush}"
+        Icon="/Assets/icon.ico"
+        Title="Doll Remolding Lab">
+
+  <Window.Resources>
+    <views:StringEqualsConverter x:Key="StrEq" />
+  </Window.Resources>
+
+  <Window.Styles>
+    <!-- Recent-mods rows (home screen). The default FluentTheme Button chrome highlighted inconsistently on
+         click; pin every interaction state to the HUD brushes on the row's own ContentPresenter so ONLY the
+         hovered/pressed row lights (there is no per-row selection state — each row is an independent Button). -->
+    <Style Selector="Button.recent /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="3" />
+    </Style>
+    <Style Selector="Button.recent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource HudPanelAltBrush}" />
+    </Style>
+    <Style Selector="Button.recent:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource HudBorderBrush}" />
+    </Style>
+
+    <!-- Build pane: a texture-map chip on a change row. Quiet by default; accented when the edit does
+         something to that map — authored on it, or blanked it. Blanked comes first so authored wins the
+         chip that did both. -->
+    <Style Selector="Border.chip">
+      <Setter Property="Background" Value="{StaticResource HudPanelAltBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource HudBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Padding" Value="7,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.chip > TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Border.chip.blanked">
+      <Setter Property="BorderBrush" Value="{StaticResource HudAccentDimBrush}" />
+    </Style>
+    <Style Selector="Border.chip.blanked > TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource HudAccentBrush}" />
+    </Style>
+    <Style Selector="Border.chip.authored">
+      <Setter Property="BorderBrush" Value="{StaticResource HudAccentDimBrush}" />
+    </Style>
+    <Style Selector="Border.chip.authored > TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource HudAccentBrush}" />
+    </Style>
+    <!-- a change left out of this build: still listed, visibly not shipping -->
+    <Style Selector="Border.off">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+
+    <!-- shared pulsing throbber dot (a background scan or export in flight) -->
+    <Style Selector="TextBlock.pulse">
+      <Setter Property="Foreground" Value="{StaticResource HudAccentBrush}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Style.Animations>
+        <Animation Duration="0:0:1.2" IterationCount="INFINITE">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+          <KeyFrame Cue="50%"><Setter Property="Opacity" Value="1.0" /></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,*,Auto">
+
+    <!-- ===== Header ===== -->
+    <Border Grid.Row="0" Background="{StaticResource HudPanelBrush}"
+            BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,0,0,1" Padding="16,10">
+      <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+        <TextBlock Grid.Column="0" Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="16"
+                   Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
+
+        <!-- Menu bar: the mod is a first-class object. Boxed + highlighted so it reads as a real
+             menu bar rather than a lone word. File/Tools/Help are all live. -->
+        <Border Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center"
+                Background="{StaticResource HudPanelAltBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                BorderThickness="1" CornerRadius="4">
+          <Menu Background="Transparent" VerticalAlignment="Center">
+            <Menu.Styles>
+              <Style Selector="Menu > MenuItem">
+                <Setter Property="Padding" Value="12,6" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Foreground" Value="{StaticResource HudTextBrush}" />
+              </Style>
+            </Menu.Styles>
+            <MenuItem Header="File">
+              <MenuItem Header="New Mod…" Click="OnNewMod" />
+              <MenuItem Header="Open Mod…" Click="OnOpenMod" />
+              <MenuItem Header="Open Recent" Name="RecentMenu" ItemsSource="{Binding RecentMods}"
+                        IsEnabled="{Binding HasRecentMods}">
+                <MenuItem.ItemTemplate>
+                  <DataTemplate x:DataType="core:RecentMod">
+                    <TextBlock Text="{Binding Name}" />
+                  </DataTemplate>
+                </MenuItem.ItemTemplate>
+                <!-- each generated child is a real command item: binding its Command (not a bubbled Click on
+                     the submenu parent) is what makes Avalonia dismiss the menu on click.
+                     Scope to RecentMenu's CHILDREN by name: a bare "MenuItem > MenuItem" also matches Open
+                     Recent itself (a MenuItem under the File MenuItem), which would give the header the typed
+                     RecentMod command with the VM as its parameter and crash CanExecute when File opens. -->
+                <MenuItem.Styles>
+                  <Style Selector="MenuItem#RecentMenu > MenuItem" x:DataType="core:RecentMod">
+                    <Setter Property="Command"
+                            Value="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}" />
+                    <Setter Property="CommandParameter" Value="{Binding}" />
+                  </Style>
+                </MenuItem.Styles>
+              </MenuItem>
+              <Separator />
+              <MenuItem Header="Save Mod" Command="{Binding SaveModCommand}" IsEnabled="{Binding !ShowHome}" />
+              <MenuItem Header="Save Mod As…" Click="OnSaveModAs" IsEnabled="{Binding !ShowHome}" />
+              <MenuItem Header="Close Mod" Command="{Binding CloseModCommand}" IsEnabled="{Binding !ShowHome}" />
+            </MenuItem>
+            <MenuItem Header="Tools">
+              <MenuItem Header="Rescan game files" Command="{Binding ReloadRosterCommand}"
+                        IsEnabled="{Binding !IsScanning}" />
+              <MenuItem Header="Locate game…" Click="OnLocateGame" />
+              <MenuItem Header="Settings…" Click="OnSettings" />
+            </MenuItem>
+            <MenuItem Header="Help">
+              <MenuItem Header="About Doll Remolding Lab" Click="OnAbout" />
+            </MenuItem>
+          </Menu>
+        </Border>
+
+        <TextBlock Grid.Column="2" Margin="16,0,0,0" VerticalAlignment="Center"
+                   Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding !ShowHome}">
+          <Run Text="Current mod:" />
+          <Run Text="{Binding ModTitleDisplay}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+        </TextBlock>
+        <!-- the launch's own line, beside the button that causes it: the status bar's notice cell carries
+             the load's warnings, and a launch must not overwrite them. Glyphless while a stage is in
+             flight, glyphed when it lands; the detail rides the tooltip as everywhere else. -->
+        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" Margin="12,0"
+                    VerticalAlignment="Center" HorizontalAlignment="Right"
+                    IsVisible="{Binding LaunchStatus.HasText}"
+                    ToolTip.Tip="{Binding LaunchStatus.Detail}">
+          <!-- a glyphless facet is a stage still running (the permission prompt gets up to a minute), so it
+               carries the app's pulsing throbber where a landed one carries its ✓ / ✗ -->
+          <TextBlock Classes="pulse" Text="◌" IsVisible="{Binding !LaunchStatus.HasGlyph}" />
+          <TextBlock Text="{Binding LaunchStatus.Glyph}" Foreground="{Binding LaunchStatus.Color}"
+                     IsVisible="{Binding LaunchStatus.HasGlyph}" />
+          <TextBlock Text="{Binding LaunchStatus.Text}" Foreground="{Binding LaunchStatus.Color}"
+                     FontSize="12" TextTrimming="CharacterEllipsis" MaxWidth="320" />
+        </StackPanel>
+        <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="8" IsVisible="{Binding !ShowHome}">
+          <Button Content="⌂ Home" Command="{Binding CloseModCommand}"
+                  ToolTip.Tip="Close this mod and return to the start screen" />
+          <Button Content="Save" Command="{Binding SaveModCommand}" />
+        </StackPanel>
+        <!-- Launching belongs to the app, not to a mod, so it stands outside the per-mod buttons and shows
+             on the start screen too. Disabled it says which half is missing (ShowOnDisabled). -->
+        <Button Grid.Column="5" Content="▶ Launch game" Margin="8,0,0,0" VerticalAlignment="Center"
+                Command="{Binding LaunchGameCommand}" IsEnabled="{Binding CanLaunchGame}"
+                ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding LaunchButtonTip}" />
+      </Grid>
+    </Border>
+
+    <!-- ===== Body: left rail + main pane (hidden on the home screen) ===== -->
+    <Grid Grid.Row="1" ColumnDefinitions="180,*" IsVisible="{Binding !ShowHome}">
+
+      <!-- left rail -->
+      <Border Grid.Column="0" Background="{StaticResource HudPanelBrush}"
+              BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,0,1,0">
+        <ListBox ItemsSource="{Binding Steps}" SelectedItem="{Binding SelectedStep}"
+                 Background="Transparent" Margin="0,8" Padding="0">
+          <ListBox.ItemTemplate>
+            <!-- the Build step carries the pane's own pulse while a build runs, so a build in flight is
+                 visible from Pick and Edit. The outer Panel picks out the Build row by its own text (the
+                 step string IS the step's identity); the inner glyph shows only while a build runs. -->
+            <DataTemplate x:DataType="x:String">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" Text="{Binding}" FontSize="14" Padding="10,8" />
+                <Panel Grid.Column="1" Margin="0,0,10,0"
+                       IsVisible="{Binding Converter={StaticResource StrEq}, ConverterParameter='③ Build'}">
+                  <TextBlock Classes="pulse" Text="◌"
+                             IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).IsModBuilding}"
+                             ToolTip.Tip="A build is running" />
+                </Panel>
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Border>
+
+      <!-- main pane -->
+      <Panel Grid.Column="1" Margin="16">
+
+        <!-- PICK -->
+        <Grid RowDefinitions="Auto,*,Auto"
+              IsVisible="{Binding SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='① Pick'}">
+          <StackPanel Grid.Row="0" Margin="0,0,0,10" Spacing="3">
+            <TextBlock Text="Pick" FontSize="15"
+                       Foreground="{StaticResource HudTextBrush}" />
+            <!-- Honest cue: unlock is PROGRESSIVE — each character's checkbox lights up as the scan confirms
+                 that character, not all-at-once when the scan finishes. -->
+            <TextBlock IsVisible="{Binding IsScanning}" Foreground="{StaticResource HudSubtextBrush}"
+                       FontSize="12" TextWrapping="Wrap"
+                       Text="Scanning game files. Characters unlock as they're confirmed." />
+          </StackPanel>
+
+          <!-- Two roster tabs over the same live roster (both TreeViews over CharacterVm): tab 1 the
+               playable characters, tab 2 the enemies/NPCs. -->
+          <TabControl Grid.Row="1" Padding="0">
+
+            <!-- Shared by the Characters and Enemies grids below — both are TreeViews over CharacterVm. -->
+            <TabControl.Styles>
+              <!-- multi-outfit character groups are default-COLLAPSED: each CharacterVm's IsExpanded (false by
+                   default) drives its row two-way; reflection binding tolerates a leaf row whose VM lacks the
+                   property (it falls back to collapsed, which a leaf ignores). -->
+              <Style Selector="TreeViewItem">
+                <Setter Property="IsExpanded" Value="{ReflectionBinding IsExpanded, Mode=TwoWay, FallbackValue=False}" />
+              </Style>
+            </TabControl.Styles>
+            <TabControl.DataTemplates>
+              <!-- Subject-level Pick (S9 inc4): each row is a picked SUBJECT (outfit) with ONE checkbox —
+                   in the mod / not. Checking adds the ledger entry; unchecking removes the subject (confirm +
+                   revert on cancel, in the VM). A subject with edits shows a single ✎. Singleton levels
+                   collapse: a one-outfit character's row IS the subject (its checkbox); a multi-outfit
+                   character is a header whose outfit rows each carry a checkbox. Double-click opens it in Edit
+                   (OnPickRowDoubleTapped → OpenSubjectInEdit, which checks it first). -->
+              <TreeDataTemplate DataType="vm:CharacterVm" ItemsSource="{Binding TreeChildren}">
+                <Panel>
+                  <!-- collapsed single-outfit subject: the character row carries the checkbox (proxies the one outfit) -->
+                  <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowSubjectBox}"
+                              Opacity="{Binding NameOpacity}" VerticalAlignment="Center">
+                    <CheckBox IsThreeState="False" IsChecked="{Binding SubjectInMod}">
+                      <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                    </CheckBox>
+                    <TextBlock Text="{Binding TreeDetail}" Foreground="{StaticResource HudSubtextBrush}"
+                               FontSize="11" VerticalAlignment="Center" IsVisible="{Binding HasTreeDetail}" />
+                    <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
+                               VerticalAlignment="Center" IsVisible="{Binding SubjectHasEdits}"
+                               ToolTip.Tip="This subject has edits in the mod." />
+                  </StackPanel>
+                  <!-- multi-outfit character: a grouping header that ALSO carries a character-level checkbox
+                       (F3, "grab an entire character at once"). Tri-state: checked = all outfits in,
+                       unchecked = none, dash = mixed (display only — a click from any state adds all). Its
+                       outfit rows still carry their own checkboxes underneath. -->
+                  <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowGroupHeader}"
+                              Opacity="{Binding NameOpacity}" VerticalAlignment="Center">
+                    <CheckBox IsThreeState="True" IsChecked="{Binding CharacterInMod}"
+                              ToolTip.Tip="Add or remove all of this character's outfits at once.">
+                      <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                    </CheckBox>
+                    <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
+                               VerticalAlignment="Center" IsVisible="{Binding CharacterHasEdits}"
+                               ToolTip.Tip="Some of this character's outfits have edits in the mod." />
+                  </StackPanel>
+                  <!-- loading: plain label, no checkbox (nothing to pick until the scan resolves the outfits) -->
+                  <TextBlock Text="{Binding DisplayName}" IsVisible="{Binding IsLoading}" Opacity="{Binding NameOpacity}"
+                             Margin="4,0,0,0" VerticalAlignment="Center"
+                             Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                </Panel>
+              </TreeDataTemplate>
+              <!-- OutfitVm is always a LEAF (parts aren't picked here), so no ItemsSource — the dead Children
+                   binding was removed with the property. -->
+              <TreeDataTemplate DataType="vm:OutfitVm">
+                <Panel>
+                  <!-- ready: the subject checkbox (in the mod / not) + ✎ when it has edits -->
+                  <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowSubjectBox}"
+                              VerticalAlignment="Center">
+                    <CheckBox IsThreeState="False" IsChecked="{Binding IsInMod}">
+                      <TextBlock Text="{Binding Label}" Foreground="{StaticResource HudAmberBrush}" />
+                    </CheckBox>
+                    <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
+                               VerticalAlignment="Center" IsVisible="{Binding HasEdits}"
+                               ToolTip.Tip="This subject has edits in the mod." />
+                  </StackPanel>
+                  <!-- loading: plain label + hint, no checkbox (we can't act on it until the scan reaches it) -->
+                  <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding IsLoading}"
+                              Margin="4,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Label}" Foreground="{StaticResource HudAmberBrush}" />
+                    <TextBlock Text="still loading…" Foreground="{StaticResource HudSubtextBrush}"
+                               FontStyle="Italic" FontSize="11" VerticalAlignment="Center" />
+                  </StackPanel>
+                </Panel>
+              </TreeDataTemplate>
+            </TabControl.DataTemplates>
+
+            <!-- ===== Characters — the outfit roster (subject picker) =====
+                 The Outfits/Animations inner mode switch retired in S9 inc4: the Pick "Animations" tab is
+                 gone. Double-click a subject to open it in Edit (checks it first). -->
+            <TabItem Header="{Binding CharactersTabHeader}">
+              <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
+                <TextBox Grid.Row="0" Watermark="Search characters…" Text="{Binding SearchText}"
+                         Margin="0,0,0,10" />
+                <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+                  <Panel>
+                    <TextBlock Text="Reading the game database…" Margin="14"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding IsLoading}" />
+                    <!-- a search that matched nothing: the box says so instead of standing empty -->
+                    <TextBlock Text="{Binding CharactersNoMatch}" Margin="14" TextWrapping="Wrap"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding HasCharactersNoMatch}" />
+                    <TreeView ItemsSource="{Binding Characters}" Background="Transparent" Padding="6"
+                              DoubleTapped="OnPickRowDoubleTapped" />
+                  </Panel>
+                </Border>
+              </Grid>
+            </TabItem>
+
+            <!-- ===== Enemies — the enemy-model roster (subject picker): EnemyData names joined to
+                 their models, one row per enemy; picks feed the same queue/ledger as Characters. ===== -->
+            <TabItem Header="{Binding EnemiesTabHeader}">
+              <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
+                <TextBox Grid.Row="0" Watermark="Search enemies…" Text="{Binding EnemySearchText}"
+                         Margin="0,0,0,10" />
+                <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+                  <Panel>
+                    <TextBlock Text="Reading game files…" Margin="14"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding IsLoading}" />
+                    <!-- a search that matched nothing, plus where a filtered duplicate door went: the tab
+                         lists an enemy under the character whose meshes it reuses, and a hole the modder
+                         can't explain is worse than the sentence -->
+                    <StackPanel Margin="14" Spacing="6" IsVisible="{Binding HasEnemiesNoMatch}">
+                      <TextBlock Text="{Binding EnemiesNoMatch}" TextWrapping="Wrap"
+                                 Foreground="{StaticResource HudSubtextBrush}" />
+                      <TextBlock Text="{Binding EnemiesNoMatchNote}" TextWrapping="Wrap" FontSize="11"
+                                 Foreground="{StaticResource HudSubtextBrush}" />
+                    </StackPanel>
+                    <TreeView ItemsSource="{Binding Enemies}" Background="Transparent" Padding="6"
+                              DoubleTapped="OnPickRowDoubleTapped" />
+                  </Panel>
+                </Border>
+              </Grid>
+            </TabItem>
+
+          </TabControl>
+
+          <!-- footer (S9 inc4): no Add/queue — Pick just selects subjects. A subject is authored in Edit
+               (double-click a row, or check it and press Next). -->
+          <Grid Grid.Row="2" Margin="0,10,0,0" ColumnDefinitions="*,Auto">
+            <Border Grid.Column="0" Padding="10,8" CornerRadius="3" VerticalAlignment="Stretch"
+                    Margin="0,0,12,0" Background="{StaticResource HudPanelAltBrush}">
+              <TextBlock VerticalAlignment="Center" Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
+                         Text="Check the subjects to include in this mod, then open one in Edit (double-click a row) to author it." />
+            </Border>
+            <Button Grid.Column="1" Content="Next: Edit ▸" Command="{Binding GoToEditCommand}" Classes="primary"
+                    FontSize="15" Padding="18,10" VerticalAlignment="Stretch" />
+          </Grid>
+        </Grid>
+        <!-- EDIT — the read-only Outfit Workbench. -->
+        <views:WorkbenchView DataContext="{Binding Workbench}"
+              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='② Edit'}" />
+        <!-- BUILD: the derived change list + the one Build action. Verbs are never authored here —
+             the pane reports what the Edit pane's state produces, and the one thing it owns is
+             whether a change ships. Then it emits the standard self-contained 3DMigoto mod folder
+             into the published root, beside its zip. -->
+        <Grid RowDefinitions="Auto,*,Auto,Auto"
+              IsVisible="{Binding SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='③ Build'}">
+          <!-- identity: what the mod is called, who made it, and the one key that toggles it in game.
+               Autosaved through the same route a change-list tick uses, behind a debounce. -->
+          <StackPanel Grid.Row="0" Margin="0,0,0,10" Spacing="8">
+            <TextBlock Text="Build" FontSize="15" Foreground="{StaticResource HudTextBrush}" />
+            <!-- the whole block is off while a build runs: the run reads the persisted workspace, and a
+                 rename mid-build would move the folder out from under it -->
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3" Padding="12,10"
+                    IsEnabled="{Binding !IsModBuilding}">
+              <Grid ColumnDefinitions="*,12,180,12,110" RowDefinitions="Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Name" FontSize="11"
+                           Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="Author" FontSize="11"
+                           Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBlock Grid.Row="0" Grid.Column="4" Text="Version" FontSize="11"
+                           Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PackageName}" Watermark="untitled mod" />
+                <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PackageAuthor}" Watermark="handle" />
+                <TextBox Grid.Row="1" Grid.Column="4" Text="{Binding PackageVersion}" Watermark="1.0" />
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Description" FontSize="11" Margin="0,10,0,0"
+                           Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBlock Grid.Row="2" Grid.Column="2" Text="Toggle key" FontSize="11" Margin="0,10,0,0"
+                           Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBox Grid.Row="3" Grid.Column="0" Text="{Binding PackageDescription}"
+                         AcceptsReturn="True" TextWrapping="Wrap" Height="72"
+                         Watermark="What this mod changes. Ships with the mod." />
+                <StackPanel Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="3" Spacing="6" VerticalAlignment="Top">
+                  <!-- the ⚠ names whatever else this key switches; a shared key is a choice, not a fault.
+                       ShowOnDisabled, like its per-row twin: the identity block goes off while a build runs,
+                       and a state that can't be read is no state -->
+                  <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Left">
+                    <TextBlock Text="⚠" FontSize="12" VerticalAlignment="Center"
+                               Foreground="{StaticResource HudAmberBrush}"
+                               IsVisible="{Binding HasPackageKeyCollision}"
+                               ToolTip.ShowOnDisabled="True"
+                               ToolTip.Tip="{Binding PackageKeyCollisionTip}" />
+                    <views:KeyCaptureButton BoundKey="{Binding PackageToggleKey, Mode=TwoWay}"
+                                            Padding="10,2" FontSize="11"
+                                            ToolTip.Tip="{Binding PackageToggleKeyTip}" />
+                    <Button Content="✕" Padding="7,2" FontSize="11"
+                            IsVisible="{Binding HasPackageToggleKey}"
+                            Command="{Binding ClearPackageToggleKeyCommand}"
+                            ToolTip.Tip="Clear the key." />
+                  </StackPanel>
+                  <TextBlock Text="No key means always on. A key toggles the mod in game. Keys reset each launch."
+                             FontSize="11" TextWrapping="Wrap"
+                             Foreground="{StaticResource HudSubtextBrush}" />
+                </StackPanel>
+              </Grid>
+            </Border>
+          </StackPanel>
+
+          <!-- the change list: one row per derived edit, grouped by subject. An unticked row stays
+               on the list, dimmed — "left out" is a visible state, never a silent absence. -->
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" IsVisible="{Binding HasBuildRows}">
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3">
+              <ItemsControl ItemsSource="{Binding BuildGroups}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:BuildGroupVm">
+                    <StackPanel>
+                      <!-- group header: the subject, its counts, and the two bulk ticks. Both go through
+                           the per-row toggle, so a bulk gesture persists exactly as a single tick does. -->
+                      <Grid Margin="12,8,12,4" ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{StaticResource HudSubtextBrush}">
+                          <Run Text="{Binding Character}" />
+                          <Run Text="·" />
+                          <Run Text="{Binding OutfitLabel}" Foreground="{StaticResource HudAmberBrush}" FontWeight="SemiBold" />
+                          <Run Text="·" />
+                          <Run Text="{Binding ChangesLabel}" />
+                          <Run Text="{Binding LeftOutLabel}" />
+                        </TextBlock>
+                        <!-- disabled, these say WHY (ShowOnDisabled): a bulk tick that refuses without a
+                             reason reads as a dead button -->
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                          <Button Content="Include all" Padding="10,2" FontSize="11"
+                                  Command="{Binding IncludeAllCommand}"
+                                  IsEnabled="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildListEnabled}"
+                                  ToolTip.ShowOnDisabled="True"
+                                  ToolTip.Tip="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildIncludeAllTip}" />
+                          <Button Content="Leave out all" Padding="10,2" FontSize="11"
+                                  Command="{Binding ExcludeAllCommand}"
+                                  IsEnabled="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildListEnabled}"
+                                  ToolTip.ShowOnDisabled="True"
+                                  ToolTip.Tip="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildExcludeAllTip}" />
+                        </StackPanel>
+                      </Grid>
+                      <ItemsControl ItemsSource="{Binding Rows}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:BuildRowVm">
+                            <Border BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,1,0,0"
+                                    Padding="12,7" Classes.off="{Binding IsExcluded}">
+                              <Grid ColumnDefinitions="Auto,200,*,Auto">
+                                <!-- ticks are refused while the list is being rebuilt or a build is
+                                     running: the row under the pointer may not be the row that lands -->
+                                <CheckBox Grid.Column="0" IsChecked="{Binding IsIncluded}" Margin="0,0,8,0"
+                                          IsEnabled="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildListEnabled}"
+                                          ToolTip.ShowOnDisabled="True"
+                                          ToolTip.Tip="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildRowTickTip}" />
+                                <TextBlock Grid.Column="1" Text="{Binding PartLabel}" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{StaticResource HudTextBrush}"
+                                           TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding PartLabel}" />
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                  <!-- the verb words come from BuildVerbWords, the one home the key-collision
+                                       tips read too: a tip that named a verb this list doesn't show would
+                                       name a change the modder can't find -->
+                                  <TextBlock Text="{x:Static vm:BuildVerbWords.ReplaceRow}" FontSize="12" VerticalAlignment="Center"
+                                             Foreground="{StaticResource HudAccentBrush}" IsVisible="{Binding IsReplace}" />
+                                  <TextBlock Text="{x:Static vm:BuildVerbWords.RetextureRow}" FontSize="12" VerticalAlignment="Center"
+                                             Foreground="{StaticResource HudAccentBrush}" IsVisible="{Binding IsRetexture}" />
+                                  <TextBlock Text="{x:Static vm:BuildVerbWords.HideRow}" FontSize="12" VerticalAlignment="Center"
+                                             Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding IsHide}" />
+                                  <ItemsControl ItemsSource="{Binding Chips}" IsVisible="{Binding HasChips}">
+                                    <ItemsControl.ItemsPanel>
+                                      <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="4" /></ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                      <DataTemplate x:DataType="vm:BuildChipVm">
+                                        <Border Classes="chip" Classes.authored="{Binding Authored}"
+                                                Classes.blanked="{Binding Blanked}"
+                                                ToolTip.Tip="{Binding Tip}">
+                                          <TextBlock Text="{Binding Text}" />
+                                        </Border>
+                                      </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                  </ItemsControl>
+                                  <TextBlock Text="· left out of this build" FontSize="12" VerticalAlignment="Center"
+                                             Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding IsExcluded}" />
+                                </StackPanel>
+                                <!-- per-change key + the hop back to where this change was authored. The
+                                     row itself stays inert: only these and the tick are interactive. The
+                                     panel carries the list gate, so every control inherits it; the key
+                                     field and its clear go off with the row's own tick as well — a change
+                                     left out of the build has no key to bind. What the key MEANS sits on
+                                     a second line under it, so a row without one keeps its height. -->
+                                <StackPanel Grid.Column="3" Spacing="4" Orientation="Vertical"
+                                            VerticalAlignment="Center" HorizontalAlignment="Right"
+                                            IsEnabled="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).BuildListEnabled}">
+                                  <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right">
+                                    <!-- the ⚠ names whatever else this key switches; a shared key is a
+                                         choice, not a fault. ShowOnDisabled, like its siblings: the panel's
+                                         gate takes the glyph with it, and a state that can't be read is
+                                         no state -->
+                                    <TextBlock Text="⚠" FontSize="12" VerticalAlignment="Center"
+                                               Foreground="{StaticResource HudAmberBrush}"
+                                               IsVisible="{Binding HasKeyCollision}"
+                                               ToolTip.ShowOnDisabled="True"
+                                               ToolTip.Tip="{Binding KeyCollisionTip}" />
+                                    <!-- both go off with the row's own tick, and both say so on hover: every
+                                         other disabled control in this pane names its state -->
+                                    <views:KeyCaptureButton BoundKey="{Binding ToggleKey, Mode=TwoWay}"
+                                                            Padding="10,2" FontSize="11"
+                                                            IsEnabled="{Binding IsIncluded}"
+                                                            ToolTip.ShowOnDisabled="True"
+                                                            ToolTip.Tip="{Binding ToggleKeyTip}" />
+                                    <Button Content="✕" Padding="7,2" FontSize="11"
+                                            IsVisible="{Binding HasToggleKey}"
+                                            IsEnabled="{Binding IsIncluded}"
+                                            Command="{Binding ClearKeyCommand}"
+                                            ToolTip.ShowOnDisabled="True"
+                                            ToolTip.Tip="{Binding ClearKeyTip}" />
+                                    <Button Content="Edit" Padding="10,2" FontSize="11"
+                                            Command="{Binding EditCommand}"
+                                            ToolTip.Tip="Open this change in ② Edit" />
+                                  </StackPanel>
+                                  <!-- how the key starts, and what it leaves behind. Only a Replace has a
+                                       choice of off: a Hide has no replacement of its own, so vanilla is
+                                       its only one. "Starts off" is every keyed row's box, so it sits LAST
+                                       against the row's right edge and reads as one column down the list;
+                                       the one that comes and goes moves beside it, not under it. -->
+                                  <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right"
+                                              IsVisible="{Binding ShowsKeyState}">
+                                    <CheckBox Content="Hides when off" FontSize="11"
+                                              IsChecked="{Binding HideWhenOff}"
+                                              IsVisible="{Binding ShowsKeyOffMode}"
+                                              IsEnabled="{Binding IsIncluded}"
+                                              ToolTip.ShowOnDisabled="True"
+                                              ToolTip.Tip="{Binding HideWhenOffTip}" />
+                                    <CheckBox Content="Starts off" FontSize="11"
+                                              IsChecked="{Binding StartsOff}"
+                                              IsEnabled="{Binding IsIncluded}"
+                                              ToolTip.ShowOnDisabled="True"
+                                              ToolTip.Tip="{Binding StartsOffTip}" />
+                                  </StackPanel>
+                                </StackPanel>
+                              </Grid>
+                            </Border>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Border>
+          </ScrollViewer>
+          <!-- nothing derived: the sentence stands alone, with no empty panel drawn around it. The size is
+               the pane's own, not the theme's larger default. The line height is explicit and generous: the
+               circled step glyph (②) ascends and descends past Latin metrics, so a line box measured from
+               the font's own metrics clips it top and bottom. -->
+          <TextBlock Grid.Row="1" IsVisible="{Binding !HasBuildRows}" Text="{Binding BuildEmptyText}"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="420"
+                     FontSize="12" LineHeight="20" TextWrapping="Wrap" TextAlignment="Center"
+                     Foreground="{StaticResource HudSubtextBrush}" />
+
+          <StackPanel Grid.Row="2" Spacing="8" Margin="0,12,0,0">
+            <!-- warnings first: what the mod can't do, or where it differs from what was authored. They
+                 come BEFORE the terminal action, so a problem is read on the way to the button. -->
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3" Padding="12,8" IsVisible="{Binding HasBuildWarnings}">
+              <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding BuildWarnings}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <Grid ColumnDefinitions="Auto,*" Margin="0,1">
+                        <TextBlock Grid.Column="0" Text="⚠" FontSize="12" Margin="0,0,6,0"
+                                   Foreground="{StaticResource HudAmberBrush}" />
+                        <TextBlock Grid.Column="1" Text="{Binding}" FontSize="12" TextWrapping="Wrap"
+                                   Foreground="{StaticResource HudSubtextBrush}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+
+            <!-- disclosures with nothing to fix: an edit's reach beyond the picked subject and how the
+                 run scoped it. Run-owned, so the block appears only after a build. -->
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3" Padding="12,8" IsVisible="{Binding HasBuildInfos}">
+              <ScrollViewer MaxHeight="140" VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding BuildInfos}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <Grid ColumnDefinitions="Auto,*" Margin="0,1">
+                        <TextBlock Grid.Column="0" Text="ℹ" FontSize="12" Margin="0,0,6,0"
+                                   Foreground="{StaticResource HudSubtextBrush}" />
+                        <TextBlock Grid.Column="1" Text="{Binding}" FontSize="12" TextWrapping="Wrap"
+                                   Foreground="{StaticResource HudSubtextBrush}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+
+            <!-- the terminal action of the flow, and the step after it -->
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3" Padding="12,10">
+              <!-- Grid, not a StackPanel: the destination line is the star column, so a long mod name trims
+                   with an ellipsis instead of pushing the pane wider than the window. The full path is on its
+                   tooltip either way. -->
+              <Grid ColumnDefinitions="Auto,Auto,*">
+                <!-- both disabled buttons say why on hover (ShowOnDisabled), so neither of the flow's two
+                     terminal actions ever sits greyed out without a reason. Install renders before there
+                     is a build for the same reason: its reason IS "Build the mod first." -->
+                <Button Grid.Column="0" Content="Build Mod ▸" Classes="primary" FontSize="15" Padding="20,8"
+                        Margin="0,0,12,0"
+                        Command="{Binding BuildModCommand}" IsEnabled="{Binding CanBuildMod}"
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding BuildButtonTip}" />
+                <Button Grid.Column="1" Content="Install" Command="{Binding InstallBuildCommand}"
+                        VerticalAlignment="Center" Margin="0,0,12,0"
+                        IsEnabled="{Binding CanInstallBuild}"
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding InstallButtonTip}" />
+                <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="12"
+                           Foreground="{StaticResource HudSubtextBrush}"
+                           TextTrimming="CharacterEllipsis"
+                           ToolTip.Tip="{Binding BuildDestinationTip}">
+                  <Run Text="Builds to" />
+                  <Run Text="{Binding BuildDestination}" />
+                  <Run Text="· zip for sharing" />
+                </TextBlock>
+              </Grid>
+            </Border>
+
+            <!-- the last build's result: what landed, where it is, and what to do with it. It STAYS after
+                 an edit that changes what would ship — the folder is still there and still installable —
+                 and says on its own line that it no longer matches. -->
+            <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
+                    BorderThickness="1" CornerRadius="3" Padding="12,10" IsVisible="{Binding HasLastBuild}">
+              <StackPanel Spacing="6">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                  <TextBlock VerticalAlignment="Center" Foreground="{StaticResource HudAccentBrush}"
+                             Text="{Binding BuiltPackage, StringFormat='✓ Built {0}'}" />
+                  <TextBlock VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource HudSubtextBrush}"
+                             Text="{Binding BuildSizeSummary}" IsVisible="{Binding HasBuildSize}" />
+                  <Button Content="Show in folder" Command="{Binding OpenBuildFolderCommand}" />
+                  <Button Content="Show installed" Command="{Binding ShowInstalledFolderCommand}"
+                          IsVisible="{Binding HasLastInstall}"
+                          ToolTip.Tip="Reveal the installed folder in the Mods folder" />
+                  <Button Content="Show zip" Command="{Binding ShowBuildZipCommand}"
+                          IsVisible="{Binding HasBuildZip}"
+                          ToolTip.Tip="Reveal the zip in the file browser" />
+                  <Button Content="Open build log" Command="{Binding OpenBuildLogCommand}"
+                          IsEnabled="{Binding HasBuildLog}" ToolTip.Tip="{Binding BuildLogTip}" />
+                </StackPanel>
+                <TextBlock FontSize="12" Foreground="{StaticResource HudAmberBrush}" TextWrapping="Wrap"
+                           IsVisible="{Binding BuildResultStale}"
+                           Text="{x:Static vm:MainWindowViewModel.StaleResultLine}" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <!-- footer status line: the pane's OWN channel (build progress, result, failure, ready
+               summary). A save/open/autosave writes the mod-level line, not this one, so a ⛔ here
+               holds until the next build or a re-entry into the step. -->
+          <Grid Grid.Row="3" Margin="0,12,0,0" ColumnDefinitions="Auto,Auto,*,Auto">
+            <TextBlock Grid.Column="0" Classes="pulse" Text="◌" Margin="0,0,6,0"
+                       IsVisible="{Binding Footer.ShowPulse}" />
+            <TextBlock Grid.Column="1" Text="⛔" Margin="0,0,6,0" VerticalAlignment="Center"
+                       Foreground="{StaticResource HudErrorBrush}" IsVisible="{Binding Footer.IsFailure}" />
+            <TextBlock Grid.Column="2" Text="{Binding Footer.Text}" VerticalAlignment="Center"
+                       Foreground="{StaticResource HudTextBrush}" FontSize="13"
+                       TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis"
+                       ToolTip.Tip="{Binding Footer.Text}" />
+            <Button Grid.Column="3" Content="Open build log" Margin="10,0,0,0"
+                    IsVisible="{Binding Footer.ShowLogButton}" IsEnabled="{Binding HasBuildLog}"
+                    Command="{Binding OpenBuildLogCommand}" ToolTip.Tip="{Binding BuildLogTip}" />
+          </Grid>
+        </Grid>
+      </Panel>
+    </Grid>
+
+    <!-- ===== Home / start screen (the hub between mods; background scan runs behind it) ===== -->
+    <Border Grid.Row="1" IsVisible="{Binding ShowHome}" Background="{StaticResource HudBgBrush}">
+      <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Width="520" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+
+        <TextBlock Grid.Row="0" Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="26"
+                   Foreground="{StaticResource HudAccentBrush}" HorizontalAlignment="Center" />
+        <TextBlock Grid.Row="1" Margin="0,6,0,28" HorizontalAlignment="Center" TextAlignment="Center"
+                   Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
+                   Text="Start a new mod, or reopen a recent one." />
+
+        <!-- primary actions -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+          <Button Content="＋  New mod" Click="OnNewMod" Classes="primary"
+                  FontSize="15" Padding="22,12" />
+          <Button Content="Open mod…" Click="OnOpenMod" FontSize="15" Padding="22,12" />
+        </StackPanel>
+
+        <!-- recent mods -->
+        <Border Grid.Row="3" Margin="0,28,0,0" Background="{StaticResource HudPanelBrush}"
+                BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="4"
+                Padding="16,12" IsVisible="{Binding HasRecentMods}">
+          <StackPanel Spacing="8">
+            <TextBlock Text="Recent mods" Foreground="{StaticResource HudSubtextBrush}" FontWeight="SemiBold" FontSize="12" />
+            <ItemsControl ItemsSource="{Binding RecentMods}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="core:RecentMod">
+                  <Button Classes="recent" Margin="0,1" Padding="10,7" HorizontalAlignment="Stretch"
+                          HorizontalContentAlignment="Left"
+                          Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}"
+                          CommandParameter="{Binding}">
+                    <StackPanel>
+                      <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                      <TextBlock Text="{Binding Path}" Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
+                                 TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+
+        <!-- background scan progress -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8" Margin="0,22,0,0"
+                    HorizontalAlignment="Center" IsVisible="{Binding IsScanning}">
+          <TextBlock Classes="pulse" Text="◌" />
+          <TextBlock Text="{Binding StatusChars}" Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ===== Status bar =====
+         Grid, not a StackPanel: the roster cell is the single star column that absorbs slack and ellipsizes,
+         and every warning/error rides the notice cell (colored glyph + short label, full detail in its
+         tooltip). Nothing here can run off the right edge — long remedies live in tooltips, never inline. -->
+    <Border Grid.Row="2" Background="{StaticResource HudPanelBrush}"
+            BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,1,0,0" Padding="14,6">
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto">
+        <!-- Game facet -->
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                    ToolTip.Tip="{Binding GameStatus.Detail}">
+          <TextBlock Text="{Binding GameStatus.Glyph}" Foreground="{Binding GameStatus.Color}"
+                     IsVisible="{Binding GameStatus.HasGlyph}" />
+          <TextBlock Text="{Binding GameStatus.Text}" Foreground="{StaticResource HudSubtextBrush}" />
+        </StackPanel>
+        <TextBlock Grid.Column="1" Text="·" Margin="12,0" VerticalAlignment="Center"
+                   Foreground="{StaticResource HudBorderBrush}" />
+        <!-- Roster cell: the flexible column — trims with an ellipsis, full text in its tooltip -->
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <TextBlock Classes="pulse" Text="◌" IsVisible="{Binding IsScanning}" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding StatusChars}" Foreground="{StaticResource HudSubtextBrush}"
+                     TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding StatusChars}" />
+        </StackPanel>
+        <!-- Background-work cell: one line while long disk work runs behind the modder, blank otherwise —
+             plus the one ending that is not a blank, a measurement that failed. Running work pulses and
+             carries no glyph; the failure carries the ⚠ and its remedy in the tooltip. The label trims, so
+             the tooltip is the only place the whole answer is guaranteed to survive. -->
+        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                    Margin="12,0,0,0" IsVisible="{Binding BackgroundStatus.HasText}"
+                    ToolTip.Tip="{Binding BackgroundStatus.Detail}">
+          <TextBlock Classes="pulse" Text="◌" VerticalAlignment="Center"
+                     IsVisible="{Binding !BackgroundStatus.HasGlyph}" />
+          <TextBlock Text="{Binding BackgroundStatus.Glyph}" Foreground="{Binding BackgroundStatus.Color}"
+                     VerticalAlignment="Center" IsVisible="{Binding BackgroundStatus.HasGlyph}" />
+          <TextBlock Text="{Binding BackgroundStatus.Text}" Foreground="{StaticResource HudSubtextBrush}"
+                     TextTrimming="CharacterEllipsis" MaxWidth="180" />
+        </StackPanel>
+        <!-- Notice cell: warnings / errors — colored glyph + short label, full detail in the tooltip.
+             Rescan rides the cell only for a load blocked on the game, so the remedy its notice names is
+             one click away instead of a Tools-menu trip. -->
+        <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                    Margin="12,0,0,0" IsVisible="{Binding NoticeStatus.HasGlyph}"
+                    ToolTip.Tip="{Binding NoticeStatus.Detail}">
+          <TextBlock Text="{Binding NoticeStatus.Glyph}" Foreground="{Binding NoticeStatus.Color}" />
+          <TextBlock Text="{Binding NoticeStatus.Text}" Foreground="{Binding NoticeStatus.Color}"
+                     TextTrimming="CharacterEllipsis" MaxWidth="360" />
+          <Button Content="Rescan" Command="{Binding ReloadRosterCommand}"
+                  IsVisible="{Binding GameRescanOffered}" Padding="8,1" FontSize="11"
+                  VerticalAlignment="Center" />
+        </StackPanel>
+        <!-- Blender facet -->
+        <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                    Margin="12,0,0,0" ToolTip.Tip="{Binding BlenderStatus.Detail}">
+          <TextBlock Text="{Binding BlenderStatus.Glyph}" Foreground="{Binding BlenderStatus.Color}"
+                     IsVisible="{Binding BlenderStatus.HasGlyph}" />
+          <TextBlock Text="{Binding BlenderStatus.Text}" Foreground="{StaticResource HudSubtextBrush}" />
+        </StackPanel>
+        <!-- 3DMigoto facet: the configured loader. Install and Launch are the only things that need
+             it, which its tooltip says — nothing else in the app is gated on it. -->
+        <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                    Margin="12,0,0,0" ToolTip.Tip="{Binding MigotoStatus.Detail}">
+          <TextBlock Text="{Binding MigotoStatus.Glyph}" Foreground="{Binding MigotoStatus.Color}"
+                     IsVisible="{Binding MigotoStatus.HasGlyph}" />
+          <TextBlock Text="{Binding MigotoStatus.Text}" Foreground="{StaticResource HudSubtextBrush}" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+  </Grid>
+</Window>

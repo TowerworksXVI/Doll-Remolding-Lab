@@ -1,0 +1,81 @@
+using System.Collections.Generic;
+using Remold.Core.Skeleton;
+using Xunit;
+
+namespace Remold.Core.Tests;
+
+/// <summary>
+/// The bone-name-hash rule and root-anchored path derivation. The hash fixtures are pinned body-bone pairs
+/// (constants, not game data), so the CRC32 rule is asserted independently of any live bundle. The corpus
+/// scan itself needs a real game dir and is not exercised here.
+/// </summary>
+public class BoneTableTests
+{
+    [Theory]
+    [InlineData("root/Root_M", 0x20c78f46u)]
+    [InlineData("root/Root_M/Spine1_M", 0xb0e35784u)]
+    [InlineData("root/Root_M/Spine1_M/Spine2_M", 0xd7f8a476u)]
+    [InlineData("root/Root_M/Spine1_M/Spine2_M/Chest_M", 0x81115162u)]
+    [InlineData("root/Root_M/Spine1_M/Spine2_M/Chest_M/Neck_M", 0x4bd8ec42u)]
+    [InlineData("root/Root_M/Spine1_M/Spine2_M/Chest_M/Neck_M/Head_M", 0xa8c83d16u)]
+    [InlineData("root/Root_M/Hip_R", 0xbc42fa3fu)]
+    [InlineData("root/Root_M/Hip_L", 0x464dc75cu)]
+    [InlineData("root/Root_M/foot_R_Ctrl3_Jnt_skin", 0x07c1e6edu)]   // the 7-hex-digit one (leading zero)
+    public void Hash_MatchesPinnedBoneHashes(string path, uint expected)
+    {
+        Assert.Equal(expected, BoneTable.Hash(path));
+    }
+
+    [Fact]
+    public void CanonicalBonePath_CharacterRigAnchorsOnRoot()
+    {
+        // a real chain: the skin-mesh root wraps "root", which holds the skeleton
+        var chain = new[] { "c_TalviSSR01_slg_body", "root", "Root_M", "Spine1_M" };
+        Assert.Equal("root/Root_M/Spine1_M", BoneTable.CanonicalBonePath(chain));
+    }
+
+    [Fact]
+    public void CanonicalBonePath_AnchorsOnRootRegardlessOfWrapperDepth()
+    {
+        // deeper nesting under prefab/model wrappers must not change the hashed path
+        var shallow = new[] { "model", "root", "Root_M", "Hip_L" };
+        var deep = new[] { "Prefab", "Model", "Armature", "root", "Root_M", "Hip_L" };
+        Assert.Equal("root/Root_M/Hip_L", BoneTable.CanonicalBonePath(shallow));
+        Assert.Equal(BoneTable.CanonicalBonePath(shallow), BoneTable.CanonicalBonePath(deep));
+        Assert.Equal(0x464dc75cu, BoneTable.Hash(BoneTable.CanonicalBonePath(deep)!));
+    }
+
+    [Fact]
+    public void CanonicalBonePath_PropRigAnchorsOnRootM_WhenNoRootNode()
+    {
+        // a skinned prop (Solvig's beverage) has no "root" wrapper — its rig starts at Root_M
+        var prop = new[] { "SolvigSSR01@c_SolvigSSR01_CommandCenterBack_Beverage1", "Root_M", "Beverage1", "ring" };
+        Assert.Equal("Root_M/Beverage1/ring", BoneTable.CanonicalBonePath(prop));
+        // a character chain (root present) must still prefer "root", not its inner Root_M
+        var character = new[] { "c_X_slg_body", "root", "Root_M", "Hip_L" };
+        Assert.Equal("root/Root_M/Hip_L", BoneTable.CanonicalBonePath(character));
+    }
+
+    [Fact]
+    public void CanonicalBonePath_NullForNonSkeletonTransforms()
+    {
+        Assert.Null(BoneTable.CanonicalBonePath(new[] { "scene", "Camera", "lens" }));   // no entry node
+        Assert.Null(BoneTable.CanonicalBonePath(new[] { "wrapper", "root" }));            // "root" is the leaf, no Root_M
+    }
+
+    [Fact]
+    public void Resolved_CountsOnlyHashesInTheTable()
+    {
+        var table = new BoneTable
+        {
+            HashToPath = new Dictionary<uint, string>
+            {
+                [0x20c78f46u] = "root/Root_M",
+                [0xb0e35784u] = "root/Root_M/Spine1_M",
+            },
+        };
+        Assert.Equal("root/Root_M/Spine1_M", table.Path(0xb0e35784u));
+        Assert.Null(table.Path(0xdeadbeefu));
+        Assert.Equal(2, table.Resolved(new[] { 0x20c78f46u, 0xb0e35784u, 0xdeadbeefu }));
+    }
+}

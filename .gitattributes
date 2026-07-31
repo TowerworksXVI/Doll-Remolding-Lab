@@ -1,0 +1,4 @@
+# Golden emitted-text assets are byte-exact contracts (mod.ini/hlsl = LF, *.json = CRLF, as the
+# emitter writes them). No EOL conversion — an autocrlf rewrite on checkout would silently break
+# the byte-for-byte golden comparison.
+tests/Remold.Core.Tests/Migoto/golden/** -text

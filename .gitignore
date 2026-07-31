@@ -1,0 +1,25 @@
+# --- .NET build output ---
+bin/
+obj/
+*.user
+.vs/
+
+# --- local scratch output (never tracked) ---
+/out/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+
+# --- defensive: game-derived or bulky binaries never enter this repo ---
+# (deliberately broad; loosen per-file only with an explicit decision)
+*.bundle
+*.glb
+*.blend
+*.dds
+*.buf
+*.bytes
+*.zip
+
+# agent worktrees (separate checkouts of this repo)
+.claude/
