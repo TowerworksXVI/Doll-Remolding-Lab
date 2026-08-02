@@ -60,14 +60,17 @@ game. 3DMigoto has to hook the game process as it comes up, so the order matters
 - Windows 10 or 11, x64.
 - **Girls' Frontline 2: Exilium**, installed. Steam and standalone installs are both detected; the
   folder can also be set by hand.
-- A GFL2-configured 3DMigoto loader, installed separately. Two are validated: the
+- A GFL2-configured 3DMigoto loader, installed separately. Recommended:
+  [DollMI](https://github.com/TowerworksXVI/DollMI), this app's companion mod manager — its bundled
+  `3dmigoto\` host ships GFL2-ready. Two third-party loaders are also validated: the
   [3Dmigoto Mod Loader](https://www.nexusmods.com/girlsfrontline2exilium/mods/4) on Nexus, and
   [SSMT4](https://github.com/StarBobis/SSMT4-Alpha) (create a GFL2 profile; SSMT fetches a 3DMigoto
-  for it). The mods fire through a shader-regex hook those loaders' `d3dx.ini` carries: plain stock
-  3DMigoto ships no GFL2 config and no hook, and a 3DMigoto set up for another game never attaches
-  to GFL2, so neither works as-is. Point Settings at the loader itself — `3DMigoto Loader.exe`, or
-  SSMT's per-game `Run.exe` — and built mods install into the `Mods\` folder beside it. Until it is
-  set, Install and Launch stay off and say why.
+  for it) — they work today, but support for third-party loaders may narrow to DollMI in a future
+  release. The mods fire through a hook those loaders' `d3dx.ini` carries: plain stock 3DMigoto
+  ships no GFL2 config and no hook, and a 3DMigoto set up for another game never attaches to GFL2,
+  so neither works as-is. Point Settings at the loader itself — DollMI's or Nexus's
+  `3DMigoto Loader.exe`, or SSMT's per-game `Run.exe` — and built mods install into the `Mods\`
+  folder beside it. Until it is set, Install and Launch stay off and say why.
 - **Blender**, for mesh editing only. Retexture-only and hide-only mods need no Blender. It is
   detected from `PATH`, the registry, and the usual install folders, and the exact executable can be
   set in Settings. Any Blender 4.x or 5.x works, validated on 4.3 and 5.1.
@@ -76,8 +79,9 @@ game. 3DMigoto has to hook the game process as it comes up, so the order matters
 
 ## Install
 
-Download the release zip, extract it anywhere, and run `Remold.App.exe`. The whole folder is the app:
-it is a self-contained win-x64 build, so there is no .NET runtime to install.
+Download the release zip and extract it anywhere — it unpacks to a single `Doll Remolding Lab`
+folder; run `Doll Remolding Lab.exe` inside it. That folder is the whole app: a self-contained
+win-x64 build, so there is no .NET runtime to install.
 
 Settings, the mods library and the first-run record live **beside the exe**, so a copied folder
 carries its state and extracting an update over the top keeps it. An update extracted over an

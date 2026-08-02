@@ -191,6 +191,15 @@ public sealed record PoolBuildRequest
     /// <summary>The keys whose variable is declared 0, so what they gate starts OFF and the first press
     /// turns it on. A key not listed starts on. See <see cref="MigotoEmitter.KeyDeclarations"/>.</summary>
     public IReadOnlyCollection<string>? KeysStartingOff { get; init; }
+
+    /// <summary>Guards for the sections whose hash also fires on a sibling mesh's draws, one per guarded
+    /// hash. See <see cref="TwinGuard"/>.</summary>
+    public IReadOnlyList<TwinGuard>? TwinGuards { get; init; }
+
+    /// <summary>The external writers of the guards' sticky variables — sections that identify a sibling
+    /// by drawing at all rather than by a texture bound at the guarded draw. See
+    /// <see cref="TwinSighting"/>.</summary>
+    public IReadOnlyList<TwinSighting>? TwinSightings { get; init; }
 }
 
 /// <summary>One replaced LOD tier of a pool part: <paramref name="Part"/> is the pool part name,
@@ -297,6 +306,25 @@ public enum StockMapKind { Albedo, Normal, Rmo }
 /// this hash can name a row the author can find. Empty when the caller has no label.</para></summary>
 public sealed record StockMapTag(string Hash, StockMapKind Kind, string Part = "");
 
+/// <summary>One probe target of a twin guard: seeing a texture with <see cref="TagValue"/> bound at
+/// the guarded draw identifies the sibling numbered <see cref="Verdict"/>.</summary>
+public sealed record TwinProbeTag(string TexHash, int TagValue, int Verdict);
+
+/// <summary>A guard for a section whose hash fires on several meshes' draws. The probe writes the
+/// sticky per-signature variable <see cref="Var"/> whenever a tagged texture identifies a sibling;
+/// the section acts while the variable holds any of <see cref="OwnVerdicts"/> (ascending). The variable
+/// is never reset per frame: passes that bind no identifying texture act on the last identification.
+///
+/// <para>More than one verdict is what a suppression covering SEVERAL siblings needs — one section skips
+/// on one hash, so hiding two meshes that share a signature is one section admitting both.</para></summary>
+public sealed record TwinGuard(string Hash, string Var, IReadOnlyList<int> OwnVerdicts,
+    IReadOnlyList<TwinProbeTag> Tags);
+
+/// <summary>An external sighting for a sticky twin variable: whenever the section owning
+/// <see cref="Hash"/> fires, <see cref="Var"/> takes <see cref="Verdict"/> — proof by a mesh the
+/// signature group's meshes are worn (or not worn) with.</summary>
+public sealed record TwinSighting(string Hash, string Var, int Verdict);
+
 /// <summary>
 /// Assembles a runnable pooled 3DMigoto mesh-swap mod folder — one pipeline per Replace: captures each
 /// pool part's posed vb0 + draw constants, recovers each part's bone palette into that pipeline's union
@@ -332,9 +360,30 @@ public sealed partial class MigotoEmitter
     internal static int RetexTag(string stockHash) =>
         1_000_000 + (int)(Convert.ToUInt32(stockHash, 16) % 15_000_000);
 
+    /// <summary>The probe tag value for each stock base color a twin guard identifies a sibling by: the
+    /// albedo kind value where the build's own slot tags carry it, else the value derived from the hash.
+    /// This owns the assignment the emitted tag sections follow — slot-tag dedupe is first-kind-wins,
+    /// and a scoped retexture takes its hash back from a slot tag, so that hash derives again.</summary>
+    public static Func<string, int> TwinTagValues(IEnumerable<StockMapTag> slotTags,
+        IEnumerable<string> scopedStockHashes)
+    {
+        var scoped = scopedStockHashes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var kinds = new Dictionary<string, StockMapKind>(StringComparer.OrdinalIgnoreCase);
+        var slotTaggedAlbedos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in slotTags)
+            if (kinds.TryAdd(t.Hash, t.Kind) && t.Kind == StockMapKind.Albedo && !scoped.Contains(t.Hash))
+                slotTaggedAlbedos.Add(t.Hash);
+        return hash => slotTaggedAlbedos.Contains(hash) ? FilterAlbedo : RetexTag(hash);
+    }
+
     /// <summary>The two variables of a presence latch (see <see cref="WitnessLatch"/>).</summary>
     static string GateVar(string latch) => $"zz_gate_{latch}";
     static string SeenVar(string latch) => $"zz_seen_{latch}";
+
+    /// <summary>The sticky per-signature variable of a twin guard (see <see cref="TwinGuard"/>). The one
+    /// namer of the <c>zz_tw_*</c> space, so a guard and the sightings that write its variable agree by
+    /// construction.</summary>
+    public static string TwinVar(string signatureKey) => $"zz_tw_{signatureKey}";
 
     // The draw's own variables: the slot each probe answer landed in, and the scratch the probe reads
     // through. 3DMigoto namespaces named variables per ini file, so two of these mods never collide.
@@ -345,9 +394,22 @@ public sealed partial class MigotoEmitter
     // list's so a scoped bind can never clobber a Replace draw's probe state mid-frame.
     const string VarRetexProbe = "zz_rt", VarRetexSlot = "zz_rslot";
 
+    // The scratch a multi-verdict twin guard folds its verdicts into: the ini nests if/endif rather than
+    // offering an OR, so the admitted verdicts each set this and the body opens on it once. Declared only
+    // in builds that carry such a guard.
+    const string VarTwinOk = "zz_twok";
+
     /// <summary>Pool parts one pipeline can carry. The convert pass binds each part's constants at a cb
     /// slot of its own, b5..b12, with b13 reserved for the anchor.</summary>
     public const int MaxPoolParts = 8;
+
+    /// <summary>The slot-tag filter value carried for a stock map kind.</summary>
+    static int KindFilter(StockMapKind kind) => kind switch
+    {
+        StockMapKind.Albedo => FilterAlbedo,
+        StockMapKind.Normal => FilterNormal,
+        _ => FilterRmo,
+    };
 
     /// <summary>The shipped flat map for a kind, or null for a kind that has none.</summary>
     static string? NeutralResource(StockMapKind kind) => kind switch
@@ -873,21 +935,18 @@ public sealed partial class MigotoEmitter
                 tagKinds[t.Hash] = t.Kind;
                 slotTags.Add(t);
             }
-        if (req.Retextures is { } rtxEntries)
-            foreach (var r in rtxEntries)
-                if (tagKinds.ContainsKey(r.Hash))
-                    warnings.Add($"stock texture {r.Hash} is both retextured and slot-tagged for a Replace "
-                        + "draw. Two sections claim its hash and only one survives the ini parse, so either "
-                        + "the retexture or the donor map binds. Not both");
-
         // ---- the ini --------------------------------------------------------------------------------
         // Section ownership is settled before a byte is written: one ib hash owns exactly one
         // TextureOverride, so sighting assignments and scoped binds land INSIDE the owning section. The
         // retexture text is composed first — it hands its same-hash bind blocks to the capture units —
         // and appended after the pooled emission.
+        // one guard per guarded hash settles here, so the tag sections, the declarations, the collision
+        // walk and the emission all read the same dictionary
+        var guards = GuardsByHash(req.TwinGuards);
         RefuseTagCollisions(slotTags.Select(t => (Hash: t.Hash, Part: t.Part)),
             (req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>())
-                .Select(e => (Hash: e.StockHash, Part: e.Part)));
+                .Select(e => (Hash: e.StockHash, Part: e.Part)),
+            MintedTwinTagHashes(guards.Values).Select(h => (Hash: h, Part: "")));
         var hides = (req.HideHashes ?? Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToList();
         var units = BuildCaptureUnits(pipes, req.ToggleKey);
         foreach (var h in hides)
@@ -916,15 +975,18 @@ public sealed partial class MigotoEmitter
                 rigidOwner[h] = r;
             }
         RefuseHiddenScopedAnchors(hides, req.ScopedRetextures);
-        var sightings = RouteSightings(req.Latches, units, hides, req.ScopedRetextures, rigidOwner.Keys);
+        var sightings = RouteSightings(req.Latches, units, hides, req.ScopedRetextures, rigidOwner.Keys,
+            new HashSet<string>(guards.Keys, StringComparer.Ordinal),
+            LiveSightings(req.TwinSightings, guards.Values));
         string retexIni = req.Retextures is { Count: > 0 } || req.ScopedRetextures is { Count: > 0 }
+                          || guards.Count > 0
             ? RetexIni(req.Retextures ?? Array.Empty<RetexEntry>(), req.OutDir, req.ToggleKey,
-                req.ScopedRetextures, units, sightings, rigidOwner)
+                req.ScopedRetextures, units, sightings, rigidOwner, guards.Values, tagKinds)
             : "";
         string ini = EmitIni(pipes, rigids, units, hides, sightings, slotTags, slimParts,
             req.ToggleKey, req.HideKeys, req.Retextures ?? Array.Empty<RetexEntry>(),
             req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), req.Latches, req.HideLatches,
-            req.KeysStartingOff) + retexIni;
+            req.KeysStartingOff, guards) + retexIni;
         File.WriteAllText(Path.Combine(req.OutDir, "mod.ini"), ini);
 
         return new Result(req.OutDir, ubTotal, vcountTotal, warnings, diagnostics);
@@ -940,24 +1002,30 @@ public sealed partial class MigotoEmitter
         IReadOnlyList<ScopedRetexEntry>? scopedEntries = null,
         IReadOnlyList<WitnessLatch>? latches = null,
         IReadOnlyDictionary<string, string>? hideLatches = null,
-        IReadOnlyCollection<string>? keysStartingOff = null)
+        IReadOnlyCollection<string>? keysStartingOff = null,
+        IReadOnlyList<TwinGuard>? twinGuards = null,
+        IReadOnlyList<TwinSighting>? twinSightings = null)
     {
         var retex = entries ?? Array.Empty<RetexEntry>();
         var scoped = scopedEntries ?? Array.Empty<ScopedRetexEntry>();
+        var guards = GuardsByHash(twinGuards);
         // deduped for the same reason the pooled path dedupes: one hash owns one TextureOverride, and a
         // second section on it would be dropped at parse time
         var hides = (hideHashes ?? Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToList();
         if (retex.Count == 0 && scoped.Count == 0 && hides.Count == 0)
             throw new InvalidOperationException("overlay-only build with no retextures and no hides");
         RefuseHiddenScopedAnchors(hides, scoped);
-        // No pipelines here, so nothing slot-tags an anchor's stock maps: every hash is a retexture's.
+        // No pipelines here, so nothing slot-tags an anchor's stock maps: every hash is a retexture's or
+        // a twin guard's.
         RefuseTagCollisions(Array.Empty<(string, string)>(),
-            scoped.Select(e => (Hash: e.StockHash, Part: e.Part)));
+            scoped.Select(e => (Hash: e.StockHash, Part: e.Part)),
+            MintedTwinTagHashes(guards.Values).Select(h => (Hash: h, Part: "")));
         Directory.CreateDirectory(outDir);
         // no pipelines here, so no hash is capture-claimed; a sighting still routes into the hide or
         // scoped-anchor section that owns its ib
         var units = BuildCaptureUnits(Array.Empty<PipelineEmission>(), modKey);
-        var sightings = RouteSightings(latches, units, hides, scoped);
+        var sightings = RouteSightings(latches, units, hides, scoped,
+            twins: LiveSightings(twinSightings, guards.Values));
         var P = new StringBuilder();
         P.Append("; Overlay overrides - generated by the Remold overlay emitter\n"
                + "; hide skips every pass of a mesh; retexture rebinds a stock texture by its own\n"
@@ -968,10 +1036,19 @@ public sealed partial class MigotoEmitter
             .Concat(scoped.SelectMany(r => r.Images).Select(i => i.ToggleKey)).ToList();
         var declared = ModKeys.Distinct(new[] { modKey }.Concat(overlayKeys));
         var lat = latches ?? Array.Empty<WitnessLatch>();
-        if (declared.Count > 0 || lat.Count > 0 || scoped.Count > 0)
+        if (declared.Count > 0 || lat.Count > 0 || scoped.Count > 0 || guards.Count > 0)
         {
             P.Append("[Constants]\n");
             if (scoped.Count > 0) P.Append($"global ${VarRetexProbe} = 0\nglobal ${VarRetexSlot} = 0\n");
+            if (guards.Count > 0)
+            {
+                // the slot probe belongs to the guards that carry tags; a build whose verdicts all arrive
+                // from sightings never reads a slot
+                if (guards.Values.Any(g => g.Tags.Count > 0)) P.Append($"global ${VarProbe} = 0\n");
+                foreach (var v in TwinVars(guards.Values)) P.Append($"global ${v} = 0\n");
+                // the multi-verdict guards' scratch, rewritten at every guard it opens rather than carried
+                if (TwinScratchNeeded(guards.Values)) P.Append($"global ${VarTwinOk} = 0\n");
+            }
             foreach (var l in lat)
                 P.Append($"global ${GateVar(l.Name)} = 0\nglobal ${SeenVar(l.Name)} = 0\n");
             P.Append(KeyDeclarations(declared, keysStartingOff));
@@ -993,15 +1070,19 @@ public sealed partial class MigotoEmitter
             // absent the frame it comes back on
             if (sightings.ByHash.TryGetValue(hides[i], out var seen))
                 foreach (var line in seen) P.Append(line).Append('\n');
+            // this hash also fires on a sibling mesh's draws, so the skip waits for the probe to find
+            // the hidden mesh's own tagged texture bound
+            bool hideGuarded = OpenTwinGuardIfAny(P, guards, hides[i]);
             var gate = new Gate(new[] { modKey, HideKey(hideKeys, hides[i]) },
                 HideKey(hideLatches, hides[i]) is { } hl ? new[] { GateVar(hl) } : null);
             gate.Open(P);
             P.Append("handling = skip\n");
             gate.Close(P);
+            CloseTwinGuard(P, hideGuarded);
             P.Append("\n");
         }
-        if (retex.Count > 0 || scoped.Count > 0)
-            P.Append(RetexIni(retex, outDir, modKey, scoped, units, sightings));
+        if (retex.Count > 0 || scoped.Count > 0 || guards.Count > 0)
+            P.Append(RetexIni(retex, outDir, modKey, scoped, units, sightings, null, guards.Values));
         File.WriteAllText(Path.Combine(outDir, "mod.ini"), P.ToString());
         return new Result(outDir, 0, 0, Array.Empty<string>(), Array.Empty<string>());
     }
@@ -1030,9 +1111,15 @@ public sealed partial class MigotoEmitter
         /// the pipeline's own slot probe reads the stock textures' tags rather than a rebound
         /// replacement's, and the block's own save/probe/bind/restore then repaints the vanilla draw.</summary>
         public readonly List<string> ScopeLines = new();
+        /// <summary>Presence-latch assignments this section records ahead of everything else. A section
+        /// under a twin guard keeps them here: either sibling's draw proves the outfit is on screen, so
+        /// the sighting must not wait on the guard's verdict.</summary>
+        public readonly List<string> SightingLines = new();
         readonly HashSet<string> _seen = new(StringComparer.Ordinal);
         readonly HashSet<string> _skipSeen = new(StringComparer.Ordinal);
         public void Capture(string line) { if (_seen.Add(line)) CaptureLines.Add(line); }
+        readonly HashSet<string> _sightSeen = new(StringComparer.Ordinal);
+        public void Sight(string line) { if (_sightSeen.Add(line)) SightingLines.Add(line); }
         // no dedupe: chain blocks legitimately repeat structural lines (if/endif) across pipelines
         public void Run(string line) => RunLines.Add(line);
         public void Suppress(Gate gate) { if (_skipSeen.Add(gate.Id)) SkipGates.Add(gate); }
@@ -1134,15 +1221,25 @@ public sealed partial class MigotoEmitter
         /// <summary>ib hash → the assignment lines the hide or scoped-anchor section owning it carries.</summary>
         public readonly Dictionary<string, List<string>> ByHash = new(StringComparer.Ordinal);
 
-        /// <summary>The latch and witness index of every ib no other section claims.</summary>
-        public readonly List<(WitnessLatch Latch, int Index)> Standalone = new();
+        /// <summary>The latch and witness index of every ib no other section claims, each with the twin
+        /// sightings that landed on the same ib — one hash owns one section, whichever writer reached
+        /// it first.</summary>
+        public readonly List<(WitnessLatch Latch, int Index, List<string> Extra)> Standalone = new();
+
+        /// <summary>The twin sightings whose ib no other section carries, in first-seen order: each hash
+        /// mints one section holding every line routed to it.</summary>
+        public readonly List<(string Hash, List<string> Lines)> Minted = new();
     }
 
-    /// <summary>Route every latch's witness sightings to their owning sections. Capture sections take the
-    /// assignment straight away; a hide, scoped anchor or rigid replacement gets it back by hash.</summary>
+    /// <summary>Route every latch's witness sightings and every twin sighting to their owning sections.
+    /// Capture sections take the assignment straight away; a hide, scoped anchor or rigid replacement gets
+    /// it back by hash. A capture section under a twin guard takes it into its sighting list instead, which
+    /// the emission writes ahead of the guard — a twin sighting always goes there, since the sticky verdict
+    /// it writes is what the guard on that section would be testing.</summary>
     static Sightings RouteSightings(IReadOnlyList<WitnessLatch>? latches, CaptureUnits units,
         IReadOnlyList<string> hides, IReadOnlyList<ScopedRetexEntry>? scoped,
-        IEnumerable<string>? rigidHashes = null)
+        IEnumerable<string>? rigidHashes = null, IReadOnlySet<string>? guardedHashes = null,
+        IReadOnlyList<TwinSighting>? twins = null)
     {
         var s = new Sightings();
         var hideSet = new HashSet<string>(hides, StringComparer.Ordinal);
@@ -1153,36 +1250,95 @@ public sealed partial class MigotoEmitter
             for (int i = 0; i < l.WitnessIbs.Count; i++)
             {
                 string ib = l.WitnessIbs[i], line = $"${SeenVar(l.Name)} = 1";
-                if (units.ByHash.TryGetValue(ib, out var u)) u.Capture(line);
+                if (units.ByHash.TryGetValue(ib, out var u))
+                {
+                    if (guardedHashes?.Contains(ib) == true) u.Sight(line); else u.Capture(line);
+                }
                 else if (hideSet.Contains(ib) || anchors.Contains(ib))
                 {
                     if (!s.ByHash.TryGetValue(ib, out var lines)) s.ByHash[ib] = lines = new List<string>();
                     if (!lines.Contains(line, StringComparer.Ordinal)) lines.Add(line);
                 }
-                else s.Standalone.Add((l, i));
+                else s.Standalone.Add((l, i, new List<string>()));
             }
+        // routed after the latches, so a mesh a latch already mints a section on carries the twin
+        // sighting there rather than under a second override on one hash
+        foreach (var t in twins ?? Array.Empty<TwinSighting>())
+        {
+            string line = $"${t.Var} = {t.Verdict}";
+            if (units.ByHash.TryGetValue(t.Hash, out var u)) { u.Sight(line); continue; }
+            if (hideSet.Contains(t.Hash) || anchors.Contains(t.Hash))
+            {
+                if (!s.ByHash.TryGetValue(t.Hash, out var lines)) s.ByHash[t.Hash] = lines = new List<string>();
+                if (!lines.Contains(line, StringComparer.Ordinal)) lines.Add(line);
+                continue;
+            }
+            int at = s.Standalone.FindIndex(w =>
+                string.Equals(w.Latch.WitnessIbs[w.Index], t.Hash, StringComparison.Ordinal));
+            var target = at >= 0 ? s.Standalone[at].Extra : MintedLines(s, t.Hash);
+            if (!target.Contains(line, StringComparer.Ordinal)) target.Add(line);
+        }
         return s;
+
+        static List<string> MintedLines(Sightings s, string hash)
+        {
+            int at = s.Minted.FindIndex(m => string.Equals(m.Hash, hash, StringComparison.Ordinal));
+            if (at >= 0) return s.Minted[at].Lines;
+            var lines = new List<string>();
+            s.Minted.Add((hash, lines));
+            return lines;
+        }
     }
 
-    /// <summary>The witness sections for the ibs nothing else claims. The index in the name is the
+    /// <summary>The sighting sections for the ibs nothing else claims. A latch's index in the name is the
     /// witness's own position in its latch, so a claimed sibling leaves a gap rather than renaming the
-    /// sections around it.</summary>
+    /// sections around it; a twin sighting's section is named for the hash it keys on.</summary>
     static string WitnessIni(Sightings sightings)
     {
         var P = new StringBuilder();
-        foreach (var (l, i) in sightings.Standalone)
+        foreach (var (l, i, extra) in sightings.Standalone)
+        {
             P.Append($"[TextureOverride_Witness_{l.Name}_{i}]\nhash = {l.WitnessIbs[i]}\n"
-                   + $"${SeenVar(l.Name)} = 1\n\n");
+                   + $"${SeenVar(l.Name)} = 1\n");
+            foreach (var line in extra) P.Append(line).Append('\n');
+            P.Append('\n');
+        }
+        foreach (var (hash, lines) in sightings.Minted)
+        {
+            P.Append($"[TextureOverride_TwinWit_{hash}]\nhash = {hash}\n");
+            foreach (var line in lines) P.Append(line).Append('\n');
+            P.Append('\n');
+        }
         return P.ToString();
+    }
+
+    /// <summary>The sightings a guard of this build reads, deduped by hash, variable and verdict. A write
+    /// into a variable no emitted guard tests would identify a sibling no section asks about, so it is
+    /// left out — the same discipline that keeps a guard off a key no section carries.</summary>
+    static List<TwinSighting> LiveSightings(IReadOnlyList<TwinSighting>? sightings,
+        IEnumerable<TwinGuard> guards)
+    {
+        var vars = new HashSet<string>(guards.Select(g => g.Var), StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var live = new List<TwinSighting>();
+        foreach (var t in sightings ?? Array.Empty<TwinSighting>())
+            if (vars.Contains(t.Var) && seen.Add($"{t.Hash}|{t.Var}|{t.Verdict}")) live.Add(t);
+        return live;
     }
 
     /// <summary>Refuse two stock textures of one build whose derived <see cref="RetexTag"/> collide (a
     /// hash remainder; ~1 in 15e6 pairs). The probes compare tag VALUES, so a shared one binds whichever
     /// replacement the sections order last at the other's slot. The fix line names the kinds the colliding
     /// pair came from — a pair of slot tags has no retexture to drop — and each hash's part label, so the
-    /// refusal names change-list rows the author can find.</summary>
+    /// refusal names change-list rows the author can find.
+    ///
+    /// <para><paramref name="twinTags"/> are the stock textures a twin guard mints a tag section on. They
+    /// carry no part label, and they walk here for the same reason the others do: the guard probes compare
+    /// tag VALUES, so a derived value shared with a slot tag or a scoped tag would identify the wrong
+    /// sibling.</para></summary>
     static void RefuseTagCollisions(IEnumerable<(string Hash, string Part)> slotTags,
-        IEnumerable<(string Hash, string Part)> retexes)
+        IEnumerable<(string Hash, string Part)> retexes,
+        IEnumerable<(string Hash, string Part)>? twinTags = null)
     {
         // enumerated in arrival order, so a refusal reads the same way twice
         var retexInOrder = retexes.ToList();
@@ -1190,7 +1346,8 @@ public sealed partial class MigotoEmitter
         var byTag = new Dictionary<int, (string Hash, string Part)>();
         // deduped by HASH alone: one texture reaching the build twice is one texture
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var one in slotTags.Concat(retexInOrder))
+        foreach (var one in slotTags.Concat(retexInOrder)
+                     .Concat(twinTags ?? Array.Empty<(string, string)>()))
         {
             if (!seen.Add(one.Hash)) continue;
             int tag = RetexTag(one.Hash);
@@ -1236,15 +1393,94 @@ public sealed partial class MigotoEmitter
         public Dictionary<string, List<string>> ScopeLines { get; } = new(StringComparer.Ordinal);
     }
 
+    /// <summary>One guard per guarded hash, first entry wins — a section carries one verdict.</summary>
+    static Dictionary<string, TwinGuard> GuardsByHash(IReadOnlyList<TwinGuard>? guards)
+    {
+        var byHash = new Dictionary<string, TwinGuard>(StringComparer.Ordinal);
+        foreach (var g in guards ?? Array.Empty<TwinGuard>()) byHash.TryAdd(g.Hash, g);
+        return byHash;
+    }
+
+    /// <summary>The guard's draw-time probe: each tagged texture found on a probed ps-t slot writes its
+    /// sibling's verdict into the guard's variable. Nothing clears the variable, so a pass binding no
+    /// tagged texture leaves the last identification standing. Same slot sweep and same scratch as the
+    /// scoped-retexture probe.
+    ///
+    /// <para>A guard carrying no tags writes NOTHING: its variable is written by sightings elsewhere in
+    /// the ini, and a slot sweep here would read the slots for an answer no tag can give.</para></summary>
+    static void AppendTwinProbe(StringBuilder P, TwinGuard guard)
+    {
+        if (guard.Tags.Count == 0) return;
+        foreach (int s in ProbeSlots)
+        {
+            P.Append($"${VarProbe} = ps-t{s}\n");
+            foreach (var t in guard.Tags)
+                P.Append($"if ${VarProbe} == {t.TagValue}\n${guard.Var} = {t.Verdict}\nendif\n");
+        }
+    }
+
+    /// <summary>Opens the guarded body: the section acts while the sticky variable names a mesh it claims.
+    /// One claimed verdict opens on the variable itself; several fold into <see cref="VarTwinOk"/> first,
+    /// since the ini nests conditions rather than offering an OR. Either shape closes on ONE
+    /// <c>endif</c>.</summary>
+    static void OpenTwinGuard(StringBuilder P, TwinGuard guard)
+    {
+        if (guard.OwnVerdicts.Count == 1)
+        {
+            P.Append($"if ${guard.Var} == {guard.OwnVerdicts[0]}\n");
+            return;
+        }
+        P.Append($"${VarTwinOk} = 0\n");
+        foreach (int v in guard.OwnVerdicts)
+            P.Append($"if ${guard.Var} == {v}\n${VarTwinOk} = 1\nendif\n");
+        P.Append($"if ${VarTwinOk} == 1\n");
+    }
+
+    /// <summary>Opens the twin-guard wrap on a section when <paramref name="hash"/> carries a guard —
+    /// the probe, then the verdict test — and reports whether it did, so the caller closes with
+    /// <see cref="CloseTwinGuard"/>. A guardless hash writes nothing.</summary>
+    static bool OpenTwinGuardIfAny(StringBuilder P, IReadOnlyDictionary<string, TwinGuard> guards,
+        string hash)
+    {
+        if (!guards.TryGetValue(hash, out var guard)) return false;
+        AppendTwinProbe(P, guard);
+        OpenTwinGuard(P, guard);
+        return true;
+    }
+
+    static void CloseTwinGuard(StringBuilder P, bool opened) { if (opened) P.Append("endif\n"); }
+
+    /// <summary>Whether any emitted guard admits more than one verdict, so the build declares
+    /// <see cref="VarTwinOk"/>. False leaves the declarations exactly where a single-verdict build has
+    /// them.</summary>
+    static bool TwinScratchNeeded(IEnumerable<TwinGuard> guards) =>
+        guards.Any(g => g.OwnVerdicts.Count > 1);
+
+    /// <summary>Every sticky variable the emitted guards read, first-seen order. Declared in
+    /// <c>[Constants]</c> and written nowhere else, so an unidentified signature reads 0 and the
+    /// sections it guards stay inert.</summary>
+    static List<string> TwinVars(IEnumerable<TwinGuard> guards) =>
+        guards.Select(g => g.Var).Distinct(StringComparer.Ordinal).ToList();
+
+    /// <summary>The stock textures a guard probe needs a section of its own on: the ones whose tag value
+    /// is derived from the hash rather than carried by a slot tag the build already emits.</summary>
+    static List<string> MintedTwinTagHashes(IEnumerable<TwinGuard> guards) =>
+        guards.SelectMany(g => g.Tags)
+            .Where(t => t.TagValue == RetexTag(t.TexHash))
+            .Select(t => t.TexHash)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
     string EmitIni(List<PipelineEmission> pipes, List<RigidEmission> rigids, CaptureUnits units,
         IReadOnlyList<string> hideHashes,
         Sightings sightings, IReadOnlyList<StockMapTag> slotTags,
         IReadOnlySet<string> slimParts, string? modKey, IReadOnlyDictionary<string, string>? hideKeys,
         IReadOnlyList<RetexEntry> retextures, IReadOnlyList<ScopedRetexEntry>? scopedRetextures = null,
         IReadOnlyList<WitnessLatch>? latches = null, IReadOnlyDictionary<string, string>? hideLatches = null,
-        IReadOnlyCollection<string>? keysStartingOff = null)
+        IReadOnlyCollection<string>? keysStartingOff = null,
+        IReadOnlyDictionary<string, TwinGuard>? twinGuards = null)
     {
         var P = new StringBuilder();
+        var guards = twinGuards ?? new Dictionary<string, TwinGuard>(StringComparer.Ordinal);
 
         // Emitted ini header — ships in every generated mod, so it describes the mod, not this code;
         // each route describes only itself.
@@ -1287,7 +1523,9 @@ public sealed partial class MigotoEmitter
                 .Concat(retextures.Select(r => r.ToggleKey))
                 .Concat((scopedRetextures ?? Array.Empty<ScopedRetexEntry>())
                     .SelectMany(r => r.Images).Select(i => i.ToggleKey)),
-            latches, sightings, scopedRetextures is { Count: > 0 }, scopedHashes, keysStartingOff));
+            latches, sightings, scopedRetextures is { Count: > 0 }, scopedHashes, keysStartingOff,
+            TwinVars(guards.Values), TwinScratchNeeded(guards.Values),
+            retextures.Select(r => r.Hash).ToHashSet(StringComparer.OrdinalIgnoreCase)));
 
         // resource declarations: per-pipeline blocks; shared per-part resources declared by the first
         // pipeline that pools the part
@@ -1377,6 +1615,13 @@ public sealed partial class MigotoEmitter
         foreach (var u in units.Ordered)
         {
             P.Append($"[TextureOverride_{u.SectionName}]\nhash = {u.Hash}\n");
+            // The CAPTURE sits inside the guard with the skip and the chain: this hash also fires on a
+            // sibling mesh's draws, and a capture taken there would feed palette recovery the wrong
+            // rest geometry for every pipeline reading it.
+            // a sighting records that the outfit is on screen, which EITHER sibling's draw proves, so it
+            // stays outside the guard
+            foreach (var line in u.SightingLines) P.Append(line).Append('\n');
+            bool guarded = OpenTwinGuardIfAny(P, guards, u.Hash);
             foreach (var line in u.CaptureLines) P.Append(line).Append('\n');
             if (u.Skips)
             {
@@ -1391,6 +1636,8 @@ public sealed partial class MigotoEmitter
                     }
             }
             foreach (var line in u.RunLines) P.Append(line).Append('\n');
+            CloseTwinGuard(P, guarded);
+            // the scoped-retexture body carries its own probe and self-corrects, so it stays outside
             foreach (var line in u.ScopeLines) P.Append(line).Append('\n');
             P.Append("\n");
         }
@@ -1419,6 +1666,9 @@ public sealed partial class MigotoEmitter
                 // outfit as absent the frame it comes back on
                 if (sightings.ByHash.TryGetValue(r.Hashes[i], out var seen))
                     foreach (var line in seen) P.Append(line).Append('\n');
+                // this hash also fires on a sibling mesh's draws, so the suppression and the donor draw
+                // wait for the probe to find this part's own tagged texture bound
+                bool rigidGuarded = OpenTwinGuardIfAny(P, guards, r.Hashes[i]);
                 if (oneGate)
                 {
                     drawGate.Open(P);
@@ -1436,6 +1686,7 @@ public sealed partial class MigotoEmitter
                     P.Append($"run = CommandListRigid_{r.Sfx}\n");
                     drawGate.Close(P);
                 }
+                CloseTwinGuard(P, rigidGuarded);
                 // after the suppression and the donor draw, and outside this replacement's gate — the same
                 // place a pooled capture section runs its scoped-retexture blocks
                 if (r.ScopeLines.TryGetValue(r.Hashes[i], out var scope))
@@ -1454,11 +1705,15 @@ public sealed partial class MigotoEmitter
                 // absent the frame it comes back on
                 if (sightings.ByHash.TryGetValue(h, out var seen))
                     foreach (var line in seen) P.Append(line).Append('\n');
+                // this hash also fires on a sibling mesh's draws, so the skip waits for the probe to find
+                // the hidden mesh's own tagged texture bound
+                bool hideGuarded = OpenTwinGuardIfAny(P, guards, h);
                 var hideGate = new Gate(new[] { modKey, HideKey(hideKeys, h) },
                     HideKey(hideLatches, h) is { } hl ? new[] { GateVar(hl) } : null);
                 hideGate.Open(P);
                 P.Append("handling = skip\n");
                 hideGate.Close(P);
+                CloseTwinGuard(P, hideGuarded);
                 P.Append("\n");
             }
         }
@@ -1618,11 +1873,16 @@ public sealed partial class MigotoEmitter
     /// <paramref name="outDir"/>) and one <c>[TextureOverride_Retex_*]</c> per entry, keyed on the stock
     /// texture's hash and rebinding it with <c>this =</c>. No slot binds, no save/restore — the swap
     /// happens where the resource is bound, not around a draw. Two entries on one hash throw, as do
-    /// distinct sources sharing a basename (a silent last-copy-wins would ship the wrong
-    /// texture).</summary>
+    /// distinct sources sharing a basename (a silent last-copy-wins would ship the wrong texture).
+    ///
+    /// <para>An entry whose hash a twin guard also probes for carries that guard's <c>filter_index</c> tag
+    /// on its own section, ahead of the gate — one hash owns one section, and the tag has to answer
+    /// whether or not the retexture's key is on.</para></summary>
     string RetexIni(IReadOnlyList<RetexEntry> entries, string outDir, string? modKey,
         IReadOnlyList<ScopedRetexEntry>? scoped, CaptureUnits units, Sightings sightings,
-        IReadOnlyDictionary<string, RigidEmission>? rigidOwner = null)
+        IReadOnlyDictionary<string, RigidEmission>? rigidOwner = null,
+        IEnumerable<TwinGuard>? twinGuards = null,
+        IReadOnlyDictionary<string, StockMapKind>? slotTagKinds = null)
     {
         var P = new StringBuilder();
 
@@ -1663,14 +1923,53 @@ public sealed partial class MigotoEmitter
             foreach (int s in ProbeSlots) P.Append($"[Resource_RtxSave{s}]\n");
         P.Append("\n");
 
+        // The stock textures a twin guard probes for by a value derived from the hash. A retexture's own
+        // section already owns those hashes, so it carries the tag rather than letting a second section
+        // mint itself on one — the ini parse drops the second, and which of the two survived could not
+        // be predicted.
+        var guardList = (twinGuards ?? Array.Empty<TwinGuard>()).ToList();
+        var mintedTwinTags = MintedTwinTagHashes(guardList);
+        var twinProbed = new HashSet<string>(mintedTwinTags, StringComparer.OrdinalIgnoreCase);
+
         foreach (var e in entries)
         {
             P.Append($"[TextureOverride_Retex_{e.Name}]\nhash = {e.Hash}\n");
+            // A tag rides with the hash and OUTSIDE the gate: the draw probes (and any guard probing
+            // this texture) read it whether or not this retexture's key is on. Only the rebind waits on
+            // the keys. A slot-tagged hash carries its kind value HERE instead of a SlotTag section of
+            // its own — two sections on one hash trip the runtime's mod-conflict warning.
+            if (slotTagKinds?.TryGetValue(e.Hash, out var kind) == true)
+                P.Append($"filter_index = {KindFilter(kind)}\n");
+            else if (twinProbed.Contains(e.Hash))
+                P.Append($"filter_index = {RetexTag(e.Hash)}\nmatch_priority = 100\n");
+            // A rebind hides the stock texture from the guard probes — the bound replacement answers
+            // to no tag — so this section matching its hash IS the sighting: it writes the tagged
+            // sibling's verdict at bind time, outside the gate (a keyed-off rebind leaves the tagged
+            // stock bound, proving the same thing). The build refuses this pairing wherever the bind
+            // would not prove the sibling's wardrobe option.
+            foreach (var g in guardList)
+                foreach (var t in g.Tags)
+                    if (string.Equals(t.TexHash, e.Hash, StringComparison.OrdinalIgnoreCase))
+                        P.Append($"${g.Var} = {t.Verdict}\n");
             var gate = new Gate(modKey, e.ToggleKey);
             gate.Open(P);
             P.Append($"this = {texRes[e.DdsFile]}\n");
             gate.Close(P);
             P.Append("\n");
+        }
+
+        // One tag per stock texture a twin guard probes for and nothing else in the build tags. A hash
+        // the scoped retextures already tag carries that section instead: both derive the same value
+        // from the hash, and a second section on one hash is dropped at parse time. A slot-tagged hash
+        // never reaches here — the guard probes for the kind value its slot tag carries.
+        var scopedTagged = (scoped ?? Array.Empty<ScopedRetexEntry>())
+            .Select(e => e.StockHash).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retexTagged = entries.Select(e => e.Hash).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var hash in mintedTwinTags)
+        {
+            if (scopedTagged.Contains(hash) || retexTagged.Contains(hash)) continue;
+            P.Append($"[TextureOverride_TwinTag_{hash}]\nhash = {hash}\n"
+                   + $"filter_index = {RetexTag(hash)}\nmatch_priority = 100\n\n");
         }
 
         if (scoped is { Count: > 0 })
@@ -1829,11 +2128,18 @@ public sealed partial class MigotoEmitter
     string FlagsIni(IReadOnlyList<string>? perFrameFlags, IReadOnlyList<StockMapTag> slotTags,
         string? modKey, IEnumerable<string?>? changeKeys,
         IReadOnlyList<WitnessLatch>? latches, Sightings sightings, bool scopedRetex = false,
-        IReadOnlySet<string>? scopedHashes = null, IReadOnlyCollection<string>? keysStartingOff = null)
+        IReadOnlySet<string>? scopedHashes = null, IReadOnlyCollection<string>? keysStartingOff = null,
+        IReadOnlyList<string>? twinVars = null, bool twinScratch = false,
+        IReadOnlySet<string>? retexturedHashes = null)
     {
         var keys = ModKeys.Distinct(new[] { modKey }.Concat(changeKeys ?? Array.Empty<string?>()));
         var P = new StringBuilder($"[Constants]\nglobal ${VarProbe} = 0\nglobal ${VarAlbedoSlot} = 0\n"
             + $"global ${VarNormalSlot} = 0\nglobal ${VarRmoSlot} = 0\n");
+        // declared here and written only by the guard probes: the [Present] resets below leave them
+        // alone, which is what carries a verdict across the passes that bind no identifying texture
+        foreach (var v in twinVars ?? Array.Empty<string>()) P.Append($"global ${v} = 0\n");
+        // the multi-verdict guards' scratch, rewritten at every guard it opens rather than carried
+        if (twinScratch) P.Append($"global ${VarTwinOk} = 0\n");
         foreach (var f in perFrameFlags ?? Array.Empty<string>()) P.Append($"global ${f} = 0\n");
         if (scopedRetex) P.Append($"global ${VarRetexProbe} = 0\nglobal ${VarRetexSlot} = 0\n");
         foreach (var l in latches ?? Array.Empty<WitnessLatch>())
@@ -1855,13 +2161,10 @@ public sealed partial class MigotoEmitter
             // with a second filter_index on the same hash would leave the probe's answer to the
             // priority sort. The draw probe accepts the RetexTag value for the kind instead.
             if (scopedHashes?.Contains(t.Hash) == true) continue;
-            int fi = t.Kind switch
-            {
-                StockMapKind.Albedo => FilterAlbedo,
-                StockMapKind.Normal => FilterNormal,
-                _ => FilterRmo,
-            };
-            P.Append($"[TextureOverride_SlotTag_{t.Hash}]\nhash = {t.Hash}\nfilter_index = {fi}\n\n");
+            // A plain-retextured stock hash carries its kind value on the retexture's own section —
+            // a second section here would trip the runtime's mod-conflict warning.
+            if (retexturedHashes?.Contains(t.Hash) == true) continue;
+            P.Append($"[TextureOverride_SlotTag_{t.Hash}]\nhash = {t.Hash}\nfilter_index = {KindFilter(t.Kind)}\n\n");
         }
         P.Append(WitnessIni(sightings));
         return P.ToString();

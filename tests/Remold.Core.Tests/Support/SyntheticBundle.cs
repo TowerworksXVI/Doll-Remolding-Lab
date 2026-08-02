@@ -39,6 +39,16 @@ internal static class SyntheticBundle
         return px;
     }
 
+    /// <summary>The stock-texture hash of <paramref name="textureName"/> in a built bundle, exactly as
+    /// the build pipeline computes it — the value emitted inis carry in tags and hash lines.</summary>
+    public static string StockTexHash(byte[] bundleBytes, string textureName)
+    {
+        var stock = new Remold.Core.Bundles.BundleReader().GetTextureHashSource(bundleBytes, textureName)!.Value;
+        return Remold.Core.Migoto.TextureHash.Compute(stock.PictureData, stock.Width, stock.Height, stock.MipCount,
+            Remold.Core.Migoto.TextureHash.Dxgi((AssetsTools.NET.Texture.TextureFormat)stock.Format, stock.Srgb)!.Value)
+            .ToString("x8");
+    }
+
     /// <summary>Returns each texture's assigned path id, index-aligned with <paramref name="textures"/>.</summary>
     public static IReadOnlyList<long> Build(string path, params TextureSpec[] textures)
         => Build(path, bundleName: null, textures);
@@ -215,11 +225,12 @@ internal static class SyntheticBundle
     /// known layout still has bytes there that are neither weights nor indices.</param>
     public static long BuildOneSkinnedMesh(string path, string name, float[] positions, int[] triangles,
         uint[] boneHashes, string? bundleName = null, int blendShapes = 0, int skinWidth = 4,
-        uint[]? tabledOnlyBones = null, bool implicitWeights = false, bool extraSkinChannel = false)
+        uint[]? tabledOnlyBones = null, bool implicitWeights = false, bool extraSkinChannel = false,
+        int uvSeed = 0)
     {
         var file = NewMeshFile(blendShapes);
         AddSkinnedMesh(file, 1, name, positions, triangles, boneHashes, blendShapes, skinWidth, tabledOnlyBones,
-            implicitWeights, extraSkinChannel);
+            implicitWeights, extraSkinChannel, uvSeed);
         if (bundleName is not null) AddAssetBundleObject(file, pathId: 2, bundleName);
 
         using var ms = new MemoryStream();
@@ -250,7 +261,7 @@ internal static class SyntheticBundle
     /// mesh-only fixture does.</summary>
     private static void AddSkinnedMesh(AssetsFile file, long pathId, string name, float[] positions,
         int[] triangles, uint[] boneHashes, int blendShapes, int skinWidth, uint[]? tabledOnlyBones = null,
-        bool implicitWeights = false, bool extraSkinChannel = false)
+        bool implicitWeights = false, bool extraSkinChannel = false, int uvSeed = 0)
     {
         if (positions.Length % 3 != 0) throw new ArgumentException("positions must be a flat x,y,z list");
         if (boneHashes.Length == 0) throw new ArgumentException("a skinned mesh needs at least one bone");
@@ -266,7 +277,7 @@ internal static class SyntheticBundle
             var chArray = vd["m_Channels"]["Array"];
             chArray.Children = SkinnedChannels(chArray, skinWidth, implicitWeights, extraSkinChannel);
             vd["m_DataSize"].AsByteArray = SkinnedVertexBlob(positions, vertexCount, boneHashes.Length, skinWidth,
-                implicitWeights, extraSkinChannel);
+                implicitWeights, extraSkinChannel, uvSeed);
 
             var ibytes = new byte[triangles.Length * 2];
             for (int i = 0; i < triangles.Length; i++)
@@ -434,7 +445,7 @@ internal static class SyntheticBundle
     /// <summary>The stream-interleaved blob for <see cref="SkinnedChannels"/>: intermediate streams padded
     /// up to 16 bytes, the last one not, exactly as the engine lays them out.</summary>
     private static byte[] SkinnedVertexBlob(float[] positions, int vertexCount, int boneCount,
-        int skinWidth = 4, bool implicitWeights = false, bool extraSkinChannel = false)
+        int skinWidth = 4, bool implicitWeights = false, bool extraSkinChannel = false, int uvSeed = 0)
     {
         int skinStride = SkinBase(skinWidth, implicitWeights) + (extraSkinChannel ? 8 : 0);
         int s0 = (vertexCount * SkinStream0Stride + 15) & ~15;
@@ -453,6 +464,9 @@ internal static class SyntheticBundle
 
             int q = s0 + v * SkinStream1Stride;
             blob[q] = blob[q + 1] = blob[q + 2] = blob[q + 3] = 0xFF;   // white vertex colour
+            // a nonzero seed gives the mesh a UV set of its own, so two same-topology meshes can differ
+            // in their stream-1 bytes exactly the way remodel twins with a re-unwrap do
+            if (uvSeed != 0) BitConverter.GetBytes((float)(uvSeed + v)).CopyTo(blob, q + 4);
 
             int r = s0 + s1 + v * skinStride;
             if (!implicitWeights) BitConverter.GetBytes(1f).CopyTo(blob, r);    // w0 = 1, the rest 0

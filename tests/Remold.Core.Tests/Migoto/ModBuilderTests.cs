@@ -50,6 +50,9 @@ public class ModBuilderTests : IDisposable
     /// <summary>The stock texture's own 3DMigoto resource hash — what the retexture override keys on.</summary>
     private string _stockTexHash = "";
 
+    /// <summary>The second stock base color's hash: what a part binding a base color of its own carries.</summary>
+    private string _altTexHash = "";
+
     /// <summary>Seams for sibling test classes driving the same synthetic world.</summary>
     internal string StockTexHash => _stockTexHash;
     internal string OutRoot => _out;
@@ -158,12 +161,12 @@ public class ModBuilderTests : IDisposable
     /// <summary>An EDITED texture target: no original on record = edited by definition. A real DDS, so the
     /// encode pass-through route accepts it.</summary>
     internal void AddEditedTexture(ModProject p, string file = "skin.dds",
-        string user = "c_vesna01_body_lod0")
+        string user = "c_vesna01_body_lod0", string bundle = "bundleT", string objectName = "tex_body_d")
     {
         FlatDds.Write(Path.Combine(_proj, file), (1, 2, 3, 255));
         p.Targets.Add(new ProjectTarget
         {
-            AssetType = "Texture2D", Bundle = "bundleT", ObjectName = "tex_body_d",
+            AssetType = "Texture2D", Bundle = bundle, ObjectName = objectName,
             ReplaceFile = file, Users = new List<string> { user },
             SubjectCharacter = "Vesna", SubjectOutfit = "VesnaSSR01",
         });
@@ -1028,6 +1031,15 @@ public class ModBuilderTests : IDisposable
     /// recovery, so the roster reaches pool derivation short of it and these bones unowned.</summary>
     private static readonly uint[] FaceBones = { 0x00000301, 0x00000302 };
 
+    /// <summary>The bones both wardrobe options own (see <see cref="WardrobeWorld"/>): the two options fill one
+    /// slot, so they are rigged alike. A donor riding these pools the option it targets and nothing else.</summary>
+    private static readonly uint[] DressBones = { 0x00000401, 0x00000402 };
+
+    /// <summary>Each wardrobe option's companion bones: donor-ridden only where a test asks the companion
+    /// into the pool.</summary>
+    private static readonly uint[] Belt1Bones = { 0x00000403, 0x00000404 };
+    private static readonly uint[] Belt2Bones = { 0x00000405, 0x00000406 };
+
     /// <summary>The accessory part's bone table (see <c>narrowAccessory</c>): the body's FIRST bone and
     /// nothing else. One influence per vertex means it rides that bone at weight 1 on all of them, which
     /// outweighs the body's share of it — the ownership the union would hand over if the part could
@@ -1056,6 +1068,26 @@ public class ModBuilderTests : IDisposable
         return tris;
     }
 
+    /// <summary>The wardrobe-twin world of <see cref="MakeSkinnedEnv"/>: which companion each of the
+    /// two options is married to, and the extra siblings that reshape the signature classes.</summary>
+    private sealed record WardrobeWorld
+    {
+        /// <summary>Dropping either option's companion leaves that variant nothing to sight it
+        /// by.</summary>
+        public bool Companion1 { get; init; } = true;
+        public bool Companion2 { get; init; } = true;
+        /// <summary>The second option's companion is byte-identical to the first's — the one accessory
+        /// both options are worn with.</summary>
+        public bool TwinCompanions { get; init; }
+        /// <summary>A byte-identical accessory pair BESIDE the companions of their own.</summary>
+        public bool SharedExtra { get; init; }
+        /// <summary>A third sibling byte-identical to the first option: the pair is one content class
+        /// with a single mate, separable by its own base color, while the lone sibling is not.</summary>
+        public bool Mixed { get; init; }
+        /// <summary>A companion this build refuses to touch, in the first option.</summary>
+        public bool BlockedCompanion { get; init; }
+    }
+
     /// <summary>The one-part world in SKINNED form — the shape a Replace needs: a bone table the donor's
     /// weights resolve against, and the full skin stream palette recovery consumes. One material, so the
     /// anchor has a stock albedo the donor maps can bind through; <paramref name="anchorNormal"/> and
@@ -1080,13 +1112,26 @@ public class ModBuilderTests : IDisposable
     /// spelling the game's accessories ship: recoverable, donor-ridden through that shared bone, and
     /// heavier on it than the body itself. <paramref name="bodySharedSkinStream"/> puts a third live
     /// channel on the target's skin stream, an influence count recovery accepts spelled in a shape it
-    /// cannot read.</summary>
+    /// cannot read. <paramref name="twinPartOwnAlbedo"/> gives the twin part a base color of its OWN, the
+    /// shape where the textures bound at the two draws tell the twins apart;
+    /// <paramref name="twinPartSharedAlbedo"/> gives it the body's, where they cannot.
+    /// <paramref name="clothTwinsMate"/> puts the cloth part on the pool mate's index buffer, so an
+    /// unpooled mesh shares a pooled one's draw signature; <paramref name="clothOwnAlbedo"/> gives the
+    /// cloth a base color of its own instead of the body's. <paramref name="mateOwnAlbedo"/> does the
+    /// same for the pool mate, which is what separates its twinned TIER from the body's.
+    /// <paramref name="wardrobe"/> adds two options of ONE wardrobe slot whose meshes share an index
+    /// buffer, stream-1 bytes and base color — nothing at the draw parts them — each married to a
+    /// companion mesh of its own; <see cref="WardrobeWorld"/>'s knobs shape the companions and extra
+    /// siblings. Wire <see cref="WithWardrobeScheme"/> to classify them.</summary>
     private BuildEnv MakeSkinnedEnv(bool anchorNormal = false, bool anchorRmo = false,
         string meshTail = "", bool twinPart = false, bool clothWearer = false, bool poolMate = false,
         bool midTier = false, bool mateTierTwin = false, bool mateTier = false, int bodyBlendShapes = 0,
         int bodySkinWidth = 4, bool facePart = false, bool ghostPart = false, uint[]? bodyTierBones = null,
         uint[]? bodyTierTabledOnly = null, bool clothTier = false, string clothTail = "",
-        bool narrowAccessory = false, bool bodySharedSkinStream = false)
+        bool narrowAccessory = false, bool bodySharedSkinStream = false, int twinPartUvSeed = 0,
+        int twinPartPosSeed = 5, bool twinPartOwnAlbedo = false, bool twinPartSharedAlbedo = false,
+        bool clothTwinsMate = false, bool clothOwnAlbedo = false, bool mateOwnAlbedo = false,
+        WardrobeWorld? wardrobe = null)
     {
         string b0 = Path.Combine(_root, "s0.bundle");
         string b1 = Path.Combine(_root, "s1.bundle");
@@ -1108,10 +1153,16 @@ public class ModBuilderTests : IDisposable
             ["bundleN"] = File.ReadAllBytes(bn),
             ["bundleR"] = File.ReadAllBytes(br),
         };
-        var skinnedStock = new Remold.Core.Bundles.BundleReader().GetTextureHashSource(bytes["bundleT"], "tex_body_d")!.Value;
-        _stockTexHash = TextureHash.Compute(skinnedStock.PictureData, skinnedStock.Width, skinnedStock.Height,
-            skinnedStock.MipCount, TextureHash.Dxgi(
-                (AssetsTools.NET.Texture.TextureFormat)skinnedStock.Format, skinnedStock.Srgb)!.Value).ToString("x8");
+        _stockTexHash = SyntheticBundle.StockTexHash(bytes["bundleT"], "tex_body_d");
+
+        if (twinPartOwnAlbedo || clothOwnAlbedo || mateOwnAlbedo || wardrobe is { Mixed: true })
+        {
+            // a second stock base color, so a part can bind one no other part of the roster does
+            string balt = Path.Combine(_root, "salt.bundle");
+            SyntheticBundle.BuildOneTexture(balt, "tex_alt_d", 8, 8, 20, 210, 90, 255, colorSpace: 1);
+            bytes["bundleAlt"] = File.ReadAllBytes(balt);
+            _altTexHash = SyntheticBundle.StockTexHash(bytes["bundleAlt"], "tex_alt_d");
+        }
 
         var maps = new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") };
         if (anchorNormal) maps.Add(new SubjectMap("_BumpMap", "tex_body_n", "bundleN"));
@@ -1139,12 +1190,19 @@ public class ModBuilderTests : IDisposable
         if (twinPart)
         {
             // its OWN bones, so the donor riding both parts pools both — but the identical triangle
-            // list gives it the body's exact index buffer
+            // list gives it the body's exact index buffer. A nonzero uvSeed gives it stream-1 bytes of
+            // its own, the remodel-with-a-re-unwrap shape a vb1 key can separate; a twinPartPosSeed of
+            // its own gives it different GEOMETRY on one index buffer, which nothing but the bound
+            // textures separates.
             string b2 = Path.Combine(_root, "s2.bundle");
-            SyntheticBundle.BuildOneSkinnedMesh(b2, "c_vesna01_body2_lod0", Cloud(32, 5), WrappedTris(32), TwinBones);
+            SyntheticBundle.BuildOneSkinnedMesh(b2, "c_vesna01_body2_lod0", Cloud(32, twinPartPosSeed),
+                WrappedTris(32), TwinBones, uvSeed: twinPartUvSeed);
             bytes["bundle2"] = File.ReadAllBytes(b2);
+            var twinMaps = new List<SubjectMap>();
+            if (twinPartOwnAlbedo) twinMaps.Add(new SubjectMap("_BaseMap", "tex_alt_d", "bundleAlt"));
+            else if (twinPartSharedAlbedo) twinMaps.Add(new SubjectMap("_BaseMap", "tex_body_d", "bundleT"));
             parts.Add(new SubjectPart("body2", "c_vesna01_body2_lod0", "addr_body2",
-                new[] { new SubjectMaterial("m_body2", 1, "cab-body2", new List<SubjectMap>()) }));
+                new[] { new SubjectMaterial("m_body2", 1, "cab-body2", twinMaps) }));
             addresses["addr_body2"] = "bundle2";
         }
         if (clothWearer)
@@ -1152,7 +1210,10 @@ public class ModBuilderTests : IDisposable
             // bones the donor never rides keep it out of the pool; the material wears the SAME stock
             // albedo as the body's anchor material
             string bc = Path.Combine(_root, "sc.bundle");
-            SyntheticBundle.BuildOneSkinnedMesh(bc, $"c_vesna01_cloth_lod0{clothTail}", Cloud(16, 13), WrappedTris(16), ClothBones);
+            // the mate's vertex count gives the two the SAME index buffer with content of their own
+            int clothVerts = clothTwinsMate ? 20 : 16;
+            SyntheticBundle.BuildOneSkinnedMesh(bc, $"c_vesna01_cloth_lod0{clothTail}",
+                Cloud(clothVerts, 13), WrappedTris(clothVerts), ClothBones);
             bytes["bundleC"] = File.ReadAllBytes(bc);
             var clothTiers = new List<RecipeTierSlot>();
             if (clothTier)
@@ -1167,7 +1228,12 @@ public class ModBuilderTests : IDisposable
             }
             parts.Add(new SubjectPart($"cloth{clothTail}", $"c_vesna01_cloth_lod0{clothTail}", "addr_cloth",
                 new[] { new SubjectMaterial("m_cloth", 1, "cab-cloth",
-                    new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") }) },
+                    new List<SubjectMap>
+                    {
+                        clothOwnAlbedo
+                            ? new SubjectMap("_BaseMap", "tex_alt_d", "bundleAlt")
+                            : new SubjectMap("_BaseMap", "tex_body_d", "bundleT"),
+                    }) },
                 SiblingTiers: clothTiers.Count > 0 ? clothTiers.ToArray() : null));
             addresses["addr_cloth"] = "bundleC";
         }
@@ -1230,10 +1296,82 @@ public class ModBuilderTests : IDisposable
                 addresses["addr_mate_l1"] = "bundleMO";
             }
             parts.Add(new SubjectPart("mate", "c_vesna01_mate_lod0", "addr_mate",
-                new[] { new SubjectMaterial("m_mate", 1, "cab-mate",
-                    new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") }) },
+                new[] { new SubjectMaterial("m_mate", 1, "cab-mate", new List<SubjectMap>
+                    {
+                        mateOwnAlbedo
+                            ? new SubjectMap("_BaseMap", "tex_alt_d", "bundleAlt")
+                            : new SubjectMap("_BaseMap", "tex_body_d", "bundleT"),
+                    }) },
                 SiblingTiers: mateTiers.Count > 0 ? mateTiers.ToArray() : null));
             addresses["addr_mate"] = "bundleM";
+        }
+        if (wardrobe is { } w)
+        {
+            // Two options of ONE wardrobe slot. Same triangle list and the same UVs, so neither the index
+            // buffer nor stream 1 keys them apart; positions of their own make them two content classes
+            // all the same, and the shared stock albedo leaves nothing bound at the draw to ask. Each
+            // option is worn with a companion whose vertex count gives it an index buffer of its own.
+            string bd1 = Path.Combine(_root, "sd1.bundle"), bd2 = Path.Combine(_root, "sd2.bundle");
+            SyntheticBundle.BuildOneSkinnedMesh(bd1, "c_vesna01_dress1_lod0", Cloud(26, 5),
+                WrappedTris(26), DressBones);
+            SyntheticBundle.BuildOneSkinnedMesh(bd2, "c_vesna01_dress2_lod0", Cloud(26, 21),
+                WrappedTris(26), DressBones);
+            bytes["bundleD1"] = File.ReadAllBytes(bd1);
+            bytes["bundleD2"] = File.ReadAllBytes(bd2);
+            foreach (var (token, bundleId) in new[] { ("dress1", "bundleD1"), ("dress2", "bundleD2") })
+            {
+                // the mixed world gives the FIRST option a base color no other sibling binds, so its own
+                // draw answers for it while the other option's still has nothing to read
+                parts.Add(new SubjectPart(token, $"c_vesna01_{token}_lod0", $"addr_{token}",
+                    new[] { new SubjectMaterial($"m_{token}", 1, $"cab-{token}",
+                        new List<SubjectMap>
+                        {
+                            w.Mixed && token == "dress1"
+                                ? new SubjectMap("_BaseMap", "tex_alt_d", "bundleAlt")
+                                : new SubjectMap("_BaseMap", "tex_body_d", "bundleT"),
+                        }) }));
+                addresses[$"addr_{token}"] = bundleId;
+            }
+            if (w.Mixed)
+            {
+                // A third sibling on the same index buffer, byte-identical to the first option: the two
+                // are ONE content class, so that class is told about a single mate while the lone
+                // sibling is told about both. It wears the shared base color, which is what leaves the
+                // lone sibling inseparable by texture and the pair separable.
+                string bd1b = Path.Combine(_root, "sd1b.bundle");
+                SyntheticBundle.BuildOneSkinnedMesh(bd1b, "c_vesna01_dress1b_lod0", Cloud(26, 5),
+                    WrappedTris(26), DressBones);
+                bytes["bundleD1b"] = File.ReadAllBytes(bd1b);
+                parts.Add(new SubjectPart("dress1b", "c_vesna01_dress1b_lod0", "addr_dress1b",
+                    new[] { new SubjectMaterial("m_dress1b", 1, "cab-dress1b",
+                        new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") }) }));
+                addresses["addr_dress1b"] = "bundleD1b";
+            }
+            if (w.Companion1) Companion("belt1", 18, 41, Belt1Bones, "bundleB1", "sb1.bundle");
+            // twinned companions carry the first's vertex cloud, so the two are one mesh under two names
+            if (w.Companion2)
+                Companion("belt2", w.TwinCompanions ? 18 : 17, w.TwinCompanions ? 41 : 43,
+                    Belt2Bones, "bundleB2", "sb2.bundle");
+            if (w.SharedExtra)
+            {
+                Companion("scarf1", 15, 47, Belt1Bones, "bundleS1", "ss1.bundle");
+                Companion("scarf2", 15, 47, Belt2Bones, "bundleS2", "ss2.bundle");
+            }
+            if (w.BlockedCompanion)
+                // its name alone fails the content policy, so nothing about it can ever be read
+                parts.Add(new SubjectPart("belt1x", "c_Helena_belt_lod0", "addr_belt1x",
+                    new[] { new SubjectMaterial("m_belt1x", 1, "cab-belt1x", new List<SubjectMap>()) }));
+
+            void Companion(string token, int verts, int seed, uint[] bones, string bundleId, string file)
+            {
+                string path = Path.Combine(_root, file);
+                SyntheticBundle.BuildOneSkinnedMesh(path, $"c_vesna01_{token}_lod0", Cloud(verts, seed),
+                    WrappedTris(verts), bones);
+                bytes[bundleId] = File.ReadAllBytes(path);
+                parts.Add(new SubjectPart(token, $"c_vesna01_{token}_lod0", $"addr_{token}",
+                    new[] { new SubjectMaterial($"m_{token}", 1, $"cab-{token}", new List<SubjectMap>()) }));
+                addresses[$"addr_{token}"] = bundleId;
+            }
         }
         var model = new SubjectModel("Vesna", "VesnaSSR01", SubjectSource.Prefab, parts.ToArray(),
             Skeleton: null, Problems: Array.Empty<string>());
@@ -1762,6 +1900,787 @@ public class ModBuilderTests : IDisposable
         Assert.Contains("share one draw signature", ex.Message);
     }
 
+    [Fact]
+    public void A_wardrobe_sibling_is_excluded_from_the_pool_and_named_in_the_refusal()
+    {
+        // End to end through BuildEnv.PartSchemeFor: the scheme marks body2 a wardrobe option, the
+        // presence filter keeps it out of the body's pool, and a donor riding its bones is told so.
+        // The uvSeed keeps the two signature-separable, so no twin refusal fires ahead of this one.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7);
+        env = env with
+        {
+            PartSchemeFor = stem => stem == "VesnaSSR01"
+                ? new[]
+                {
+                    new Remold.Core.Tables.PartScheme.Slot(1, new[]
+                    {
+                        new Remold.Core.Tables.PartScheme.Variant(11, true, new[] { "body2" }),
+                        new Remold.Core.Tables.PartScheme.Variant(12, false, new[] { "body9" }),
+                    }),
+                }
+                : null,
+        };
+        var p = NewProject("WardrobePool");
+        WriteDonorGlb(bones: BodyBones.Concat(TwinBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.ThrowsAny<Exception>(() => ModBuilder.Build(p, env, _out, zip: false));
+        Assert.Contains("'c_vesna01_body2_lod0' · it is a wardrobe option", ex.Message);
+    }
+
+    [Fact]
+    public void Twins_whose_vb1_differs_build_with_vb1_keyed_sections()
+    {
+        // Same triangle list, different geometry AND different stream-1 bytes: the signature key falls
+        // back to each mesh's vb1 hash, so both capture separately and the shared ib appears nowhere.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7);
+        var p = NewProject("SwapTwinVb1");
+        WriteDonorGlb(bones: BodyBones.Concat(TwinBones).ToArray());
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string sharedIb = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), sharedIb);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedVb1("s0.bundle", "c_vesna01_body_lod0")}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body2]\nhash = {SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0")}\n", ini);
+        Assert.DoesNotContain($"hash = {sharedIb}", ini);
+    }
+
+    // ---- twins the bound textures tell apart -----------------------------------------------------
+
+    /// <summary>The section owning <paramref name="hash"/>, header line included, up to the blank line
+    /// that ends it.</summary>
+    private static string SectionOn(string ini, string hash)
+    {
+        int at = ini.IndexOf($"\nhash = {hash}\n", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"no section carries hash {hash}");
+        int start = ini.LastIndexOf('[', at);
+        int end = ini.IndexOf("\n\n", at, StringComparison.Ordinal);
+        return end < 0 ? ini[start..] : ini[start..end];
+    }
+
+    /// <summary>The <c>[Present]</c> block, or empty when the ini has none.</summary>
+    private static string PresentSection(string ini)
+    {
+        int at = ini.IndexOf("[Present]\n", StringComparison.Ordinal);
+        if (at < 0) return "";
+        int end = ini.IndexOf("\n\n", at, StringComparison.Ordinal);
+        return end < 0 ? ini[at..] : ini[at..end];
+    }
+
+    /// <summary>Every section testing a sticky verdict runs the probe that writes it, ahead of the test.
+    /// A section that only READ the variable would never correct it on its own draws, and would act on
+    /// whatever the last guarded draw left behind.</summary>
+    private static void AssertTwinVerdictIsProbedWhereItIsTested(string ini)
+    {
+        foreach (var section in ini.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+            foreach (var line in section.Split('\n'))
+            {
+                if (!line.StartsWith("if $zz_tw_", StringComparison.Ordinal)) continue;
+                string name = line["if $".Length..line.IndexOf(" ==", StringComparison.Ordinal)];
+                int wrote = section.IndexOf($"${name} = ", StringComparison.Ordinal);
+                Assert.True(wrote >= 0 && wrote < section.IndexOf(line, StringComparison.Ordinal),
+                    $"a section tests ${name} without probing for it first");
+            }
+    }
+
+    /// <summary>No sticky verdict is cleared per frame. A verdict reset in <c>[Present]</c> would leave
+    /// every depth and shadow pass unidentified, which is exactly where no base color is bound.</summary>
+    private static void AssertStickyVerdictsSurviveTheFrame(string ini)
+    {
+        string present = PresentSection(ini);
+        foreach (var line in ini.Split('\n'))
+            if (line.StartsWith("global $zz_tw_", StringComparison.Ordinal))
+                Assert.DoesNotContain(line["global $".Length..line.IndexOf(" =", StringComparison.Ordinal)],
+                    present);
+    }
+
+    [Fact]
+    public void An_ambiguous_target_whose_base_colors_differ_builds_behind_a_draw_time_guard()
+    {
+        // Same index buffer, different geometry, no vb1 to separate them — but the two parts bind
+        // different base colors, so the section can ask at draw time which one is on the slots.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("SwapTwinGuard");
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), shared);
+        int own = MigotoEmitter.RetexTag(_stockTexHash), mate = MigotoEmitter.RetexTag(_altTexHash);
+        string v = $"zz_tw_{shared}";
+        // the verdict is declared once and never reset, so a pass binding no base color acts on the
+        // last identification rather than standing down
+        Assert.Contains($"global ${v} = 0\n", ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+        Assert.Contains($"[TextureOverride_TwinTag_{_stockTexHash}]\nhash = {_stockTexHash}\n"
+            + $"filter_index = {own}\nmatch_priority = 100\n", ini);
+        Assert.Contains($"[TextureOverride_TwinTag_{_altTexHash}]\nhash = {_altTexHash}\n"
+            + $"filter_index = {mate}\nmatch_priority = 100\n", ini);
+        string cap = SectionOn(ini, shared);
+        // the probe answers for BOTH siblings, which is what corrects the verdict after a wardrobe change
+        Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {own}\n${v} = 1\nendif\n"
+            + $"if $zz_t == {mate}\n${v} = 2\nendif\n", cap);
+        // the capture AND the suppression sit inside the guard, and nothing else skips on this hash
+        Assert.Contains($"if ${v} == 1\nResource_vesna_body_Posed = ref vb0\n"
+            + "Resource_vesna_body_CB = copy vs-cb1\nhandling = skip\n", cap);
+        Assert.Equal(1, CountOf(cap, "handling = skip"));
+        Assert.EndsWith("run = CommandListDraw_vesna_body\nendif", cap);
+        Assert.Contains(r.Diagnostics, d => d.Contains("'body' shares a draw signature with 'body2'")
+            && d.Contains("act while its own textures answer for it"));
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+    }
+
+    [Fact]
+    public void An_ambiguous_target_whose_own_albedo_is_slot_tagged_probes_the_slot_tag_value()
+    {
+        // Authored donor maps already tag the anchor's own base color with the ALBEDO kind value. The
+        // guard probes for that value rather than minting a second section on the hash, which the ini
+        // parse would drop.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("SwapTwinSlotTagged");
+        WriteDonorGlb();
+        using (var img = new Image<Rgba32>(8, 8, new Rgba32(200, 100, 50, 255)))
+            img.SaveAsPng(Path.Combine(_proj, "s0_base.png"));
+        AddReplaceTarget(p, textures: new List<SubmeshTextures>
+        {
+            new() { Submesh = 0, Albedo = "s0_base.png" },
+        });
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string v = $"zz_tw_{shared}";
+        // the slot tag stands, and it is the only section on that hash
+        Assert.Contains($"[TextureOverride_SlotTag_{_stockTexHash}]\nhash = {_stockTexHash}\n"
+            + "filter_index = 3301\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinTag_{_stockTexHash}]", ini);
+        Assert.Equal(1, CountOf(ini, $"hash = {_stockTexHash}\n"));
+        // the sibling's base color is tagged by nobody else, so it still mints one
+        Assert.Contains($"[TextureOverride_TwinTag_{_altTexHash}]\nhash = {_altTexHash}\n"
+            + $"filter_index = {MigotoEmitter.RetexTag(_altTexHash)}\n", ini);
+        string cap = SectionOn(ini, shared);
+        Assert.Contains($"$zz_t = ps-t0\nif $zz_t == 3301\n${v} = 1\nendif\n", cap);
+        Assert.Contains($"if ${v} == 1\nResource_vesna_body_Posed = ref vb0\n", cap);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void Ambiguous_twins_wearing_one_base_color_still_refuse()
+    {
+        // Nothing at draw time separates them, so a refusal naming the mesh it collides with is the
+        // only honest answer.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartSharedAlbedo: true);
+        var p = NewProject("SwapTwinSame");
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+        Assert.Contains("'c_vesna01_body_lod0' and 'body2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
+    }
+
+    [Fact]
+    public void An_ambiguous_pool_part_whose_base_color_separates_it_captures_behind_a_guard()
+    {
+        // The ambiguous mesh is a Leave the Replace leans on for recovery, not the target. Its capture
+        // would otherwise hold whichever of the two drew last; the guard keeps it to its own draws.
+        var env = MakeSkinnedEnv(poolMate: true, clothWearer: true, clothTwinsMate: true, clothOwnAlbedo: true);
+        var p = NewProject("SwapPoolGuard");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("sm.bundle", "c_vesna01_mate_lod0");
+        Assert.Equal(SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0"), shared);
+        string v = $"zz_tw_{shared}";
+        // roster order numbers the siblings, so the cloth answers 1 and the pooled mate 2
+        int cloth = MigotoEmitter.RetexTag(_altTexHash), mate = MigotoEmitter.RetexTag(_stockTexHash);
+        string cap = SectionOn(ini, shared);
+        Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {cloth}\n${v} = 1\nendif\n"
+            + $"if $zz_t == {mate}\n${v} = 2\nendif\n", cap);
+        Assert.Contains($"if ${v} == 2\nResource_vesna_mate_Posed = ref vb0\n", cap);
+        Assert.Contains(r.Diagnostics, d => d.Contains("'mate' shares a draw signature with 'cloth'"));
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void An_ambiguous_pool_tier_whose_base_color_separates_it_is_guarded_rather_than_left_vanilla()
+    {
+        // The mate's lod1 draws on the body lod1's index buffer, so a capture on that hash would hold
+        // whichever of the two drew last. The two parts bind different base colors, so the tier keeps
+        // its section behind a guard instead of standing down to a vanilla draw.
+        var env = MakeSkinnedEnv(poolMate: true, mateTierTwin: true, mateOwnAlbedo: true);
+        var p = NewProject("TierTwinGuard");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string tierIb = SkinnedIb("s1.bundle", "c_vesna01_body_lod1");
+        Assert.Equal(SkinnedIb("smt.bundle", "c_vesna01_mate_lod1"), tierIb);
+        string v = $"zz_tw_{tierIb}";
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("vanilla draw is left running"));
+        Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
+        Assert.Contains($"global ${v} = 0\n", ini);
+        string tier = SectionOn(ini, tierIb);
+        Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {MigotoEmitter.RetexTag(_stockTexHash)}\n${v} = 1\nendif\n"
+            + $"if $zz_t == {MigotoEmitter.RetexTag(_altTexHash)}\n${v} = 2\nendif\n", tier);
+        Assert.Contains($"if ${v} == 1\nResource_vesna_body_lod1_Posed = ref vb0\n", tier);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void A_sighting_on_a_guarded_capture_section_records_ahead_of_the_guard()
+    {
+        // Presence is what the sighting records, and EITHER sibling's draw proves the outfit is on
+        // screen. Inside the guard it would miss every frame the other sibling drew, and the latch would
+        // read the outfit as absent.
+        var env = MakeSkinnedEnv(poolMate: true, clothWearer: true, clothTwinsMate: true, clothOwnAlbedo: true);
+        string body = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string shared = SkinnedIb("sm.bundle", "c_vesna01_mate_lod0");
+        env = env with
+        {
+            Sharing = Measured(new Dictionary<string, int[]> { [body] = new[] { 0, 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { shared } }),
+        };
+        var p = NewProject("SwapGuardSighting");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.DoesNotContain("[TextureOverride_Witness_", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {shared}\n"
+            + "$zz_seen_vesnassr01 = 1\n$zz_t = ps-t0\n", ini);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void A_hide_on_an_ambiguous_mesh_is_guarded_when_the_base_colors_differ()
+    {
+        // A hide keyed on the shared signature skips the sibling's draws too, which blanks a mesh the
+        // author never touched. The guard holds the skip to the hidden mesh's own draws.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("HideTwinGuard");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s2.bundle", "c_vesna01_body2_lod0");
+        string v = $"zz_tw_{shared}";
+        int body = MigotoEmitter.RetexTag(_stockTexHash), hidden = MigotoEmitter.RetexTag(_altTexHash);
+        Assert.Contains($"global $zz_t = 0\nglobal ${v} = 0\n", ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+        Assert.Contains($"[TextureOverride_TwinTag_{_altTexHash}]\nhash = {_altTexHash}\n"
+            + $"filter_index = {hidden}\nmatch_priority = 100\n", ini);
+        string hide = SectionOn(ini, shared);
+        Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {body}\n${v} = 1\nendif\n"
+            + $"if $zz_t == {hidden}\n${v} = 2\nendif\n", hide);
+        // one verdict opens on the variable itself: no scratch, declared or written
+        Assert.EndsWith($"if ${v} == 2\nhandling = skip\nendif", hide);
+        Assert.DoesNotContain("zz_twok", ini);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+    }
+
+    [Fact]
+    public void Hiding_both_meshes_of_one_draw_signature_skips_at_each_of_their_draws()
+    {
+        // One hash, one section, two hidden meshes: a guard admitting only the first claimant's verdict
+        // would leave the second twin on screen, which is not what a hide on it asked for.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("HideBothTwins");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), shared);
+        string v = $"zz_tw_{shared}";
+        Assert.Contains($"global ${v} = 0\nglobal $zz_twok = 0\n", ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+        // both verdicts fold into the scratch, and the skip opens on it once
+        string hide = SectionOn(ini, shared);
+        Assert.EndsWith($"$zz_twok = 0\nif ${v} == 1\n$zz_twok = 1\nendif\n"
+            + $"if ${v} == 2\n$zz_twok = 1\nendif\nif $zz_twok == 1\nhandling = skip\nendif", hide);
+        // the shared signature and the body's own lod1: one skip each, and nothing else skips
+        Assert.Equal(2, CountOf(ini, "handling = skip"));
+        Assert.Contains(r.Diagnostics, d => d.Contains("'body' shares a draw signature with 'body2'"));
+        Assert.Contains(r.Diagnostics, d => d.Contains("'body2' shares a draw signature with 'body'"));
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+    }
+
+    [Fact]
+    public void A_plain_retexture_no_guard_probes_is_emitted_without_a_tag()
+    {
+        // The tag lines belong to the builds that probe for the hash. A build with no guard in it emits
+        // the retexture section it always emitted.
+        var env = MakeSkinnedEnv();
+        var p = NewProject("RetexNoGuard");
+        AddEditedTexture(p);
+        p.SetChangeKey("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", EditVerbs.Retexture, "F9");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\nhash = {_stockTexHash}\n"
+            + "if $zz_key_f9 == 1\nthis = Resource_Rtx0\nendif\n", ini);
+        Assert.DoesNotContain("filter_index", ini);
+        Assert.DoesNotContain("match_priority", ini);
+    }
+
+    [Fact]
+    public void Two_siblings_on_one_tag_value_refuse_only_where_a_claimed_verdict_is_in_it()
+    {
+        // Siblings whose tags carry one value are one answer to the probe. A section acting for one of
+        // that pair can't tell its own draws apart and refuses; a section acting for NEITHER stays closed
+        // at both their draws, which is where it belongs, so it ships.
+        Assert.Equal((1, 3), ModBuilder.TwinValueCollision(new[] { 700, 800, 700 }, new[] { 1 }));
+        Assert.Equal((1, 3), ModBuilder.TwinValueCollision(new[] { 700, 800, 700 }, new[] { 3 }));
+        Assert.Null(ModBuilder.TwinValueCollision(new[] { 700, 800, 700 }, new[] { 2 }));
+        // a set of claimed verdicts is answered the same way, one member at a time
+        Assert.Equal((2, 4), ModBuilder.TwinValueCollision(new[] { 700, 800, 900, 800 }, new[] { 1, 4 }));
+        Assert.Null(ModBuilder.TwinValueCollision(new[] { 700, 800, 900, 800 }, new[] { 1, 3 }));
+    }
+
+    [Fact]
+    public void A_hide_on_an_ambiguous_mesh_wearing_one_base_color_stays_a_plain_skip()
+    {
+        // No discriminator, no guard: the skip stays plain, and the hide reaches both draws.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartSharedAlbedo: true);
+        var p = NewProject("HideTwinPlain");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.DoesNotContain("zz_tw_", ini);
+        Assert.DoesNotContain("TwinTag", ini);
+        Assert.Contains($"[TextureOverride_Hide_0]\nhash = "
+            + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nhandling = skip\n", ini);
+    }
+
+    [Fact]
+    public void A_guard_tag_on_a_scoped_retextured_stock_map_emits_one_tag_section()
+    {
+        // Both mechanisms tag the same stock texture with the same derived value. Two sections on one
+        // hash would leave the second dropped at parse time, so the scoped tag serves both.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true, clothWearer: true);
+        env = env with
+        {
+            Sharing = Measured(new Dictionary<string, int[]>(), new Dictionary<int, string[]>(),
+                tex: new Dictionary<string, int[]> { [_stockTexHash] = new[] { 0, 1 } }),
+        };
+        var p = NewProject("HideTwinScoped");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        AddEditedTexture(p, user: "c_vesna01_cloth_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.Contains($"[TextureOverride_RetexTag_{_stockTexHash}]", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinTag_{_stockTexHash}]", ini);
+        Assert.Equal(1, CountOf(ini, $"hash = {_stockTexHash}\n"));
+        // and the guard still probes for the value that one tag carries
+        string v = $"zz_tw_{SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}";
+        Assert.Contains($"if $zz_t == {MigotoEmitter.RetexTag(_stockTexHash)}\n${v} = 1\n", ini);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    // ---- twins the wardrobe tells apart ----------------------------------------------------------
+
+    /// <summary>The wardrobe scheme of the twin world: one slot, two options, each married to companion
+    /// meshes. The ids carry the arithmetic the build reads them by — slot = id / 100, and the last two
+    /// digits are the option's place in the slot. Every companion the fixture can build is listed, and a
+    /// token the world left out classifies nothing; tokens EXTENDING a listed one (<c>dress1b</c>,
+    /// <c>belt1x</c>) land on it, which is how the scheme reads suffixed part names.</summary>
+    private static BuildEnv WithWardrobeScheme(BuildEnv env) => env with
+    {
+        PartSchemeFor = stem => stem == "VesnaSSR01"
+            ? new[]
+            {
+                new Remold.Core.Tables.PartScheme.Slot(700103, new[]
+                {
+                    new Remold.Core.Tables.PartScheme.Variant(70010301, true,
+                        new[] { "dress1", "belt1", "scarf1" }),
+                    new Remold.Core.Tables.PartScheme.Variant(70010302, false,
+                        new[] { "dress2", "belt2", "scarf2" }),
+                }),
+            }
+            : null,
+    };
+
+    [Fact]
+    public void A_replace_on_a_wardrobe_twin_acts_while_its_option_is_sighted()
+    {
+        // Nothing bound at the shared draw tells the two options apart, but they are worn one at a time
+        // and each marries a companion mesh of its own. The companions' sections write the verdict, and
+        // the swap's own section acts on it without probing a slot.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new()));
+        var p = NewProject("WardrobeWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
+        Assert.Equal(SkinnedIb("sd2.bundle", "c_vesna01_dress2_lod0"), shared);
+        string v = $"zz_tw_{shared}";
+        // each option's companion mints a section of its own and writes that option's ordinal
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+        // the guarded section reads the verdict and probes no slot for it
+        string cap = SectionOn(ini, shared);
+        Assert.DoesNotContain("ps-t0\n", cap);
+        Assert.StartsWith($"[TextureOverride_Cap_vesna_dress1]\nhash = {shared}\nif ${v} == 1\n"
+            + "Resource_vesna_dress1_Posed = ref vb0\n", cap);
+        Assert.Equal(1, CountOf(cap, "handling = skip"));
+        Assert.Contains($"if ${v} == 1\nResource_vesna_dress1_Posed = ref vb0\n"
+            + "Resource_vesna_dress1_CB = copy vs-cb1\nhandling = skip\n", cap);
+        Assert.EndsWith("run = CommandListDraw_vesna_dress1\nendif", cap);
+        // declared once, and never cleared: the option holds between wardrobe changes
+        Assert.Contains($"global ${v} = 0\n", ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+        Assert.Contains(r.Diagnostics, d => d.Contains("'dress1' shares a draw signature with 'dress2'")
+            && d.Contains("act while its wardrobe option is sighted"));
+        // the companions carry sections of this mod's own, so a manager comparing two mods has to see
+        // them: another mod overriding either hash fights this one for the draw
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
+        var hashes = doc.RootElement.GetProperty("override_hashes")
+            .EnumerateArray().Select(e => e.GetString()).ToArray();
+        Assert.Contains(SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"), hashes);
+        Assert.Contains(SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"), hashes);
+    }
+
+    [Fact]
+    public void A_wardrobe_twin_with_no_companions_refuses_as_before()
+    {
+        // Neither option marries a mesh of its own, so nothing on screen says which one drew. The
+        // refusal the build always gave stands.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Companion1 = false, Companion2 = false }));
+        var p = NewProject("WardrobeNoWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
+    }
+
+    [Fact]
+    public void A_wardrobe_twin_whose_sibling_option_has_no_companion_refuses()
+    {
+        // The targeted option can be sighted, its sibling cannot. A verdict nothing contradicts would
+        // stand from the frame the target last drew, so the swap would keep acting after the player
+        // changed into the other option.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Companion2 = false }));
+        var p = NewProject("WardrobeHalfWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+    }
+
+    [Fact]
+    public void A_tier_twin_outside_the_wardrobe_scheme_takes_no_witness_route()
+    {
+        // The witness route answers wardrobe OPTIONS — meshes worn one at a time. These two parts belong
+        // to no slot the scheme lists, so nothing on screen proves which of them drew and the refusal
+        // stands.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(poolMate: true, mateTierTwin: true));
+        var p = NewProject("TierTwinNoWardrobe");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("share one draw signature", ex.Message);
+        Assert.Contains("mate", ex.Message);
+    }
+
+    [Fact]
+    public void A_pooled_companion_writes_its_verdict_inside_its_own_capture_section()
+    {
+        // The donor rides the companion too, so its ib already owns a capture section. A second override
+        // on that hash would be dropped at parse time, so the sighting rides the capture — ahead of
+        // everything else in it, as a latch sighting does.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new()));
+        var p = NewProject("WardrobePooledWitness");
+        WriteDonorGlb(bones: DressBones.Concat(Belt1Bones).ToArray());
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        string belt1 = SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0");
+        Assert.Contains($"[TextureOverride_Cap_vesna_belt1]\nhash = {belt1}\n${v} = 1\n"
+            + "Resource_vesna_belt1_Posed = ref vb0\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
+        // the unpooled option's companion still mints one
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]", ini);
+    }
+
+    [Fact]
+    public void A_hide_on_a_wardrobe_twin_skips_while_its_option_is_sighted()
+    {
+        // A hide keyed on the shared signature would blank the other option too. The companions' sections
+        // say which option is worn, and the skip waits on that.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new()));
+        var p = NewProject("WardrobeHide");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress1_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
+        string v = $"zz_tw_{shared}";
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+        string hide = SectionOn(ini, shared);
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nif ${v} == 1\nhandling = skip\nendif", hide);
+        // no probe: an overlay build whose verdicts all arrive from sightings reads no slot at all
+        Assert.DoesNotContain("zz_t = ps-t", ini);
+        Assert.DoesNotContain("global $zz_t = 0", ini);
+        Assert.Contains($"global ${v} = 0\n", ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void A_hidden_companion_writes_its_verdict_inside_its_hide_section()
+    {
+        // The companion of the option NOT being replaced is hidden by an edit of its own, so its ib
+        // already owns a skip section. The verdict rides that section, ahead of the skip and outside
+        // every gate: a sighting silenced while a key was off would leave the verdict stale.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new()));
+        var p = NewProject("WardrobeHiddenWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_belt2_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        string belt2 = SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0");
+        Assert.Contains($"[TextureOverride_Hide_0]\nhash = {belt2}\n${v} = 2\nhandling = skip\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt2}]", ini);
+    }
+
+    [Fact]
+    public void A_companion_that_also_witnesses_a_latch_carries_both_lines_in_one_section()
+    {
+        // The presence latch mints a section on the companion's ib, and the wardrobe verdict wants one
+        // on the same hash. Two overrides on one hash leave the second dropped at parse time, so both
+        // lines ride the one section.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new()));
+        string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
+        string belt1 = SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0");
+        env = env with
+        {
+            Sharing = Measured(new Dictionary<string, int[]> { [shared] = new[] { 0, 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { belt1 } }),
+        };
+        var p = NewProject("WardrobeLatchWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.Contains($"[TextureOverride_Witness_vesnassr01_0]\nhash = {belt1}\n"
+            + $"$zz_seen_vesnassr01 = 1\n$zz_tw_{shared} = 1\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
+    }
+
+    [Fact]
+    public void A_companion_both_options_wear_witnesses_neither_of_them()
+    {
+        // One accessory, worn whichever option is on: its mesh is byte-identical under both names, so it
+        // draws on ONE signature and its section would write a verdict per option with the last one
+        // standing. It proves nothing, and with nothing else to sight the route has no answer.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { TwinCompanions = true }));
+        var p = NewProject("WardrobeSharedCompanion");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
+    }
+
+    [Fact]
+    public void A_companion_both_options_wear_is_struck_and_the_private_ones_still_witness()
+    {
+        // Each option is worn with an accessory of its own AND with the one both share. The shared mesh
+        // is struck — its single section can only carry one option's verdict — and the private ones
+        // still say which option is on, so the route holds.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { SharedExtra = true }));
+        var p = NewProject("WardrobeSharedExtra");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+        // one hash under two names, and no line on it at all
+        string scarf = SkinnedIb("ss1.bundle", "c_vesna01_scarf1_lod0");
+        Assert.Equal(SkinnedIb("ss2.bundle", "c_vesna01_scarf2_lod0"), scarf);
+        Assert.DoesNotContain(scarf, ini);
+        AssertStickyVerdictsSurviveTheFrame(ini);
+    }
+
+    [Fact]
+    public void A_companion_this_build_refuses_to_touch_is_no_witness_rather_than_no_build()
+    {
+        // One of the first option's companions fails the content policy, so nothing about it can be
+        // read and nothing may be emitted on it. It drops out of the candidates the way an unreadable
+        // part does, and the companion beside it still witnesses the option.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { BlockedCompanion = true }));
+        var p = NewProject("WardrobeBlockedCompanion");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress1_lod0", true);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]", ini);
+        Assert.Contains($"global ${v} = 0\n", ini);
+        Assert.DoesNotContain("Helena", ini);
+    }
+
+    [Fact]
+    public void A_signature_the_two_routes_split_refuses_rather_than_dropping_a_claimant()
+    {
+        // Three siblings on one draw signature, two of them byte-identical. The pair is told about a
+        // single mate and binds a base color that mate does not, so its draws answer for themselves;
+        // the lone sibling is told about both and shares a color with one, so only the wardrobe answers
+        // for it. One variable cannot hold both meanings, and dropping either claimant would leave its
+        // hide acting on the other's draws.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true }));
+        var p = NewProject("WardrobeMixedRoutes");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress1_lod0", true);
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress2_lod0", true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'dress1' and 'dress2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
+    }
+
+    [Fact]
+    public void Either_route_alone_on_the_split_signature_builds_as_it_always_did()
+    {
+        // The same three siblings, one hide at a time: the pair's hide is answered by the textures at
+        // its own draw, the lone sibling's by the wardrobe. Neither is changed by the refusal above.
+        var p1 = NewProject("WardrobeMixedTextureOnly");
+        p1.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress1_lod0", true);
+        var r1 = ModBuilder.Build(p1,
+            WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true })), _out, zip: false);
+
+        string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
+        string ini1 = File.ReadAllText(Path.Combine(r1.OutDir, "mod.ini"));
+        string hide1 = SectionOn(ini1, shared);
+        // the slot sweep the texture route reads, then the skip on the verdict it wrote
+        Assert.StartsWith($"[TextureOverride_Hide_0]\nhash = {shared}\n$zz_t = ps-t", hide1);
+        Assert.EndsWith($"if $zz_tw_{shared} == 1\nhandling = skip\nendif", hide1);
+        Assert.DoesNotContain("TextureOverride_TwinWit_", ini1);
+
+        var p2 = NewProject("WardrobeMixedWitnessOnly");
+        p2.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress2_lod0", true);
+        var r2 = ModBuilder.Build(p2,
+            WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true })), _out, zip: false);
+
+        string ini2 = File.ReadAllText(Path.Combine(r2.OutDir, "mod.ini"));
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nif $zz_tw_{shared} == 2\n"
+            + "handling = skip\nendif", SectionOn(ini2, shared));
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n"
+            + $"$zz_tw_{shared} = 1\n", ini2);
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n"
+            + $"$zz_tw_{shared} = 2\n", ini2);
+        Assert.DoesNotContain("zz_t = ps-t", ini2);
+    }
+
+    [Fact]
+    public void A_repainted_tag_that_other_wardrobes_meshes_bind_refuses()
+    {
+        // The lone sibling is identified by a base color the always-on body also binds. Repainted,
+        // the bind-time write would fire at the body's draws under EVERY option, so the verdict
+        // would claim the lone sibling's option regardless of what is worn.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true }));
+        var p = NewProject("WardrobeTagRepaintShared");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_dress1_lod0", true);
+        AddEditedTexture(p);   // repaints tex_body_d — dress2's identifying color, and the body's
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("also binds the base color that identifies 'dress2'", ex.Message);
+        Assert.Contains("so this build can't ship", ex.Message);
+    }
+
+    [Fact]
+    public void A_repainted_tag_on_same_frame_twins_refuses()
+    {
+        // No wardrobe gates these siblings: both draw every frame, so a bind-time write proves
+        // nothing, and the repaint has hidden the color the draw probe needed. The edit rides the
+        // un-acted-on body, so it ships as a plain retexture rather than being adopted or dropped.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("TwinTagRepaint");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+        AddEditedTexture(p);   // repaints tex_body_d — the body's identifying color at the shared draw
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'body' and 'body2' share one draw signature, told apart by 'body's base color",
+            ex.Message);
+        Assert.Contains("so this build can't ship", ex.Message);
+    }
+
     // ---- parts the recoverable-skin rule holds back ----------------------------------------------
 
     [Fact]
@@ -1801,8 +2720,8 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, lines.Add, zip: false);
 
         Assert.Contains("pool (vesna_body): c_vesna01_body_lod0 (anchor c_vesna01_body_lod0)", lines);
-        Assert.Contains(r.Diagnostics, d => d == "pool (vesna_body): one-influence part(s) left out: "
-            + "c_vesna01_acc_lod0");
+        Assert.Contains(r.Diagnostics, d => d == "pool (vesna_body): left out: 'c_vesna01_acc_lod0' · "
+            + "it stores one influence per vertex, so only a Replace on that part itself pools it");
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.DoesNotContain("vesna_acc", ini);
         // every union bone recovered from the body's own draw
@@ -2026,6 +2945,9 @@ public class ModBuilderTests : IDisposable
     /// <summary>The ib hash of a mesh in one of the skinned world's bundles.</summary>
     private string SkinnedIb(string bundleFile, string mesh) =>
         BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, bundleFile)), mesh).Ib.ToString("x8");
+
+    private string SkinnedVb1(string bundleFile, string mesh) =>
+        BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, bundleFile)), mesh).Vb1!.Value.ToString("x8");
 
     private static SharingIndex Measured(Dictionary<string, int[]> mesh, Dictionary<int, string[]> witnesses,
         Dictionary<string, int[]>? tex = null) =>
@@ -2283,21 +3205,21 @@ public class ModBuilderTests : IDisposable
     }
 
     [Fact]
-    public void One_pipelines_two_tiers_on_one_index_buffer_ride_a_single_capture()
+    public void A_target_whose_tier_shares_anothers_draw_signature_refuses()
     {
-        // Within a pipeline the shared hash is not a collision: both tiers recover into the same palette,
-        // so the second rides the first's capture rather than minting a section or refusing.
+        // The mate's lod1 is a different mesh on the body lod1's index buffer. Every section on that
+        // hash fires on both draws, so replacing the body would suppress and redraw the mate at that
+        // detail level too. Refused, and the refusal names both parts.
         var env = MakeSkinnedEnv(poolMate: true, mateTierTwin: true);
         var p = NewProject("OneTierTwin");
         WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
 
-        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        AssertNoDuplicateSections(ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body_lod1]\nhash = {SkinnedIb("s1.bundle", "c_vesna01_body_lod1")}\n", ini);
-        Assert.DoesNotContain("Cap_vesna_mate_lod1", ini);
+        Assert.Contains("share one draw signature", ex.Message);
+        Assert.Contains("c_vesna01_body_lod0", ex.Message);
+        Assert.Contains("mate", ex.Message);
     }
 
     /// <summary>How many sections the ini opens on one ib hash.</summary>

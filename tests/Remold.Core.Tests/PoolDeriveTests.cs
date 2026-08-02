@@ -5,6 +5,7 @@ using System.Linq;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 using Xunit;
+using static Remold.Core.Tests.Support.PoolFixtures;
 
 namespace Remold.Core.Tests;
 
@@ -15,26 +16,6 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class PoolDeriveTests
 {
-    private static PoolDerive.PartBones Part(string mesh, params uint[] hashes) =>
-        new(mesh, hashes.ToHashSet());
-
-    /// <summary>A donor whose vertices ride exactly <paramref name="usedHashes"/>. The remaining influences
-    /// carry weight 0 and point at joint 0 — zero-weight influences must never pull a bone into the
-    /// pool.</summary>
-    private static MeshApply.Payload Donor(params uint[] usedHashes)
-    {
-        int n = Math.Max(1, usedHashes.Length);
-        var ji = new int[n * 4];
-        var jw = new float[n * 4];
-        for (int v = 0; v < usedHashes.Length; v++) { ji[v * 4] = v; jw[v * 4] = 1f; }
-        return new MeshApply.Payload
-        {
-            Mesh = new UnityMesh { Name = "donor", VertexCount = n },
-            JointIndices = ji, JointWeights = jw,
-            SkinJointHashes = usedHashes.Length > 0 ? usedHashes : new uint[] { 1 },
-        };
-    }
-
     private static readonly IReadOnlyList<PoolDerive.PartBones> Roster = new[]
     {
         Part("face", 1, 2, 3),

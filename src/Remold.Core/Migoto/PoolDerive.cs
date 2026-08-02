@@ -30,9 +30,13 @@ public static class PoolDerive
     /// <para><paramref name="Narrow"/> marks a part storing ONE influence per vertex, which
     /// <see cref="PoolCandidates"/> keeps out of every pool but its own Replace's. Such a part rides its
     /// bones at weight 1 on every vertex, so it takes union ownership of a shared bone from the part that
-    /// actually poses it (<see cref="PoolMath.BuildUnion"/> ranks by summed weight) — and these are the
-    /// conditionally-drawn parts, whose captures don't fire in the frames they aren't drawn.</para></summary>
-    public sealed record PartBones(string Mesh, IReadOnlySet<uint> BoneHashes, bool Narrow = false);
+    /// actually poses it (<see cref="PoolMath.BuildUnion"/> ranks by summed weight).</para>
+    ///
+    /// <para><paramref name="Presence"/> is when the part is on screen; <see cref="PoolCandidates"/>
+    /// admits it for a Replace only when it covers the replaced part's presence. The default is
+    /// unconditional.</para></summary>
+    public sealed record PartBones(string Mesh, IReadOnlySet<uint> BoneHashes, bool Narrow = false,
+        PartPresence Presence = default);
 
     /// <summary>A roster part the caller could NOT offer as a pool candidate, and why in the caller's own
     /// words. <paramref name="BoneHashes"/> is null when the part's bone table is unknown too, which is what
@@ -59,25 +63,56 @@ public static class PoolDerive
     public sealed record TierBones(string Mesh, string CaptureHash, IReadOnlySet<uint> WeightedBones);
 
     /// <summary>The roster a Replace on <paramref name="replacedPart"/> may pool over, and the parts this
-    /// left out. THE one seam the narrow rule is applied at: both pool derivation and tier coverage read the
-    /// candidate set, so a part filtered here is neither pooled for another part's donor nor ranked to carry
-    /// another part's tier bones. Everything canonical passes through in roster order.
+    /// left out. THE one seam the candidacy rules are applied at: both pool derivation and tier coverage
+    /// read the candidate set, so a part filtered here is neither pooled for another part's donor nor
+    /// ranked to carry another part's tier bones. Everything admitted passes through in roster order.
     ///
-    /// <para>The exclusions come back as <see cref="MissingPart"/> so a donor riding a bone only a narrow
-    /// part owns is told which part it landed on, rather than blamed on a foreign armature.</para></summary>
+    /// <para>Two rules. A narrow part (one stored influence) pools only for its own Replace. A part
+    /// pools only when its <see cref="PartPresence"/> covers the replaced part's: a recovery source
+    /// that can be off screen while the replacement draws would pose its owned bones from a buffer
+    /// nothing refreshed. The replaced part is always admitted; its own capture fires exactly when the
+    /// replacement is visible.</para>
+    ///
+    /// <para>The exclusions come back as <see cref="MissingPart"/> so a donor riding a bone only an
+    /// excluded part owns is told which part it landed on, rather than blamed on a foreign armature.</para></summary>
     public static (IReadOnlyList<PartBones> Candidates, IReadOnlyList<MissingPart> Excluded) PoolCandidates(
         IReadOnlyList<PartBones> rosterParts, string replacedPart)
     {
+        var target = rosterParts.FirstOrDefault(p =>
+            string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase));
+        // an unlisted target admits only unconditional sources; nothing else is provably co-drawn
+        var targetPresence = target?.Presence ?? PartPresence.Always;
+
         var candidates = new List<PartBones>();
         var excluded = new List<MissingPart>();
         foreach (var p in rosterParts)
-            if (!p.Narrow || string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase))
-                candidates.Add(p);
-            else
+        {
+            bool isTarget = string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase);
+            if (!isTarget && p.Narrow)
                 excluded.Add(new MissingPart(p.Mesh,
                     "it stores one influence per vertex, so only a Replace on that part itself pools it",
                     p.BoneHashes));
+            else if (!isTarget && !p.Presence.Covers(targetPresence))
+                excluded.Add(new MissingPart(p.Mesh, NotCoDrawn(p.Presence, targetPresence), p.BoneHashes));
+            else
+                candidates.Add(p);
+        }
         return (candidates, excluded);
+    }
+
+    /// <summary>Why a part that isn't reliably co-drawn stays out, in the change list's vocabulary —
+    /// named by the axis that actually failed.</summary>
+    static string NotCoDrawn(PartPresence source, PartPresence target)
+    {
+        bool variantFails = source.VariantId != PartPresence.NoVariant
+            && (source.VariantId == PartPresence.UnknownVariant || source.VariantId != target.VariantId);
+        if (variantFails)
+            return source.VariantId == PartPresence.UnknownVariant
+                ? "its wardrobe slot isn't in the game's tables, so nothing guarantees it is on screen"
+                : "it is a wardrobe option worn only some of the time";
+        return source.Context == PresenceContext.Fight
+            ? "it is on screen only in combat"
+            : "it is on screen only in the dorm";
     }
 
     /// <summary>Derive the pool for <paramref name="donor"/> over <paramref name="rosterParts"/>.

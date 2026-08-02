@@ -213,12 +213,21 @@ public class SlotProbeEmissionTests : IDisposable
     }
 
     [Fact]
-    public void Retexturing_a_slot_tagged_texture_warns_that_the_probe_goes_blind()
+    public void Retexturing_a_slot_tagged_texture_merges_the_tag_into_the_retex_section()
     {
+        // One hash, one section: the retexture's section carries the slot tag's kind value (with the
+        // hash, ungated — the draw probes read it whether or not the rebind's key is on) and no
+        // separate SlotTag section is minted, so the runtime sees no same-hash conflict.
         string dds = Path.Combine(_root, "rtx.dds");
         FlatDds.Write(dds, (200, 10, 10, 255));
-        var (_, warnings, _) = Emit(Tags, donorTexed: true,
+        var (ini, warnings, _) = Emit(Tags, donorTexed: true,
             retex: new[] { new RetexEntry("alpha_a_f1f1a1a1", "f1f1a1a1", dds) });
-        Assert.Contains(warnings, w => w.Contains("f1f1a1a1") && w.Contains("retextured"));
+
+        Assert.DoesNotContain("[TextureOverride_SlotTag_f1f1a1a1]", ini);
+        Assert.Contains("[TextureOverride_Retex_alpha_a_f1f1a1a1]\nhash = f1f1a1a1\n"
+            + $"filter_index = {MigotoEmitter.FilterAlbedo}\nthis = Resource_Rtx0\n", ini);
+        // the other kinds' tags stand untouched
+        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\n", ini);
+        Assert.DoesNotContain(warnings, w => w.Contains("f1f1a1a1"));
     }
 }

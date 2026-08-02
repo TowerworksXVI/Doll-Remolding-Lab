@@ -611,13 +611,34 @@ public partial class MainWindowViewModel
                 _buildWaitingOnSharing = false;
             }
             Footer = Footer.Streaming("Building…");
+            // The wardrobe scheme decides which parts a pool may lean on. Loaded lazily on the build
+            // thread, once. ANY failure to read the tables costs no build: without a scheme,
+            // wardrobe-shaped parts classify unknown, which only shrinks pools, and the change list's
+            // exclusion reasons say why.
+            string gameDirForScheme = GameDir;
+            var schemeLazy = new Lazy<Dictionary<string, IReadOnlyList<PartScheme.Slot>>?>(() =>
+            {
+                try
+                {
+                    var db = GameDatabase.FromGameDir(gameDirForScheme);
+                    return PartScheme.Load(db).ByStem(db);
+                }
+                catch (Exception ex)
+                {
+                    lock (logLines) logLines.Add($"wardrobe tables unreadable, pools stay conservative: {ex.Message}");
+                    return null;
+                }
+            });
+            IReadOnlyList<PartScheme.Slot>? PartSchemeFor(string stem) =>
+                schemeLazy.Value is { } byStem && byStem.TryGetValue(stem, out var slots) ? slots : null;
             var env = new BuildEnv(
                 ResolveSubjectForBuild,
                 a => vfs.Catalog.ResolveAddress(a),
                 TryDeobfuscateBundle,
                 vfs.CatalogVersion,
                 typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(),
-                sharing);
+                sharing,
+                PartSchemeFor: PartSchemeFor);
             var result = await Task.Run(() => ModBuilder.Build(project, env, outRoot, msg =>
             {
                 lock (logLines) logLines.Add(msg);

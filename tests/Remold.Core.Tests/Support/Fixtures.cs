@@ -93,6 +93,27 @@ internal sealed class TempGame : IDisposable
         return m.ToArray();
     }
 
+    /// <summary>A row of PartsTypeListData: <c>#1</c> = clothes id (1e6 + ModelConfigId), <c>#2</c> =
+    /// packed slot ids.</summary>
+    public static byte[] PartsTypeListRow(long clothesId, params long[] slotIds) =>
+        Pb.Msg().Varint(1, clothesId).Packed(2, slotIds).ToArray();
+
+    /// <summary>A row of PartsGroupData: <c>#1</c> = slot id, <c>#3</c> = packed variant ids.</summary>
+    public static byte[] PartsGroupRow(long slotId, params long[] variantIds) =>
+        Pb.Msg().Varint(1, slotId).Packed(3, variantIds).ToArray();
+
+    /// <summary>A row of PartsListData: <c>#1</c> = variant id, <c>#4</c> = default flag.</summary>
+    public static byte[] PartsListRow(long variantId, bool isDefault = false)
+    {
+        var m = Pb.Msg().Varint(1, variantId);
+        if (isDefault) m.Varint(4, 1);
+        return m.ToArray();
+    }
+
+    /// <summary>A row of PartsResourceData: <c>#1</c> = resource id (variantId·10+k), <c>#2</c> = token.</summary>
+    public static byte[] PartsResourceRow(long resourceId, string token) =>
+        Pb.Msg().Varint(1, resourceId).Str(2, token).ToArray();
+
     /// <summary>The parent of both <c>Table</c> and <c>AssetBundles_Windows</c>, derived from the game root
     /// exactly as the app does.</summary>
     private string DataDir => Path.Combine(Root, "GF2_Exilium_Data", "LocalCache", "Data");

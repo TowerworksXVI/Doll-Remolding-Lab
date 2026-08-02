@@ -32,7 +32,11 @@ public sealed record BuildEnv(
     /// <summary>The roster's asset-sharing measurement, deciding each edit's scope (draw-scoped
     /// retextures, presence latches). Null = no measurement: every edit ships unscoped, noted in the
     /// diagnostics.</summary>
-    Workbench.SharingIndex? Sharing = null);
+    Workbench.SharingIndex? Sharing = null,
+    /// <summary>Outfit stem → its wardrobe scheme (<see cref="Tables.PartScheme"/>), or null for a
+    /// non-modular outfit. Null resolver = no scheme available: wardrobe-shaped parts then classify as
+    /// unknown, so they may be replaced but never lean on.</summary>
+    Func<string, IReadOnlyList<Tables.PartScheme.Slot>?>? PartSchemeFor = null);
 
 /// <summary>
 /// Where a build may keep regenerable products (solved recovery operators, encoded textures). Both are
@@ -128,6 +132,25 @@ public static class ModBuilder
             + $"carry one key, so {kept ?? "no key"} applies. Set the same key on both";
     }
 
+    /// <summary>The first pair of siblings a twin guard's probe cannot tell apart AND at least one of whose
+    /// verdicts the guarded section claims, as (earlier, later) verdict numbers — or null when every claimed
+    /// verdict carries a tag value of its own. <paramref name="values"/> holds one tag value per sibling,
+    /// indexed by verdict minus one.
+    ///
+    /// <para>Two UNCLAIMED siblings sharing a value cost the section nothing: whichever of them draws, the
+    /// variable lands on a verdict the section does not admit, so it stays closed at both — which is what
+    /// it wants at a sibling's draw anyway.</para></summary>
+    internal static (int A, int B)? TwinValueCollision(IReadOnlyList<int> values,
+        IReadOnlyCollection<int> ownVerdicts)
+    {
+        var claimed = new HashSet<int>(ownVerdicts);
+        for (int b = 1; b <= values.Count; b++)
+            for (int a = 1; a < b; a++)
+                if (values[a - 1] == values[b - 1] && (claimed.Contains(a) || claimed.Contains(b)))
+                    return (a, b);
+        return null;
+    }
+
     /// <summary>The refusal when two changes ask one stock texture for different images and the mechanism
     /// has only one image to give: the game-wide rebind, or a draw-scoped section a game-wide claim also
     /// wants. Both claimants are named so the author can tell which two edits met.</summary>
@@ -197,6 +220,51 @@ public static class ModBuilder
     /// <summary>Who holds an ib hash's one capture section: the mesh claiming it, and the label a refusal
     /// names that holder by.</summary>
     internal readonly record struct HashClaim(CaptureMesh Mesh, string Claimant);
+
+    /// <summary>How a twin guard on one mesh can tell its siblings apart. <paramref name="OwnVariant"/>
+    /// is 0 where the textures bound at the draw answer, and the mesh's wardrobe variant id where a
+    /// sighting elsewhere on screen does; <paramref name="Witnesses"/> then names the section key that
+    /// witnesses each variant of the sibling set and the verdict it writes.</summary>
+    private readonly record struct TwinRoute(long OwnVariant,
+        IReadOnlyList<(string Key, int Verdict)> Witnesses);
+
+    /// <summary>One site's request for a guard on a shared signature key, carrying the route it was
+    /// accepted on. <see cref="Hide"/> marks the hide pass's requests — the one kind answerable
+    /// together on a key.</summary>
+    private sealed record TwinRequest(SubjectModel Model, string Key, string OwnToken,
+        IReadOnlyList<string> Mates, bool Hide, TwinRoute Route)
+    {
+        /// <summary>The textures at the mesh's own draw answer the probe; false = the verdict arrives
+        /// from wardrobe sightings.</summary>
+        public bool IsTextureRoute => Route.OwnVariant == 0;
+    }
+
+    /// <summary>One mesh's draw-signature entry: the key its sections act on, its own ib hash (dump
+    /// and sharing identity), whether the key names it alone, the mate a refusal names, and every mate
+    /// token sharing the key.</summary>
+    private readonly record struct MeshSig(string Key, string Ib, bool Unique, string Mate,
+        IReadOnlyList<string> Mates);
+
+    /// <summary>The refusal naming two meshes on one draw signature when a change cannot act on one
+    /// without hitting the other.</summary>
+    private static InvalidOperationException TwinShipRefusal(string a, string b) =>
+        new($"'{a}' and '{b}' share one draw signature. The swap can't act on one without hitting the "
+            + "other, so this build can't ship");
+
+    /// <summary>Strike sightings whose key was seen under more than one verdict — such a mesh is worn
+    /// with several options, so its drawing proves nothing — and demand every verdict in
+    /// <paramref name="required"/> keeps at least one witness. Null = some verdict lost them all: its
+    /// option could never contradict the others, and the sticky variable would stand at its draws
+    /// with another option's answer in it.</summary>
+    private static List<(string Key, int Verdict)>? StrikeContradictedWitnesses(
+        IReadOnlyList<(string Key, int Verdict)> sightings, IEnumerable<int> required)
+    {
+        var contradicted = sightings.GroupBy(w => w.Key, StringComparer.Ordinal)
+            .Where(g => g.Select(w => w.Verdict).Distinct().Count() > 1)
+            .Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+        var kept = sightings.Where(w => !contradicted.Contains(w.Key)).ToList();
+        return required.Any(v => !kept.Any(w => w.Verdict == v)) ? null : kept;
+    }
 
     /// <summary>The refusal when <paramref name="dumpName"/> already means a different mesh than
     /// <paramref name="incoming"/>, else null. A silent dir reuse across different meshes would feed a
@@ -425,8 +493,8 @@ public static class ModBuilder
                 }
             }
 
-            // Hashing an index buffer parses the mesh out of its bundle, and one mesh is asked for by the
-            // pool, by its pipeline's captures and by the hide enumeration.
+            // Hashing an index buffer parses the mesh out of its bundle; memoized because several sites
+            // can ask about one out-of-index mesh.
             var ibHashes = new Dictionary<string, string>(StringComparer.Ordinal);
             string IbHash(string bundleId, string meshName, long pathId)
             {
@@ -441,6 +509,322 @@ public static class ModBuilder
             // pins the contents, so the part is solved fresh.
             string? OpKey(string bundleId, string meshName, long pathId) =>
                 env.CatalogVersion is { } cv ? $"{cv}|{bundleId}|{meshName}|{pathId}" : null;
+
+            // ---- draw-signature keys ---------------------------------------------------------------
+            // Sections act by hash, and one subject can ship two DIFFERENT meshes on one index-buffer
+            // hash (wardrobe remodels reuse a garment's topology), so a section on that hash fires on
+            // both draws. Every section therefore keys on the mesh's SIGNATURE KEY: the ib hash, unless
+            // another mesh of the subject shares it with different content — then each content class
+            // keys on its vb1 hash instead. Byte-identical meshes under two names are one draw
+            // signature legitimately and keep the shared key. A mesh left AMBIGUOUS (vb1 missing or
+            // colliding too) keeps the ib key unmarked as unique: it may still feed a pool the way it
+            // always has, but acting on it directly refuses, naming the mesh it collides with.
+            // Each entry carries the mate a refusal names AND every mate token the class shares its key
+            // with, which is what a discriminator has to be compared against.
+            var sigIndexes = new Dictionary<(string, string), Dictionary<string, MeshSig>>();
+            Dictionary<string, MeshSig> SignatureIndex(SubjectModel model)
+            {
+                var subjectKey = (model.Character.ToLowerInvariant(), model.Stem.ToLowerInvariant());
+                if (sigIndexes.TryGetValue(subjectKey, out var have)) return have;
+
+                var meshes = new List<(string Name, string Bid, long Pid, BufferHash.Hashes H, bool Vb1Bound, string Token)>();
+                foreach (var p in model.Parts)
+                {
+                    List<(string Name, string BundleId, long PathId)> tiers;
+                    try { tiers = Tiers(p); } catch { continue; }   // unreadable here = nothing to key a section on
+                    foreach (var (name, bid, pid) in tiers)
+                    {
+                        if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
+                        try
+                        {
+                            var field = reader.GetMeshField(Bundle(bid, $"mesh '{name}'"), name, pid)
+                                ?? throw new InvalidDataException($"mesh '{name}' not found in '{bid}'");
+                            var raw = Mesh.MeshRaw.From(field);
+                            // the vb1 hash is a usable key only when the mesh's SECOND stream is stream 1,
+                            // the UV/colour buffer the draw binds — a skin stream in that ordinal is
+                            // CPU-side and its hash matches nothing at runtime
+                            bool vb1Bound = raw.StreamIds.Count > 1 && raw.StreamIds[1] == 1;
+                            meshes.Add((name, bid, pid, BufferHash.Compute(raw), vb1Bound, p.Token));
+                        }
+                        catch { }
+                    }
+                }
+
+                // ib groups → content classes → candidate keys; one triple can be reached twice (a tier
+                // shared between parts), which is one mesh, not two
+                var index = new Dictionary<string, MeshSig>(StringComparer.Ordinal);
+                var byCandidate = new Dictionary<string, List<(string Trip, string ClassId, string Token, string Ib,
+                    string? ForcedMate, IReadOnlyList<string> ForcedMates)>>(StringComparer.Ordinal);
+                int classSeq = 0;
+                foreach (var group in meshes.GroupBy(m => m.H.Ib)
+                             .Select(g => g.DistinctBy(m => (m.Bid, m.Name, m.Pid)).ToList()))
+                {
+                    // Partition the group into byte-identical content classes. Comparisons re-parse the
+                    // meshes, so each group member is materialized once for the whole partition rather
+                    // than once per comparison; a singleton group compares nothing and parses nothing.
+                    var raws = new Dictionary<string, Mesh.MeshRaw>(StringComparer.Ordinal);
+                    Mesh.MeshRaw RawOf(string bid, string name, long pid) =>
+                        raws.TryGetValue($"{bid}|{name}|{pid}", out var have)
+                            ? have
+                            : raws[$"{bid}|{name}|{pid}"] = Mesh.MeshRaw.From(
+                                reader.GetMeshField(Bundle(bid, $"mesh '{name}'"), name, pid)
+                                ?? throw new InvalidDataException($"mesh '{name}' not found in '{bid}'"));
+                    var classes = new List<List<(string Name, string Bid, long Pid, BufferHash.Hashes H, bool Vb1Bound, string Token)>>();
+                    foreach (var m in group)
+                    {
+                        var home = classes.FirstOrDefault(c =>
+                        {
+                            try { return MeshBytesEqual(RawOf(c[0].Bid, c[0].Name, c[0].Pid), RawOf(m.Bid, m.Name, m.Pid)); }
+                            catch { return false; }
+                        });
+                        if (home is null) classes.Add(new() { m }); else home.Add(m);
+                    }
+                    // In a shared group a class may key on its vb1 only when the draw binds one AND no
+                    // sibling class answers to the same value; everything else keeps its own ib — which
+                    // the siblings also draw on, so it can never be unique, even standing alone in its
+                    // key bucket.
+                    string GroupVb1(int i) => classes[i][0].Vb1Bound ? classes[i][0].H.Vb1?.ToString("x8") ?? "" : "";
+                    for (int ci = 0; ci < classes.Count; ci++)
+                    {
+                        var cls = classes[ci];
+                        string ib = cls[0].H.Ib.ToString("x8");
+                        string vb1 = GroupVb1(ci);
+                        bool separates = classes.Count > 1 && vb1.Length > 0
+                            && Enumerable.Range(0, classes.Count).All(j => j == ci || GroupVb1(j) != vb1);
+                        string candidate = separates ? vb1 : ib;
+                        bool forced = classes.Count > 1 && !separates;
+                        string? forcedMate = forced ? classes[(ci + 1) % classes.Count][0].Token : null;
+                        // every OTHER class of the ib group draws on this class's key too, so all their
+                        // tokens are mates a discriminator has to tell this class apart from
+                        IReadOnlyList<string> forcedMates = forced
+                            ? Enumerable.Range(0, classes.Count).Where(j => j != ci)
+                                .SelectMany(j => classes[j].Select(m => m.Token)).ToList()
+                            : Array.Empty<string>();
+                        string classId = $"c{classSeq++}";
+                        if (!byCandidate.TryGetValue(candidate, out var list)) byCandidate[candidate] = list = new();
+                        foreach (var m in cls)
+                            list.Add(($"{m.Bid}|{m.Name}|{m.Pid}", classId, m.Token, ib, forcedMate, forcedMates));
+                    }
+                }
+                // closure: a candidate shared by more than one content class is unique for nobody — a
+                // vb1 landing on some other mesh's ib, or the reverse, demotes both here. A demoted or
+                // forced mesh keys on its own ib: the honest legacy signature, and the one already-shipped
+                // sidecars and dumps recorded.
+                foreach (var (key, members) in byCandidate)
+                {
+                    bool oneClass = members.DistinctBy(m => m.ClassId).Count() == 1;
+                    foreach (var (trip, classId, token, ib, forcedMate, forcedMates) in members)
+                    {
+                        bool unique = oneClass && forcedMate is null;
+                        var mates = forcedMates
+                            .Concat(members.Where(o => o.ClassId != classId).Select(o => o.Token))
+                            .Where(t => !string.Equals(t, token, StringComparison.OrdinalIgnoreCase))
+                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                        index[trip] = new MeshSig(unique ? key : ib, ib, unique,
+                            forcedMate ?? members.FirstOrDefault(o => o.ClassId != classId).Token ?? "",
+                            mates);
+                    }
+                }
+                return sigIndexes[subjectKey] = index;
+            }
+
+            // The signature a mesh's sections key on. A mesh outside the index (an unreadable sibling)
+            // keys on its ib: nothing measured contests it.
+            MeshSig SigOf(SubjectModel model, string bid, string name, long pid)
+            {
+                if (SignatureIndex(model).TryGetValue($"{bid}|{name}|{pid}", out var sig)) return sig;
+                string ib = IbHash(bid, name, pid);
+                return new MeshSig(ib, ib, true, "", Array.Empty<string>());
+            }
+
+            // The outfit's wardrobe scheme, read once per outfit: null = it is not modular, or no
+            // resolver knows it. The ONE place the scheme is asked for, so the roster probe's presence
+            // and every wardrobe question below read the same answer. Keyed on the stem exactly as it
+            // was given: the resolver decides what two spellings of one name mean, and a cache that
+            // folded case would answer for a stem the resolver was never asked about.
+            var schemes = new Dictionary<string, IReadOnlyList<Tables.PartScheme.Slot>?>(
+                StringComparer.Ordinal);
+            IReadOnlyList<Tables.PartScheme.Slot>? SchemeOf(SubjectModel model) =>
+                schemes.TryGetValue(model.Stem, out var have)
+                    ? have : schemes[model.Stem] = env.PartSchemeFor?.Invoke(model.Stem);
+
+            // Sections whose signature key another mesh draws on too, recorded where each site meets one.
+            // The guards themselves are built in one pass at the end: a verdict number spans every sibling
+            // of the key, and a sibling's tag value is only knowable once the build's slot tags and scoped
+            // retextures are settled.
+            // Several hides on one key are answerable together — one section skipping on each hidden
+            // sibling's verdict — where two sites wanting the section to ACT for them are not.
+            var twinRequests = new List<TwinRequest>();
+            void RecordTwinGuard(SubjectModel model, SubjectPart part, string key,
+                IReadOnlyList<string> mates, TwinRoute route, bool hide = false) =>
+                twinRequests.Add(new TwinRequest(model, key, part.Token, mates, hide, route));
+
+            // The route a guard on this mesh can take, or null when none can. The textures bound at its
+            // own draw answer first — cheapest, and they need no section of their own — and the wardrobe
+            // route stands behind them. Answered per MESH; the finalization refuses a key whose requests
+            // come back on both routes, since one variable can hold one kind of verdict.
+            TwinRoute? TwinRouteFor(SubjectModel model, SubjectPart part, IReadOnlyList<string> mates)
+            {
+                if (TwinSeparable(model, part, mates))
+                    return new TwinRoute(0, Array.Empty<(string, int)>());
+                if (WardrobeWitnesses(model, part, mates) is not { } wardrobe) return null;
+                return new TwinRoute(wardrobe.OwnVariant, wardrobe.Witnesses);
+            }
+
+            // Whether a guard on this mesh is possible, recording the request when it is. False leaves
+            // the site its original refusal or degrade.
+            bool RequestTwinGuard(SubjectModel model, SubjectPart part, string key,
+                IReadOnlyList<string> mates, bool hide = false)
+            {
+                if (TwinRouteFor(model, part, mates) is not { } route) return false;
+                RecordTwinGuard(model, part, key, mates, route, hide);
+                return true;
+            }
+
+            // The wardrobe route: the siblings are different options of ONE outfit slot, worn one at a
+            // time and stable during play, and each option marries meshes whose own signatures are
+            // unique. Sighting one of those proves which option is on the doll, so the guarded section
+            // needs no texture of its own. Answers this mesh's variant id and the section key that
+            // witnesses each variant of the sibling set; null where the shape does not hold, which leaves
+            // the site its own refusal or degrade.
+            (long OwnVariant, IReadOnlyList<(string Key, int Verdict)> Witnesses)? WardrobeWitnesses(
+                SubjectModel model, SubjectPart part, IReadOnlyList<string> mates)
+            {
+                if (mates.Count == 0) return null;
+                long own = VariantOf(model, part);
+                if (own <= 0) return null;
+                // the whole signature group is off limits as a witness: its meshes are exactly the ones
+                // whose draws cannot be told apart
+                var group = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { part.Token };
+                var variants = new List<long> { own };
+                foreach (var mate in mates)
+                {
+                    if (PartOf(model, mate) is not { } matePart) return null;
+                    long theirs = VariantOf(model, matePart);
+                    if (theirs <= 0 || theirs == own || theirs / 100 != own / 100) return null;
+                    group.Add(mate);
+                    if (!variants.Contains(theirs)) variants.Add(theirs);
+                }
+                // each option's candidates first, then the ones no OTHER option also draws
+                var perVariant = new List<(long Variant, List<string> Keys)>();
+                foreach (long variant in variants)
+                {
+                    var keys = new List<string>();
+                    foreach (var p in model.Parts)
+                    {
+                        if (group.Contains(p.Token) || VariantOf(model, p) != variant) continue;
+                        List<(string Name, string BundleId, long PathId)> tiers;
+                        // a part this build can't resolve — including one it refuses to touch — is no
+                        // witness, exactly as the signature walk leaves it out of the index
+                        try { tiers = Tiers(p); }
+                        catch { continue; }
+                        foreach (var (name, bid, pid) in tiers)
+                        {
+                            if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
+                            var sig = SigOf(model, bid, name, pid);
+                            // an ambiguous witness would answer for its own siblings too, which is the
+                            // question this route is trying to settle
+                            if (sig.Unique && !keys.Contains(sig.Key, StringComparer.Ordinal))
+                                keys.Add(sig.Key);
+                        }
+                    }
+                    perVariant.Add((variant, keys));
+                }
+                // A mesh worn with SEVERAL options resolves to one signature key, and its section would
+                // write a different verdict for each option that lists it — one line per option in one
+                // section, the last of them standing. Drawing proves nothing about which option is on,
+                // so it is struck from every list rather than trusted in one of them; an option the
+                // strike leaves unsightable fails the whole route.
+                var sighted = new List<(string Key, int Verdict)>();
+                foreach (var (variant, keys) in perVariant)
+                    foreach (var key in keys) sighted.Add((key, (int)(variant % 100)));
+                if (StrikeContradictedWitnesses(sighted, variants.Select(v => (int)(v % 100)))
+                        is not { } witnesses)
+                    return null;
+                return (own, witnesses);
+            }
+
+            // The wardrobe variant a part belongs to, classified the way the roster probe classifies it:
+            // 0 = not wardrobe-gated, -1 = a variant-shaped token the scheme doesn't list.
+            long VariantOf(SubjectModel model, SubjectPart part) =>
+                PartPresence.Classify(part.Token, SchemeOf(model)).VariantId;
+
+            // Acting on a mesh whose signature stays ambiguous would hit the other mesh's draws too,
+            // unless the textures bound at the two draws tell them apart.
+            void RefuseTwinTarget(SubjectModel model, SubjectPart part, string editMesh)
+            {
+                foreach (var (name, bid, pid) in Tiers(part))
+                {
+                    if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
+                    var sig = SigOf(model, bid, name, pid);
+                    if (sig.Unique) continue;
+                    if (RequestTwinGuard(model, part, sig.Key, sig.Mates)) continue;
+                    throw new InvalidOperationException(
+                        $"'{editMesh}' and '{sig.Mate}' share one draw signature. The swap can't act "
+                        + "on one without hitting the other, so this Replace can't build");
+                }
+            }
+
+            // Whether the base colors bound at a shared draw tell this part apart from every mate: it binds
+            // one, each mate names a roster part binding one, and no mate binds the same image.
+            bool TwinSeparable(SubjectModel model, SubjectPart part, IReadOnlyList<string> mates)
+            {
+                // no mate but this part's own: the draws that share the key are its own tiers, which bind
+                // one material and therefore one base color. Nothing at draw time can part them.
+                if (mates.Count == 0) return false;
+                if (AlbedoHash(part) is not { } own) return false;
+                foreach (var mate in mates)
+                {
+                    // an unnamed mate, or one whose albedo won't read, leaves nothing to compare against
+                    if (PartOf(model, mate) is not { } matePart
+                        || AlbedoHash(matePart) is not { } theirs) return false;
+                    if (string.Equals(own, theirs, StringComparison.OrdinalIgnoreCase)) return false;
+                }
+                return true;
+            }
+
+            // The roster part a signature mate's token names, or null when nothing on the roster answers.
+            SubjectPart? PartOf(SubjectModel model, string token) => model.Parts.FirstOrDefault(p =>
+                string.Equals(p.Token, token, StringComparison.OrdinalIgnoreCase));
+
+            // Whether any of this part's stock maps is the given texture. An unreadable map proves
+            // nothing and says nothing, the same stance the witness walk takes on unreadable parts.
+            bool BindsStock(SubjectPart p, string hash)
+            {
+                foreach (var material in p.Materials)
+                    foreach (var m in material.Maps)
+                    {
+                        string h;
+                        try { h = StockTexture(m, p.SlotName).Hash; }
+                        catch { continue; }
+                        if (string.Equals(h, hash, StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                return false;
+            }
+
+            // A part's own base-color stock texture hash, or null when it binds none or it won't read.
+            string? AlbedoHash(SubjectPart p)
+            {
+                foreach (var material in p.Materials)
+                    foreach (var m in material.Maps)
+                        if (Materials.MaterialResolver.IsBaseColor(m.Slot))
+                        {
+                            try { return StockTexture(m, p.SlotName).Hash; }
+                            catch (Exception ex) when (ex is not BlockedAssetException) { return null; }
+                        }
+                return null;
+            }
+
+            // Whether two meshes serialize the same geometry: index bytes and every vertex stream equal.
+            static bool MeshBytesEqual(Mesh.MeshRaw a, Mesh.MeshRaw b)
+            {
+                if (a.VertexCount != b.VertexCount || a.StreamIds.Count != b.StreamIds.Count
+                    || !a.Index.AsSpan().SequenceEqual(b.Index)) return false;
+                for (int s = 0; s < a.StreamIds.Count; s++)
+                    if (a.Stride(s) != b.Stride(s) || !a.StreamBytes(s).AsSpan().SequenceEqual(b.StreamBytes(s)))
+                        return false;
+                return true;
+            }
 
             // ---- edit scope: the sharing measurement decides each edit's reach -----------------------
             // A measured shared TEXTURE goes draw-scoped instead of hash-global; a measured shared MESH
@@ -547,10 +931,11 @@ public static class ModBuilder
 
             // Before any dumping or compiling: two Replaces on one vanilla draw can't both win, and the
             // refusal names the subjects the author picked rather than the dump name they collided on.
+            // Compared on the signature KEY, so two subject-mates a key already separates both build.
             if (ReplacedMeshConflict(replaceWork.Select(w =>
                 {
                     var (name, bid, pid) = Tiers(w.Part)[0];
-                    return ($"{w.Model.Character} · {w.Model.Stem} · {w.Part.Token}", IbHash(bid, name, pid));
+                    return ($"{w.Model.Character} · {w.Model.Stem} · {w.Part.Token}", SigOf(w.Model, bid, name, pid).Key);
                 })) is { } clash)
                 throw new InvalidOperationException(clash);
 
@@ -715,6 +1100,11 @@ public static class ModBuilder
                 var subjectKey = (model.Character.ToLowerInvariant(), model.Stem.ToLowerInvariant());
                 if (rosterProbes.TryGetValue(subjectKey, out var have)) return have;
 
+                // The outfit's wardrobe scheme decides part presence. No resolver, or an outfit it
+                // doesn't know, classifies by context tail alone — variant-shaped tokens then read
+                // unknown, which admits them as targets and keeps them out of every other pool.
+                var schemeSlots = SchemeOf(model);
+
                 // Readable parts only. Every part left out is kept with its reason, because a pool derived
                 // over a SHORT roster fails in ways only the exclusions explain — and a Replace whose own
                 // target is missing here has no pool question to ask at all.
@@ -740,7 +1130,8 @@ public static class ModBuilder
                             continue;
                         }
                         bones.Add(new PoolDerive.PartBones(p.SlotName, hashes,
-                            Narrow: Mesh.SkinLayout.IsNarrow(field)));
+                            Narrow: Mesh.SkinLayout.IsNarrow(field),
+                            Presence: PartPresence.Classify(p.Token, schemeSlots)));
                         bySlot[p.SlotName] = p;
                         // The part's measured scene rest rides the probe: a delta composed of two measured
                         // rests is how the union restates a part sharing too few bones with the anchor for
@@ -789,7 +1180,7 @@ public static class ModBuilder
                     {
                         var field = reader.GetMeshField(Bundle(bid, $"tier '{name}'"), name, pid)
                             ?? throw new InvalidDataException($"mesh '{name}' not found in '{bid}'");
-                        list.Add(new PoolDerive.TierBones(name, IbHash(bid, name, pid),
+                        list.Add(new PoolDerive.TierBones(name, SigOf(model, bid, name, pid).Key,
                             StreamDump.WeightedBoneHashes(field)));
                     }
                     catch (Exception ex) when (ex is not BlockedAssetException)
@@ -814,7 +1205,7 @@ public static class ModBuilder
                     l0Weighted = new HashSet<uint>();
                 }
                 return partTiers[key] = new PoolDerive.PartTiers(
-                    IbHash(l0Bid, l0Name, l0Pid), l0Weighted, list);
+                    SigOf(model, l0Bid, l0Name, l0Pid).Key, l0Weighted, list);
             }
 
             foreach (var (edit, model, part) in replaceWork)
@@ -841,18 +1232,21 @@ public static class ModBuilder
                     throw new InvalidOperationException(
                         $"'{edit.Mesh}' can't be replaced: {blocked.Why}. Drop this Replace");
 
-                // The roster this Replace may pool over. A one-influence part is in it only when it IS the
-                // target, and what it is left out of is both halves at once — the derivation below and the
-                // tier coverage after it read this one set.
-                var (candidates, narrowOut) = PoolDerive.PoolCandidates(partBones, part.SlotName);
-                if (narrowOut.Count > 0)
-                    diagnostics.Add($"pool ({sfx}): one-influence part(s) left out: "
-                        + string.Join(", ", narrowOut.Select(m => m.Mesh)));
+                RefuseTwinTarget(model, part, edit.Mesh);
+
+                // The roster this Replace may pool over. A part is in it only when it is on screen
+                // whenever the target is (a one-influence part only when it IS the target), and what it
+                // is left out of is both halves at once — the derivation below and the tier coverage
+                // after it read this one set.
+                var (candidates, leftOut) = PoolDerive.PoolCandidates(partBones, part.SlotName);
+                if (leftOut.Count > 0)
+                    diagnostics.Add($"pool ({sfx}): left out: "
+                        + string.Join("; ", leftOut.Select(m => $"'{m.Mesh}' · {m.Why}")));
 
                 // The parts held back go WITH the roster: they are what tells an orphan-bone refusal apart
                 // from a donor genuinely weighted to another armature.
                 var derived = PoolDerive.Derive(payload, candidates, edit.AnchorOverride,
-                    heldBack.Concat(narrowOut).ToList(), part.SlotName);
+                    heldBack.Concat(leftOut).ToList(), part.SlotName);
 
                 // The pool the donor's weights ask for isn't always one the pool can POSE: a part's other
                 // LOD tiers ride the union palette built from the pool's lod0 bone sets, and those tiers can
@@ -889,18 +1283,30 @@ public static class ModBuilder
                 var poolMeshes = new List<SwapCompile.PoolMesh>();
                 var noSkip = new List<string>();
                 var poolTiers = new List<PoolTier>();
-                var pipelineHashes = new HashSet<string>(StringComparer.Ordinal);   // THIS pipeline's captures
+                var pipelineHashes = new HashSet<string>(StringComparer.Ordinal);   // THIS pipeline's captures (signature keys)
+                var pipelineIbs = new HashSet<string>(StringComparer.Ordinal);      // the same meshes' ib hashes, for the sharing index
                 foreach (var s in pool.Pool) poolSlotNames.Add(s);
                 foreach (var slotName in pool.Pool)
                 {
                     var p = partBySlot[slotName];
                     string partName = PartName(model.Character, p.Token);
                     var (name, bid, pid) = Tiers(p)[0];
-                    string h = IbHash(bid, name, pid);
-                    // One capture section serves one hash. This part reached by another Replace's pool is
-                    // the same mesh, so it rides the section already claimed for it. Two DIFFERENT meshes
-                    // on one hash would point both parts' posed refs at whichever draw fired last — silent
-                    // wrong geometry on animation. Refuse instead.
+                    var sig = SigOf(model, bid, name, pid);
+                    // A recovery source must be capturable alone: on a shared signature the capture
+                    // holds whichever mesh drew last, and the palette rows this part owns would be
+                    // recovered against the wrong rest geometry. A guard on the part's own textures
+                    // keeps the capture to its own draws where they separate the two.
+                    if (!sig.Unique && !RequestTwinGuard(model, p, sig.Key, sig.Mates))
+                        throw new InvalidOperationException(
+                            $"'{p.Token}' and '{sig.Mate}' share one draw signature, and this Replace leans on "
+                            + $"'{p.Token}' for its recovery. The swap can't capture them separately, so this "
+                            + "Replace can't build");
+                    string h = sig.Key;
+                    pipelineIbs.Add(sig.Ib);
+                    // One capture section serves one signature key. This part reached by another Replace's
+                    // pool is the same mesh, so it rides the section already claimed for it. Two DIFFERENT
+                    // meshes on one key would point both parts' posed refs at whichever draw fired last —
+                    // silent wrong geometry on animation. Refuse instead.
                     string claimant = $"{model.Character} · {model.Stem} · {p.Token}";
                     var claimed = new CaptureMesh(bid, name, pid);
                     if (poolHashOwner.TryGetValue(h, out var owner) && owner.Mesh != claimed)
@@ -908,7 +1314,9 @@ public static class ModBuilder
                             $"'{owner.Claimant}' and '{claimant}' share one draw signature. The swap can't capture "
                             + "them separately, so this Replace can't build");
                     poolHashOwner.TryAdd(h, new HashClaim(claimed, claimant));   // the first claimant names the refusal
-                    string dumpDir = ClaimDump(partName, name, bid, pid, h);
+                    // dump identity is the MESH (name + ib), not the section key: one physical mesh
+                    // reached via two outfits is one dump even when only one outfit gives it a twin
+                    string dumpDir = ClaimDump(partName, name, bid, pid, sig.Ib);
                     poolParts.Add(new PoolPart(partName, dumpDir, OpKey(bid, name, pid),
                         partRests.GetValueOrDefault(slotName)));
                     poolMeshes.Add(new SwapCompile.PoolMesh(Bundle(bid, $"pool part '{p.Token}'"), name, pid,
@@ -939,8 +1347,27 @@ public static class ModBuilder
                     {
                         var (name, bid, pid) = tiers[ti];
                         if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
-                        string h = IbHash(bid, name, pid);
-                        if (!pipelineHashes.Add(h)) continue;   // identical content rides the existing capture
+                        var tierSig = SigOf(model, bid, name, pid);
+                        string h = tierSig.Key;
+                        pipelineIbs.Add(tierSig.Ib);
+                        // a key already captured is the same mesh (or an ambiguous class still pooled
+                        // on its shared ib)
+                        if (!pipelineHashes.Add(h)) continue;
+                        // an ambiguous tier nothing in this pipeline captured runs vanilla: a capture on
+                        // the shared signature would hold whichever mesh drew last. Where the two parts'
+                        // textures separate them, a guard keeps the tier's section on its own draws.
+                        TwinRoute? tierRoute = null;
+                        if (!tierSig.Unique)
+                        {
+                            tierRoute = TwinRouteFor(model, p, tierSig.Mates);
+                            if (tierRoute is null)
+                            {
+                                pipelineHashes.Remove(h);
+                                warnings.Add($"tier '{name}' shares its draw signature with '{tierSig.Mate}'. "
+                                    + "Its vanilla draw is left running");
+                                continue;
+                            }
+                        }
                         // The tier suffix is the LOD label, read with MeshName.Lod for the same infix
                         // reason as the lodm0 check above: a variant tier like …_lod1_Fight is the lod1
                         // link of its chain, and the emitter pairs tiers across parts by this suffix.
@@ -957,12 +1384,14 @@ public static class ModBuilder
                                 + "them separately, so this Replace can't build");
                         bool mintedClaim = poolHashOwner.TryAdd(h, new HashClaim(tierClaimed, tierClaimant));
                         // the same rule ClaimDump claims on, ahead of the degrade-to-warning catch below:
-                        // a tier name meaning two different meshes is a refusal, not a warning
+                        // a tier name meaning two different meshes is a refusal, not a warning. Dump
+                        // identity is the mesh (name + ib), never the section key.
+                        string tierIb = tierSig.Ib;
                         if (dumpedParts.TryGetValue(tierName, out var prevTier)
-                            && DumpNameConflict(tierName, prevTier, new DumpIdentity(name, h)) is { } tierClash)
+                            && DumpNameConflict(tierName, prevTier, new DumpIdentity(name, tierIb)) is { } tierClash)
                             throw new InvalidOperationException(tierClash);
                         string dumpDir;
-                        try { dumpDir = ClaimDump(tierName, name, bid, pid, h); }
+                        try { dumpDir = ClaimDump(tierName, name, bid, pid, tierIb); }
                         catch (Exception ex)
                         {
                             pipelineHashes.Remove(h);
@@ -976,6 +1405,10 @@ public static class ModBuilder
                         poolTiers.Add(new PoolTier(partName, tierName, Remold.Core.Model.MeshName.Lod(name), dumpDir, h,
                             OpKey(bid, name, pid)));
                         allCaptureHashes.Add(h);
+                        // recorded only now: a tier that degraded to a warning above leaves no guard and no
+                        // tag section behind it
+                        if (tierRoute is { } tierAccepted)
+                            RecordTwinGuard(model, p, tierSig.Key, tierSig.Mates, tierAccepted);
                     }
                 }
 
@@ -998,7 +1431,7 @@ public static class ModBuilder
                 // presence latch when other outfits also draw any of this pipeline's meshes: the
                 // suppression and the donor draw then apply only while this outfit is on screen
                 string? pipeLatch = null;
-                var pipeOthers = pipelineHashes.SelectMany(h => MeshOthers(h, model))
+                var pipeOthers = pipelineIbs.SelectMany(h => MeshOthers(h, model))
                     .Distinct().ToList();
                 if (pipeOthers.Count > 0 && (pipeLatch = LatchFor(model)) is not null)
                 {
@@ -1033,6 +1466,7 @@ public static class ModBuilder
             foreach (var (edit, model, part) in rigidWork)
             {
                 string sfx = PartName(model.Character, part.Token);
+                RefuseTwinTarget(model, part, edit.Mesh);
                 string donorAbs = project.Resolve(edit.DonorFile
                     ?? throw new InvalidOperationException($"Replace on '{edit.Mesh}' has no donor glb yet"));
                 log?.Invoke($"donor ({sfx}): importing {Path.GetFileName(donorAbs)}");
@@ -1064,25 +1498,28 @@ public static class ModBuilder
                 // the donor binds at this part's own draws and nowhere else, so the part IS the anchor
                 var (subMaps, stockMaps) = DonorMaps(edit, part, sfx, compiled.SubmeshCount);
 
-                // Every renderable tier of the part: its own hash first, then the siblings. All of them are
-                // suppressed and redrawn, since a tier left alone would show the stock mesh wherever the
-                // game picks it.
-                string ownHash = IbHash(bid, name, pid);
+                // Every renderable tier of the part: its own signature key first, then the siblings. All
+                // of them are suppressed and redrawn, since a tier left alone would show the stock mesh
+                // wherever the game picks it.
+                var ownSig = SigOf(model, bid, name, pid);
+                string ownHash = ownSig.Key;
                 var tierHashes = new List<string>();
+                var rigidIbs = new HashSet<string>(StringComparer.Ordinal) { ownSig.Ib };
                 var claimed = new HashSet<string>(StringComparer.Ordinal) { ownHash };
                 foreach (var (tName, tBid, tPid) in Tiers(part).Skip(1))
                 {
                     if (Remold.Core.Model.MeshName.IsUnrenderedTier(tName)) continue;
-                    string h = IbHash(tBid, tName, tPid);
-                    if (claimed.Add(h)) tierHashes.Add(h);   // identical content rides the section already there
+                    var tierSig = SigOf(model, tBid, tName, tPid);
+                    rigidIbs.Add(tierSig.Ib);
+                    if (claimed.Add(tierSig.Key)) tierHashes.Add(tierSig.Key);   // a key already claimed is the same mesh
                 }
                 foreach (var h in claimed) allCaptureHashes.Add(h);   // the hide pass leaves these sections alone
 
                 // presence latch when other outfits also draw this part: the suppression and the donor draw
                 // then apply only while this outfit is on screen. Walked in emission order, so the
-                // disclosure a rebuild writes reads the same way twice.
+                // disclosure a rebuild writes reads the same way twice. The sharing index reads ib hashes.
                 string? rigidLatch = null;
-                var rigidOthers = new[] { ownHash }.Concat(tierHashes)
+                var rigidOthers = rigidIbs
                     .SelectMany(h => MeshOthers(h, model)).Distinct().ToList();
                 if (rigidOthers.Count > 0 && (rigidLatch = LatchFor(model)) is not null)
                 {
@@ -1129,8 +1566,15 @@ public static class ModBuilder
                 foreach (var (name, bid, pid) in Tiers(part))
                 {
                     if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
-                    string h = IbHash(bid, name, pid);
+                    var hideSig = SigOf(model, bid, name, pid);
+                    string h = hideSig.Key;
                     if (allCaptureHashes.Contains(h)) continue;
+                    // An ambiguous hide skips its sibling's draws too; a guard on the hidden part's own
+                    // textures holds the skip to its own where they separate the two. Asked for AHEAD of
+                    // the section claim below, so every hidden sibling's verdict reaches the guard: the
+                    // one section carries them all, and a request dropped here would leave the second
+                    // sibling on screen.
+                    if (!hideSig.Unique) RequestTwinGuard(model, part, h, hideSig.Mates, hide: true);
                     if (!hideSeen.Add(h))
                     {
                         if (HideKeyCollisionWarning(name, hideKeys.GetValueOrDefault(h), ChangeKey(e)) is { } w)
@@ -1139,7 +1583,7 @@ public static class ModBuilder
                     }
                     hides.Add(h);
                     if (ChangeKey(e) is { } hk) hideKeys[h] = hk;
-                    var others = MeshOthers(h, model);
+                    var others = MeshOthers(hideSig.Ib, model);
                     if (others.Count > 0 && LatchFor(model) is { } latch)
                     {
                         hideLatches[h] = latch;
@@ -1302,7 +1746,7 @@ public static class ModBuilder
                             foreach (var (name, bid, pid) in Tiers(part))
                             {
                                 if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
-                                string ib = IbHash(bid, name, pid);
+                                string ib = SigOf(model, bid, name, pid).Ib;
                                 var others = MeshOthers(ib, model);
                                 string? latch = others.Count > 0 ? LatchFor(model) : null;
                                 entry.MeshAt[ib] = name;
@@ -1383,6 +1827,167 @@ public static class ModBuilder
                         + "Submeshes without an authored map keep the stock image");
             }
 
+            // ---- twin guards: one per shared signature, built once every site has spoken --------------
+            // A section keyed on a signature several meshes draw on has to know WHICH sibling is on screen.
+            // On the texture route each sibling gets a verdict number and the tag its own base color
+            // carries, and the probe at the guarded draw writes the verdict it sees; on the wardrobe route
+            // the verdict is the sibling's variant ordinal and the writers are the sections of the meshes
+            // each option is worn with. Either way the variable keeps its verdict until another sighting
+            // replaces it, so a pass identifying nothing acts on the last identification.
+            var twinGuards = new List<TwinGuard>();
+            var twinSightings = new List<TwinSighting>();
+            if (twinRequests.Count > 0)
+            {
+                var retexturedStock = new HashSet<string>(retex.Select(r => r.Hash),
+                    StringComparer.OrdinalIgnoreCase);
+                // The emitter owns tag values: the probes compare against what its tag sections carry.
+                var tagValueOf = MigotoEmitter.TwinTagValues(
+                    pipelines.Select(pl => pl.StockMaps).Concat(rigids.Select(rg => rg.StockMaps))
+                        .SelectMany(l => l ?? (IReadOnlyList<StockMapTag>)Array.Empty<StockMapTag>()),
+                    scopedRetex.Select(s => s.StockHash));
+
+                // The signature keys this build emits a section on: every capture (pooled or rigid,
+                // the rigids' claims already in allCaptureHashes) and every hide. A request on any
+                // other key was left behind by a site that stood down after asking — a tier degraded
+                // to a vanilla draw, a capture claim withdrawn — and a guard built on it would declare
+                // a variable, mint tag sections and log a diagnostic that name a section nobody writes.
+                var guardedKeys = new HashSet<string>(allCaptureHashes, StringComparer.Ordinal);
+                guardedKeys.UnionWith(hides);
+
+                foreach (var group in twinRequests.Where(rq => guardedKeys.Contains(rq.Key))
+                             .GroupBy(rq => rq.Key, StringComparer.Ordinal))
+                {
+                    // One section, one answer: two parts asking the same section to ACT for them cannot
+                    // both be answered, and two subjects reaching one key are two parts. Hides are the
+                    // exception — a section skipping at each hidden sibling's own draws is one section
+                    // admitting several verdicts.
+                    // Counted over EVERY request on the key, whichever route each was accepted on: a
+                    // claimant left out of the count keeps its section and loses its verdict, which is a
+                    // change acting on the sibling's draws instead of its own.
+                    var claimants = new List<(SubjectModel Model, string Token)>();
+                    foreach (var rq in group)
+                        if (!claimants.Any(c => ReferenceEquals(c.Model, rq.Model)
+                                && string.Equals(c.Token, rq.OwnToken, StringComparison.OrdinalIgnoreCase)))
+                            claimants.Add((rq.Model, rq.OwnToken));
+                    // one roster numbers the verdicts, so several claimants are answerable together only
+                    // while they are siblings on it
+                    bool together = group.All(rq => rq.Hide)
+                        && claimants.All(c => ReferenceEquals(c.Model, claimants[0].Model));
+                    if (claimants.Count > 1 && !together)
+                        throw TwinShipRefusal(claimants[0].Token, claimants[1].Token);
+                    // One variable, one meaning. A key some requests answer by the textures at the guarded
+                    // draw and others only by the wardrobe has no single guard: the probe would write tag
+                    // verdicts and the sightings option ordinals into the same variable, and each side's
+                    // sections would open on the other's numbers.
+                    var textureReqs = group.Where(rq => rq.IsTextureRoute).ToList();
+                    var witnessReqs = group.Where(rq => !rq.IsTextureRoute).ToList();
+                    if (textureReqs.Count > 0 && witnessReqs.Count > 0)
+                        throw TwinShipRefusal(textureReqs[0].OwnToken, witnessReqs[0].OwnToken);
+                    var model = claimants[0].Model;
+                    if (witnessReqs.Count > 0)
+                    {
+                        // the wardrobe ordinal is the verdict, so one option's sections open exactly while
+                        // the meshes it is worn with were the last thing sighted
+                        string witVar = MigotoEmitter.TwinVar(group.Key);
+                        var worn = witnessReqs.Select(rq => (int)(rq.Route.OwnVariant % 100)).Distinct()
+                            .OrderBy(v => v).ToList();
+                        // every request's sightings, merged now that the key has heard from all of them
+                        var sighted = new List<(string Key, int Verdict)>();
+                        foreach (var rq in witnessReqs)
+                            foreach (var w in rq.Route.Witnesses)
+                                if (!sighted.Contains(w)) sighted.Add(w);
+                        // A hash two requests saw under DIFFERENT options is one mesh worn under both —
+                        // struck rather than trusted — and every worn or sighted verdict must keep a
+                        // witness, or the sticky verdict would stand at that option's draws with another
+                        // option's answer in it.
+                        if (StrikeContradictedWitnesses(sighted,
+                                worn.Concat(sighted.Select(w => w.Verdict)).Distinct()) is not { } kept)
+                        {
+                            var stuck = witnessReqs.First(rq => ReferenceEquals(rq.Model, claimants[0].Model)
+                                && string.Equals(rq.OwnToken, claimants[0].Token, StringComparison.OrdinalIgnoreCase));
+                            throw TwinShipRefusal(claimants[0].Token, stuck.Mates[0]);
+                        }
+                        twinGuards.Add(new TwinGuard(group.Key, witVar, worn,
+                            Array.Empty<TwinProbeTag>()));
+                        foreach (var (key, verdict) in kept)
+                            twinSightings.Add(new TwinSighting(key, witVar, verdict));
+                        // one line per claimant, whatever number of sites asked on its behalf
+                        foreach (var c in claimants)
+                        {
+                            var first = witnessReqs.First(rq => ReferenceEquals(rq.Model, c.Model)
+                                && string.Equals(rq.OwnToken, c.Token, StringComparison.OrdinalIgnoreCase));
+                            diagnostics.Add($"'{c.Token}' shares a draw signature with '{first.Mates[0]}'. "
+                                + "Its sections act while its wardrobe option is sighted");
+                        }
+                        continue;
+                    }
+                    var ownTokens = new HashSet<string>(claimants.Select(c => c.Token),
+                        StringComparer.OrdinalIgnoreCase);
+                    var tokens = new HashSet<string>(ownTokens, StringComparer.OrdinalIgnoreCase);
+                    foreach (var rq in textureReqs) foreach (var m in rq.Mates) tokens.Add(m);
+                    // roster order, so the verdict numbers are the same on every build of this world
+                    var siblings = model.Parts.Where(sp => tokens.Contains(sp.Token)).ToList();
+
+                    var tags = new List<TwinProbeTag>();
+                    var ownVerdicts = new List<int>();
+                    foreach (var sibling in siblings)
+                    {
+                        // non-null for every sibling: a mate with no readable base color was refused at
+                        // request time, and so was the own part
+                        string hash = AlbedoHash(sibling)!;
+                        tags.Add(new TwinProbeTag(hash, tagValueOf(hash), tags.Count + 1));
+                        if (ownTokens.Contains(sibling.Token)) ownVerdicts.Add(tags.Count);
+                    }
+                    // every claimant has to BE one of the siblings the verdicts number: a claimant the
+                    // roster walk never reached would be admitted by no verdict, and its draws would keep
+                    // running where the change asked for the opposite
+                    if (ownVerdicts.Count != claimants.Count)
+                    {
+                        string stranger = claimants.First(c => !siblings.Any(sp =>
+                            string.Equals(sp.Token, c.Token, StringComparison.OrdinalIgnoreCase))).Token;
+                        throw TwinShipRefusal(stranger, siblings[0].Token);
+                    }
+                    // Two siblings whose tags carry ONE value are one answer to the probe, which breaks
+                    // only a section acting for one of that pair: a collision between two siblings it acts
+                    // for neither of leaves it closed at both their draws, which is where it belongs.
+                    if (TwinValueCollision(tags.Select(t => t.TagValue).ToList(), ownVerdicts) is { } oneValue)
+                        throw TwinShipRefusal(siblings[oneValue.A - 1].Token, siblings[oneValue.B - 1].Token);
+                    // A repainted probe tag hides its stock color from the draw probe — the rebound
+                    // image answers to no tag — so the retexture's own section writes the verdict at
+                    // bind time instead (the emitter pairs them by hash). That bind proves the drawer
+                    // only for a wardrobe option's exclusive color: options are worn one at a time,
+                    // where same-frame siblings both bind their colors every frame, and a color other
+                    // options' meshes also bind would answer for draws that prove nothing.
+                    foreach (var tag in tags)
+                    {
+                        if (!retexturedStock.Contains(tag.TexHash)) continue;
+                        var sib = siblings[tag.Verdict - 1];
+                        string mateName = siblings.First(s => !ReferenceEquals(s, sib)).Token;
+                        long sibVariant = VariantOf(model, sib);
+                        if (sibVariant <= 0)
+                            throw new InvalidOperationException(
+                                $"'{sib.Token}' and '{mateName}' share one draw signature, told apart by "
+                                + $"'{sib.Token}'s base color — which this build also repaints. A repainted "
+                                + "color answers the probe for neither, so this build can't ship");
+                        foreach (var other in model.Parts)
+                            if (VariantOf(model, other) != sibVariant && BindsStock(other, tag.TexHash))
+                                throw new InvalidOperationException(
+                                    $"'{other.Token}' also binds the base color that identifies '{sib.Token}' "
+                                    + "at a shared draw signature, and this build repaints it. The repaint "
+                                    + $"would answer for '{other.Token}'s draws too, so this build can't ship");
+                    }
+                    twinGuards.Add(new TwinGuard(group.Key, MigotoEmitter.TwinVar(group.Key), ownVerdicts, tags));
+                    foreach (int own in ownVerdicts)
+                    {
+                        string ownToken = siblings[own - 1].Token;
+                        string named = siblings.First(sp =>
+                            !string.Equals(sp.Token, ownToken, StringComparison.OrdinalIgnoreCase)).Token;
+                        diagnostics.Add($"'{ownToken}' shares a draw signature with '{named}'. "
+                            + "Its sections act while its own textures answer for it");
+                    }
+                }
+            }
+
             // ---- emit -------------------------------------------------------------------------------
             log?.Invoke("final assembly: operators, buffers, ini");
             MigotoEmitter.Result emitted;
@@ -1406,6 +2011,8 @@ public static class ModBuilder
                     HideLatches = hideLatches.Count > 0 ? hideLatches : null,
                     Latches = latchList.Count > 0 ? latchList : null,
                     KeysStartingOff = keysStartingOff.Count > 0 ? keysStartingOff : null,
+                    TwinGuards = twinGuards.Count > 0 ? twinGuards : null,
+                    TwinSightings = twinSightings.Count > 0 ? twinSightings : null,
                 });
             }
             else
@@ -1415,14 +2022,16 @@ public static class ModBuilder
                     scopedRetex.Count > 0 ? scopedRetex : null,
                     latchList.Count > 0 ? latchList : null,
                     hideLatches.Count > 0 ? hideLatches : null,
-                    keysStartingOff.Count > 0 ? keysStartingOff : null);
+                    keysStartingOff.Count > 0 ? keysStartingOff : null,
+                    twinGuards.Count > 0 ? twinGuards : null,
+                    twinSightings.Count > 0 ? twinSightings : null);
             }
             warnings.AddRange(emitted.Warnings);
             diagnostics.AddRange(emitted.Diagnostics);
 
             WriteSidecar(project, env, tmpMod, work,
                 captureHashes.Values.Concat(rigids.SelectMany(r => r.Hashes)), hides, retex,
-                scopedRetex, latchList);
+                scopedRetex, latchList, twinSightings);
 
             // ---- swap into place, then the distribution zip -----------------------------------------
             // The previous build is renamed ASIDE, never deleted in place: a single locked file under it
@@ -1533,7 +2142,8 @@ public static class ModBuilder
     private static void WriteSidecar(ModProject project, BuildEnv env, string modDir,
         IReadOnlyList<(MeshEdit Edit, SubjectModel Model, SubjectPart Part)> work,
         IEnumerable<string> captureHashes, IEnumerable<string> hides, IEnumerable<RetexEntry> retex,
-        IEnumerable<ScopedRetexEntry> scopedRetex, IEnumerable<WitnessLatch> latches)
+        IEnumerable<ScopedRetexEntry> scopedRetex, IEnumerable<WitnessLatch> latches,
+        IEnumerable<TwinSighting> twinSightings)
     {
         string? preview = null;
         if (project.Info.Preview is { } prev)
@@ -1562,6 +2172,7 @@ public static class ModBuilder
                 .Concat(scopedRetex.SelectMany(s => s.Images
                     .SelectMany(i => i.Anchors.Select(a => a.Hash)).Append(s.StockHash)))
                 .Concat(latches.SelectMany(l => l.WitnessIbs))
+                .Concat(twinSightings.Select(t => t.Hash))
                 .Distinct(StringComparer.Ordinal).OrderBy(h => h, StringComparer.Ordinal).ToArray(),
             game_catalog = env.CatalogVersion,
             app_version = env.AppVersion,

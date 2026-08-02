@@ -34,6 +34,10 @@ public sealed partial class OutfitLayout
     [GeneratedRegex(@"^P(\d+)_(.+)$", RegexOptions.IgnoreCase)]
     private static partial Regex VariantPrefix();
 
+    /// <summary>A <c>P&lt;digits&gt;_</c> token — the shape the game's own recipe routing keys on. The
+    /// one owner of that shape, so a new modular-token consumer never re-spells it.</summary>
+    public static bool IsModularToken(string token) => VariantPrefix().IsMatch(token);
+
     [GeneratedRegex(@"^([A-Za-z]+)(\d*)$")]
     private static partial Regex WordNum();
 

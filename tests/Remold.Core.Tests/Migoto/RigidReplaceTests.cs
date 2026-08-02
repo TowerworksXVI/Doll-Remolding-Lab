@@ -39,7 +39,11 @@ public class RigidReplaceTests : IDisposable
 
     private const string Part = "p_CrateMk2_frame_lod0";
     private const string Tier = "p_CrateMk2_frame_lod1";
+    private const string Panel = "p_CrateMk2_panel_lod0";
     private static readonly uint[] Bone = { 0x11111111u };
+
+    /// <summary>The frame's and the panel's own base color hashes, once the twin world gives them one.</summary>
+    private string _frameTexHash = "", _panelTexHash = "";
 
     private static float[] Cloud(int verts, int seed)
     {
@@ -61,8 +65,11 @@ public class RigidReplaceTests : IDisposable
     /// only one this route takes); 1 the single-influence one that goes pooled; 2 the reduced one the
     /// routing rule refuses. <paramref name="implicitWeights"/> picks the one-influence spelling the game's
     /// own weapon parts ship: indices alone, each weight implicitly 1.</summary>
+    /// <param name="twin">Adds a second static part on the frame's exact index buffer with geometry of
+    /// its own, and gives the two base colors of their own — the shape where only the textures bound at
+    /// the draw tell the two apart.</param>
     private BuildEnv MakeEnv(out string lod0Hash, out string lod1Hash, int skinWidth = 0,
-        bool implicitWeights = false)
+        bool implicitWeights = false, bool twin = false)
     {
         string b0 = Path.Combine(_root, "r0.bundle");
         string b1 = Path.Combine(_root, "r1.bundle");
@@ -86,15 +93,44 @@ public class RigidReplaceTests : IDisposable
         lod0Hash = BufferHash.Compute(bytes["bundle0"], Part).Ib.ToString("x8");
         lod1Hash = BufferHash.Compute(bytes["bundle1"], Tier).Ib.ToString("x8");
 
-        var model = new SubjectModel("Crate", "CrateMk2", SubjectSource.Prefab, new[]
-        {
-            new SubjectPart("frame", Part, "addr_frame", Array.Empty<SubjectMaterial>(),
-                SiblingTiers: new[] { new RecipeTierSlot(Tier, "addr_frame_l1") }),
-        }, Skeleton: null, Problems: Array.Empty<string>());
+        var parts = new List<SubjectPart>();
         var addresses = new Dictionary<string, string>
         {
             ["addr_frame"] = "bundle0", ["addr_frame_l1"] = "bundle1",
         };
+        var frameMaterials = Array.Empty<SubjectMaterial>();
+        if (twin)
+        {
+            string bt = Path.Combine(_root, "rt.bundle");
+            SyntheticBundle.Build(bt,
+                new SyntheticBundle.TextureSpec("tex_frame_d", 8, 8,
+                    SyntheticBundle.SolidRgba32(8, 8, 200, 100, 50, 255), ColorSpace: 1),
+                new SyntheticBundle.TextureSpec("tex_panel_d", 8, 8,
+                    SyntheticBundle.SolidRgba32(8, 8, 20, 210, 90, 255), ColorSpace: 1));
+            bytes["bundleT"] = File.ReadAllBytes(bt);
+            _frameTexHash = SyntheticBundle.StockTexHash(bytes["bundleT"], "tex_frame_d");
+            _panelTexHash = SyntheticBundle.StockTexHash(bytes["bundleT"], "tex_panel_d");
+            // the frame's exact triangle list over geometry of its own: one index buffer, two meshes
+            string b2 = Path.Combine(_root, "r2.bundle");
+            SyntheticBundle.BuildOneMesh(b2, Panel, Cloud(32, 21), WrappedTris(32));
+            bytes["bundle2"] = File.ReadAllBytes(b2);
+            frameMaterials = new[]
+            {
+                new SubjectMaterial("m_frame", 1, "cab-frame",
+                    new[] { new SubjectMap("_BaseMap", "tex_frame_d", "bundleT") }),
+            };
+            parts.Add(new SubjectPart("panel", Panel, "addr_panel", new[]
+            {
+                new SubjectMaterial("m_panel", 2, "cab-panel",
+                    new[] { new SubjectMap("_BaseMap", "tex_panel_d", "bundleT") }),
+            }));
+            addresses["addr_panel"] = "bundle2";
+        }
+        parts.Insert(0, new SubjectPart("frame", Part, "addr_frame", frameMaterials,
+            SiblingTiers: new[] { new RecipeTierSlot(Tier, "addr_frame_l1") }));
+
+        var model = new SubjectModel("Crate", "CrateMk2", SubjectSource.Prefab, parts.ToArray(),
+            Skeleton: null, Problems: Array.Empty<string>());
         return new BuildEnv(
             (c, s) => c == "Crate" && s == "CrateMk2" ? model : null,
             a => addresses.GetValueOrDefault(a),
@@ -180,6 +216,36 @@ public class RigidReplaceTests : IDisposable
         Assert.True(File.Exists(Path.Combine(r.OutDir, "rigid_vb0_crate_frame.buf")));
         Assert.True(File.Exists(Path.Combine(r.OutDir, "rigid_ib_crate_frame.buf")));
 
+        ModBuilderTests.AssertNoDuplicateSections(ini);
+    }
+
+    [Fact]
+    public void An_ambiguous_rigid_target_whose_base_colors_differ_swaps_behind_a_guard()
+    {
+        // The panel draws on the frame's index buffer, so the swap section fires on its draws too. The
+        // two bind different base colors, so the section asks at draw time which one is drawing.
+        var env = MakeEnv(out string lod0Hash, out _, skinWidth: 0, twin: true);
+        var p = NewProject();
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+
+        int frame = MigotoEmitter.RetexTag(_frameTexHash), panel = MigotoEmitter.RetexTag(_panelTexHash);
+        string v = $"zz_tw_{lod0Hash}";
+        Assert.Contains($"[TextureOverride_TwinTag_{_frameTexHash}]\nhash = {_frameTexHash}\n"
+            + $"filter_index = {frame}\nmatch_priority = 100\n", ini);
+        Assert.Contains($"[TextureOverride_TwinTag_{_panelTexHash}]\nhash = {_panelTexHash}\n"
+            + $"filter_index = {panel}\nmatch_priority = 100\n", ini);
+        // declared once, written only by the probes: no per-frame reset takes the verdict away
+        Assert.Contains($"global ${v} = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Rigid_crate_frame]\nhash = {lod0Hash}\n"
+            + $"$zz_t = ps-t0\nif $zz_t == {frame}\n${v} = 1\nendif\n"
+            + $"if $zz_t == {panel}\n${v} = 2\nendif\n", ini);
+        Assert.Contains($"if ${v} == 1\nhandling = skip\n"
+            + "run = CommandListRigid_crate_frame\nendif\n", ini);
+        Assert.Contains(r.Diagnostics, d => d.Contains("'frame' shares a draw signature with 'panel'"));
         ModBuilderTests.AssertNoDuplicateSections(ini);
     }
 

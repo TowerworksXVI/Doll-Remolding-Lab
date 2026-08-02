@@ -170,6 +170,11 @@ public sealed class GameDatabase
         return result;
     }
 
+    /// <summary>ModelConfigId → model stem, the whole table. Several ids can share one stem, so a
+    /// caller joining FROM ids reads this rather than inverting <see cref="StemToModelConfigId"/>,
+    /// whose last-wins collapse would shadow all but one of them.</summary>
+    public Dictionary<long, string> ModelStemsById() => ReadModelStems();
+
     /// <summary>Model stem → ModelConfigId, for callers that hold a stem and want its DB id.</summary>
     public Dictionary<string, long> StemToModelConfigId()
     {

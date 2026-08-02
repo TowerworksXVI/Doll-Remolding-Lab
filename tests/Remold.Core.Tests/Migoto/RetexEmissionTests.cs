@@ -27,6 +27,42 @@ public class RetexEmissionTests : IDisposable
     }
 
     [Fact]
+    public void An_entry_on_a_guards_probe_tag_writes_the_verdict_at_bind_time()
+    {
+        // The rebind hides the stock texture from the guard's draw probe — the bound replacement
+        // answers to no tag — so the retexture's section writes the tagged sibling's verdict itself,
+        // outside the gate and with the tag, and no separate TwinTag section is minted on the hash.
+        string outDir = Path.Combine(_root, "out-twin");
+        string hash = "3ff9db6d";
+        int tag = MigotoEmitter.RetexTag(hash);
+        var r = new MigotoEmitter().BuildOverlaysOnly(outDir,
+            new[] { new RetexEntry("ilse_face_a", hash, Dds("face_a.dds")) },
+            hideHashes: new[] { "aaaa1111" },
+            twinGuards: new[]
+            {
+                new TwinGuard("aaaa1111", MigotoEmitter.TwinVar("aaaa1111"), new[] { 1 },
+                    new[]
+                    {
+                        new TwinProbeTag(hash, tag, 1),
+                        new TwinProbeTag("22bb33cc", MigotoEmitter.RetexTag("22bb33cc"), 2),
+                    }),
+            });
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains(
+            "[TextureOverride_Retex_ilse_face_a]\n"
+            + $"hash = {hash}\n"
+            + $"filter_index = {tag}\n"
+            + "match_priority = 100\n"
+            + "$zz_tw_aaaa1111 = 1\n"
+            + "this = Resource_Rtx0\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinTag_{hash}]", ini);
+        // the unrepainted sibling's tag still gets its own minted section, with no verdict write
+        Assert.Contains("[TextureOverride_TwinTag_22bb33cc]\nhash = 22bb33cc\n"
+            + $"filter_index = {MigotoEmitter.RetexTag("22bb33cc")}\nmatch_priority = 100\n\n", ini);
+    }
+
+    [Fact]
     public void An_entry_emits_the_exact_section_and_nothing_pass_shaped()
     {
         string outDir = Path.Combine(_root, "out");
@@ -344,6 +380,35 @@ public class RetexEmissionTests : IDisposable
         Assert.DoesNotContain("retexture", ex.Message);
         Assert.DoesNotContain("new textures", ex.Message);
         Assert.EndsWith("Leave a row with a new mesh out of the build.", ex.Message);
+    }
+
+    [Fact]
+    public void A_twin_guards_minted_tag_colliding_with_a_scoped_tag_refuses()
+    {
+        // The guard's tag section carries a value derived the same way a scoped retexture's does. Sharing
+        // one value would let the scoped texture identify the wrong sibling, so the walk that refuses over
+        // the other tag families covers this one too.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            new MigotoEmitter().BuildOverlaysOnly(Path.Combine(_root, "tagtwinguard"), entries: null,
+                hideHashes: new[] { "aaaa1111" },
+                scopedEntries: new[]
+                {
+                    new ScopedRetexEntry("one", TagTwin1, new[]
+                    {
+                        new ScopedRetexImage(Dds("one.dds"), new[] { new ScopedAnchor("bbbb2222", "one") }),
+                    }, "body"),
+                },
+                twinGuards: new[]
+                {
+                    new TwinGuard("aaaa1111", "zz_tw_aaaa1111", new[] { 1 }, new[]
+                    {
+                        new TwinProbeTag(TagTwin2, MigotoEmitter.RetexTag(TagTwin2), 1),
+                    }),
+                }));
+
+        Assert.Contains("same slot tag", ex.Message);
+        Assert.Contains($"{TagTwin1} on body", ex.Message);
+        Assert.Contains(TagTwin2, ex.Message);
     }
 
     [Fact]
