@@ -40,6 +40,24 @@ public enum SubjectSource
 /// <param name="PrimaryBundle">Logical bundle id of that primary candidate prefab — where an smr-body
 /// part's scene rig is read from when its own mesh bundle carries none. Empty when no prefab
 /// resolved.</param>
+/// <param name="PrefabBundles">Every logical bundle whose assembly prefab this build PARSED — the primary
+/// and each merged stem-sibling — deduped in candidate order. Not the subject's dependency closure: the
+/// scope opens bundles looking for prefabs and for CAB names, and only the ones that yielded a prefab
+/// shaped this model. What a caller that has to know when its answer went stale records (the sharing
+/// measurement does), since a prefab rewritten in place changes the slots, the recipe and the shadow flags
+/// this model is made of while every name around it survives. Empty from a hand-built model — only
+/// <see cref="SubjectModelBuilder.Build"/> can answer it.</param>
+/// <param name="MaterialBundles">Every logical bundle a MATERIAL of this model was read out of — the
+/// bundle the renderer's material PPtr resolved to, whose <c>m_SavedProperties</c> says which texture maps
+/// exist and what each binds — deduped, ordinal-sorted. The same "parsed, not opened" discipline as
+/// <paramref name="PrefabBundles"/>: the scope opens bundles speculatively while walking for a CAB name,
+/// and one that never yielded a material shaped nothing here. It is a SEPARATE record from the texture
+/// bundles a caller reaches through <see cref="SubjectMap.BundleId"/> — those coincide only when a texture
+/// is local to its own material's bundle. A material rewritten in place to bind a different texture, or to
+/// bind none, changes this model's map list with no bundle named anywhere else having moved. Empty from a
+/// hand-built model — only <see cref="SubjectModelBuilder.Build"/> can answer it.</param>
+/// <param name="PartsPoolAlone">Mirror of <see cref="Model.Outfit.PartsPoolAlone"/>, carried so the build
+/// and the export ask the subject they hold rather than re-finding its roster row.</param>
 public sealed record SubjectModel(
     string Character,
     string Stem,
@@ -49,7 +67,10 @@ public sealed record SubjectModel(
     IReadOnlyList<string> Problems,
     string PrimaryRoot = "",
     string PrimaryBundle = "",
-    string? SkeletonProblem = null)
+    string? SkeletonProblem = null,
+    IReadOnlyList<string>? PrefabBundles = null,
+    IReadOnlyList<string>? MaterialBundles = null,
+    bool PartsPoolAlone = false)
 {
     /// <summary>Every part of this subject draws from a static renderer slot. A combined Blender session
     /// carries the SKINNED parts, so such a subject has none to carry and is authored one part at a time.
@@ -74,6 +95,16 @@ public sealed record SubjectModel(
 /// <param name="IsStatic">The representative slot is drawn by a plain <c>MeshRenderer</c> — a draw the
 /// game does not pose per vertex. Read off the prefab, so it costs no mesh read; it describes the SLOT,
 /// which is what decides whether the part can join a combined rigged session.</param>
+/// <param name="CastsShadows">The representative slot's renderer takes part in the shadow pass. A part
+/// that does not cast issues no draw at all while the camera can't see it, so it can neither feed another
+/// part's palette recovery nor witness presence; its own Replace, Retexture and Hide are unaffected, since
+/// each fires at its own draw. Read off the prefab, so it costs no mesh read. False requires a measured
+/// Off.</param>
+/// <param name="Visibility">The game-side mechanism, if any, that can leave the representative slot undrawn
+/// while its name and wardrobe variant say it draws. Anything but
+/// <see cref="Remold.Core.Model.VisibilityOverride.None"/> keeps the part out of every other part's pool
+/// and off the witness stand; its own Replace, Retexture and Hide are unaffected. Read off the prefab, so
+/// it costs no mesh read, and only a list that named this node sets it.</param>
 public sealed record SubjectPart(
     string Token,
     string SlotName,
@@ -84,7 +115,9 @@ public sealed record SubjectPart(
     IReadOnlyList<RecipeTierSlot>? SiblingTiers = null,
     string? MeshBundle = null,
     long MeshPathId = 0,
-    bool IsStatic = false)
+    bool IsStatic = false,
+    bool CastsShadows = true,
+    Remold.Core.Model.VisibilityOverride Visibility = Remold.Core.Model.VisibilityOverride.None)
 {
     /// <summary>The prefab-exact identity carried down to <see cref="AssetExporter.ExportRecipePart"/>:
     /// representative slot + sibling tiers, recipe-backed (address) or smr-backed (bundle+path-id). A part

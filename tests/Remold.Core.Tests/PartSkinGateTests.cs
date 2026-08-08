@@ -37,14 +37,27 @@ public class PartSkinGateTests : IDisposable
             PartSkinGate.Blocked(Bundles("b_face", "face.bundle"), "b_face", "face"));
     }
 
-    [Fact]
-    public void AMeshWithAReducedSkinStreamIsRefusedOnTheLayoutBranch()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void AMeshWithABelowFourSkinIsNotRefused(int skinWidth)
     {
-        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "body.bundle"), "body",
-            TriPositions, TriIndices, Bones, skinWidth: 2);
+        // The stored influences are the whole skin at any width, widened where they are read, so the
+        // pooled swap takes these and the verb must be offered.
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, $"body{skinWidth}.bundle"), "body",
+            TriPositions, TriIndices, Bones, skinWidth: skinWidth);
+
+        Assert.Null(PartSkinGate.Blocked(Bundles("b_body", $"body{skinWidth}.bundle"), "b_body", "body"));
+    }
+
+    [Fact]
+    public void AMeshWhoseSkinStreamCarriesAThirdChannelIsRefusedOnTheLayoutBranch()
+    {
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "shared.bundle"), "shared",
+            TriPositions, TriIndices, Bones, extraSkinChannel: true);
 
         Assert.Equal(StreamDump.SkinRefusal.SkinLayout,
-            PartSkinGate.Blocked(Bundles("b_body", "body.bundle"), "b_body", "body"));
+            PartSkinGate.Blocked(Bundles("b_shared", "shared.bundle"), "b_shared", "shared"));
     }
 
     [Fact]
@@ -73,6 +86,29 @@ public class PartSkinGateTests : IDisposable
             TriPositions, TriIndices, Bones);
 
         Assert.Null(PartSkinGate.Blocked(Bundles("b_hair", "hair.bundle"), "b_hair", "hair"));
+    }
+
+    [Fact]
+    public void AMeshRidingASpringChainIsRefusedOnTheSpringBranch()
+    {
+        // 0x05f0c65f = the Spring01 chain root. The skin itself is recoverable (full-width stream), so
+        // this refusal can only be the bone-set rule.
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "charm.bundle"), "charm",
+            TriPositions, TriIndices, new uint[] { 0x9e3779b9, 0x05f0c65f });
+
+        Assert.Equal(StreamDump.SkinRefusal.SpringRig,
+            PartSkinGate.Blocked(Bundles("b_charm", "charm.bundle"), "b_charm", "charm"));
+    }
+
+    [Fact]
+    public void ASpringChainRefusalBeatsTheRouteAnswer()
+    {
+        // A one-influence spring mesh has a valid pooled route; the spring rule must still refuse it.
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "charm1.bundle"), "charm1",
+            TriPositions, TriIndices, new uint[] { 0x2b587a92 }, skinWidth: 1);
+
+        Assert.Equal(StreamDump.SkinRefusal.SpringRig,
+            PartSkinGate.Blocked(Bundles("b_charm1", "charm1.bundle"), "b_charm1", "charm1"));
     }
 
     [Fact]

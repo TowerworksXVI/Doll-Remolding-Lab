@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 
 namespace Remold.Core.Tests.Support;
 
@@ -84,6 +85,22 @@ internal sealed class TempGame : IDisposable
     public static byte[] DromInteractRow(long gunId, long spotId, string reactTemplate) =>
         Pb.Msg().Varint(2, gunId).Varint(3, spotId).Str(8, reactTemplate).ToArray();
 
+    /// <summary>A row of LobbyActionListData: <c>#1</c> = action id, and the three clip-name carriers
+    /// <c>#6</c>, <c>#7</c> and <c>#19</c>. Any may be null, for a row carrying only some of them.</summary>
+    public static byte[] LobbyActionListRow(long actionId, string? clip6 = null, string? clip7 = null,
+        string? clip19 = null)
+    {
+        var m = Pb.Msg().Varint(1, actionId);
+        if (clip6 is not null) m.Str(6, clip6);
+        if (clip7 is not null) m.Str(7, clip7);
+        if (clip19 is not null) m.Str(19, clip19);
+        return m.ToArray();
+    }
+
+    /// <summary>A row of LobbyActionData: <c>#1</c> = action id, <c>#5</c> = the clip name.</summary>
+    public static byte[] LobbyActionRow(long actionId, string clip) =>
+        Pb.Msg().Varint(1, actionId).Str(5, clip).ToArray();
+
     /// <summary>A row of BattleSummonedData: <c>#5</c> = the summon's ModelConfigId,
     /// <c>#16 = {#1=textId}</c> = the summon-name wrapper (null = an unnamed battle row).</summary>
     public static byte[] BattleSummonedRow(long rowId, long modelConfigId, long? nameTextId)
@@ -113,6 +130,56 @@ internal sealed class TempGame : IDisposable
     /// <summary>A row of PartsResourceData: <c>#1</c> = resource id (variantId·10+k), <c>#2</c> = token.</summary>
     public static byte[] PartsResourceRow(long resourceId, string token) =>
         Pb.Msg().Varint(1, resourceId).Str(2, token).ToArray();
+
+    /// <summary>A row of GunWeaponData: <c>#1</c> = weapon id, <c>#2 = {#1=textId}</c> = the name
+    /// wrapper, <c>#4</c> = weapon type, <c>#9</c> = model path, <c>#11</c> = rarity, <c>#30</c> =
+    /// packed default part ids. Null path = a row naming no model, which the reader skips.</summary>
+    public static byte[] GunWeaponRow(long weaponId, int type, string? modelPath, int rarity,
+        long? nameTextId = null, params long[] defaultPartIds)
+    {
+        var m = Pb.Msg().Varint(1, weaponId).Varint(4, type).Varint(11, rarity);
+        if (nameTextId is not null) m.Sub(2, Pb.Msg().Varint(1, nameTextId.Value));   // #2.1 = name text-id
+        if (modelPath is not null) m.Str(9, modelPath);
+        if (defaultPartIds.Length > 0) m.Packed(30, defaultPartIds);
+        return m.ToArray();
+    }
+
+    /// <summary>A row of WeaponSkinData (intl/): <c>#1</c> = skin id, <c>#3 = {#1=textId}</c> = the
+    /// name wrapper, <c>#11</c> = rarity, <c>#13</c> = the own-appearance weapon link, <c>#14</c> =
+    /// the standalone skin's model path. A real row carries #13 or #14, never both.</summary>
+    public static byte[] WeaponSkinRow(long skinId, int rarity, long? ownWeaponId = null,
+        string? modelPath = null, long? nameTextId = null)
+    {
+        var m = Pb.Msg().Varint(1, skinId).Varint(11, rarity);
+        if (nameTextId is not null) m.Sub(3, Pb.Msg().Varint(1, nameTextId.Value));   // #3.1 = name text-id
+        if (ownWeaponId is not null) m.Varint(13, ownWeaponId.Value);
+        if (modelPath is not null) m.Str(14, modelPath);
+        return m.ToArray();
+    }
+
+    /// <summary>A row of WeaponSkinByTypeData (intl/): <c>#1</c> = weapon type, <c>#2</c> = packed
+    /// applicable skin ids.</summary>
+    public static byte[] WeaponSkinByTypeRow(int type, params long[] skinIds) =>
+        Pb.Msg().Varint(1, type).Packed(2, skinIds).ToArray();
+
+    /// <summary>A row of WeaponModCodGroupData: <c>#1</c> = the packed part/family/tier id, <c>#2</c> =
+    /// the base attachment model path.</summary>
+    public static byte[] WeaponModCodRow(long id, string modelPath) =>
+        Pb.Msg().Varint(1, id).Str(2, modelPath).ToArray();
+
+    /// <summary>A row of WeaponModSkinData (intl/): <c>#1</c> = skin id, <c>#3 = {#1=textId}</c> = the
+    /// name wrapper, <c>#11</c> = rarity, <c>#13</c> = the base-model ref
+    /// (<c>&lt;partId&gt;&lt;family&gt;&lt;tier&gt;53</c>), <c>#14</c> = model path (null = "use the
+    /// base model").</summary>
+    public static byte[] WeaponModSkinRow(long skinId, int rarity, string? modelPath = null,
+        long? nameTextId = null, long? refId = null)
+    {
+        var m = Pb.Msg().Varint(1, skinId).Varint(11, rarity);
+        if (nameTextId is not null) m.Sub(3, Pb.Msg().Varint(1, nameTextId.Value));   // #3.1 = name text-id
+        if (refId is not null) m.Varint(13, refId.Value);
+        if (modelPath is not null) m.Str(14, modelPath);
+        return m.ToArray();
+    }
 
     /// <summary>The parent of both <c>Table</c> and <c>AssetBundles_Windows</c>, derived from the game root
     /// exactly as the app does.</summary>
@@ -174,17 +241,36 @@ internal sealed class TempGame : IDisposable
 /// test binaries' own folder. Snapshot it so a run leaves it as it found it.</summary>
 internal sealed class SettingsSnapshot : IDisposable
 {
-    private readonly byte[]? _before =
-        File.Exists(Remold.Core.LabSettings.DefaultPath) ? File.ReadAllBytes(Remold.Core.LabSettings.DefaultPath) : null;
+    private readonly byte[]? _before = ReadOrNull(Remold.Core.LabSettings.DefaultPath);
+
+    /// <summary>The file's bytes, or null when it isn't there. RETRIED: the settings file is published by
+    /// an atomic replace and the test host rewrites it constantly, so a reader can arrive during the
+    /// instant the OS (or a scanner watching the new file) still has the handle — a sharing violation that
+    /// says nothing about the test taking the snapshot. Failing on it turns any settings-driven test into a
+    /// coin flip; the retry is short and the last attempt is allowed to throw, so a REAL unreadable file
+    /// still fails loudly.</summary>
+    private static byte[]? ReadOrNull(string path)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { return File.Exists(path) ? File.ReadAllBytes(path) : null; }
+            catch (IOException) when (attempt < 20) { Thread.Sleep(25); }
+            catch (UnauthorizedAccessException) when (attempt < 20) { Thread.Sleep(25); }
+        }
+    }
 
     public void Dispose()
     {
-        try
+        for (int attempt = 0; attempt < 20; attempt++)
         {
-            if (_before is null) File.Delete(Remold.Core.LabSettings.DefaultPath);
-            else File.WriteAllBytes(Remold.Core.LabSettings.DefaultPath, _before);
+            try
+            {
+                if (_before is null) File.Delete(Remold.Core.LabSettings.DefaultPath);
+                else File.WriteAllBytes(Remold.Core.LabSettings.DefaultPath, _before);
+                return;
+            }
+            catch (IOException) { Thread.Sleep(25); }
+            catch (UnauthorizedAccessException) { Thread.Sleep(25); }
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
     }
 }

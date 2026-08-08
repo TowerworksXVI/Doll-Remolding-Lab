@@ -9,17 +9,16 @@ namespace Remold.Core.Mesh;
 
 /// <summary>
 /// The skin-stream shape palette recovery consumes — float4 BlendWeight at stream-2 offset 0, uint4
-/// BlendIndices at offset 16 — and the widening that brings a ONE-influence layout into it.
+/// BlendIndices at offset 16 — and the widening that brings any stored influence width (1–4) into it.
 ///
-/// <para>A mesh storing a single influence per vertex spells that skin two ways: BlendWeight and
-/// BlendIndices both stored x1, or BlendIndices alone with each weight implicitly 1. Both carry exactly
-/// the same skin as <c>(w,0,0,0)/(i,0,0,0)</c>, so widening is lossless and the pooled pipeline can read
-/// them like any other skinned mesh. A REDUCED layout (2 or 3 stored influences) is not here: widening it
-/// would be lossless too, but its draws are posed per vertex by influences the narrow stream no longer
-/// carries, so recovery has nothing to reproduce them from.</para>
+/// <para>Meshes store skins at several widths: the full four, a two-influence pair, and two
+/// one-influence spellings (BlendWeight and BlendIndices both stored x1, or BlendIndices alone with each
+/// weight implicitly 1). Whatever the width, the stored influences ARE the mesh's whole skin — its draws
+/// are posed by exactly what the stream carries — so padding the missing slots with zero weight is
+/// lossless and the pooled pipeline reads the result like any other skinned mesh.</para>
 ///
-/// <para>THE one home for the narrow shape: the readers, the layout half of the recoverable-skin rule and
-/// the compile all ask here rather than each spelling out the channel arithmetic.</para>
+/// <para>THE one home for the skin-stream shape: the readers, the layout half of the recoverable-skin
+/// rule and the compile all ask here rather than each spelling out the channel arithmetic.</para>
 /// </summary>
 public static class SkinLayout
 {
@@ -62,18 +61,27 @@ public static class SkinLayout
         return false;
     }
 
-    /// <summary>True when the mesh stores exactly one influence per vertex in a layout
-    /// <see cref="Widen"/> can bring to the canonical shape: uint32 indices on stream 2, weights either
-    /// float32 alongside them or absent (implicitly 1), and nothing else sharing that stream.</summary>
+    /// <summary>True when the mesh stores exactly one influence per vertex — either narrow spelling.
+    /// Not a readability question (<see cref="Recoverable"/> is): a one-influence part rides its bones at
+    /// weight 1 on every vertex, which is what the pool rules key this flag for.</summary>
     public static bool IsNarrow(AssetTypeValueField mesh) => IsNarrow(Channels(mesh));
 
-    private static bool IsNarrow(List<Chan> ch)
+    private static bool IsNarrow(List<Chan> ch) =>
+        IsWidenable(ch) && ch[IndexChannel].Dim == 1;
+
+    /// <summary>True when <see cref="Widen"/> can bring the mesh's skin stream to the canonical shape:
+    /// uint32 indices stored x1–x4 on stream 2, weights float32 at the same width alongside them (or
+    /// absent with x1 indices, each weight implicitly 1), and nothing else sharing that stream. A
+    /// canonical layout passes too — it widens to itself.</summary>
+    private static bool IsWidenable(List<Chan> ch)
     {
         if (ch.Count <= IndexChannel) return false;
         var idx = ch[IndexChannel];
         var wgt = ch[WeightChannel];
-        if (idx.Dim != 1 || idx.Format != UInt32Format || idx.Stream != SkinStream) return false;
-        if (wgt.Dim != 0 && (wgt.Dim != 1 || wgt.Format != Float32 || wgt.Stream != SkinStream)) return false;
+        if (idx.Format != UInt32Format || idx.Stream != SkinStream || idx.Dim is < 1 or > 4) return false;
+        if (wgt.Dim == 0
+            ? idx.Dim != 1
+            : wgt.Dim != idx.Dim || wgt.Format != Float32 || wgt.Stream != SkinStream) return false;
         return !Shared(ch);
     }
 
@@ -82,13 +90,13 @@ public static class SkinLayout
     public static bool Recoverable(AssetTypeValueField mesh)
     {
         var ch = Channels(mesh);
-        return IsCanonical(ch) || IsNarrow(ch);
+        return IsCanonical(ch) || IsWidenable(ch);
     }
 
     /// <summary>The mesh's skin stream in the canonical stride-32 shape: returned verbatim when the mesh
-    /// already stores it, widened to <c>(w,0,0,0)/(i,0,0,0)</c> when it stores one influence per vertex.
-    /// Throws <see cref="InvalidDataException"/> for any other layout — there is no lossless answer — and
-    /// for a canonical-channel mesh whose stream is stored at some other stride, whose records the returned
+    /// already stores it, widened with zero-weight padding when it stores fewer influences per vertex.
+    /// Throws <see cref="InvalidDataException"/> for a layout no widening can read — and for a
+    /// canonical-channel mesh whose stream is stored at some other stride, whose records the returned
     /// bytes would not be.</summary>
     public static byte[] Canonical(AssetTypeValueField mesh) => Canonical(Channels(mesh), MeshRaw.From(mesh));
 
@@ -106,13 +114,13 @@ public static class SkinLayout
                 : throw new InvalidDataException(
                     $"the mesh declares float4 weights + uint4 indices but stores its skin stream "
                     + $"{raw.Stride(ordinal)} bytes per vertex");
-        if (!IsNarrow(ch))
+        if (!IsWidenable(ch))
             throw new InvalidDataException(
-                "the mesh's skin stream isn't float4 weights + uint4 indices, and stores more than one "
-                + "influence per vertex");
+                "the mesh's skin stream isn't a weights + indices pair widening can read");
 
         int stride = raw.Stride(ordinal);
-        bool hasWeight = ch[WeightChannel].Dim == 1;
+        int dim = ch[IndexChannel].Dim;
+        bool hasWeight = ch[WeightChannel].Dim > 0;
         int wOff = ch[WeightChannel].Offset, iOff = ch[IndexChannel].Offset;
         var wide = new byte[(long)raw.VertexCount * CanonicalStride <= int.MaxValue
             ? raw.VertexCount * CanonicalStride
@@ -120,25 +128,26 @@ public static class SkinLayout
         for (int v = 0; v < raw.VertexCount; v++)
         {
             int src = v * stride, dst = v * CanonicalStride;
-            float w = hasWeight ? BitConverter.ToSingle(stored, src + wOff) : 1f;
-            BitConverter.GetBytes(w).CopyTo(wide, dst);
-            Array.Copy(stored, src + iOff, wide, dst + 16, 4);
+            // the stored influences verbatim, the padding slots already zero from allocation
+            if (hasWeight) Array.Copy(stored, src + wOff, wide, dst, dim * 4);
+            else BitConverter.GetBytes(1f).CopyTo(wide, dst);
+            Array.Copy(stored, src + iOff, wide, dst + 16, dim * 4);
         }
         return wide;
     }
 
-    /// <summary>Rewrite a one-influence mesh's vertex data and channel table into the canonical shape, in
-    /// place; false when the mesh has nothing to widen (already canonical, skinless, or a layout
-    /// <see cref="IsNarrow"/> refuses). Every other stream is copied through byte for byte.
+    /// <summary>Rewrite a mesh's vertex data and channel table into the canonical skin shape, in place;
+    /// false when the mesh has nothing to widen (already canonical, skinless, or a layout
+    /// <see cref="Recoverable"/> refuses). Every other stream is copied through byte for byte.
     ///
     /// <para>For the compile: <see cref="MeshApply"/> encodes an authored skin against the target's OWN
-    /// stored layout, so a narrow target would take the donor's four influences down to one and slice a
-    /// narrow stream out the far end. Widening first is what lets the compiled streams come out in the
-    /// shape the pooled machinery reads.</para></summary>
+    /// stored layout, so a target stored below four would crush the donor's influences down to its width
+    /// and slice a narrow stream out the far end. Widening first is what lets the compiled streams come
+    /// out in the shape the pooled machinery reads.</para></summary>
     public static bool Widen(AssetTypeValueField mesh)
     {
         var ch = Channels(mesh);
-        if (IsCanonical(ch) || !IsNarrow(ch)) return false;
+        if (IsCanonical(ch) || !IsWidenable(ch)) return false;
 
         var raw = MeshRaw.From(mesh);
         var wide = Canonical(ch, raw);

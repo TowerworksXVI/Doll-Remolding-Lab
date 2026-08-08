@@ -10,6 +10,9 @@ With that said, I am a professional doing this in my spare time, and this is a s
 **What can I mod?**
 Textures and meshes, for all of every character's outfits, and every enemy I could find. Full geometry editing, and support for weighting to any bone on the character's vanilla skeleton. 
 
+**Why do I need this?**
+"Full geometry editing" was previously the stuff of fiction for this game - it uses DX11 CPU posing/skinning. As a workaround, the Lab references the original game meshes in their unposed state, and recovers the pose at runtime. 
+
 **Where do the mods show?** 
 Everywhere I could find. Refitting room, dorm, crew deck, combat, reflections, distant LODs. 
 
@@ -30,10 +33,10 @@ You can edit textures and hide meshes without Blender. But you do need it for th
 I probably don't know where it is yet. Feel free to send requests for any *adult* character, and I'll take a look.
 
 **Why can't I replace this part?**
-Technical limitations of the 3DMigoto workaround. Faces use expressions we can't read at runtime; some other parts simply don't have usable bones to bind to.
+Technical limitations of the 3DMigoto workaround. Some parts use facial expression or spring systems we can't read at runtime. Some other parts simply can't have their bones reliably recovered.
 
 **Can I charge for mods I make with this?**
-You agree that if you release a mod made with this tool in any paywalled form, you will release it publicly for free within 31 days afterward. My main goal for this tool is to grow the GFL2 modding ecosystem - and that doesn't happen if mods are locked away forever. 
+Yes. I'd like it if at least some of your mods ended up free eventually - my main goal for this tool is to grow the GFL2 modding ecosystem - but the Lab comes with no obligations. 
 
 **Can I edit someone else's mod?**
 This is not currently supported, but is a possible future feature.
@@ -41,12 +44,12 @@ This is not currently supported, but is a possible future feature.
 **Only Girls' Frontline 2? What about other games?**
 GFL2 is the only game *I am aware of* with this particular combination of CPU skinning and Unity bundle setup. Most F2P/gacha games use DX12 and GPU skinning and are serviced fine by 3DMigoto already. Most non-F2P games allow less roundabout modding techniques. 
 
-If you'd like me to help extend this to another game that you think it applies to, feel free to reach out.
+If you'd like to extend this to another game, the basic technique is described in [the palette recovery guide](PALETTE_RECOVERY_GUIDE.md). Feel free to reach out with any questions.
 
 ## The Mods
 
 **How do I install a mod?**
-Install a GFL2 3DMigoto mod loader (GIMI / SSMT4), put the mod in its mods folder, then launch the game with 3DMigoto active (or reload with F10).
+Install a GFL2 3DMigoto mod loader ([DollMI](https://github.com/TowerworksXVI/DollMI) recommended), put the mod in its mods folder, then launch the game with 3DMigoto active (or reload with F10).
 
 **Does it change my game files?**
 No. 3DMigoto operates at runtime only, and the Lab only ever reads them. No edits.

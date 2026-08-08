@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Remold.Core.Bundles;
@@ -36,12 +37,34 @@ public partial class OutfitVm : ObservableObject
 
     public bool ShowSubjectBox => !IsLoading;
 
+    /// <summary>The weapon-tier badge (R / SR / SSR) with its tier color; null rows show none.</summary>
+    public string? Badge { get; }
+    public bool HasBadge => Badge is not null;
+    public IBrush BadgeBrush { get; } = Brushes.Transparent;
+
+    // Immutable brushes: the first OutfitVm is built on the loader's background thread, and a
+    // mutable SolidColorBrush is thread-affine — its construction there fails the whole type.
+    private static readonly IBrush RarityR = Brush.Parse("#5B9FD6");
+    private static readonly IBrush RaritySr = Brush.Parse("#A97FD6");
+    private static readonly IBrush RaritySsr = Brush.Parse("#D6A85B");
+
+    /// <summary>Rarity code → the badge pair, shared by the outfit row and the collapsed character
+    /// row. An unknown code shows nothing rather than a wrong tier.</summary>
+    internal static (string Badge, IBrush Brush)? RarityBadge(int? rarity) => rarity switch
+    {
+        3 => ("R", RarityR),
+        4 => ("SR", RaritySr),
+        5 => ("SSR", RaritySsr),
+        _ => null,
+    };
+
     public OutfitVm(Outfit outfit, IEnumerable<string> partTokens, Action<OutfitVm> onInModToggled, bool isLoading = false)
     {
         Model = outfit;
         Stem = outfit.Stem;
         _onInModToggled = onInModToggled;
         IsLoading = isLoading;
+        if (RarityBadge(outfit.WeaponRarity) is { } badge) (Badge, BadgeBrush) = badge;
         // "<kind> · <name> · <stem> [· modular]". The leading "kind · name" comes from the ONE shared home,
         // so this tree matches the workbench header order; the stem trails only when it differs.
         var layout = OutfitLayout.Build(partTokens);
@@ -190,6 +213,11 @@ public partial class CharacterVm : ObservableObject
     /// <summary>The single outfit's edited state.</summary>
     public bool SubjectHasEdits => IsSingleOutfit && Outfits[0].HasEdits;
 
+    /// <summary>The collapsed row's tier badge — the single outfit's own.</summary>
+    public string? SubjectBadge => IsSingleOutfit ? Outfits[0].Badge : null;
+    public bool HasSubjectBadge => SubjectBadge is not null;
+    public IBrush SubjectBadgeBrush => IsSingleOutfit ? Outfits[0].BadgeBrush : Brushes.Transparent;
+
     /// <summary>Re-raise the collapse proxies after the outfits or their in-mod/edited state changed.</summary>
     public void RefreshSubjectState()
     {
@@ -198,6 +226,9 @@ public partial class CharacterVm : ObservableObject
         OnPropertyChanged(nameof(ShowGroupHeader));
         OnPropertyChanged(nameof(SubjectInMod));
         OnPropertyChanged(nameof(SubjectHasEdits));
+        OnPropertyChanged(nameof(SubjectBadge));
+        OnPropertyChanged(nameof(HasSubjectBadge));
+        OnPropertyChanged(nameof(SubjectBadgeBrush));
         OnPropertyChanged(nameof(ShowCharacterBox));
         OnPropertyChanged(nameof(CharacterInMod));
         OnPropertyChanged(nameof(CharacterHasEdits));

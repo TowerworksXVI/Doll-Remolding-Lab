@@ -33,6 +33,10 @@ public sealed class SettingsInput
     public string? MigotoLoaderExe { get; init; }          // null = unset (no default, never detected)
     public string Author { get; init; } = "";
     public int RecentCount { get; init; }
+    /// <summary>A force-rescan sweep is already owed — armed on an earlier Save and not yet run, here or in
+    /// a previous session. The row OPENS armed on it, so the form shows what is actually pending rather than
+    /// offering to arm a request that already stands.</summary>
+    public bool ForceRescanOwed { get; init; }
     public int? EncoderCpuLimit { get; init; }             // null = all cores
 }
 
@@ -47,6 +51,17 @@ public sealed class SettingsResult
     public string? MigotoLoaderExe { get; set; }
     public string Author { get; set; } = "";
     public bool ClearRecents { get; set; }
+    /// <summary>Sweep the rebuilt caches and re-read the game. Like <see cref="ClearRecents"/> it is ARMED
+    /// on the form and lands with the Save; the sweep itself waits for the rescan queue.
+    /// <para>Unlike <see cref="ClearRecents"/> this is the row's whole STATE, not a one-way request: the row
+    /// opens on <see cref="SettingsInput.ForceRescanOwed"/> and its button toggles, so false from a form that
+    /// opened armed means the modder took the request back.</para></summary>
+    public bool ForceRescan { get; set; }
+    /// <summary>What the row OPENED on — <see cref="SettingsInput.ForceRescanOwed"/>, handed straight back.
+    /// With <see cref="ForceRescan"/> it says whether this Save armed the request or merely carried one that
+    /// already stood, which is the difference between a Save that owes a re-read of the install and one that
+    /// leaves the standing debt for the next rescan to honour.</summary>
+    public bool ForceRescanWasOwed { get; set; }
     public int? EncoderCpuLimit { get; set; }              // null = all cores
 }
 
@@ -366,6 +381,10 @@ public sealed class SettingsWindow : Window
     private string? _libraryRoot;
     private readonly string? _migotoLoaderExe;
     private bool _clearRecents;
+    private bool _forceRescan;
+    /// <summary>What the force-rescan row opened on, kept beside the live state the button toggles: the two
+    /// together are what tell an arming Save from one that only carried a request already owed.</summary>
+    private readonly bool _forceRescanWasOwed;
 
     private readonly string _defaultLibrary;
     private readonly string? _blenderAuto;
@@ -393,6 +412,7 @@ public sealed class SettingsWindow : Window
     /// created is residue.</summary>
     private bool _closed;
     private readonly Button _clearRecentsButton;
+    private readonly Button _forceRescanButton;
     private readonly List<EditorChoice> _editorChoices = new();
 
     private sealed record EditorChoice(string Display, string? Path)
@@ -555,6 +575,12 @@ public sealed class SettingsWindow : Window
         };
         AddRow(grid, ref row, "CPU limit", cpuLine, cpuHint, cpuAll);
 
+        // ── one-shot actions ──────────────────────────────────────────────────
+        // Everything above is a value that STAYS; the two rows below are single actions that fire once with
+        // the Save and are not settings at all. The break is what keeps them from reading as one more
+        // preference sitting in the list.
+        AddSectionBreak(grid, ref row);
+
         // ── Recent mods ───────────────────────────────────────────────────────
         // The list is cleared by Save, not by the click — Cancel drops the whole form, this row with it — so
         // the label reports what is PENDING rather than claiming it already happened.
@@ -562,6 +588,25 @@ public sealed class SettingsWindow : Window
         _clearRecentsButton.IsEnabled = input.RecentCount > 0;
         _clearRecentsButton.Click += (_, _) => { _clearRecents = true; _clearRecentsButton.IsEnabled = false; _clearRecentsButton.Content = RecentsPendingLabel; };
         AddRow(grid, ref row, "Recent mods", _clearRecentsButton);
+
+        // ── Force rescan ──────────────────────────────────────────────────────
+        // Armed like the Recents row above: the click only ARMS, Save fires it, and Cancel drops the form
+        // with the arming in it. The sweep itself never runs here — the view-model queues it behind whatever
+        // is holding the roster.
+        //
+        // Two things this row does that the Recents row doesn't. It OPENS on the state the app is in, so a
+        // sweep still owed from an earlier Save (this session or a previous one) shows as armed rather than
+        // as an offer to arm what already stands. And the arming is REVERSIBLE: the button stays live and a
+        // second click takes the request back, which is the only way to undo a sweep owed across a restart —
+        // Cancel drops the form, and dropping the form leaves the debt where it was.
+        _forceRescan = _forceRescanWasOwed = input.ForceRescanOwed;
+        _forceRescanButton = SmallButton(ForceRescanButtonLabel(_forceRescan));
+        _forceRescanButton.Click += (_, _) =>
+        {
+            _forceRescan = !_forceRescan;
+            _forceRescanButton.Content = ForceRescanButtonLabel(_forceRescan);
+        };
+        AddRow(grid, ref row, ForceRescanLabel, _forceRescanButton, Hint(ForceRescanHint));
 
         var save = new Button { Content = "Save", IsDefault = true, Padding = new Thickness(16, 6) };
         save.Classes.Add("primary");
@@ -794,6 +839,8 @@ public sealed class SettingsWindow : Window
         MigotoLoaderExe = _migotoBox.Text,    // blank → ApplySettings Empty2Nulls it back to unset
         Author = _authorBox.Text?.Trim() ?? "",
         ClearRecents = _clearRecents,
+        ForceRescan = _forceRescan,
+        ForceRescanWasOwed = _forceRescanWasOwed,   // the row's opening state, so the Save can tell arming from carrying
         EncoderCpuLimit = _encoderCpuLimit,   // parsed in ValidateCpuLimitOnSave; blank → null
     };
 
@@ -894,6 +941,28 @@ public sealed class SettingsWindow : Window
 
     /// <summary>What the row reads once the clear is armed: it lands with the rest of the form.</summary>
     internal const string RecentsPendingLabel = "Recents clear on Save";
+
+    /// <summary>The force-rescan row's label in the one-shot actions area.</summary>
+    internal const string ForceRescanLabel = "Force rescan";
+    /// <summary>What the force-rescan row promises — and, as plainly, what it leaves alone. The caches are
+    /// named as a CATEGORY: the sweep takes four trees (the game index, the solved palette operators, the
+    /// encoded texture blobs, the thumbnails), and a line that lists two of them is false about the other
+    /// two. Thumbnails are called out because they are the part the modder can see go.</summary>
+    internal const string ForceRescanHint =
+        "Clears the app's rebuilt caches, thumbnails included, then re-reads the game. "
+        + "Mods, projects, and edits are kept.";
+    /// <summary>The button at rest: what a click will arm, named as the action rather than as the row.</summary>
+    internal const string ForceRescanRestingLabel = "Clear caches and rescan";
+    /// <summary>What the button reads once the rescan is armed: it lands with the rest of the form. A
+    /// STATEMENT of what the Save will do, the same shape as <see cref="RecentsPendingLabel"/> beside it —
+    /// the button is live either way, so a question mark would read as the click asking rather than as the
+    /// state it reports.</summary>
+    internal const string ForceRescanArmedLabel = "Caches clear on Save";
+
+    /// <summary>The force-rescan button's word for the state the row is in. One place, so the label the form
+    /// opens on and the label a toggle lands on can never disagree.</summary>
+    internal static string ForceRescanButtonLabel(bool armed) =>
+        armed ? ForceRescanArmedLabel : ForceRescanRestingLabel;
 
     // ── layout helpers ────────────────────────────────────────────────────────
 
@@ -1121,6 +1190,25 @@ public sealed class SettingsWindow : Window
         Padding = new Thickness(10, 4),
         VerticalAlignment = VerticalAlignment.Center,
     };
+
+    /// <summary>A hairline across the whole form, ending one group of rows and starting the next. The app's
+    /// own divider: a <see cref="Border"/> with a one-pixel top edge in <c>HudBorderBrush</c>, which is what
+    /// MainWindow rules its panes off with.</summary>
+    private static void AddSectionBreak(Grid grid, ref int row)
+    {
+        grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+        var rule = new Border
+        {
+            BorderBrush = ResBrush("HudBorderBrush") ?? Subtext(),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Margin = new Thickness(0, 10, 0, 4),
+        };
+        Grid.SetRow(rule, row);
+        Grid.SetColumn(rule, 0);
+        Grid.SetColumnSpan(rule, 2);   // the label column too: this rules off the form, not one row's value
+        grid.Children.Add(rule);
+        row++;
+    }
 
     /// <summary>The label in column 0; the value control, an optional hint line under it and right-aligned
     /// action buttons in column 1.</summary>

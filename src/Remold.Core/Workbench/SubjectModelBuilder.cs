@@ -69,7 +69,8 @@ public static class SubjectModelBuilder
                 : "No assembly prefab found for this subject. Its parts can't be read.");
             problems.AddRange(scope.Problems);
             return new SubjectModel(character, outfit.Stem, SubjectSource.Prefab,
-                Array.Empty<SubjectPart>(), Skeleton: null, problems);
+                Array.Empty<SubjectPart>(), Skeleton: null, problems,
+                PartsPoolAlone: outfit.PartsPoolAlone);
         }
 
         var primary = candidates[0];   // the highest-priority candidate — the skeleton and part-priority baseline
@@ -100,6 +101,13 @@ public static class SubjectModelBuilder
                 if (!byLeaf.ContainsKey(Leaf(e.SlotPath))) byLeaf[Leaf(e.SlotPath)] = e.MeshAddress;
             candidates[i] = candidates[i] with { MeshAddressByLeaf = byLeaf };
         }
+
+        // The dorm visibility lists come from the SCOPE, not from this candidate list: the context copies of
+        // one stem share a root name, so the candidate dedupe keeps only one of them, and the components
+        // ride whichever copy the game authored them on. The scope unions every prefab it parsed.
+        var visibilityByNode = scope.VisibilityOverrides;
+        VisibilityOverride VisibilityOf(string slotName) =>
+            visibilityByNode.TryGetValue(slotName, out var v) ? v : VisibilityOverride.None;
 
         // every slot name across ALL parsed candidates — a recipe entry pointing outside this set is an orphan
         var allSlotNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -154,6 +162,9 @@ public static class SubjectModelBuilder
             }
         }
 
+        // filled by ResolveSlotMaterials as each material is READ — see the MaterialBundles note below
+        var materialBundles = new HashSet<string>(StringComparer.Ordinal);
+
         var parts = new List<SubjectPart>(specs.Count);
         foreach (var spec in specs.OrderBy(p => p.Token, StringComparer.OrdinalIgnoreCase))
         {
@@ -166,7 +177,8 @@ public static class SubjectModelBuilder
             }
             var meshAddress = cand.MeshAddressByLeaf.TryGetValue(spec.Slot.Name, out var addr) ? addr : "";
             var materials = ResolveSlotMaterials(
-                scope, reader, Deobfuscate, cand.Bundle, cand.Dec, spec.Slot, spec.Token, outfit, problems);
+                scope, reader, Deobfuscate, cand.Bundle, cand.Dec, spec.Slot, spec.Token, outfit, problems,
+                materialBundles);
 
             // smr-body mesh identity: a slot with NO recipe address but a serialized renderer mesh resolves
             // its CAB to the owning scope bundle here, so the part carries bundle+path-id down to the
@@ -192,9 +204,16 @@ public static class SubjectModelBuilder
                     if (!tokenOf(x.Name).Equals(spec.Token, StringComparison.OrdinalIgnoreCase)) continue;
                     if (!tierNames.Add(x.Name)) continue;
                     var tierAddr = tierCand.MeshAddressByLeaf.GetValueOrDefault(x.Name, "");
-                    if (tierAddr.Length > 0 || x.Mesh is null) { siblingTiers.Add(new RecipeTierSlot(x.Name, tierAddr)); continue; }
+                    // each tier's shadow-pass flag and visibility override are its OWN node's: the tiers are
+                    // separate draws, and the dorm lists name them one tier at a time
+                    if (tierAddr.Length > 0 || x.Mesh is null)
+                    {
+                        siblingTiers.Add(new RecipeTierSlot(x.Name, tierAddr, CastsShadows: x.CastsShadows,
+                            Visibility: VisibilityOf(x.Name)));
+                        continue;
+                    }
                     var (tb, tp) = ResolveSlotMesh(scope, tierCand, x.Mesh, spec.Token, problems, out _);
-                    siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp));
+                    siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp, x.CastsShadows, VisibilityOf(x.Name)));
                 }
             // Mirror the exporter's whole-part texture miss: a part whose real materials ALL resolved cleanly
             // yet bind ZERO texture maps will export untextured, so flag it for the tree's ⚠ badge. A part
@@ -207,7 +226,9 @@ public static class SubjectModelBuilder
             parts.Add(new SubjectPart(spec.Token, spec.Slot.Name, meshAddress, materials,
                 SourceRoot: cand.Prefab.RootName, Problem: partProblem ?? noTexProblem, SiblingTiers: siblingTiers,
                 MeshBundle: meshBundle, MeshPathId: meshPathId,
-                IsStatic: spec.Slot.Renderer == SlotRenderer.Static));
+                IsStatic: spec.Slot.Renderer == SlotRenderer.Static,
+                CastsShadows: spec.Slot.CastsShadows,
+                Visibility: VisibilityOf(spec.Slot.Name)));
         }
 
         // Defensive: renderer slots existed but nothing became a part — loud rather than a silent empty
@@ -218,9 +239,24 @@ public static class SubjectModelBuilder
         // the scope accrues problems lazily — fold them in last so none are lost
         problems.AddRange(scope.Problems);
 
+        // The bundles this model was PARSED out of, for a caller that has to notice one being rewritten in
+        // place: the candidates, not the scope — the scope opens bundles speculatively (every closure entry
+        // gets a prefab parse attempt, and the CAB walk opens more), and a bundle that yielded no prefab
+        // shaped nothing here. Recording those instead would re-measure rows for content they never read.
+        // PLUS the visibility contributors: the candidate dedupe keeps one copy per root name while the
+        // dorm lists ride whichever context copy the game authored them on, so a contributing copy can
+        // shape every part's withheld marker without being a candidate at all.
+        var prefabBundles = candidates.Select(c => c.Bundle)
+            .Concat(scope.VisibilityContributors)
+            .Distinct(StringComparer.Ordinal).ToList();
+
         return new SubjectModel(character, outfit.Stem, SubjectSource.Prefab,
             parts, skeleton, problems, PrimaryRoot: primary.Prefab.RootName, PrimaryBundle: primary.Bundle,
-            SkeletonProblem: skeletonProblem);
+            SkeletonProblem: skeletonProblem, PrefabBundles: prefabBundles,
+            // sorted rather than read-ordered: the set is what a caller uses, and part order is not a fact
+            // worth pinning tests to
+            MaterialBundles: materialBundles.OrderBy(b => b, StringComparer.Ordinal).ToList(),
+            PartsPoolAlone: outfit.PartsPoolAlone);
     }
 
     /// <summary>The candidate's renderer slots that can become parts: OWNED (<see cref="SlotIsOwned"/>) and
@@ -395,6 +431,24 @@ public static class SubjectModelBuilder
         string.Equals(candidateRoot, outfit.Stem, StringComparison.Ordinal)
         || slotName.StartsWith(outfit.MeshPrefix, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Whether a prefab the scope parsed is part of THIS subject rather than merely reachable from
+    /// it: its container root IS the stem (the subject's own prefab and every context copy of it, which
+    /// <see cref="SubjectScope.Candidates"/> dedupes away), or it contributes at least one slot this subject
+    /// draws (<see cref="OwnedMeshSlots"/>) — the stem-SIBLING roots that carry coats, props and shadow rigs.
+    ///
+    /// <para>A scope is a dependency closure, so it also holds prefabs belonging to OTHER subjects entirely
+    /// (another doll's weapon in this doll's closure). Those are neither, and whole-prefab data read off them
+    /// — the dorm visibility lists — would be attributed to a subject whose parts they say nothing about.
+    /// This is deliberately weaker than root == stem: a <c>c_&lt;stem&gt;_slg_skin_model</c> sibling owns real
+    /// parts of the subject under a root of its own, and gating on the root alone would drop its lists.</para>
+    ///
+    /// <para>The second arm is the SAME gate the part union enumerates, so a prefab that contributes a part
+    /// always passes: the guard can never withhold data from a prefab the subject is actually built
+    /// from.</para></summary>
+    internal static bool IsSubjectConstituent(CharacterPrefab prefab, Outfit outfit) =>
+        string.Equals(prefab.RootName, outfit.Stem, StringComparison.OrdinalIgnoreCase)
+        || OwnedMeshSlots(prefab, outfit).Count > 0;
+
     /// <summary>The subject's part tokens as the Pick roster shows them: the union of OWNED renderer-slot
     /// tokens across the scope's parsed candidates, deduped and sorted. The SAME
     /// <see cref="OwnedMeshSlots"/> + <see cref="TokenRule"/> pair <see cref="Build"/> claims its parts with,
@@ -434,11 +488,16 @@ public static class SubjectModelBuilder
     /// group for an absent dependency to keep submesh alignment, this is LOUD: a non-empty material that
     /// can't resolve gets a per-material problem that also rolls up to the subject. Engine-shared
     /// textures stay on the surface: a retexture of one is scoped at build time to the subject's own
-    /// mesh draws (the sharing measurement decides), so exposing it is safe.</summary>
+    /// mesh draws (the sharing measurement decides), so exposing it is safe.
+    ///
+    /// <para><paramref name="materialBundles"/> collects every bundle a material was actually READ out of —
+    /// see <see cref="SubjectModel.MaterialBundles"/>. Recorded once the bytes are in hand, so a bundle
+    /// <see cref="SubjectScope.BundleForCab"/> merely opened while walking for the CAB never lands in it,
+    /// and neither does one the deobfuscate could not produce.</para></summary>
     private static List<SubjectMaterial> ResolveSlotMaterials(
         SubjectScope scope, BundleReader reader, Func<string, byte[]?> deobfuscate,
         string prefabBundle, byte[] prefabDec, PrefabSlot slot, string token, Outfit outfit,
-        List<string> problems)
+        List<string> problems, ISet<string> materialBundles)
     {
         var result = new List<SubjectMaterial>(slot.Materials.Count);
         foreach (var mref in slot.Materials)
@@ -466,6 +525,11 @@ public static class SubjectModelBuilder
                 result.Add(new SubjectMaterial("", mref.PathId, mref.Cab, Array.Empty<SubjectMap>(), msg));
                 continue;
             }
+            // The bytes are in hand and the material is about to be read out of them: this bundle's CONTENT
+            // is what says which maps the material binds and where they live, so it belongs on the record
+            // whether or not the read below finds the material. The prefab's own bundle passes through here
+            // too when a material is local to it — deduped, and PrefabBundles names it anyway.
+            materialBundles.Add(matBundle);
             var te = reader.GetMaterialTexEnvsByPathId(matDec, mref.PathId);
             if (te is null)
             {

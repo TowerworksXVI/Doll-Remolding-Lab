@@ -1031,6 +1031,10 @@ public class ModBuilderTests : IDisposable
     /// recovery, so the roster reaches pool derivation short of it and these bones unowned.</summary>
     private static readonly uint[] FaceBones = { 0x00000301, 0x00000302 };
 
+    /// <summary>The unmeasurable part's own bones (see <c>unreadableWeightsPart</c>): its table reads, its
+    /// weights don't, so these are the bones a refusal can still rule the part out by.</summary>
+    private static readonly uint[] UnreadBones = { 0x00000501, 0x00000502 };
+
     /// <summary>The bones both wardrobe options own (see <see cref="WardrobeWorld"/>): the two options fill one
     /// slot, so they are rigged alike. A donor riding these pools the option it targets and nothing else.</summary>
     private static readonly uint[] DressBones = { 0x00000401, 0x00000402 };
@@ -1086,6 +1090,22 @@ public class ModBuilderTests : IDisposable
         public bool Mixed { get; init; }
         /// <summary>A companion this build refuses to touch, in the first option.</summary>
         public bool BlockedCompanion { get; init; }
+        /// <summary>The SECOND option's companion is present and perfectly readable, and its renderer is
+        /// outside the shadow pass: it draws only while it is in frame, so sighting nothing at it proves
+        /// nothing. The option is left unsightable exactly as dropping the companion would be, by the
+        /// measured flag alone.</summary>
+        public bool ShadowOffCompanion2 { get; init; }
+        /// <summary>The SECOND option's companion is present and perfectly readable, and the game's own
+        /// dorm logic can withhold it: it answers for that logic rather than for the option worn, so
+        /// sighting nothing at it proves nothing. The option is left unsightable exactly as dropping the
+        /// companion would be, by the measured marker alone.</summary>
+        public bool WithheldCompanion2 { get; init; }
+        /// <summary>The second option's companion gains a lod1 TIER with an index buffer of its own — a
+        /// second witnessable draw under one companion part.</summary>
+        public bool Companion2Tier { get; init; }
+        /// <summary>…and the marker sits on that TIER while the companion part itself stays clean, which
+        /// is the only shape that tells the per-tier gate from the per-part one.</summary>
+        public bool WithheldCompanion2Tier { get; init; }
     }
 
     /// <summary>The one-part world in SKINNED form — the shape a Replace needs: a bone table the donor's
@@ -1101,9 +1121,12 @@ public class ModBuilderTests : IDisposable
     /// of its own; <paramref name="midTier"/> puts an unrendered
     /// <c>lodm1</c> tier between the body's two shipped ones. <paramref name="bodyBlendShapes"/> and
     /// <paramref name="bodySkinWidth"/> put the Replace TARGET itself past the recoverable-skin rule;
+    /// <paramref name="bodyTabledOnly"/> appends to the body lod0's bone table hashes no vertex of it
+    /// rides, the corpus shape where a part lists more skeleton than it poses;
     /// <paramref name="facePart"/> adds a second part that fails it, owning bones of its own;
     /// <paramref name="ghostPart"/> adds one whose bundle this install doesn't carry, so not even its
-    /// bones are known. <paramref name="bodyTierBones"/> replaces the bone table of the body's lod1, the
+    /// bones are known; <paramref name="unreadableWeightsPart"/> adds one past the skin rule whose vertex
+    /// bytes are gone, so its TABLE reads and its weights don't. <paramref name="bodyTierBones"/> replaces the bone table of the body's lod1, the
     /// shape where a tier POSES what its own lod0 does not; <paramref name="bodyTierTabledOnly"/> appends
     /// to that table bones no vertex of the tier rides. <paramref name="clothTier"/> gives the cloth part
     /// a lod1 of its own, so it draws where the body's lod1 draws; <paramref name="clothTail"/> puts the
@@ -1119,6 +1142,12 @@ public class ModBuilderTests : IDisposable
     /// unpooled mesh shares a pooled one's draw signature; <paramref name="clothOwnAlbedo"/> gives the
     /// cloth a base color of its own instead of the body's. <paramref name="mateOwnAlbedo"/> does the
     /// same for the pool mate, which is what separates its twinned TIER from the body's.
+    /// <paramref name="twinPartShadowOff"/> puts the twin part's renderer outside the shadow pass: fully
+    /// readable and donor-ridden, and the game stops drawing it the moment it leaves the camera, so it can
+    /// refresh nothing for another part's palette recovery.
+    /// <paramref name="twinPartVisibility"/> marks the twin part with a PREFAB-RESIDENT visibility
+    /// mechanism — fully readable and donor-ridden, and the game's own dorm or lobby logic decides
+    /// whether it draws.
     /// <paramref name="wardrobe"/> adds two options of ONE wardrobe slot whose meshes share an index
     /// buffer, stream-1 bytes and base color — nothing at the draw parts them — each married to a
     /// companion mesh of its own; <see cref="WardrobeWorld"/>'s knobs shape the companions and extra
@@ -1126,11 +1155,14 @@ public class ModBuilderTests : IDisposable
     private BuildEnv MakeSkinnedEnv(bool anchorNormal = false, bool anchorRmo = false,
         string meshTail = "", bool twinPart = false, bool clothWearer = false, bool poolMate = false,
         bool midTier = false, bool mateTierTwin = false, bool mateTier = false, int bodyBlendShapes = 0,
-        int bodySkinWidth = 4, bool facePart = false, bool ghostPart = false, uint[]? bodyTierBones = null,
+        int bodySkinWidth = 4, uint[]? bodyTabledOnly = null, bool facePart = false, bool ghostPart = false,
+        bool unreadableWeightsPart = false, uint[]? bodyTierBones = null,
         uint[]? bodyTierTabledOnly = null, bool clothTier = false, string clothTail = "",
         bool narrowAccessory = false, bool bodySharedSkinStream = false, int twinPartUvSeed = 0,
         int twinPartPosSeed = 5, bool twinPartOwnAlbedo = false, bool twinPartSharedAlbedo = false,
         bool clothTwinsMate = false, bool clothOwnAlbedo = false, bool mateOwnAlbedo = false,
+        bool twinPartShadowOff = false,
+        Remold.Core.Model.VisibilityOverride twinPartVisibility = Remold.Core.Model.VisibilityOverride.None,
         WardrobeWorld? wardrobe = null)
     {
         string b0 = Path.Combine(_root, "s0.bundle");
@@ -1138,7 +1170,8 @@ public class ModBuilderTests : IDisposable
         string bt = Path.Combine(_root, "st.bundle");
         string bn = Path.Combine(_root, "sn.bundle");
         SyntheticBundle.BuildOneSkinnedMesh(b0, $"c_vesna01_body_lod0{meshTail}", Cloud(32, 5), WrappedTris(32), BodyBones,
-            blendShapes: bodyBlendShapes, skinWidth: bodySkinWidth, extraSkinChannel: bodySharedSkinStream);
+            blendShapes: bodyBlendShapes, skinWidth: bodySkinWidth, tabledOnlyBones: bodyTabledOnly,
+            extraSkinChannel: bodySharedSkinStream);
         SyntheticBundle.BuildOneSkinnedMesh(b1, $"c_vesna01_body_lod1{meshTail}", Cloud(24, 9), WrappedTris(24),
             bodyTierBones ?? BodyBones, tabledOnlyBones: bodyTierTabledOnly);
         SyntheticBundle.BuildOneTexture(bt, "tex_body_d", 8, 8, 200, 100, 50, 255, colorSpace: 1);
@@ -1202,7 +1235,8 @@ public class ModBuilderTests : IDisposable
             if (twinPartOwnAlbedo) twinMaps.Add(new SubjectMap("_BaseMap", "tex_alt_d", "bundleAlt"));
             else if (twinPartSharedAlbedo) twinMaps.Add(new SubjectMap("_BaseMap", "tex_body_d", "bundleT"));
             parts.Add(new SubjectPart("body2", "c_vesna01_body2_lod0", "addr_body2",
-                new[] { new SubjectMaterial("m_body2", 1, "cab-body2", twinMaps) }));
+                new[] { new SubjectMaterial("m_body2", 1, "cab-body2", twinMaps) },
+                CastsShadows: !twinPartShadowOff, Visibility: twinPartVisibility));
             addresses["addr_body2"] = "bundle2";
         }
         if (clothWearer)
@@ -1260,6 +1294,18 @@ public class ModBuilderTests : IDisposable
             parts.Add(new SubjectPart("acc", "c_vesna01_acc_lod0", "addr_acc",
                 new[] { new SubjectMaterial("m_acc", 1, "cab-acc", new List<SubjectMap>()) }));
             addresses["addr_acc"] = "bundleA";
+        }
+        if (unreadableWeightsPart)
+        {
+            // Past every layout check and short of a measurement: the channel table, the bone hashes and
+            // the skin rule all read as a sound part, and the vertex bytes its weights live in are gone.
+            string bu = Path.Combine(_root, "su.bundle");
+            SyntheticBundle.BuildOneSkinnedMesh(bu, "c_vesna01_unread_lod0", Cloud(12, 37), WrappedTris(12),
+                UnreadBones, unresolvableStream: true);
+            bytes["bundleU"] = File.ReadAllBytes(bu);
+            parts.Add(new SubjectPart("unread", "c_vesna01_unread_lod0", "addr_unread",
+                new[] { new SubjectMaterial("m_unread", 1, "cab-unread", new List<SubjectMap>()) }));
+            addresses["addr_unread"] = "bundleU";
         }
         if (ghostPart)
         {
@@ -1351,7 +1397,9 @@ public class ModBuilderTests : IDisposable
             // twinned companions carry the first's vertex cloud, so the two are one mesh under two names
             if (w.Companion2)
                 Companion("belt2", w.TwinCompanions ? 18 : 17, w.TwinCompanions ? 41 : 43,
-                    Belt2Bones, "bundleB2", "sb2.bundle");
+                    Belt2Bones, "bundleB2", "sb2.bundle", casts: !w.ShadowOffCompanion2,
+                    withheld: w.WithheldCompanion2, tier: w.Companion2Tier,
+                    tierWithheld: w.WithheldCompanion2Tier);
             if (w.SharedExtra)
             {
                 Companion("scarf1", 15, 47, Belt1Bones, "bundleS1", "ss1.bundle");
@@ -1362,14 +1410,34 @@ public class ModBuilderTests : IDisposable
                 parts.Add(new SubjectPart("belt1x", "c_Helena_belt_lod0", "addr_belt1x",
                     new[] { new SubjectMaterial("m_belt1x", 1, "cab-belt1x", new List<SubjectMap>()) }));
 
-            void Companion(string token, int verts, int seed, uint[] bones, string bundleId, string file)
+            void Companion(string token, int verts, int seed, uint[] bones, string bundleId, string file,
+                bool casts = true, bool withheld = false, bool tier = false, bool tierWithheld = false)
             {
                 string path = Path.Combine(_root, file);
                 SyntheticBundle.BuildOneSkinnedMesh(path, $"c_vesna01_{token}_lod0", Cloud(verts, seed),
                     WrappedTris(verts), bones);
                 bytes[bundleId] = File.ReadAllBytes(path);
+                var tiers = new List<RecipeTierSlot>();
+                if (tier)
+                {
+                    // a vertex count of its own, so the tier is a witnessable draw distinct from the lod0
+                    string tierPath = Path.Combine(_root, $"t_{file}");
+                    SyntheticBundle.BuildOneSkinnedMesh(tierPath, $"c_vesna01_{token}_lod1",
+                        Cloud(verts + 5, seed + 100), WrappedTris(verts + 5), bones);
+                    bytes[$"{bundleId}T"] = File.ReadAllBytes(tierPath);
+                    tiers.Add(new RecipeTierSlot($"c_vesna01_{token}_lod1", $"addr_{token}_l1",
+                        Visibility: tierWithheld
+                            ? Remold.Core.Model.VisibilityOverride.DormHidden
+                            : Remold.Core.Model.VisibilityOverride.None));
+                    addresses[$"addr_{token}_l1"] = $"{bundleId}T";
+                }
                 parts.Add(new SubjectPart(token, $"c_vesna01_{token}_lod0", $"addr_{token}",
-                    new[] { new SubjectMaterial($"m_{token}", 1, $"cab-{token}", new List<SubjectMap>()) }));
+                    new[] { new SubjectMaterial($"m_{token}", 1, $"cab-{token}", new List<SubjectMap>()) },
+                    SiblingTiers: tiers.Count > 0 ? tiers.ToArray() : null,
+                    CastsShadows: casts,
+                    Visibility: withheld
+                        ? Remold.Core.Model.VisibilityOverride.DormHidden
+                        : Remold.Core.Model.VisibilityOverride.None));
                 addresses[$"addr_{token}"] = bundleId;
             }
         }
@@ -1929,6 +1997,29 @@ public class ModBuilderTests : IDisposable
     }
 
     [Fact]
+    public void A_shadow_off_sibling_is_excluded_from_the_pool_and_named_in_the_refusal()
+    {
+        // End to end through the roster probe: body2's renderer is outside the shadow pass, so the probe
+        // must carry that flag onto PoolDerive.PartBones for the third exclusion to fire, and the donor
+        // riding its bones is told which part it landed on. Pins ModBuilder's `CastsShadows: p.CastsShadows`
+        // pass-through — without it every part reads as casting and body2 pools as normal.
+        //
+        // The control is Twins_whose_vb1_differs_build_with_vb1_keyed_sections: the SAME fixture with the
+        // flag left alone builds clean, so the flag alone decided this refusal. The uvSeed keeps the two
+        // signature-separable, so no twin refusal fires ahead of it, and no scheme is wired, so the
+        // presence rule that precedes this one admits body2.
+        var env = MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7, twinPartShadowOff: true);
+        var p = NewProject("ShadowOffPool");
+        WriteDonorGlb(bones: BodyBones.Concat(TwinBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.ThrowsAny<Exception>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_body2_lod0' · it casts no shadow, so the game stops drawing it the "
+            + "moment it leaves the camera, and only a Replace on that part itself pools it", ex.Message);
+    }
+
+    [Fact]
     public void Twins_whose_vb1_differs_build_with_vb1_keyed_sections()
     {
         // Same triangle list, different geometry AND different stream-1 bytes: the signature key falls
@@ -2336,6 +2427,81 @@ public class ModBuilderTests : IDisposable
             : null,
     };
 
+    /// <summary>A build whose timelines hide <paramref name="nodes"/>: one clip whose hide list names
+    /// them. This is the BUILD-TIME input the workbench model never carries, which is why it arrives
+    /// through the env and not on the parts.</summary>
+    private static BuildEnv WithTimelineHides(BuildEnv env, params string[] nodes) => env with
+    {
+        TimelineShoesFor = _ => new[]
+            { new Remold.Core.Bundles.TimelineShoe(Array.Empty<string>(), nodes) },
+    };
+
+    [Fact]
+    public void A_prefab_marked_part_keeps_its_own_mechanism_when_a_timeline_names_it_too()
+    {
+        // PRECEDENCE. Both inputs name body2: the prefab's own coat list, and a timeline hide list. The
+        // part's own marker answers first, so the refusal teaches the mechanism that is actually resident
+        // on the model rather than the one the build happened to read afterwards. Pins the
+        // `if (part.Visibility != None) return part.Visibility;` line — without it the answer falls
+        // through to the timeline and the refusal names the wrong data.
+        //
+        // The control is A_shadow_off_sibling-style: the same fixture with no marker at all builds (see
+        // Twins_whose_vb1_differs_build_with_vb1_keyed_sections), so the marker alone decided this.
+        var env = WithTimelineHides(
+            MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7,
+                twinPartVisibility: Remold.Core.Model.VisibilityOverride.CoatList),
+            "c_vesna01_body2_lod0");
+        var p = NewProject("VisibilityPrecedence");
+        WriteDonorGlb(bones: BodyBones.Concat(TwinBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.ThrowsAny<Exception>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_body2_lod0' · the dorm dresses it on and off separately from the "
+            + "scene, so only a Replace on that part itself pools it", ex.Message);
+        // …and NOT the timeline's sentence, which is what a lost precedence would print
+        Assert.DoesNotContain("a dorm scene can hide or reveal it mid-pose", ex.Message);
+    }
+
+    [Fact]
+    public void A_timeline_naming_only_a_parts_SIBLING_TIER_still_demotes_the_whole_part()
+    {
+        // A timeline that can flip any ONE of a part's draws makes the whole part unsafe to lean on, so
+        // every tier name is offered to the match — not just the representative's. Here the hide list
+        // names ONLY c_vesna01_mate_lod1, and the part's own slot name appears in no list. Pins the
+        // sibling-tier arm of VisibilityOf; without it the mate reads as unwithheld and pools as normal.
+        //
+        // The control is A_timeline_naming_no_node_of_the_part_leaves_it_pooled below: the identical
+        // fixture with the list naming something else builds clean.
+        var env = WithTimelineHides(MakeSkinnedEnv(poolMate: true, mateTier: true),
+            "c_vesna01_mate_lod1");
+        var p = NewProject("TimelineTierDemotion");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.ThrowsAny<Exception>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_mate_lod0' · a dorm scene can hide or reveal it mid-pose, so only a "
+            + "Replace on that part itself pools it", ex.Message);
+    }
+
+    [Fact]
+    public void A_timeline_naming_no_node_of_the_part_leaves_it_pooled()
+    {
+        // The control for the test above: the SAME fixture and a timeline that really is read, naming a
+        // node this outfit does not carry. So it is the tier's name matching, and not the mere presence
+        // of a timeline resolver, that decided the demotion.
+        var env = WithTimelineHides(MakeSkinnedEnv(poolMate: true, mateTier: true),
+            "c_vesna01_nosuchnode_lod1");
+        var p = NewProject("TimelineNoMatch");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        Assert.False(string.IsNullOrEmpty(r.OutDir));
+    }
+
     [Fact]
     public void A_replace_on_a_wardrobe_twin_acts_while_its_option_is_sighted()
     {
@@ -2383,6 +2549,71 @@ public class ModBuilderTests : IDisposable
     }
 
     [Fact]
+    public void A_withheld_companion_takes_its_CLEAN_tiers_off_the_stand_with_it()
+    {
+        // The PART-level gate, and the only shape that makes it load-bearing. For a representative tier
+        // the per-tier gate below already answers with the part's own marker, so a marked part with no
+        // tiers is refused either way. Here belt2 is marked AND carries a lod1 tier that no list names:
+        // that clean tier would vouch for option 2 on its own, so the part-level gate is what keeps the
+        // whole withheld companion off the stand — and the option unsightable, which fails the route.
+        // Pins `if (p.Visibility != None) continue;`; without it the clean tier sights option 2 and the
+        // build succeeds.
+        //
+        // The control is The_same_companion_tier_witnesses_when_no_list_names_it: the same tiered fixture
+        // with belt2 unmarked builds and mints sections for both of its draws.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(
+            wardrobe: new() { WithheldCompanion2 = true, Companion2Tier = true }));
+        var p = NewProject("WardrobeWithheldWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
+    }
+
+    [Fact]
+    public void A_withheld_TIER_of_a_companion_mints_no_witness_section_while_its_lod0_still_does()
+    {
+        // PER TIER inside the witness route: belt2's part is clean and its lod0 vouches for option 2 as
+        // usual, while the lod1 tier a dorm list names is struck from that option's witness list on its
+        // own. Pins the per-tier `if (TierVisibility(p, name) != None) continue;` and the sibling arm of
+        // the TierVisibility helper it calls — the part-level gate above cannot stand in for either,
+        // since the part carries no marker at all here.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(
+            wardrobe: new() { Companion2Tier = true, WithheldCompanion2Tier = true }));
+        var p = NewProject("WardrobeWithheldTier");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string lod0 = SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0");
+        string tier = SkinnedIb("t_sb2.bundle", "c_vesna01_belt2_lod1");
+        Assert.NotEqual(lod0, tier);                            // the tier really is its own draw
+        Assert.Contains($"[TextureOverride_TwinWit_{lod0}]", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{tier}]", ini);
+    }
+
+    [Fact]
+    public void The_same_companion_tier_witnesses_when_no_list_names_it()
+    {
+        // The control for the test above: the identical fixture with the tier unmarked, so the marker
+        // alone decided the exclusion — and it shows the tier minting a section of its own.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Companion2Tier = true }));
+        var p = NewProject("WardrobeCleanTier");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("t_sb2.bundle", "c_vesna01_belt2_lod1")}]", ini);
+    }
+
+    [Fact]
     public void A_wardrobe_twin_with_no_companions_refuses_as_before()
     {
         // Neither option marries a mesh of its own, so nothing on screen says which one drew. The
@@ -2412,6 +2643,29 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
 
         Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+    }
+
+    [Fact]
+    public void A_wardrobe_twin_whose_sibling_option_is_sighted_only_by_a_shadow_off_tier_refuses()
+    {
+        // The sibling option HAS a companion, readable and signature-unique — and its renderer is outside
+        // the shadow pass, so the game stops drawing it the moment it leaves the camera and sighting
+        // nothing at it proves nothing about which option is worn. The tier is struck from that option's
+        // witness list, which leaves the option unsightable and fails the whole route, exactly as dropping
+        // the companion outright does. Pins ModBuilder's per-tier `if (!TierCastsShadows(p, name)) continue;`
+        // in WardrobeWitnesses — without it belt2 is trusted and the build succeeds.
+        //
+        // The control is A_replace_on_a_wardrobe_twin_acts_while_its_option_is_sighted: the identical
+        // fixture with belt2 casting builds, and mints belt2's witness section on that option's ordinal.
+        var env = WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { ShadowOffCompanion2 = true }));
+        var p = NewProject("WardrobeShadowOffWitness");
+        WriteDonorGlb(bones: DressBones);
+        AddReplaceTarget(p, "c_vesna01_dress1_lod0");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' share one draw signature", ex.Message);
+        Assert.Contains("can't act on one without hitting the other", ex.Message);
     }
 
     [Fact]
@@ -2707,6 +2961,30 @@ public class ModBuilderTests : IDisposable
     }
 
     [Fact]
+    public void A_two_influence_target_builds_through_palette_recovery()
+    {
+        // The stored pair is the mesh's whole skin — its draws are posed by exactly those two influences —
+        // so it widens where it is read and the Replace derives and builds as a four-wide target does.
+        var env = MakeSkinnedEnv(bodySkinWidth: 2);
+        var p = NewProject("SwapPair");
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+        var lines = new List<string>();
+
+        var r = ModBuilder.Build(p, env, _out, lines.Add, zip: false);
+
+        // pooled like any measured part, not held back and not narrow-restricted
+        Assert.Contains("pool (vesna_body): c_vesna01_body_lod0 (anchor c_vesna01_body_lod0)", lines);
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        AssertEveryReferencedFileShips(ini, r.OutDir);
+        Assert.Contains("CustomShaderRecover_vesna_body_vesna_body", ini);
+        Assert.Contains("CustomShaderConvert_vesna_body", ini);
+        Assert.DoesNotContain("Rigid", ini);
+        Assert.Empty(Directory.GetFiles(r.OutDir, "rigid_*"));
+    }
+
+    [Fact]
     public void A_one_influence_part_stays_out_of_another_parts_pool()
     {
         // It rides the shared bone at weight 1 on every vertex, so pooling it would hand it that bone's
@@ -2754,16 +3032,16 @@ public class ModBuilderTests : IDisposable
 
     [Theory]
     [InlineData(21, 4, false, "it carries 21 blend shapes (its posed vertices aren't pure LBS)")]
-    [InlineData(0, 2, false, "its skin stream isn't float4 weights + uint4 indices (a reduced layout)")]
     [InlineData(0, 1, true, "it carries a skin stream recovery can't read")]
+    [InlineData(0, 2, true, "it carries a skin stream recovery can't read")]
     [InlineData(0, 4, true, "it carries a skin stream recovery can't read")]
     public void A_replace_whose_target_cant_feed_recovery_refuses_over_that_mesh(
         int blendShapes, int skinWidth, bool sharedSkinStream, string why)
     {
         // The target's own mesh failing the rule says nothing about how the donor was weighted, so the
-        // refusal names the mesh and the rule rather than sending the author back to re-weight. A rigid
-        // layout takes the direct swap, so the reduced line names only the count that can reach here — and
-        // a count recovery does accept, spelled in a shape it can't read, says so instead.
+        // refusal names the mesh and the rule rather than sending the author back to re-weight. Every
+        // influence count 1–4 is one recovery accepts, so what reaches this is a count it does accept
+        // spelled in a shape it can't read — and the line says so.
         var env = MakeSkinnedEnv(bodyBlendShapes: blendShapes, bodySkinWidth: skinWidth,
             bodySharedSkinStream: sharedSkinStream);
         var p = NewProject("SwapBlocked");
@@ -2829,6 +3107,59 @@ public class ModBuilderTests : IDisposable
         Assert.Equal("the donor rides 1 bone(s) owned by no part of this outfit (first: 0x00000909). "
             + "It was weighted against a different armature; re-export this outfit's reference and re-weight",
             ex.Message);
+    }
+
+    [Fact]
+    public void A_donor_bone_the_outfit_only_tables_refuses_the_build()
+    {
+        // The whole route, not the rule in isolation: the probe measures which bones the body's lod0
+        // actually poses, and a donor riding one it merely LISTS gets the refusal rather than a swap that
+        // would tie those vertices to a bone the outfit never moves.
+        var env = MakeSkinnedEnv(bodyTabledOnly: new uint[] { 0x00000107 });
+        var p = NewProject("SwapTabled");
+        WriteDonorGlb(bones: BodyBones.Append(0x00000107u).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.Throws<InvalidDataException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Equal("the donor rides 1 bone(s) that no pooled part of this outfit poses "
+            + "(first: 0x00000107, carried at zero weight by 'c_vesna01_body_lod0'). "
+            + "Re-weight the donor onto the bones this outfit moves", ex.Message);
+    }
+
+    [Fact]
+    public void A_part_whose_weights_cant_be_read_is_held_back_with_the_bones_it_owns()
+    {
+        // The weight read fails past the skin rule, and the bone table was already in hand. Losing it
+        // would make the part a suspect in every orphan refusal on this subject and put the read's own
+        // .NET text where the diagnosis belongs.
+        var env = MakeSkinnedEnv(unreadableWeightsPart: true);
+        var p = NewProject("SwapUnread");
+        WriteDonorGlb(bones: BodyBones.Append(0x00000909u).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.Throws<InvalidDataException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Equal("the donor rides 1 bone(s) owned by no part of this outfit (first: 0x00000909). "
+            + "It was weighted against a different armature; re-export this outfit's reference and re-weight",
+            ex.Message);
+    }
+
+    [Fact]
+    public void A_part_whose_weights_cant_be_read_never_reaches_the_pool()
+    {
+        // Offered without a measured posed set, the part would answer the posed gate from its TABLE —
+        // exactly the answer that gate exists to refuse. It stays out, and the build log carries the read.
+        var env = MakeSkinnedEnv(unreadableWeightsPart: true);
+        var p = NewProject("SwapUnreadPool");
+        WriteDonorGlb(bones: BodyBones.Concat(UnreadBones).ToArray());
+        AddReplaceTarget(p);
+
+        var ex = Assert.Throws<InvalidDataException>(() => ModBuilder.Build(p, env, _out, zip: false));
+
+        Assert.Contains("Left out of the pool: 'c_vesna01_unread_lod0' · its skin weights can't be read",
+            ex.Message);
+        Assert.DoesNotContain("poses", ex.Message);
     }
 
     [Fact]

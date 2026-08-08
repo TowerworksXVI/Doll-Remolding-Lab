@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Remold.Core.Model;
 
 namespace Remold.Core.Export;
 
@@ -7,9 +8,18 @@ namespace Remold.Core.Export;
 /// a recipe addressable (<see cref="MeshAddress"/>) for recipe-backed parts, or a resolved
 /// <see cref="MeshBundle"/> + <see cref="MeshPathId"/> for smr-body parts, whose renderers reference
 /// meshes directly. Fans a part's sibling detail levels out without re-deriving a name from
-/// prefix+token.</summary>
+/// prefix+token.
+///
+/// <para><see cref="CastsShadows"/> is the tier renderer's shadow-pass participation. A tier that does
+/// not cast is drawn only while it is in frame, so it can witness nothing about presence; false requires
+/// a measured Off.</para>
+///
+/// <para><see cref="Visibility"/> is the game-side override that can leave THIS tier undrawn. It is keyed
+/// per tier because the dorm lists name individual tier nodes, so one tier of a part can be withheld while
+/// its siblings draw.</para></summary>
 public readonly record struct RecipeTierSlot(string SlotName, string MeshAddress,
-    string? MeshBundle = null, long MeshPathId = 0);
+    string? MeshBundle = null, long MeshPathId = 0, bool CastsShadows = true,
+    VisibilityOverride Visibility = VisibilityOverride.None);
 
 /// <summary>
 /// The prefab-exact identity of one workbench part, carried down into

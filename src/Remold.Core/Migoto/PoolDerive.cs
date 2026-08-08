@@ -16,7 +16,10 @@ namespace Remold.Core.Migoto;
 /// reproducible. The anchor (hosts convert+skin+draw) defaults to the pool part owning the most
 /// donor-used bones, ties to the replaced part when it is one of them and to the LAST in roster order
 /// otherwise; an explicit override wins. A donor bone owned by NO roster part fails loudly — silently
-/// dropping influences would deform the donor.</para>
+/// dropping influences would deform the donor — and so does one every owner merely TABLES, since a bone
+/// no pooled part poses has no sound palette row for the donor's vertices to ride. A bone a coverage GROUP
+/// certifies answers both refusals: it rides an appended palette slot of its own outside the union, written
+/// at the drawing member's dispatch, so it needs no pooled tabler and no pooled poser.</para>
 ///
 /// <para>The donor's weights decide membership, but the pool's own LOD tiers decide whether that pool is
 /// POSEABLE: <see cref="CoverTierBones"/> extends it with the parts whose top LOD carries the bones those
@@ -34,20 +37,80 @@ public static class PoolDerive
     ///
     /// <para><paramref name="Presence"/> is when the part is on screen; <see cref="PoolCandidates"/>
     /// admits it for a Replace only when it covers the replaced part's presence. The default is
-    /// unconditional.</para></summary>
+    /// unconditional.</para>
+    ///
+    /// <para><paramref name="PosedBones"/> is the subset of <paramref name="BoneHashes"/> the part
+    /// actually POSES — the hashes carrying nonzero summed vertex weight, the quantity
+    /// <see cref="StreamDump.WeightedBoneHashes"/> reads off a mesh. Union membership and every
+    /// table-based rule keep reading <paramref name="BoneHashes"/>; only <see cref="Derive"/>'s posed
+    /// gate reads this. Null says the caller measured no weights and leaves the gate reading the table,
+    /// which is the pre-measurement behaviour and NOT a safe place for a caller that can measure them: a
+    /// bone tabled at zero weight is exactly what the gate exists to catch.</para>
+    ///
+    /// <para><paramref name="CastsShadows"/> is the part's shadow-pass participation. A part that casts
+    /// keeps issuing a depth-only draw while the camera can't see it, which is what lets a recovery source
+    /// survive being culled; one that does not cast issues nothing off screen, so
+    /// <see cref="PoolCandidates"/> keeps it out of every pool but its own Replace's. False requires a
+    /// measured Off — the default admits every part whose renderer wasn't read.</para>
+    ///
+    /// <para><paramref name="Visibility"/> is the game-side mechanism, if any, that can leave the part
+    /// undrawn even in the scene its name and wardrobe variant put it in. Anything but
+    /// <see cref="Model.VisibilityOverride.None"/> keeps it out of every pool but its own Replace's, for the
+    /// same reason presence does: a source the game may have withheld poses its owned bones from a buffer
+    /// nothing refreshed. The default admits every part no such list named.</para></summary>
     public sealed record PartBones(string Mesh, IReadOnlySet<uint> BoneHashes, bool Narrow = false,
-        PartPresence Presence = default);
+        PartPresence Presence = default, IReadOnlySet<uint>? PosedBones = null, bool CastsShadows = true,
+        Model.VisibilityOverride Visibility = Model.VisibilityOverride.None)
+    {
+        /// <summary>The bones this part poses — its whole table when the caller measured none.</summary>
+        public IReadOnlySet<uint> Posed => PosedBones ?? BoneHashes;
+    }
 
     /// <summary>A roster part the caller could NOT offer as a pool candidate, and why in the caller's own
     /// words. <paramref name="BoneHashes"/> is null when the part's bone table is unknown too, which is what
-    /// keeps it from being ruled out as the owner of a bone the pool ends up missing.</summary>
-    public sealed record MissingPart(string Mesh, string Why, IReadOnlySet<uint>? BoneHashes);
+    /// keeps it from being ruled out as the owner of a bone the pool ends up missing.
+    ///
+    /// <para><paramref name="Presence"/> is where the part would have sat in the wardrobe, which
+    /// <see cref="VariantGroups"/> reads for its two kills and nothing finer. Null says the caller didn't
+    /// classify it at all: every scheme arm then reads it as possibly its own missing poser, and only the
+    /// target's own arm can certify. A <see cref="PartPresence.UnknownVariant"/> standing says the wardrobe
+    /// doesn't list it, and nothing forms at all. Any other classified standing kills no coverage on its
+    /// own — an unmeasured piece of a worn cell co-draws beside that cell's measured posers and displaces
+    /// nothing.</para></summary>
+    public sealed record MissingPart(string Mesh, string Why, IReadOnlySet<uint>? BoneHashes,
+        PartPresence? Presence = null);
 
     /// <summary>The derived pool: part mesh names in roster order, the anchor, and how many donor-used
     /// bones each pool part owns. A part pooled only to carry another part's tier bones owns none, and
     /// counts 0.</summary>
     public sealed record Result(IReadOnlyList<string> Pool, string Anchor,
-        IReadOnlyDictionary<string, int> UsedBoneCounts);
+        IReadOnlyDictionary<string, int> UsedBoneCounts)
+    {
+        /// <summary>The donor-used bones no pool part poses that the coverage group covers instead, each
+        /// mapped to <see cref="CoverageGroupId"/> (see <see cref="VariantGroups"/>). These passed the posed
+        /// gate on the group's certificate rather than on a pool part's own weights, so a caller that treats
+        /// every pool bone alike would be treating them as owned. Empty on a derive that formed no
+        /// group.</summary>
+        public IReadOnlyDictionary<uint, long> GroupCovered { get; init; } = new Dictionary<uint, long>();
+    }
+
+    /// <summary>The outfit's one coverage group: the parts whose draws, between them, keep every
+    /// <see cref="GroupBones"/> bone posed in every (wardrobe variant, scene context) state the target
+    /// displays in.
+    ///
+    /// <para>No single member is a sound recovery source on its own — each is unworn or off-scene some of
+    /// the time — but a bone certified here has, in EVERY state the target draws in, at least one member on
+    /// screen posing it. Whichever member that is writes the bone's rows at its own draw, so overlapping
+    /// members are just more writers of the same correct transform. <paramref name="GroupBones"/> is
+    /// ascending by hash, already stripped of what the pool candidates pose themselves;
+    /// <paramref name="Members"/> is every part a certifying cell holds, in roster order, each listed
+    /// once.</para></summary>
+    public sealed record VariantGroup(long SlotId, IReadOnlyList<PartBones> Members,
+        IReadOnlyList<uint> GroupBones);
+
+    /// <summary>The coverage group's identity in the space wardrobe slot ids share. The group certifies over
+    /// variant×context cells rather than for any one wardrobe slot, so no slot's own id could name it.</summary>
+    public const long CoverageGroupId = long.MaxValue;
 
     /// <summary>One roster part's LOD tiers as tier coverage reads them: the lod0 draw's capture hash, the
     /// bones that draw actually poses, then every renderable non-lod0 tier in the order the tier machinery
@@ -67,16 +130,25 @@ public static class PoolDerive
     /// read the candidate set, so a part filtered here is neither pooled for another part's donor nor
     /// ranked to carry another part's tier bones. Everything admitted passes through in roster order.
     ///
-    /// <para>Two rules. A narrow part (one stored influence) pools only for its own Replace. A part
+    /// <para>Four per-part rules, under one subject-level rule. A subject whose parts draw independently
+    /// (<paramref name="partsPoolAlone"/> — weapon-family subjects, whose parts are separate game objects
+    /// with no co-draw guarantee) admits only the target, whatever the per-part rules would say. Then: a
+    /// narrow part (one stored influence) pools only for its own Replace. A part
     /// pools only when its <see cref="PartPresence"/> covers the replaced part's: a recovery source
     /// that can be off screen while the replacement draws would pose its owned bones from a buffer
-    /// nothing refreshed. The replaced part is always admitted; its own capture fires exactly when the
-    /// replacement is visible.</para>
+    /// nothing refreshed. And a part outside the shadow pass pools only for its own Replace: a culled
+    /// part normally keeps issuing a depth-only draw, which is what refreshes it off screen, while one
+    /// with shadow casting Off issues nothing at all there. Last, a part the game's own scene logic can
+    /// withhold (<see cref="Model.VisibilityOverride"/>) pools only for its own Replace, since its name and
+    /// wardrobe variant no longer settle whether it draws. The replaced part is always admitted under
+    /// every rule; its own capture fires exactly when the replacement is visible.</para>
+    ///
+    /// <para>A part failing more than one rule reports the first that caught it, in the order above.</para>
     ///
     /// <para>The exclusions come back as <see cref="MissingPart"/> so a donor riding a bone only an
     /// excluded part owns is told which part it landed on, rather than blamed on a foreign armature.</para></summary>
     public static (IReadOnlyList<PartBones> Candidates, IReadOnlyList<MissingPart> Excluded) PoolCandidates(
-        IReadOnlyList<PartBones> rosterParts, string replacedPart)
+        IReadOnlyList<PartBones> rosterParts, string replacedPart, bool partsPoolAlone = false)
     {
         var target = rosterParts.FirstOrDefault(p =>
             string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase));
@@ -88,17 +160,199 @@ public static class PoolDerive
         foreach (var p in rosterParts)
         {
             bool isTarget = string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase);
-            if (!isTarget && p.Narrow)
+            if (!isTarget && partsPoolAlone)
+                excluded.Add(new MissingPart(p.Mesh,
+                    "its subject's parts draw independently, so only a Replace on that part itself pools it",
+                    p.BoneHashes));
+            else if (!isTarget && p.Narrow)
                 excluded.Add(new MissingPart(p.Mesh,
                     "it stores one influence per vertex, so only a Replace on that part itself pools it",
                     p.BoneHashes));
             else if (!isTarget && !p.Presence.Covers(targetPresence))
                 excluded.Add(new MissingPart(p.Mesh, NotCoDrawn(p.Presence, targetPresence), p.BoneHashes));
+            else if (!isTarget && !p.CastsShadows)
+                excluded.Add(new MissingPart(p.Mesh,
+                    "it casts no shadow, so the game stops drawing it the moment it leaves the camera, "
+                    + "and only a Replace on that part itself pools it",
+                    p.BoneHashes));
+            else if (!isTarget && p.Visibility != Model.VisibilityOverride.None)
+                excluded.Add(new MissingPart(p.Mesh, WithheldByGame(p.Visibility), p.BoneHashes));
             else
                 candidates.Add(p);
         }
         return (candidates, excluded);
     }
+
+    /// <summary>The coverage the outfit's own alternation answers for, for a Replace on
+    /// <paramref name="replacedPart"/>: at most ONE group, certifying every bone that stays posed in every
+    /// (wardrobe variant, scene context) cell the target displays in. A variant or context part is no pool
+    /// candidate — it is unworn or off-scene some of the time — but a bone with an on-screen poser in EVERY
+    /// displayed cell is posed whatever the player wears and wherever the scene sits, and that is a recovery
+    /// source the pool rules alone can't see.
+    ///
+    /// <para>This is capture-only metadata. It decides no pool membership, no anchor and no tier carrier;
+    /// <see cref="Derive"/> reads it at the posed gate and nowhere else.</para>
+    ///
+    /// <para>The displayed cells are a variant axis × a context axis. The context axis is both scenes for an
+    /// always-on target and the target's own scene for a context-tagged one. The variant axis comes one ARM
+    /// at a time: each wardrobe slot contributes its variant list, and the target's own wardrobe standing
+    /// contributes a one-variant arm of its own — the generalization of the old scene-context pair, and the
+    /// only arm a schemeless roster has. A cell (v, c) is answered by any part worn and on screen whenever
+    /// that cell is up: wardrobe variant v or none, scene context c or always. Every part answering must
+    /// also be one a pool could lean on — not narrow, in the shadow pass, named by no visibility list, with
+    /// a MEASURED posed set — and never the target itself. An arm certifies a bone only when every one of
+    /// its cells holds such a poser of it; one cell short and that arm certifies nothing, because the
+    /// unworn and off-scene states are exactly what the coverage answers for. The group's bones are the
+    /// union over arms, its members every part a certifying arm's cells hold.</para>
+    ///
+    /// <para><paramref name="heldBack"/> narrows this the way it always has. A part the caller classified
+    /// kills nothing on its own: pieces of one worn cell are additive, so an unmeasured piece co-draws
+    /// beside a measured poser and displaces nothing — while a cell whose every poser was held back simply
+    /// has none, and its arm certifies nothing on the cell rule alone. A held-back part the caller did NOT
+    /// classify silences every scheme arm, since nothing says which cell it was the missing poser of; the
+    /// target's own arm still stands, because its cells vary only the scene, and contexts are additive —
+    /// an unmeasured extra part displaces neither scene's dress. An unreadable or empty
+    /// <paramref name="schemeSlots"/> leaves scheme arms unformed the same silent way: the wardrobe is what
+    /// states which parts alternate.</para>
+    ///
+    /// <para><paramref name="poolCandidates"/> is this Replace's <see cref="PoolCandidates"/> output, and
+    /// what those parts pose is subtracted: a bone the pool already covers needs no group behind it. The
+    /// group's bones come back ascending by hash, which is the order every later stage reads them in, under
+    /// <see cref="CoverageGroupId"/>.</para></summary>
+    public static IReadOnlyList<VariantGroup> VariantGroups(IReadOnlyList<PartBones> rosterParts,
+        IReadOnlyList<Tables.PartScheme.Slot>? schemeSlots, IReadOnlyList<MissingPart> heldBack,
+        IReadOnlyList<PartBones> poolCandidates, string replacedPart, bool partsPoolAlone = false)
+    {
+        // A subject whose parts draw independently certifies nothing across them: even the target's own
+        // arm leans on sibling posers, and no sibling here is guaranteed on screen with the target.
+        if (partsPoolAlone) return Array.Empty<VariantGroup>();
+
+        // A wardrobe-shaped part the scheme doesn't list is an alternative of SOME slot with nothing
+        // stating which — several wardrobe ids can share one part token, so a subject can wear an option
+        // the scheme it matched never names. A group certifying a bone while such a part is on the roster
+        // would certify one that nothing poses whenever that unlisted option is the worn one, so the whole
+        // roster forms nothing, the same total kill an unclassified held-back part is.
+        // This runs before the scheme is read at all, because a roster with NO scheme is the same hole seen
+        // from the other side: PartPresence.Classify hands a modular-shaped token UnknownVariant when
+        // nothing lists it, and the target's own arm below forms without a scheme.
+        if (rosterParts.Any(p => p.Presence.VariantId == PartPresence.UnknownVariant)
+            || heldBack.Any(m => m.Presence is { VariantId: PartPresence.UnknownVariant }))
+            return Array.Empty<VariantGroup>();
+
+        // the same read PoolCandidates takes: an unlisted target is unconditional, so nothing vouches for it
+        // that isn't unconditional itself
+        var target = rosterParts.FirstOrDefault(p =>
+            string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase));
+        var targetPresence = target?.Presence ?? PartPresence.Always;
+
+        // Every rule a cell poser must pass that says nothing about WHEN the part is on screen — the cell
+        // itself adds that axis, which is the whole point of a group. The posed set must be MEASURED: a
+        // part falling back to its bone table would certify coverage of bones it carries at zero weight,
+        // which is what the posed gate exists to refuse.
+        bool Sound(PartBones p) =>
+            !string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase)
+            && !p.Narrow && p.CastsShadows && p.Visibility == Model.VisibilityOverride.None
+            && p.PosedBones is not null;
+
+        var pooled = new HashSet<uint>();
+        foreach (var c in poolCandidates) pooled.UnionWith(c.Posed);
+        pooled.Add(0);   // 0 = unrecoverable hash (MeshApply.Payload contract) — never a covered bone
+
+        // The context axis the target displays across. An always-on target draws in both scenes, so every
+        // arm below must answer both; a context-tagged one draws in its own scene alone.
+        var needCtx = targetPresence.Context == PresenceContext.Always
+            ? new[] { PresenceContext.Fight, PresenceContext.Dorm }
+            : new[] { targetPresence.Context };
+
+        // A cell (v, c)'s posers, as roster indices: worn whenever variant v is (their own variant is v or
+        // none) and on screen whenever scene c shows (their own context is c or always). The roster-wide
+        // UnknownVariant kill already returned, so no poser here carries that sentinel.
+        List<int> Cell(long v, PresenceContext c) => Enumerable.Range(0, rosterParts.Count)
+            .Where(i => Sound(rosterParts[i])
+                && (rosterParts[i].Presence.VariantId == PartPresence.NoVariant
+                    || rosterParts[i].Presence.VariantId == v)
+                && (rosterParts[i].Presence.Context == PresenceContext.Always
+                    || rosterParts[i].Presence.Context == c)).ToList();
+
+        // The variant arms. Each wardrobe slot is one arm — except a slot listing the target's own variant,
+        // whose displayed cells narrow to that variant alone, which is exactly the target's own arm below.
+        // An unclassified held-back part silences every scheme arm: nothing says which cell it was the
+        // missing poser of. (A part the caller DID classify kills nothing here — pieces of one worn cell
+        // are additive, and a cell whose every poser was held back simply comes up empty below.)
+        var arms = new List<IReadOnlyList<long>>();
+        bool schemeArmsSilenced = heldBack.Any(m => m.Presence is null);
+        foreach (var slot in (schemeSlots ?? Array.Empty<Tables.PartScheme.Slot>()).OrderBy(s => s.Id))
+        {
+            if (schemeArmsSilenced || slot.Variants.Count == 0) continue;
+            if (targetPresence.VariantId != PartPresence.NoVariant
+                && slot.Variants.Any(v => v.Id == targetPresence.VariantId)) continue;
+            arms.Add(slot.Variants.Select(v => v.Id).ToList());
+        }
+        // The target's own arm: one variant — the target's, or none — across the displayed contexts. This
+        // is the old scene-context pair generalized: it forms over a schemeless roster (where the
+        // non-modular outfits sit), needs no wardrobe beyond the target's own standing, and a held-back
+        // part never silences it — its cells vary only the scene, and contexts are additive.
+        arms.Add(new[] { targetPresence.VariantId });
+
+        var certified = new SortedSet<uint>();
+        var memberIdx = new SortedSet<int>();
+        foreach (var arm in arms)
+        {
+            HashSet<uint>? shared = null;
+            var armMembers = new List<int>();
+            foreach (var v in arm)
+            {
+                foreach (var c in needCtx)
+                {
+                    var posers = Cell(v, c);
+                    if (posers.Count == 0) { shared = null; goto armDone; }
+                    var posed = new HashSet<uint>();
+                    foreach (int i in posers) posed.UnionWith(rosterParts[i].Posed);
+                    armMembers.AddRange(posers);
+                    if (shared is null) shared = posed;
+                    else shared.IntersectWith(posed);
+                }
+            }
+            armDone:
+            if (shared is null) continue;
+            shared.ExceptWith(pooled);
+            // What the pool TABLES is not consulted. A group bone is compiled onto an appended palette slot
+            // past the union rather than onto a union row, and the drawing member writes it, so a bone only
+            // the members carry is exactly the shape this certifies — the members are its tablers.
+            if (shared.Count == 0) continue;
+            certified.UnionWith(shared);
+            foreach (int i in armMembers) memberIdx.Add(i);
+        }
+
+        if (certified.Count == 0) return Array.Empty<VariantGroup>();
+        return new[]
+        {
+            new VariantGroup(CoverageGroupId,
+                memberIdx.Select(i => rosterParts[i]).ToList(), certified.ToList()),
+        };
+    }
+
+    /// <summary>Why a part the game's own scene logic can withhold stays out, named by the mechanism that
+    /// withholds it so a refusal teaches which data said so.</summary>
+    static string WithheldByGame(Model.VisibilityOverride why) => why switch
+    {
+        Model.VisibilityOverride.CoatList =>
+            "the dorm dresses it on and off separately from the scene, so only a Replace on that part "
+            + "itself pools it",
+        Model.VisibilityOverride.DormHidden =>
+            "the game hides it in the dorm whatever its name says, so only a Replace on that part itself "
+            + "pools it",
+        Model.VisibilityOverride.LobbyHidden =>
+            "the game hides it on the crew deck whatever its name says, so only a Replace on that part "
+            + "itself pools it",
+        Model.VisibilityOverride.TimelineNamed =>
+            "a dorm scene can hide or reveal it mid-pose, so only a Replace on that part itself pools it",
+        // Every mechanism gets a sentence that names it, so a refusal teaches which data said so. A new
+        // member falling through to a catch-all would inherit the timeline wording and misname its cause,
+        // which is worse than failing here — this is called only after a mechanism already fired.
+        _ => throw new ArgumentOutOfRangeException(nameof(why), why,
+            "no refusal sentence for this visibility mechanism"),
+    };
 
     /// <summary>Why a part that isn't reliably co-drawn stays out, in the change list's vocabulary —
     /// named by the axis that actually failed.</summary>
@@ -116,15 +370,28 @@ public static class PoolDerive
     }
 
     /// <summary>Derive the pool for <paramref name="donor"/> over <paramref name="rosterParts"/>.
-    /// Throws <see cref="InvalidDataException"/> on an unweighted donor, a used bone no part owns, an
-    /// override naming a part outside the pool, or a donor using no bones at all.
+    /// Throws <see cref="InvalidDataException"/> on an unweighted donor, a used bone no part owns and no
+    /// group covers, a used bone every owner merely TABLES that no group covers, a donor whose every used
+    /// bone a group covers (nothing joins the pool, so nothing can host the draw), an override naming a part
+    /// outside the pool, or a donor using no bones at all.
     ///
     /// <para><paramref name="missingParts"/> are roster parts the caller had to hold back, which is what
     /// decides how the orphan-bone refusal reads: a foreign armature is the honest diagnosis only when the
-    /// roster came through whole, so any held-back part that could own an orphan is named instead.</para></summary>
+    /// roster came through whole, so any held-back part that could own an orphan is named instead. The
+    /// posed refusal reads the same list for the same reason — a bone the pool only tables may be posed by
+    /// a part that was left out, and <see cref="MissingPart"/> carries a table rather than a posed set, so
+    /// what it can say is that the part MIGHT be the one moving it.</para>
+    ///
+    /// <para><paramref name="groups"/> is the outfit's coverage group — the bones with an on-screen poser
+    /// in every variant×context state the target displays in (<see cref="VariantGroups"/>). A used bone the
+    /// pool doesn't pose passes the posed gate when the group covers it, and one no pool part even TABLES
+    /// passes the orphan check the same way — the bone is compiled onto an appended slot outside the union,
+    /// so the pool owes it neither a row nor a poser. Both come back in
+    /// <see cref="Result.GroupCovered"/>; they change nothing else, since a group's members are not pool
+    /// parts. Null leaves both gates reading the pool alone.</para></summary>
     public static Result Derive(MeshApply.Payload donor, IReadOnlyList<PartBones> rosterParts,
         string? anchorOverride = null, IReadOnlyList<MissingPart>? missingParts = null,
-        string? replacedPart = null)
+        string? replacedPart = null, IReadOnlyList<VariantGroup>? groups = null)
     {
         if (donor.JointIndices is null || donor.JointWeights is null || donor.SkinJointHashes is null)
             throw new InvalidDataException(
@@ -140,18 +407,36 @@ public static class PoolDerive
             throw new InvalidDataException("the donor's skin uses no recognizable bones (all hashes unrecoverable)");
 
         var pool = new List<string>();
+        var pooled = new List<PartBones>();
         var counts = new Dictionary<string, int>();
         var owned = new HashSet<uint>();
+        var posed = new HashSet<uint>();
         foreach (var part in rosterParts)
         {
             int n = part.BoneHashes.Count(used.Contains);
             if (n == 0) continue;
             pool.Add(part.Mesh);
+            pooled.Add(part);
             counts[part.Mesh] = n;
             owned.UnionWith(part.BoneHashes);
+            posed.UnionWith(part.Posed);
         }
 
-        var orphans = used.Where(h => !owned.Contains(h)).ToList();
+        // The bones a coverage group certifies, each mapped to the group that certified it. Settled BEFORE
+        // the orphan sweep because both gates below read exactly this set: a bone exempted from one and
+        // refused by the other would be refused in words that name no tabler at all.
+        var groupCovered = new Dictionary<uint, long>();
+        foreach (var g in groups ?? Array.Empty<VariantGroup>())
+            foreach (uint h in g.GroupBones) groupCovered.TryAdd(h, g.SlotId);
+
+        // A used bone no pooled part TABLES has no union row, and the union is what the pool's palette is
+        // built over — a weight compiled onto a row nothing lays out would land on a foreign bone. Refuse.
+        // …unless a group covers it. A group bone is compiled onto an APPENDED slot past the union rather
+        // than onto a union row (SwapCompile's extras), and the row is written by whichever member is on
+        // screen, so the pool tabling it settles nothing: the members are the tablers, and a group member
+        // tables every bone it poses. Exempted here, the bone flows on to the posed gate, which admits it on
+        // the same certificate.
+        var orphans = used.Where(h => !owned.Contains(h) && !groupCovered.ContainsKey(h)).ToList();
         if (orphans.Count > 0)
         {
             // a held-back part with an unknown bone table can't be ruled out, so it is always named
@@ -166,6 +451,55 @@ public static class PoolDerive
                   string.Join("; ", blame.Select(m => $"'{m.Mesh}' · {m.Why}")) +
                   ". Re-weight the donor onto the pooled parts, or drop this Replace");
         }
+
+        // Owning a bone is TABLING it; posing it is carrying weight on it, and a part may table the whole
+        // skeleton while posing a fraction of it. A donor bone no pooled part poses has no sound recovery
+        // anywhere in the pool: the union hands the slot to whichever part the weight argmax lands on with
+        // nothing behind it, that part's operator finds the bone ill-conditioned, and the emitter ties its
+        // rows rigidly to a neighbour. The donor's vertices there then ride a bone that never moves as
+        // they were weighted to expect — wrong skinning behind a build-log line. Refuse instead.
+        // …unless the coverage group covers it. Every variant×context state the target displays in holds
+        // a poser of the bone, so whatever the player wears and wherever the scene sits, something on
+        // screen is posing it — a recovery source the pool rules can't admit as a part because no single
+        // poser is always the on-screen one.
+        var admitted = new Dictionary<uint, long>();
+
+        var unposed = new List<uint>();
+        foreach (uint h in used.OrderBy(h => h))
+        {
+            if (posed.Contains(h)) continue;
+            if (groupCovered.TryGetValue(h, out long slot)) admitted[h] = slot;
+            else unposed.Add(h);
+        }
+        if (unposed.Count > 0)
+        {
+            // never empty: the bone is donor-used and passed the orphan check, so every part tabling it
+            // took a pool slot for it
+            var tablers = pooled.Where(p => p.BoneHashes.Contains(unposed[0])).Select(p => p.Mesh);
+            // A held-back part that TABLES the bone may well be the one posing it, and a held-back part of
+            // unknown bones can't be ruled out either. Saying the outfit doesn't move a bone the modder can
+            // watch animate sends them re-weighting away from a hole the build made.
+            var couldPose = (missingParts ?? Array.Empty<MissingPart>())
+                .Where(m => m.BoneHashes is not { } b || b.Contains(unposed[0])).ToList();
+            throw new InvalidDataException(
+                $"the donor rides {unposed.Count} bone(s) that no pooled part of this outfit poses " +
+                $"(first: 0x{unposed[0]:x8}, carried at zero weight by " +
+                string.Join(", ", tablers.Select(m => $"'{m}'")) + ")" +
+                (couldPose.Count == 0
+                    ? ". Re-weight the donor onto the bones this outfit moves"
+                    : ". Left out of the pool: " +
+                      string.Join("; ", couldPose.Select(m => $"'{m.Mesh}' · {m.Why}")) +
+                      ". Re-weight the donor onto the bones the pooled parts move, or drop this Replace"));
+        }
+
+        // Every used bone a group certified and none of them a roster part TABLES, so no part joined the
+        // pool. There is no union to compile against and no draw to host the replacement — the anchor
+        // selection below would read an empty pool. Refuse in words rather than index off the end.
+        if (pool.Count == 0)
+            throw new InvalidDataException(
+                "the donor rides only bones this outfit's wardrobe or scene alternatives cover, so no part " +
+                "of it joins the pool and nothing can host the replacement's draw. Re-weight the donor onto " +
+                "the bones the outfit's own parts move as well");
 
         string anchor;
         if (anchorOverride is not null)
@@ -191,7 +525,7 @@ public static class PoolDerive
                 && counts[target] == counts[anchor])
                 anchor = target;
         }
-        return new Result(pool, anchor, counts);
+        return new Result(pool, anchor, counts) { GroupCovered = admitted };
     }
 
     /// <summary>

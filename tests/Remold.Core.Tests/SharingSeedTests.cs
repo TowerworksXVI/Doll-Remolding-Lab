@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using Remold.App.ViewModels;
 using Remold.Core.Bundles;
 using Remold.Core.Model;
+using Remold.Core.Tests.Support;
 using Remold.Core.Workbench;
 using Xunit;
 
@@ -79,8 +82,9 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void The_fingerprint_moves_when_the_internal_id_behind_a_bundle_does()
     {
-        // The two bundle namespaces are independent, so a bundle whose content moved is caught by
-        // whichever of them the game re-minted.
+        // The two bundle namespaces are independent, so a bundle that re-minted in either one moves the
+        // fingerprint. Content rewritten in place under names that both survive is the read record's
+        // question, not this one.
         var address = GameVfs.PrefabAddress("Character/Player", "VesnaSSR01");
         CatalogIndex WithInternalId(string internalId) => CatalogIndex.ForTest(
             new[] { (address, "prefab.bundle") },
@@ -88,6 +92,159 @@ public class SharingSeedTests : IDisposable
             new[] { ("prefab.bundle", internalId) });
         Assert.NotEqual(SubjectFingerprint.For(WithInternalId("aaaa.bundle"), Outfit("VesnaSSR01")),
             SubjectFingerprint.For(WithInternalId("bbbb.bundle"), Outfit("VesnaSSR01")));
+    }
+
+    // ---- the read record --------------------------------------------------------------------------
+
+    /// <summary>A catalog naming two mesh bundles, each joined to the manifest internalId given.</summary>
+    private static CatalogIndex ReadCatalog(string vInternalId = "v-1", string kInternalId = "k-1") =>
+        CatalogIndex.ForTest(
+            new[] { ("Assets/X/a.mesh", "vmesh.bundle"), ("Assets/X/b.mesh", "kmesh.bundle") },
+            null,
+            new[] { ("vmesh.bundle", vInternalId), ("kmesh.bundle", kInternalId) });
+
+    /// <summary>A content-hash lookup over exactly these internalIds; anything else resolves to no
+    /// hash, the way an internalId the manifest does not name does.</summary>
+    private static Func<string, string?> Content(params (string InternalId, string ContentHash)[] files) =>
+        id => files.FirstOrDefault(f => f.InternalId == id).ContentHash;
+
+    [Fact]
+    public void The_read_record_is_one_triple_per_bundle_and_current_in_the_world_it_was_taken_in()
+    {
+        var catalog = ReadCatalog();
+        var content = Content(("v-1", "vhash"), ("k-1", "khash"));
+        string reads = BundleReads.Of(catalog, content, new[] { "vmesh.bundle", "kmesh.bundle" });
+
+        // bundle key, internalId key, content-hash key — per bundle, and nothing but hex
+        Assert.Equal(2 * 3 * 16, reads.Length);
+        Assert.Matches("^[0-9A-F]+$", reads);
+        Assert.True(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, content), reads));
+        // a bundle read twice is one triple: the record is over the SET the measurement depended on
+        Assert.Equal(3 * 16,
+            BundleReads.Of(catalog, content, new[] { "vmesh.bundle", "vmesh.bundle" }).Length);
+    }
+
+    [Fact]
+    public void A_bundles_content_moving_under_an_unchanged_name_and_internal_id_reads_as_moved()
+    {
+        // The one thing the name namespaces cannot report: a bundle rewritten where it stands. Both names
+        // are held constant here — the catalog is the same object on both sides — so the content behind
+        // one of them is all that moved, and the row that read it has to measure again.
+        var catalog = ReadCatalog();
+        string reads = BundleReads.Of(catalog, Content(("v-1", "vhash"), ("k-1", "khash")),
+            new[] { "vmesh.bundle", "kmesh.bundle" });
+
+        Assert.False(BundleReads.StillCurrent(
+            BundleReads.CurrentKeys(catalog, Content(("v-1", "vhash-2"), ("k-1", "khash"))), reads));
+        // …and the row that read only the unmoved bundle is untouched
+        Assert.True(BundleReads.StillCurrent(
+            BundleReads.CurrentKeys(catalog, Content(("v-1", "vhash-2"), ("k-1", "khash"))),
+            BundleReads.Of(catalog, Content(("k-1", "khash")), new[] { "kmesh.bundle" })));
+    }
+
+    [Fact]
+    public void A_read_record_in_any_other_key_shape_reads_as_moved()
+    {
+        // A record that is not a whole number of triples was written by something else, and nothing can be
+        // said about which keys are which inside it — so the row measures again rather than being trusted.
+        var catalog = ReadCatalog();
+        var keys = BundleReads.CurrentKeys(catalog, Content(("v-1", "vhash")));
+        string nameAndInternalIdOnly = NameKey.Of("vmesh.bundle") + NameKey.Of("v-1");
+
+        Assert.Equal(32, nameAndInternalIdOnly.Length);
+        Assert.False(BundleReads.StillCurrent(keys, nameAndInternalIdOnly));
+        // an empty record records no bundles at all, which is current by definition
+        Assert.True(BundleReads.StillCurrent(keys, ""));
+    }
+
+    [Fact]
+    public void A_bundle_no_manifest_entry_names_records_the_same_absent_marker_on_both_sides()
+    {
+        // Absence is a fact like any other. A bundle whose internalId the manifest does not name, and a
+        // bundle the catalog does not name at all, both have to round-trip as a state rather than as a
+        // skipped half — otherwise a row that read one can never be current.
+        var catalog = ReadCatalog();
+        var located = Content(("v-1", "vhash"));
+        var unlocated = Content();
+
+        Assert.True(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, unlocated),
+            BundleReads.Of(catalog, unlocated, new[] { "vmesh.bundle" })));
+        Assert.True(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, unlocated),
+            BundleReads.Of(catalog, unlocated, new[] { "stranger.bundle" })));
+        // and the file arriving is a move like any other
+        Assert.False(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, located),
+            BundleReads.Of(catalog, unlocated, new[] { "vmesh.bundle" })));
+    }
+
+    [Fact]
+    public void The_content_lookup_answers_from_the_manifests_own_stub()
+    {
+        // The join the app hands the measurement: internalId → the content hash the VFS stub carries for
+        // it, read out of the manifest image with no bundle opened.
+        string dir = At("gff");
+        Directory.CreateDirectory(dir);
+        string manifestPath = Path.Combine(dir, GffManifest.ManifestHash + ".bundle");
+        string physHash = new string('a', 32);
+        FakeGff.Write(manifestPath, ("v-1.bundle", FakeGff.Stub(physHash, 0, 0, subSeed: 0x5A)));
+
+        var lookup = BundleReads.ContentHashLookup(GffManifest.Read(manifestPath));
+        // the stub's 16 content bytes, hex: this fixture writes all sixteen as 0x5A
+        Assert.Equal(string.Concat(Enumerable.Repeat("5a", 16)), lookup("v-1.bundle"));
+        Assert.Equal(lookup("v-1.bundle"), lookup("v-1"));   // the catalog spells internalIds both ways
+        Assert.Null(lookup("k-1.bundle"));                   // an internalId this manifest does not name
+        // and it is the CONTENT half of the stub, not the physical filename in the same 40 bytes
+        Assert.NotEqual(physHash, lookup("v-1.bundle"));
+    }
+
+    [Fact]
+    public void A_single_file_bundles_content_hash_is_the_only_thing_a_rewrite_in_place_moves()
+    {
+        // Why the record cannot key on the physical filename. For a single-file bundle the manifest entry
+        // name IS physHash + ".bundle" — the live install's rule for all 7,258 of them — so the filename
+        // key can only ever restate the internalId key sitting beside it. Two manifests for the same
+        // single, differing only in what the bundle CONTAINS, are what a rewrite in place looks like.
+        string dir = At("singles");
+        Directory.CreateDirectory(dir);
+        string phys = new string('a', 32);
+        string Manifest(string name, byte content)
+        {
+            string p = Path.Combine(dir, name);
+            FakeGff.Write(p, (phys + ".bundle", FakeGff.Stub(phys, 0, 0, content)));
+            return p;
+        }
+        var before = GffManifest.Read(Manifest("before.bundle", 1));
+        var after = GffManifest.Read(Manifest("after.bundle", 2));
+
+        // the entry name restates the physical file, and neither moved
+        Assert.Equal(phys + ".bundle", Assert.Single(before.Names));
+        Assert.Equal(before.Names, after.Names);
+        Assert.Equal(phys, before.Locate(phys + ".bundle").Stub.PhysHash);
+        Assert.Equal(phys, after.Locate(phys + ".bundle").Stub.PhysHash);
+
+        var catalog = CatalogIndex.ForTest(new[] { ("Assets/X/a.mesh", "vmesh.bundle") }, null,
+            new[] { ("vmesh.bundle", phys + ".bundle") });
+        string reads = BundleReads.Of(catalog, BundleReads.ContentHashLookup(before),
+            new[] { "vmesh.bundle" });
+        Assert.True(BundleReads.StillCurrent(
+            BundleReads.CurrentKeys(catalog, BundleReads.ContentHashLookup(before)), reads));
+        Assert.False(BundleReads.StillCurrent(
+            BundleReads.CurrentKeys(catalog, BundleReads.ContentHashLookup(after)), reads));
+    }
+
+    [Fact]
+    public void A_bundle_the_catalog_does_not_name_takes_the_absent_marker_whatever_the_lookup_says()
+    {
+        // Symmetry between the two sides of the check. StillCurrent compares a bundle missing from the
+        // current map against a fixed absent marker, so the record must write that same marker rather than
+        // asking the lookup about an empty internalId — a lookup that answered anything for "" would write
+        // rows no check could ever call current again.
+        var catalog = ReadCatalog();
+        Func<string, string?> talkative = id => id.Length == 0 ? "something" : "vhash";
+
+        string reads = BundleReads.Of(catalog, talkative, new[] { "stranger.bundle" });
+        Assert.True(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, talkative), reads));
+        // and it is the same record a well-behaved lookup writes for that bundle
+        Assert.Equal(BundleReads.Of(catalog, Content(), new[] { "stranger.bundle" }), reads);
     }
 
     // ---- adoption ---------------------------------------------------------------------------------
@@ -178,7 +335,9 @@ public class SharingSeedTests : IDisposable
     {
         var seed = System.Text.Json.Nodes.JsonNode.Parse(
             File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "data", "sharing_seed.json")))!;
-        Assert.Equal(4, seed["SchemaVersion"]!.GetValue<int>());
+        // The twin of the writer-side pin in SharingIndexTests: the shipped artifact and the code that
+        // writes it must agree, or the seed is refused at load on every install.
+        Assert.Equal(6, seed["SchemaVersion"]!.GetValue<int>());
         Assert.NotEmpty(seed["CatalogVersion"]!.GetValue<string>());
         Assert.NotEmpty(seed["Outfits"]!.AsArray());
     }
@@ -316,6 +475,22 @@ public class SharingSeedTests : IDisposable
         // and so is a pass under a newer catalog than the base it repaired
         Assert.True(MainWindowViewModel.ShouldWriteSharingCache(
             Measured("25200"), new MainWindowViewModel.SharingBase(cached, FromSeed: false)));
+    }
+
+    /// <summary>A superseded pass writes nothing. Cancellation normally comes out of the build as an
+    /// exception, but a pass that finished in the same instant reaches the write with its token already
+    /// down — and what cancels it is a rescan, which may have just swept the cache folder. Writing then
+    /// resurrects the file the modder asked to clear, holding rows measured before the sweep.</summary>
+    [Fact]
+    public void A_cancelled_pass_writes_no_cache()
+    {
+        var seed = Measured("25180");
+        var adopted = new MainWindowViewModel.SharingBase(seed, FromSeed: true);   // the always-write case
+        using var cts = new CancellationTokenSource();
+
+        Assert.True(MainWindowViewModel.ShouldWriteSharingCache(seed, adopted, cts.Token));
+        cts.Cancel();
+        Assert.False(MainWindowViewModel.ShouldWriteSharingCache(seed, adopted, cts.Token));
     }
 
     [Fact]

@@ -496,7 +496,11 @@ public partial class MainWindowViewModel
                 // The blocked load's "The game is running" notice is standing over a game that just closed,
                 // and the re-read that answers it can't run yet. Say the new state, the way the mid-scan
                 // folder change does; the queued reload writes its own notice over this one.
-                NoticeStatus = StatusFacet.Warn(GameClosedNotice, RescanQueuedDetail);
+                //
+                // The DETAIL is the shared one, so a sweep owed when the game closed is named here too: this
+                // is the same wait the "Rescan queued" notice describes, and the reload it waits for is the
+                // one that will sweep.
+                ShowQueuedRescanNotice(GameClosedNotice);
                 break;
         }
     }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Remold.Core;
@@ -22,6 +23,20 @@ public static class LabPaths
 {
     /// <summary>The cache-root folder name under LocalAppData.</summary>
     private const string CacheFolder = "DollRemoldingLab";
+
+    // The regenerable trees under the cache root, named once. A force rescan sweeps exactly these, so a
+    // folder that isn't named here (the opt-in launch-timing log) is never swept.
+    private const string IndexFolder = "index";
+    private const string OperatorFolder = "operators";
+    private const string TextureFolder = "textures";
+    private const string ThumbFolder = "thumbs";
+
+    /// <summary>The regenerable derived-cache trees, as folder names under a cache root. THE definition the
+    /// force-rescan sweep works from (<see cref="CacheReset.ClearDerivedCaches"/>) — names rather than full
+    /// paths, so the sweep can be driven against a temp root. Anything a future cache adds is swept only
+    /// once it is listed here.</summary>
+    public static IReadOnlyList<string> DerivedCacheFolders { get; } =
+        new[] { IndexFolder, OperatorFolder, TextureFolder, ThumbFolder };
 
     /// <summary>Durable-state root: the folder holding the app EXE. In the release layout the exe sits
     /// alone at the root with the assemblies in an <c>app</c> subfolder (so the modder's state — mods,
@@ -67,27 +82,38 @@ public static class LabPaths
     /// <summary>The parsed-catalog snapshot (<see cref="Bundles.CatalogIndex"/>): a re-encoding of one
     /// catalog file keyed to that file's identity, never a corpus product.</summary>
     public static string CatalogSnapshotFile(string catalogVersion) =>
-        Path.Combine(CacheRoot, "index", $"catalog_{catalogVersion}.bin");
+        Path.Combine(IndexRoot, $"catalog_{catalogVersion}.bin");
+
+    /// <summary>The catalog-keyed snapshot folder holding <see cref="CatalogSnapshotFile"/>,
+    /// <see cref="RosterSnapshotFile"/> and <see cref="SharingIndexFile"/>.</summary>
+    public static string IndexRoot => Path.Combine(CacheRoot, IndexFolder);
 
     /// <summary>The launch roster-fill snapshot (<see cref="Workbench.RosterSnapshot"/>), keyed to the
     /// asset-catalog version in the filename and re-checked inside.</summary>
     public static string RosterSnapshotFile(string catalogVersion) =>
-        Path.Combine(CacheRoot, "index", $"roster_{catalogVersion}.json");
+        Path.Combine(IndexRoot, $"roster_{catalogVersion}.json");
 
     /// <summary>The asset-sharing measurement (<see cref="Workbench.SharingIndex"/>), keyed to the
     /// asset-catalog version in the filename and re-checked inside.</summary>
     public static string SharingIndexFile(string catalogVersion) =>
-        Path.Combine(CacheRoot, "index", $"sharing_{catalogVersion}.json");
+        Path.Combine(IndexRoot, $"sharing_{catalogVersion}.json");
+
+    /// <summary>The rigged export's candidacy memo (<see cref="Export.CandidacyCache"/>): per-mesh bone
+    /// table, skin narrowness and posed set, so an open doesn't re-sum every subject part's skin stream.
+    /// Deliberately NOT keyed by catalog version in the name — every entry is keyed by its bundle's own
+    /// CONTENT, so a game update misses exactly the bundles it rewrote and a version-named file would throw
+    /// away every still-valid entry alongside them.</summary>
+    public static string CandidacyCacheFile => Path.Combine(IndexRoot, "candidacy.json");
 
     /// <summary>The preview/thumbnail cache root.</summary>
-    public static string ThumbnailRoot => Path.Combine(CacheRoot, "thumbs");
+    public static string ThumbnailRoot => Path.Combine(CacheRoot, ThumbFolder);
 
     /// <summary>Solved palette-recovery operators, keyed by source-mesh identity and the conditioning
     /// algorithm that produced them.</summary>
-    public static string OperatorCacheRoot => Path.Combine(CacheRoot, "operators");
+    public static string OperatorCacheRoot => Path.Combine(CacheRoot, OperatorFolder);
 
     /// <summary>Encoded texture blobs, keyed by source content and encode settings.</summary>
-    public static string EncodedTextureRoot => Path.Combine(CacheRoot, "textures");
+    public static string EncodedTextureRoot => Path.Combine(CacheRoot, TextureFolder);
 
     /// <summary>The opt-in launch-timing log.</summary>
     public static string LaunchTimingLog => Path.Combine(CacheRoot, "launch_timing.log");

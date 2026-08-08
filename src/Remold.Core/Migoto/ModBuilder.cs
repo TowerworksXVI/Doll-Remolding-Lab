@@ -36,7 +36,11 @@ public sealed record BuildEnv(
     /// <summary>Outfit stem → its wardrobe scheme (<see cref="Tables.PartScheme"/>), or null for a
     /// non-modular outfit. Null resolver = no scheme available: wardrobe-shaped parts then classify as
     /// unknown, so they may be replaced but never lean on.</summary>
-    Func<string, IReadOnlyList<Tables.PartScheme.Slot>?>? PartSchemeFor = null);
+    Func<string, IReadOnlyList<Tables.PartScheme.Slot>?>? PartSchemeFor = null,
+    /// <summary>Outfit stem → the node overrides carried by the dorm and lobby timelines that outfit plays
+    /// (<see cref="Bundles.TimelineShoes"/>). Null resolver = this build measured no timelines, so no part
+    /// is demoted for being named by one. Called at most once per outfit.</summary>
+    Func<string, IReadOnlyList<Bundles.TimelineShoe>?>? TimelineShoesFor = null);
 
 /// <summary>
 /// Where a build may keep regenerable products (solved recovery operators, encoded textures). Both are
@@ -290,6 +294,24 @@ public static class ModBuilder
             claimed[hash] = subject;
         }
         return null;
+    }
+
+    /// <summary>The members of <paramref name="group"/> a pipeline actually carries: those posing at least
+    /// one of <paramref name="carried"/>, one entry per MESH. The formation lists every poser of every
+    /// certifying cell — including pool candidates, which answer cells their variant doesn't gate — but a
+    /// member posing none of the bones the gate admitted would be dumped and hash-claimed for nothing (the
+    /// emitter sentinels its every row), and its claims could refuse the build over a draw-signature
+    /// collision in a mesh this Replace doesn't lean on. The per-mesh cap is the merged group's
+    /// one-writer-per-mesh invariant, held here where the sections are minted: the formation dedupes by
+    /// roster INDEX, and two rows sharing one mesh name would write one gmap file twice.</summary>
+    internal static IReadOnlyList<PoolDerive.PartBones> CoveredMembers(PoolDerive.VariantGroup group,
+        IReadOnlyList<uint> carried)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var kept = new List<PoolDerive.PartBones>();
+        foreach (var p in group.Members)
+            if (carried.Any(p.Posed.Contains) && seen.Add(p.Mesh)) kept.Add(p);
+        return kept;
     }
 
     /// <summary>Fail the build on a blocked game asset. Don't weaken or drop the calls to this
@@ -648,6 +670,57 @@ public static class ModBuilder
                 schemes.TryGetValue(model.Stem, out var have)
                     ? have : schemes[model.Stem] = env.PartSchemeFor?.Invoke(model.Stem);
 
+            // The outfit's timeline node overrides, read once per outfit like the scheme above. Null = this
+            // build measured none, which demotes nothing.
+            var timelineShoes = new Dictionary<string, IReadOnlyList<Bundles.TimelineShoe>?>(
+                StringComparer.Ordinal);
+            IReadOnlyList<Bundles.TimelineShoe>? ShoesOf(SubjectModel model) =>
+                timelineShoes.TryGetValue(model.Stem, out var have)
+                    ? have : timelineShoes[model.Stem] = env.TimelineShoesFor?.Invoke(model.Stem);
+
+            // The outfit's modular resource tokens, which is what a timeline entry aimed at the wardrobe
+            // selector matches against. Derived from the same scheme the presence rules read.
+            var schemeTokens = new Dictionary<string, IReadOnlySet<string>?>(StringComparer.Ordinal);
+            IReadOnlySet<string>? ResourceTokensOf(SubjectModel model)
+            {
+                if (schemeTokens.TryGetValue(model.Stem, out var have)) return have;
+                IReadOnlySet<string>? tokens = null;
+                if (SchemeOf(model) is { } slots)
+                {
+                    var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var slot in slots)
+                        foreach (var variant in slot.Variants)
+                            foreach (var token in variant.Tokens) set.Add(token);
+                    tokens = set;
+                }
+                return schemeTokens[model.Stem] = tokens;
+            }
+
+            // The mechanism, if any, that lets the game withhold this part. The part's own prefab-resident
+            // marker answers first; only when nothing on the prefab named it do the timelines get asked,
+            // since those are a build-time input the workbench model never carries. Every tier name is
+            // offered, because a timeline naming any one of a part's draws makes the whole part unsafe to
+            // lean on.
+            Model.VisibilityOverride VisibilityOf(SubjectModel model, SubjectPart part)
+            {
+                if (part.Visibility != Model.VisibilityOverride.None) return part.Visibility;
+                if (ShoesOf(model) is not { } shoes || shoes.Count == 0)
+                    return Model.VisibilityOverride.None;
+                var tokens = ResourceTokensOf(model);
+                foreach (var shoe in shoes)
+                    foreach (var entries in new[] { shoe.ShowNodes, shoe.HideNodes })
+                    {
+                        if (Model.ShoeNodeMatch.MatchesAny(entries, part.SlotName, part.Token, tokens,
+                                model.Stem))
+                            return Model.VisibilityOverride.TimelineNamed;
+                        foreach (var t in part.SiblingTiers ?? Array.Empty<Export.RecipeTierSlot>())
+                            if (Model.ShoeNodeMatch.MatchesAny(entries, t.SlotName, part.Token, tokens,
+                                    model.Stem))
+                                return Model.VisibilityOverride.TimelineNamed;
+                    }
+                return Model.VisibilityOverride.None;
+            }
+
             // Sections whose signature key another mesh draws on too, recorded where each site meets one.
             // The guards themselves are built in one pass at the end: a verdict number spans every sibling
             // of the key, and a sibling's tag value is only knowable once the build's slot tags and scoped
@@ -713,6 +786,14 @@ public static class ModBuilder
                     foreach (var p in model.Parts)
                     {
                         if (group.Contains(p.Token) || VariantOf(model, p) != variant) continue;
+                        // A part the game's own dorm or lobby logic can withhold answers for that logic
+                        // rather than for the option worn, so sighting it settles nothing. This reads the
+                        // PREFAB-RESIDENT marker only — a SubjectPart carries no timeline verdict, since
+                        // the timelines are a build-time input the workbench model never sees. Timeline
+                        // overrides are deliberately out of scope for witness duty: they demote a part
+                        // from the POOL (through VisibilityOf on the roster probe) and stop there, and
+                        // this prefab-resident gate is what the witness route rests on.
+                        if (p.Visibility != Model.VisibilityOverride.None) continue;
                         List<(string Name, string BundleId, long PathId)> tiers;
                         // a part this build can't resolve — including one it refuses to touch — is no
                         // witness, exactly as the signature walk leaves it out of the index
@@ -721,6 +802,11 @@ public static class ModBuilder
                         foreach (var (name, bid, pid) in tiers)
                         {
                             if (Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
+                            // A tier outside the shadow pass draws only while it is in frame, so sighting
+                            // nothing at it proves nothing about which option is worn. Nor does a tier the
+                            // dorm or lobby can withhold on its own.
+                            if (!TierCastsShadows(p, name)) continue;
+                            if (TierVisibility(p, name) != Model.VisibilityOverride.None) continue;
                             var sig = SigOf(model, bid, name, pid);
                             // an ambiguous witness would answer for its own siblings too, which is the
                             // question this route is trying to settle
@@ -742,6 +828,33 @@ public static class ModBuilder
                         is not { } witnesses)
                     return null;
                 return (own, witnesses);
+            }
+
+            // Whether the named tier of this part takes part in the shadow pass, joined by slot name:
+            // the representative tier answers with the part's own flag, every other with its sibling
+            // slot's. A name that joins to neither reads as casting, since the exclusion this feeds
+            // rides a measured Off and never an unresolved one.
+            bool TierCastsShadows(SubjectPart part, string tierName)
+            {
+                if (string.Equals(tierName, part.SlotName, StringComparison.Ordinal))
+                    return part.CastsShadows;
+                foreach (var t in part.SiblingTiers ?? Array.Empty<Export.RecipeTierSlot>())
+                    if (string.Equals(t.SlotName, tierName, StringComparison.Ordinal))
+                        return t.CastsShadows;
+                return true;
+            }
+
+            // The visibility override on the named tier of this part, joined by slot name the same way. A
+            // name that joins to neither tier reads as unwithheld, since the exclusion this feeds rides a
+            // list that named the node and never an unresolved name.
+            Model.VisibilityOverride TierVisibility(SubjectPart part, string tierName)
+            {
+                if (string.Equals(tierName, part.SlotName, StringComparison.Ordinal))
+                    return part.Visibility;
+                foreach (var t in part.SiblingTiers ?? Array.Empty<Export.RecipeTierSlot>())
+                    if (string.Equals(t.SlotName, tierName, StringComparison.Ordinal))
+                        return t.Visibility;
+                return Model.VisibilityOverride.None;
             }
 
             // The wardrobe variant a part belongs to, classified the way the roster probe classifies it:
@@ -882,7 +995,10 @@ public static class ModBuilder
 
             // ---- the Replaces: one emitter pipeline each — pool, dumps, donor compile, Leaves, textures
             var pipelines = new List<ReplacePipeline>();
-            var captureHashes = new Dictionary<string, string>();
+            // every pipeline's pool-part captures, part name → hash, for the sidecar's override list alone.
+            // A pipeline RECORD carries its own dictionary of just its own parts (see the pool loop below):
+            // the record states what that pipeline captures, and a shared one states everyone's.
+            var sidecarCaptures = new Dictionary<string, string>(StringComparer.Ordinal);
             var allCaptureHashes = new HashSet<string>(StringComparer.Ordinal);   // every pipeline's lod0 + tier hashes
             // ib hash → the mesh holding its capture section, ACROSS pipelines: one capture section serves
             // one hash, and the emitter merges by hash. The SAME mesh reached by another Replace rides the
@@ -950,14 +1066,25 @@ public static class ModBuilder
                 var (name, bid, pid) = Tiers(w.Part)[0];
                 var field = reader.GetMeshField(Bundle(bid, $"part '{w.Part.Token}'"), name, pid)
                     ?? throw new InvalidDataException($"mesh '{name}' not found in '{bid}'");
+                // Both rig rules read the bone table, and both sit ahead of the routing rule: what drives
+                // a mesh's bones decides whether it can be replaced at all, before the stream layout does.
+                var boneNameHashes = field["m_BoneNameHashes"]["Array"].Children.Select(c => c.AsUInt).ToList();
+                // a spring-chain mesh's skin is usually recoverable, and the refusal is about the
+                // simulation driving its bones, not the stream
+                if (Skeleton.BoneTable.HasSpringChain(boneNameHashes))
+                    throw new InvalidOperationException($"'{w.Edit.Mesh}' can't be replaced: "
+                        + "it moves on the game's own spring bones. Drop this Replace");
+                if (Skeleton.BoneTable.HasUnsupportedRig(boneNameHashes))
+                    throw new BlockedAssetException($"'{w.Part.SlotName}' is not a supported asset");
                 switch (StreamDump.Route(field))
                 {
                     case StreamDump.ReplaceRoute.Pooled: pooledWork.Add(w); break;
                     case StreamDump.ReplaceRoute.Rigid: rigidWork.Add(w); break;
                     default:
-                        // a rigid layout took the branch above, so the only layout that reaches this is reduced
+                        // a rigid layout took the branch above, so what reaches this carries influences
+                        // spelled in a shape recovery can't read (or blend shapes)
                         throw new InvalidOperationException($"'{w.Edit.Mesh}' can't be replaced: "
-                            + $"{StreamDump.ReducedSkinReason(field)}. Drop this Replace");
+                            + $"{StreamDump.UnrecoverableSkinReason(field)}. Drop this Replace");
                 }
             }
             replaceWork = pooledWork;
@@ -1123,15 +1250,44 @@ public static class ModBuilder
                         // ahead of the skin rule: the bone table is what tells a later orphan-bone failure
                         // whether a refused part could have owned the bones the pool is missing
                         var hashes = field["m_BoneNameHashes"]["Array"].Children.Select(c => c.AsUInt).ToHashSet();
+                        // the bone table also settles support: a rig this path can't carry is declined
+                        // like any other unsupported asset
+                        if (Skeleton.BoneTable.HasUnsupportedRig(hashes))
+                            throw new BlockedAssetException($"'{p.SlotName}' is not a supported asset");
                         if (StreamDump.UnrecoverableSkinReason(field) is { } why)
                         {
-                            heldBack.Add(new PoolDerive.MissingPart(p.SlotName, why, hashes));
+                            heldBack.Add(new PoolDerive.MissingPart(p.SlotName, why, hashes,
+                                PartPresence.Classify(p.Token, schemeSlots)));
                             diagnostics.Add($"part '{p.Token}' excluded from pool derivation: can't feed palette recovery: {why}");
+                            continue;
+                        }
+                        // Measured here and nowhere else: the bones this part POSES are what decides
+                        // whether a donor bone has a palette row to recover and whether the part can
+                        // carry another's tier bones, and two reads of one mesh could disagree.
+                        // Its own catch, and it holds the part back: the skin rule passes shapes the
+                        // weight read still can't take, and a part offered without a measured posed set
+                        // would fall back to its TABLE at the posed gate — the one thing that gate exists
+                        // to refuse. The table read above stands, so an orphan-bone refusal can still
+                        // rule this part out by the bones it owns.
+                        HashSet<uint> posedBones;
+                        try
+                        {
+                            posedBones = StreamDump.WeightedBoneHashes(field);
+                        }
+                        catch (Exception ex) when (ex is not BlockedAssetException)
+                        {
+                            const string unread = "its skin weights can't be read";
+                            heldBack.Add(new PoolDerive.MissingPart(p.SlotName, unread, hashes,
+                                PartPresence.Classify(p.Token, schemeSlots)));
+                            diagnostics.Add($"part '{p.Token}' excluded from pool derivation: {unread}: {ex.Message}");
                             continue;
                         }
                         bones.Add(new PoolDerive.PartBones(p.SlotName, hashes,
                             Narrow: Mesh.SkinLayout.IsNarrow(field),
-                            Presence: PartPresence.Classify(p.Token, schemeSlots)));
+                            Presence: PartPresence.Classify(p.Token, schemeSlots),
+                            PosedBones: posedBones,
+                            CastsShadows: p.CastsShadows,
+                            Visibility: VisibilityOf(model, p)));
                         bySlot[p.SlotName] = p;
                         // The part's measured scene rest rides the probe: a delta composed of two measured
                         // rests is how the union restates a part sharing too few bones with the anchor for
@@ -1151,7 +1307,8 @@ public static class ModBuilder
                     }
                     catch (Exception ex) when (ex is not BlockedAssetException)
                     {
-                        heldBack.Add(new PoolDerive.MissingPart(p.SlotName, ex.Message, BoneHashes: null));
+                        heldBack.Add(new PoolDerive.MissingPart(p.SlotName, ex.Message, BoneHashes: null,
+                            PartPresence.Classify(p.Token, schemeSlots)));
                         diagnostics.Add($"part '{p.Token}' excluded from pool derivation: {ex.Message}");
                     }
                 }
@@ -1189,21 +1346,11 @@ public static class ModBuilder
                     }
                 }
                 var (l0Name, l0Bid, l0Pid) = tiers[0];
-                // An unreadable lod0 skin costs the part only its candidacy as a carrier: the roster probe
-                // already cleared the skin rule for every part that reaches here, so this is a read that
-                // failed, not a layout that can't feed recovery.
-                IReadOnlySet<uint> l0Weighted;
-                try
-                {
-                    var l0Field = reader.GetMeshField(Bundle(l0Bid, $"part '{l0Name}'"), l0Name, l0Pid)
-                        ?? throw new InvalidDataException($"mesh '{l0Name}' not found in '{l0Bid}'");
-                    l0Weighted = StreamDump.WeightedBoneHashes(l0Field);
-                }
-                catch (Exception ex) when (ex is not BlockedAssetException)
-                {
-                    diagnostics.Add($"part '{l0Name}' can't cover another part's tier bones: {ex.Message}");
-                    l0Weighted = new HashSet<uint>();
-                }
+                // The lod0's posed bones are the roster probe's own measurement of this same mesh, taken
+                // once: a second read is a second chance for the two to disagree about which bones a part
+                // can cover. Only a probed part reaches here — the line above already indexes the probe.
+                var l0Weighted = RosterProbe(model).Bones
+                    .First(b => string.Equals(b.Mesh, slotName, StringComparison.OrdinalIgnoreCase)).Posed;
                 return partTiers[key] = new PoolDerive.PartTiers(
                     SigOf(model, l0Bid, l0Name, l0Pid).Key, l0Weighted, list);
             }
@@ -1238,15 +1385,24 @@ public static class ModBuilder
                 // whenever the target is (a one-influence part only when it IS the target), and what it
                 // is left out of is both halves at once — the derivation below and the tier coverage
                 // after it read this one set.
-                var (candidates, leftOut) = PoolDerive.PoolCandidates(partBones, part.SlotName);
+                var (candidates, leftOut) = PoolDerive.PoolCandidates(partBones, part.SlotName,
+                    model.PartsPoolAlone);
                 if (leftOut.Count > 0)
                     diagnostics.Add($"pool ({sfx}): left out: "
                         + string.Join("; ", leftOut.Select(m => $"'{m.Mesh}' · {m.Why}")));
 
+                // The coverage group: the bones with an on-screen poser in every variant×context state the
+                // target displays in. A variant or context part is no pool candidate, so this is read off
+                // the WHOLE roster; what the candidates already pose is subtracted inside. At most one group
+                // forms, and each member appears in it once, so every certified bone has exactly one gmap
+                // and one fused section per member mesh — the emission carries whatever forms.
+                var groups = PoolDerive.VariantGroups(partBones, SchemeOf(model), heldBack, candidates,
+                    part.SlotName, model.PartsPoolAlone);
+
                 // The parts held back go WITH the roster: they are what tells an orphan-bone refusal apart
                 // from a donor genuinely weighted to another armature.
                 var derived = PoolDerive.Derive(payload, candidates, edit.AnchorOverride,
-                    heldBack.Concat(leftOut).ToList(), part.SlotName);
+                    heldBack.Concat(leftOut).ToList(), part.SlotName, groups);
 
                 // The pool the donor's weights ask for isn't always one the pool can POSE: a part's other
                 // LOD tiers ride the union palette built from the pool's lod0 bone sets, and those tiers can
@@ -1283,6 +1439,7 @@ public static class ModBuilder
                 var poolMeshes = new List<SwapCompile.PoolMesh>();
                 var noSkip = new List<string>();
                 var poolTiers = new List<PoolTier>();
+                var poolCaptures = new Dictionary<string, string>(StringComparer.Ordinal);   // THIS pipeline's pool parts, part name → hash
                 var pipelineHashes = new HashSet<string>(StringComparer.Ordinal);   // THIS pipeline's captures (signature keys)
                 var pipelineIbs = new HashSet<string>(StringComparer.Ordinal);      // the same meshes' ib hashes, for the sharing index
                 foreach (var s in pool.Pool) poolSlotNames.Add(s);
@@ -1321,7 +1478,8 @@ public static class ModBuilder
                         partRests.GetValueOrDefault(slotName)));
                     poolMeshes.Add(new SwapCompile.PoolMesh(Bundle(bid, $"pool part '{p.Token}'"), name, pid,
                         partRests.GetValueOrDefault(slotName)));
-                    captureHashes[partName] = h;
+                    poolCaptures[partName] = h;
+                    sidecarCaptures[partName] = h;
                     pipelineHashes.Add(h);
                     allCaptureHashes.Add(h);
                     // this pipeline's OWN target and the hidden parts are the only draws it suppresses;
@@ -1412,6 +1570,120 @@ public static class ModBuilder
                     }
                 }
 
+                // One wardrobe member as the emission needs it: every draw of it the swap can capture on its
+                // own, claimed exactly the way a pool part's draws are — one dump per mesh, one section per
+                // signature key, a hash another Replace already claimed for a DIFFERENT mesh refused. The
+                // member's lod0 is load-bearing: the donor's weights ride bones only its variants pose, so a
+                // lod0 the swap cannot capture separately is a refusal rather than a warning. Its other
+                // tiers degrade — a tier left running vanilla costs the rows only at draws that pick it.
+                PoolGroupMember GroupMemberOf(long variantId, PoolDerive.PartBones pb)
+                {
+                    var mp = partBySlot[pb.Mesh];
+                    string memberName = PartName(model.Character, mp.Token);
+                    var meshes = new List<PoolGroupMesh>();
+                    var memberSeen = new HashSet<string>(StringComparer.Ordinal);
+                    var memberTiers = Tiers(mp);
+                    for (int ti = 0; ti < memberTiers.Count; ti++)
+                    {
+                        var (name, bid, pid) = memberTiers[ti];
+                        bool lod0 = ti == 0;
+                        if (!lod0 && Remold.Core.Model.MeshName.IsUnrenderedTier(name)) continue;
+                        var sig = SigOf(model, bid, name, pid);
+                        if (!memberSeen.Add(sig.Key)) continue;
+                        // Recorded only AFTER the tier's claims succeed, the pool tier loop's own rule: a
+                        // tier that degrades below must leave no guard and no tag section behind it.
+                        TwinRoute? memberTierRoute = null;
+                        if (!sig.Unique)
+                        {
+                            if (lod0)
+                            {
+                                if (!RequestTwinGuard(model, mp, sig.Key, sig.Mates))
+                                    throw new InvalidOperationException(
+                                        $"'{mp.Token}' and '{sig.Mate}' share one draw signature, and this Replace "
+                                        + $"leans on the coverage group '{mp.Token}' belongs to for its recovery. The "
+                                        + "swap can't capture them separately, so this Replace can't build");
+                            }
+                            else if (TwinRouteFor(model, mp, sig.Mates) is { } route)
+                                memberTierRoute = route;
+                            else
+                            {
+                                warnings.Add($"tier '{name}' shares its draw signature with '{sig.Mate}'. "
+                                    + "Its vanilla draw is left running");
+                                continue;
+                            }
+                        }
+                        string meshName = lod0 ? memberName
+                            : $"{memberName}_{Remold.Core.Model.MeshName.Lod(name)}";
+                        string claimant = $"{model.Character} · {model.Stem} · {meshName}";
+                        var claimed = new CaptureMesh(bid, name, pid);
+                        if (poolHashOwner.TryGetValue(sig.Key, out var owner) && owner.Mesh != claimed)
+                        {
+                            // Two members of one group genuinely share tier signatures — a P-variant
+                            // family's far LODs are often one mesh shape apiece — and one key holds ONE
+                            // capture section. The first claimant (roster order) keeps it; a later
+                            // member's TIER degrades exactly like any ambiguous tier, costing rows only
+                            // at draws that pick it, while its lod0 stays load-bearing and refuses.
+                            if (!lod0)
+                            {
+                                warnings.Add($"tier '{name}' shares its captured draw with "
+                                    + $"'{owner.Claimant}'. Its vanilla draw is left running");
+                                continue;
+                            }
+                            throw new InvalidOperationException(
+                                $"'{owner.Claimant}' and '{claimant}' share one draw signature. The swap can't "
+                                + "capture them separately, so this Replace can't build");
+                        }
+                        bool minted = poolHashOwner.TryAdd(sig.Key, new HashClaim(claimed, claimant));
+                        string dumpDir;
+                        try { dumpDir = ClaimDump(meshName, name, bid, pid, sig.Ib); }
+                        catch (Exception ex) when (!lod0)
+                        {
+                            if (minted) poolHashOwner.Remove(sig.Key);
+                            warnings.Add($"tier '{name}' can't serve the swap ({ex.Message}). "
+                                + "Its vanilla draw is left running");
+                            continue;
+                        }
+                        meshes.Add(new PoolGroupMesh(meshName,
+                            lod0 ? "" : Remold.Core.Model.MeshName.Lod(name), dumpDir, sig.Key,
+                            OpKey(bid, name, pid)));
+                        allCaptureHashes.Add(sig.Key);
+                        if (memberTierRoute is { } accepted)
+                            RecordTwinGuard(model, mp, sig.Key, sig.Mates, accepted);
+                    }
+                    return new PoolGroupMember(variantId, pb.Presence.Context, mp.Token, pb.Mesh)
+                    {
+                        Meshes = meshes.Count > 0 ? meshes : null,
+                        MeasuredRest = partRests.GetValueOrDefault(pb.Mesh),
+                        // The hide pass leaves a hash a pipeline captures to the capture section's own
+                        // skip, so a member the change list also hides carries that skip here — the same
+                        // route a hidden POOL part takes.
+                        Hidden = hiddenMeshes.Contains(pb.Mesh),
+                    };
+                }
+
+                // What the build actually leans on the coverage group for: the bones the posed gate admitted
+                // on its certificate. A group whose bones the donor rides none of carries this pipeline
+                // nothing, and the covered bones keep their ascending order.
+                // Settled before the donor compile, which needs the bone order it states.
+                var covering = groups
+                    .Select(g => (Group: g, Bones: g.GroupBones
+                        .Where(h => derived.GroupCovered.TryGetValue(h, out long owner) && owner == g.SlotId)
+                        .ToList()))
+                    .Where(x => x.Bones.Count > 0)
+                    .ToList();
+                // This trims the group to the bones the gate admitted and the members to the parts posing
+                // them (CoveredMembers), then mints those — each a distinct mesh, so every certified bone
+                // has exactly one gmap and one fused section per member. Never empty: every admitted bone
+                // had a poser in every displayed cell, and those posers are members.
+                var carriedGroups = covering
+                    .Select(x => new PoolGroup(x.Group.SlotId, x.Bones,
+                        CoveredMembers(x.Group, x.Bones)
+                            .Select(p => GroupMemberOf(p.Presence.VariantId, p)).ToList()))
+                    .ToList();
+                // The order the emitter hands out palette slots in, and the order the donor's own indices
+                // are compiled against — stated once, read by both.
+                var groupBoneOrder = carriedGroups.SelectMany(g => g.GroupBones).ToList();
+
                 log?.Invoke($"donor ({sfx}): compiling onto the union bone order");
                 string donorDir = Path.Combine(workDir, $"donor_{sfx}");
                 // layout target = the ANCHOR: the compiled streams bind at the anchor's draw, whose input
@@ -1422,7 +1694,8 @@ public static class ModBuilder
                     if (string.Equals(pool.Pool[i], pool.Anchor, StringComparison.OrdinalIgnoreCase)) { anchorIdx = i; break; }
                 if (anchorIdx < 0)
                     throw new InvalidOperationException($"anchor '{pool.Anchor}' is not in its own pool ({string.Join(", ", pool.Pool)})");
-                var compiled = SwapCompile.CompilePool(poolMeshes, donorAbs, donorDir, anchorIdx, payload, reader);
+                var compiled = SwapCompile.CompilePool(poolMeshes, donorAbs, donorDir, anchorIdx, payload, reader,
+                    groupBoneOrder.Count > 0 ? groupBoneOrder : null);
                 warnings.AddRange(compiled.Warnings);
                 diagnostics.AddRange(compiled.Diagnostics);
 
@@ -1447,7 +1720,7 @@ public static class ModBuilder
                     Suffix = sfx,
                     Parts = poolParts,
                     DonorDir = donorDir,
-                    CaptureHashes = captureHashes,
+                    CaptureHashes = poolCaptures,
                     Anchor = PartName(model.Character, partBySlot[pool.Anchor].Token),
                     SubTextures = subMaps.Count > 0 ? subMaps : null,
                     NoSkipParts = noSkip.Count > 0 ? noSkip : null,
@@ -1456,6 +1729,7 @@ public static class ModBuilder
                     ToggleKey = ChangeKey(edit),
                     HideWhenOff = HidesWhenOff(edit),
                     Latch = pipeLatch,
+                    Groups = carriedGroups.Count == 0 ? null : carriedGroups,
                 });
             }
 
@@ -2030,7 +2304,7 @@ public static class ModBuilder
             diagnostics.AddRange(emitted.Diagnostics);
 
             WriteSidecar(project, env, tmpMod, work,
-                captureHashes.Values.Concat(rigids.SelectMany(r => r.Hashes)), hides, retex,
+                sidecarCaptures.Values.Concat(rigids.SelectMany(r => r.Hashes)), hides, retex,
                 scopedRetex, latchList, twinSightings);
 
             // ---- swap into place, then the distribution zip -----------------------------------------

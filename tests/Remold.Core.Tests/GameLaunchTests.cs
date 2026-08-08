@@ -14,6 +14,11 @@ namespace Remold.Core.Tests;
 /// sits relative to the 3DMigoto loader, and whether an install launches through Steam or straight off its
 /// exe. Starting the processes is thin glue over the OS and is exercised live, not here.
 /// </summary>
+// Serialized with every other settings.json reader/writer — one file, one bin dir. Nothing here EDITS
+// settings, but constructing the view-model does: the Build pane's author field is the default-author
+// setting, and seeding it from a settings file that has no author yet is a change, which saves. A save
+// racing another class's snapshot of that file is a torn read on either side.
+[Collection("Dispatcher")]
 public class GameLaunchTests
 {
     /// <summary>A host whose ini tree carries the texture hook — what every reading here that is about

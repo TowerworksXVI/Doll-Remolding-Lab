@@ -17,9 +17,8 @@ namespace Remold.Core.Tests.Migoto;
 /// <summary>
 /// The RIGID replace route: a draw with no per-vertex influences at all takes a direct geometry swap. The
 /// vanilla draw is suppressed and the compiled donor is drawn in its place — no capture, no palette
-/// recovery, no compute pass. Only a STATIC mesh lands here: a single-influence part is posed per vertex
-/// like any other skinned one and goes through palette recovery as a single-part pool, and a reduced skin
-/// refuses, since it is posed by influences its stream no longer carries.
+/// recovery, no compute pass. Only a STATIC mesh lands here: a part storing influences at ANY width is
+/// posed per vertex like any other skinned one and goes through palette recovery as a single-part pool.
 /// </summary>
 public class RigidReplaceTests : IDisposable
 {
@@ -62,9 +61,9 @@ public class RigidReplaceTests : IDisposable
 
     /// <summary>The subject: one part with a lod1 sibling, drawn from bundles the caller shapes.
     /// <paramref name="skinWidth"/> of 0 builds a mesh with no skin channels at all (the prop shape, the
-    /// only one this route takes); 1 the single-influence one that goes pooled; 2 the reduced one the
-    /// routing rule refuses. <paramref name="implicitWeights"/> picks the one-influence spelling the game's
-    /// own weapon parts ship: indices alone, each weight implicitly 1.</summary>
+    /// only one this route takes); 1 and 2 the below-four widths that go pooled.
+    /// <paramref name="implicitWeights"/> picks the one-influence spelling the game's own weapon parts
+    /// ship: indices alone, each weight implicitly 1.</summary>
     /// <param name="twin">Adds a second static part on the frame's exact index buffer with geometry of
     /// its own, and gives the two base colors of their own — the shape where only the textures bound at
     /// the draw tell the two apart.</param>
@@ -308,20 +307,28 @@ public class RigidReplaceTests : IDisposable
     }
 
     [Fact]
-    public void A_reduced_skin_is_still_refused_over_that_mesh()
+    public void A_two_influence_part_takes_the_pooled_route_as_a_single_part_pool()
     {
-        // Two stored influences means the game poses it per vertex by influences the stream no longer
-        // carries, so recovery has nothing to solve against and a direct swap would freeze it.
-        var env = MakeEnv(out _, out _, skinWidth: 2);
+        // The stored pair is the mesh's whole skin: the game poses the draw by exactly those influences,
+        // so the part goes through capture and recovery like the one-influence case — and never the direct
+        // swap, which would freeze it at its bind pose.
+        var env = MakeEnv(out string lod0Hash, out _, skinWidth: 2);
         var p = NewProject();
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, _out, zip: false));
+        var r = ModBuilder.Build(p, env, _out, zip: false);
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
-        // and the line names only the layout that can reach it: a static one took the direct swap above
-        Assert.Equal($"'{Part}' can't be replaced: its skin stream isn't float4 weights + uint4 indices "
-            + "(a reduced layout). Drop this Replace", ex.Message);
+        Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\n", ini);
+        Assert.Contains("CustomShaderRecover_crate_frame_crate_frame", ini);
+        Assert.Contains("CustomShaderConvert_crate_frame", ini);
+        Assert.DoesNotContain("Rigid", ini);
+        Assert.Empty(Directory.GetFiles(r.OutDir, "rigid_*"));
+        // the compiled donor's skin ships in the canonical shape the compute pass reads
+        Assert.Equal(6 * 32, new FileInfo(Path.Combine(r.OutDir, "combined_skin_crate_frame.buf")).Length);
+        ModBuilderTests.AssertNoDuplicateSections(ini);
+        ModBuilderTests.AssertEveryReferencedFileShips(ini, r.OutDir);
     }
 
     [Fact]

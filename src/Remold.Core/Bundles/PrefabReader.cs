@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
+using Remold.Core.Model;
 
 namespace Remold.Core.Bundles;
 
@@ -35,8 +36,12 @@ public enum SlotRenderer
 /// <summary>One renderer slot: the slot GameObject's name (which the recipe's
 /// <see cref="PrefabRecipeEntry.SlotPath"/> matches), its ordered material references, and the
 /// serialized mesh reference when the renderer ships one.</summary>
+/// <param name="CastsShadows">The renderer takes part in the shadow pass (<c>m_CastShadows</c> is not
+/// Off). A slot that casts keeps issuing a depth-only draw while the camera can't see it; one that does
+/// not is drawn only when it is in frame, and issues nothing at all otherwise. False requires a MEASURED
+/// Off — a renderer whose field can't be read reads as casting.</param>
 public sealed record PrefabSlot(string Name, long PathId, IReadOnlyList<PrefabMaterialRef> Materials,
-    PrefabMeshRef? Mesh, SlotRenderer Renderer = SlotRenderer.Skinned)
+    PrefabMeshRef? Mesh, SlotRenderer Renderer = SlotRenderer.Skinned, bool CastsShadows = true)
 {
     /// <summary>True when the renderer ships a serialized mesh (an smr-body or static slot).</summary>
     public bool HasMesh => Mesh is not null;
@@ -44,12 +49,21 @@ public sealed record PrefabSlot(string Name, long PathId, IReadOnlyList<PrefabMa
 
 /// <summary>A parsed assembly prefab: root GameObject, mesh recipe, renderer slots with their CAB-exact
 /// material bindings, and the dependency CABs.</summary>
+/// <param name="VisibilityOverrides">Node name → the game-side mechanism that can leave that node undrawn,
+/// read off the root's own dorm components. Null when the root carried none, which is NOT the same as an
+/// empty map: both demote nothing, and neither may be read as evidence a node is always drawn.</param>
 public sealed record CharacterPrefab(
     string RootName,
     IReadOnlyList<PrefabRecipeEntry> Recipe,
     IReadOnlyList<PrefabSlot> Slots,
     IReadOnlyList<string> ExternalCabs,
-    bool HasReplaceableModel);
+    bool HasReplaceableModel,
+    IReadOnlyDictionary<string, VisibilityOverride>? VisibilityOverrides = null)
+{
+    /// <summary>The override on a node by name, or <see cref="VisibilityOverride.None"/>.</summary>
+    public VisibilityOverride VisibilityOf(string nodeName) =>
+        VisibilityOverrides is { } m && m.TryGetValue(nodeName, out var v) ? v : VisibilityOverride.None;
+}
 
 /// <summary>Deep-parses one assembly-prefab bundle from its plain (deobfuscated) bytes, on demand, when
 /// Pick/Export needs its recipe and CAB-exact material bindings. Read-only.</summary>
@@ -110,6 +124,56 @@ public static class PrefabReader
     {
         List<PrefabRecipeEntry>? recipe = null;
         bool replaceable = false;
+        Dictionary<string, VisibilityOverride>? visibility = null;
+        Dictionary<long, string>? nodeNameByTransform = null;
+
+        // Node name per Transform path id, built only once a visibility list is actually found — the
+        // overwhelming majority of prefabs carry none and pay nothing for this.
+        Dictionary<long, string> NodeNames()
+        {
+            if (nodeNameByTransform is not null) return nodeNameByTransform;
+            var goNames = new Dictionary<long, string>();
+            foreach (var i in inst.file.AssetInfos)
+                if (i.TypeId == BundleReader.ClassGameObject)
+                    try { goNames[i.PathId] = am.GetBaseField(inst, i)["m_Name"].AsString; } catch { }
+            var map = new Dictionary<long, string>();
+            foreach (var i in inst.file.AssetInfos)
+            {
+                if (i.TypeId != BundleReader.ClassTransform) continue;
+                try
+                {
+                    var owner = am.GetBaseField(inst, i)["m_GameObject"];
+                    if (owner["m_FileID"].AsInt == 0
+                        && goNames.TryGetValue(owner["m_PathID"].AsLong, out var n) && n.Length > 0)
+                        map[i.PathId] = n;
+                }
+                catch { }
+            }
+            return nodeNameByTransform = map;
+        }
+
+        // Fold one Transform list into the map. The lists hold LOCAL references, so a pointer into another
+        // file names no node of this prefab and is dropped rather than guessed at. The lowest-valued
+        // mechanism wins a node two lists both name, which keeps one node answering with one reason
+        // whatever order the prefab lists its components in.
+        void MarkNodes(AssetTypeValueField list, VisibilityOverride why)
+        {
+            // An EMPTY list names no node, so the map it would be resolved against is never built. The
+            // components ship on far more prefabs than actually carry entries, and building the map costs
+            // a deserialization per GameObject and per Transform in the file.
+            var entries = BundleReader.UnwrapArray(list);
+            if (entries.Count == 0) return;
+            var names = NodeNames();
+            foreach (var e in entries)
+            {
+                var p = BundleReader.FindPtr(e);
+                if (p is null || p["m_FileID"].AsInt != 0) continue;
+                if (!names.TryGetValue(p["m_PathID"].AsLong, out var name)) continue;
+                visibility ??= new Dictionary<string, VisibilityOverride>(StringComparer.OrdinalIgnoreCase);
+                if (!visibility.TryGetValue(name, out var have) || why < have) visibility[name] = why;
+            }
+        }
+
         foreach (var comp in BundleReader.UnwrapArray(goField["m_Component"]))
         {
             var ptr = BundleReader.FindPtr(comp);
@@ -120,6 +184,18 @@ public static class PrefabReader
             AssetTypeValueField mb;
             try { mb = am.GetBaseField(inst, target); } catch { continue; }
             if (!mb["allReplaceableMeshList"].IsDummy) replaceable = true;
+
+            // The dorm components, identified by field shape rather than script name. Only the lists that
+            // can SUBTRACT a draw are read: the context lists (DormNodes/FightNodes and their lodm0 twins)
+            // are already modelled by the nodes' own name tails, LobbyShowNodes only ever adds a draw, and
+            // the serialized lobby-hide flag is overwritten at every apply, so it says nothing.
+            if (mb["ControlVisibleNodes"] is { IsDummy: false } coat)
+                MarkNodes(coat, VisibilityOverride.CoatList);
+            if (mb["DormHideNodes"] is { IsDummy: false } dormHide)
+                MarkNodes(dormHide, VisibilityOverride.DormHidden);
+            if (mb["LobbyHideNodes"] is { IsDummy: false } lobbyHide)
+                MarkNodes(lobbyHide, VisibilityOverride.LobbyHidden);
+
             var list = mb["MeshResList"];
             if (list.IsDummy) continue;
 
@@ -200,7 +276,12 @@ public static class PrefabReader
                 if (mfid != 0 || mpid != 0)
                     meshRef = new PrefabMeshRef(mpid, Cab(mfid, externals, "mesh", slotName));
             }
-            slots.Add(new PrefabSlot(slotName, info.PathId, mats, meshRef, renderer));
+            // m_CastShadows lives on the Renderer base, so both classes carry it. Only a readable 0 (Off)
+            // takes a slot out of the shadow pass; a missing field leaves it casting, since the exclusions
+            // this feeds must ride a measured Off and never an unread one.
+            var castField = rend["m_CastShadows"];
+            bool castsShadows = castField.IsDummy || castField.AsInt != 0;
+            slots.Add(new PrefabSlot(slotName, info.PathId, mats, meshRef, renderer, castsShadows));
         }
 
         // accept a recipe root, or a recipe-less root whose slots carry serialized meshes (smr-body, prop)
@@ -209,7 +290,8 @@ public static class PrefabReader
         // path id breaks a name tie, so two slots a prefab gives one name keep a fixed order across reads
         slots.Sort((a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name) is var c and not 0
             ? c : a.PathId.CompareTo(b.PathId));
-        return new CharacterPrefab(rootName, recipe ?? new List<PrefabRecipeEntry>(), slots, externals, replaceable);
+        return new CharacterPrefab(rootName, recipe ?? new List<PrefabRecipeEntry>(), slots, externals,
+            replaceable, visibility);
     }
 
     /// <summary>The dependency CAB a PPtr's fileID names: null for a local reference, else the external at

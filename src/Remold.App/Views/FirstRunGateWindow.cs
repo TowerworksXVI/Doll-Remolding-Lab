@@ -3,20 +3,15 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Threading;
 
 namespace Remold.App.Views;
 
 /// <summary>
-/// The unskippable first-run acceptable-use gate. The check-to-accept box arms after a short delay and
-/// Accept enables only once it is ticked. There is NO skip affordance: closing the window exits the app,
-/// since it is the only one open. Code-built (no XAML), so it inherits the app theme.
+/// The unskippable first-run acceptable-use gate. There is NO skip affordance: closing the window exits
+/// the app, since it is the only one open. Code-built (no XAML), so it inherits the app theme.
 /// </summary>
 public sealed class FirstRunGateWindow : Window
 {
-    /// <summary>How long after the window shows the check-to-accept box arms.</summary>
-    private static readonly TimeSpan ArmDelay = TimeSpan.FromSeconds(3);
-
     /// <summary>Raised once on accept; the caller persists it and opens the main window.</summary>
     public event Action? Accepted;
 
@@ -31,20 +26,12 @@ public sealed class FirstRunGateWindow : Window
         if (Application.Current?.TryFindResource("HudBgBrush", out var bg) == true && bg is IBrush b)
             Background = b;
 
-        var accept = new CheckBox
-        {
-            Content = "I have read and accept these rules.",
-            IsEnabled = false,   // arms after ArmDelay
-            Foreground = Res("HudTextBrush") ?? Brushes.White,   // match the body text, not the theme default
-        };
         var button = new Button
         {
             Content = "Accept",
-            IsEnabled = false,   // enables only once the box is ticked
             IsDefault = true,
             Padding = new Thickness(20, 6),
         };
-        accept.IsCheckedChanged += (_, _) => button.IsEnabled = accept.IsChecked == true;
         button.Click += (_, _) => Accepted?.Invoke();
 
         Content = new StackPanel
@@ -63,7 +50,6 @@ public sealed class FirstRunGateWindow : Window
                     MaxHeight = 420,
                     Content = BuildBody(body),
                 },
-                accept,
                 new StackPanel
                 {
                     Orientation = Orientation.Horizontal,
@@ -72,9 +58,6 @@ public sealed class FirstRunGateWindow : Window
                 },
             },
         };
-
-        // One-shot; nothing to cancel — the window either accepts or the modder quits.
-        DispatcherTimer.RunOnce(() => accept.IsEnabled = true, ArmDelay);
     }
 
     /// <summary>A line starting "** " is a section header, a blank line is spacing, anything else is body.

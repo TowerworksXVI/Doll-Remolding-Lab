@@ -22,7 +22,7 @@ public class SwapCompilePoolTests : IDisposable
     public SwapCompilePoolTests() => Directory.CreateDirectory(_root);
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
 
-    private const uint A = 101, B = 102, C = 103, D = 104, E = 105;
+    private const uint A = 101, B = 102, C = 103, D = 104, E = 105, F = 106;
 
     private static float[] Cloud(int n, int seed) =>
         Enumerable.Range(0, n * 3).Select(i => ((i * 31 + seed) % 17) / 5f - 1.5f).ToArray();
@@ -97,6 +97,79 @@ public class SwapCompilePoolTests : IDisposable
         var order = JsonDocument.Parse(File.ReadAllText(Path.Combine(outDir, "unionorder.json")))
             .RootElement.EnumerateArray().Select(e => uint.Parse(e.GetString()!)).ToArray();
         Assert.Equal(new[] { A, B, C, D, E }, order);
+    }
+
+    /// <summary>The extra is a bone the pool DOES table without posing, so the union row it would take has no
+    /// writer and the hash appears twice in the rewritten table. Handed in as an extra, the donor's weight
+    /// compiles onto the continuation slot — the last entry carrying the hash — rather than onto that dead
+    /// union row, while the union itself, which is what the pool parts' palette is built over, is
+    /// unchanged.</summary>
+    [Fact]
+    public void Extra_bones_compile_onto_a_dense_continuation_of_the_union()
+    {
+        string pa = Path.Combine(_root, "alphax.bundle");
+        Support.SyntheticBundle.BuildOneSkinnedMesh(pa, "alpha_mesh", Cloud(12, 5), Tris(12), new[] { A, B, C, D });
+        string pb = Path.Combine(_root, "betax.bundle");
+        Support.SyntheticBundle.BuildOneSkinnedMesh(pb, "beta_mesh", Cloud(8, 6), Tris(8), new[] { B, C, D, E });
+
+        string glb = DonorGlb(new[] { A, B, C, D, E });
+        string outDir = Path.Combine(_root, "outx");
+        var result = SwapCompile.CompilePool(new[]
+        {
+            new SwapCompile.PoolMesh(File.ReadAllBytes(pa), "alpha_mesh"),
+            new SwapCompile.PoolMesh(File.ReadAllBytes(pb), "beta_mesh"),
+        }, glb, outDir, extraBones: new[] { D });
+
+        // the union and its record stay the pool's own
+        Assert.Equal(5, result.UnionBones);
+        Assert.Equal(5, JsonDocument.Parse(File.ReadAllText(Path.Combine(outDir, "unionorder.json")))
+            .RootElement.GetArrayLength());
+
+        // the donor rides bone v % 5, so vertex 3 is the one weighted to D — and it compiles onto 5, the
+        // continuation slot, not onto D's own union row
+        var (_, bi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(outDir, "stream2.buf")));
+        Assert.Equal(5, bi[3, 0]);
+        Assert.Equal(0, bi[0, 0]);      // every other index is the union one it always was
+        Assert.Equal(4, bi[4, 0]);
+    }
+
+    /// <summary>The sibling case, and the corpus one: a coverage group's members are usually the ONLY parts
+    /// tabling the bone they cover, so the extra is absent from the union entirely. It is then the single
+    /// table entry carrying its hash, the donor's weight on it still compiles onto the continuation slot, and
+    /// the union the pool's palette is built over neither grows nor reorders.</summary>
+    [Fact]
+    public void An_extra_bone_no_pool_part_tables_still_compiles_onto_the_continuation()
+    {
+        string pa = Path.Combine(_root, "alphaf.bundle");
+        Support.SyntheticBundle.BuildOneSkinnedMesh(pa, "alpha_mesh", Cloud(12, 8), Tris(12), new[] { A, B, C, D });
+        string pb = Path.Combine(_root, "betaf.bundle");
+        Support.SyntheticBundle.BuildOneSkinnedMesh(pb, "beta_mesh", Cloud(8, 9), Tris(8), new[] { B, C, D, E });
+
+        // the donor rides F, which neither pool part carries — the bone only a group's members table
+        string glb = DonorGlb(new[] { A, B, C, D, E, F });
+        string outDir = Path.Combine(_root, "outf");
+        var result = SwapCompile.CompilePool(new[]
+        {
+            new SwapCompile.PoolMesh(File.ReadAllBytes(pa), "alpha_mesh"),
+            new SwapCompile.PoolMesh(File.ReadAllBytes(pb), "beta_mesh"),
+        }, glb, outDir, extraBones: new[] { F });
+
+        // the union and its record are the pool's own, unchanged by an extra that is no part of it
+        Assert.Equal(5, result.UnionBones);
+        var order = JsonDocument.Parse(File.ReadAllText(Path.Combine(outDir, "unionorder.json")))
+            .RootElement.EnumerateArray().Select(e => uint.Parse(e.GetString()!)).ToArray();
+        Assert.Equal(new[] { A, B, C, D, E }, order);
+
+        // the donor rides bone v % 6, so vertex 5 is the one weighted to F — and it compiles onto 5, the
+        // continuation slot past the union's five rows
+        var (_, bi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(outDir, "stream2.buf")));
+        Assert.Equal(5, bi[5, 0]);
+        Assert.Equal(0, bi[0, 0]);      // every union index is the one it always was
+        Assert.Equal(4, bi[4, 0]);
+        Assert.Equal(0, bi[6, 0]);
+
+        // nothing was dropped on the way: an unresolved influence is what the out-of-skeleton warning names
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("doesn't have"));
     }
 
     [Fact]

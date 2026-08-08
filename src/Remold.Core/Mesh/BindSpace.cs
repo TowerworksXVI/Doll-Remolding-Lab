@@ -33,6 +33,13 @@ public static class BindSpace
     /// space difference is a shared rig and clears this many times over.</summary>
     public const int MinSharedBones = 3;
 
+    /// <summary>How far two statements of ONE bone's bindpose may differ and still be the same bindpose.
+    /// The last gate after every conversion this class can make: a pooled union keeps one bindpose per bone,
+    /// so a difference past this is one no measured or corroborated rigid rotation explained, and posing
+    /// geometry on it would deform it. Every consumer of that verdict — the union order, the tier scatter —
+    /// gates at the same width, or a bone one stage admits the next refuses.</summary>
+    public const double MaxBindDisagreement = 1e-5;
+
     /// <summary>The snapped part→reference delta over the bones the two share, or null when there is no
     /// conversion to make: fewer than <see cref="MinSharedBones"/> shared bones, a delta that varies across
     /// them, one that isn't an exact axis-aligned rotation, or identity (the two already share a space).
@@ -52,8 +59,8 @@ public static class BindSpace
             var d = part * refInv;
             bones++;
             if (seed is null) seed = d;
-            else if (RestBake.RotationDiff(d, seed.Value) > 1e-3f
-                     || RestBake.TranslationDiff(d, seed.Value) > 1e-2f) return null;
+            else if (RestBake.RotationDiff(d, seed.Value) > RestBake.RotationTol
+                     || RestBake.TranslationDiff(d, seed.Value) > RestBake.TranslationTol) return null;
         }
         return bones >= MinSharedBones && seed is { } m ? RestBake.Snap(m) : null;
     }

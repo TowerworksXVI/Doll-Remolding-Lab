@@ -101,4 +101,24 @@ public class LabSettingsTests
         Assert.Single(back.RecentMods);
         Assert.Equal("Karst Jacket", back.RecentMods[0].Name);
     }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsForceRescanOwed()
+    {
+        using var g = new TempGame();
+        var path = g.At("settings.json");
+        new LabSettings { ForceRescanOwed = true }.Save(path);
+        Assert.True(LabSettings.Load(path).ForceRescanOwed);
+    }
+
+    [Fact]
+    public void Load_FileWithoutForceRescanOwed_OwesNothing()
+    {
+        // Every settings.json a released build wrote predates the key. Absent must read as "nothing owed":
+        // the other way round, a first launch on an updated app would sweep its own caches unasked.
+        using var g = new TempGame();
+        var path = g.At("settings.json");
+        File.WriteAllText(path, """{ "Author": "TestAuthor", "LibraryRoot": "D:\\mods" }""");
+        Assert.False(LabSettings.Load(path).ForceRescanOwed);
+    }
 }

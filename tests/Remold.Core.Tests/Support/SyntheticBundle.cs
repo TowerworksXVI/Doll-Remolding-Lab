@@ -206,14 +206,17 @@ internal static class SyntheticBundle
     private const int SkinStream1Stride = 20;   // Color unorm8x4 @0, TexCoord0 f2 @4, TexCoord1 f2 @12
     // stream 2 is 8 bytes per stored influence: BlendWeight fW @0, BlendIndices u32xW @4W
 
-    /// <summary>One inline SKINNED Mesh in the layout the swap pipeline accepts. Every vertex sits fully on
-    /// bone <c>v % boneHashes.Length</c>, and bind poses are identity — identical across parts, which is what
-    /// the pooled union requires of a bone two parts share. Returns the mesh's path id.</summary>
+    /// <summary>One inline SKINNED Mesh in the layout the swap pipeline accepts. At widths 1 and 4 every
+    /// vertex sits fully on bone <c>v % boneHashes.Length</c>; bind poses are identity — identical across
+    /// parts, which is what the pooled union requires of a bone two parts share. Returns the mesh's path
+    /// id.</summary>
     /// <param name="blendShapes">how many blend shapes the mesh declares. Above 0 the type tree grows the
     /// <c>m_Shapes</c> struct, so a mesh without them stays byte-identical to what it was.</param>
     /// <param name="skinWidth">stored influences per vertex: 4 is the full float4 weights + uint4 indices
-    /// pair, 2 the reduced layout some game bodies ship, 1 the narrow one a part riding a single bone
-    /// carries.</param>
+    /// pair, 2 the two-influence pair some game bodies ship, 1 the narrow one a part riding a single bone
+    /// carries. Widths 2–3 store a genuine split (<see cref="SkinSplit"/>) with influence <c>k</c> on bone
+    /// <c>(v + k) % boneHashes.Length</c>, so every declared slot carries weight; 1 and 4 keep the whole
+    /// vertex on its first bone (fixtures pin those bytes).</param>
     /// <param name="implicitWeights">the OTHER one-influence spelling, the one the game's weapon and
     /// accessory parts actually ship: BlendIndices alone at stream-2 offset 0, no BlendWeight channel, each
     /// weight implicitly 1. Only meaningful at <paramref name="skinWidth"/> 1.</param>
@@ -223,14 +226,18 @@ internal static class SyntheticBundle
     /// <param name="extraSkinChannel">puts a live TexCoord2 on the skin stream, past the influences. The
     /// stream is read and written whole at one stride, so a mesh whose skin channels otherwise read as a
     /// known layout still has bytes there that are neither weights nor indices.</param>
+    /// <param name="unresolvableStream">empties the inline vertex blob and points <c>m_StreamData</c> at a
+    /// <c>.resS</c> this bundle doesn't carry. The channel table, the bone hashes and the skin rule all
+    /// still read exactly as a sound mesh's — only reading the vertex bytes themselves fails, which is
+    /// the shape a caller that measures weights meets past every layout check.</param>
     public static long BuildOneSkinnedMesh(string path, string name, float[] positions, int[] triangles,
         uint[] boneHashes, string? bundleName = null, int blendShapes = 0, int skinWidth = 4,
         uint[]? tabledOnlyBones = null, bool implicitWeights = false, bool extraSkinChannel = false,
-        int uvSeed = 0)
+        int uvSeed = 0, bool unresolvableStream = false)
     {
         var file = NewMeshFile(blendShapes);
         AddSkinnedMesh(file, 1, name, positions, triangles, boneHashes, blendShapes, skinWidth, tabledOnlyBones,
-            implicitWeights, extraSkinChannel, uvSeed);
+            implicitWeights, extraSkinChannel, uvSeed, unresolvableStream);
         if (bundleName is not null) AddAssetBundleObject(file, pathId: 2, bundleName);
 
         using var ms = new MemoryStream();
@@ -261,7 +268,8 @@ internal static class SyntheticBundle
     /// mesh-only fixture does.</summary>
     private static void AddSkinnedMesh(AssetsFile file, long pathId, string name, float[] positions,
         int[] triangles, uint[] boneHashes, int blendShapes, int skinWidth, uint[]? tabledOnlyBones = null,
-        bool implicitWeights = false, bool extraSkinChannel = false, int uvSeed = 0)
+        bool implicitWeights = false, bool extraSkinChannel = false, int uvSeed = 0,
+        bool unresolvableStream = false)
     {
         if (positions.Length % 3 != 0) throw new ArgumentException("positions must be a flat x,y,z list");
         if (boneHashes.Length == 0) throw new ArgumentException("a skinned mesh needs at least one bone");
@@ -321,9 +329,22 @@ internal static class SyntheticBundle
                 shapeArray.Children = shapes;
             }
 
-            bf["m_StreamData"]["offset"].AsULong = 0;
-            bf["m_StreamData"]["size"].AsUInt = 0;
-            bf["m_StreamData"]["path"].AsString = "";
+            if (unresolvableStream)
+            {
+                // The shape of a streamed mesh whose .resS this bundle doesn't carry: the vertex blob is
+                // gone, m_StreamData points at a resource nothing can load, and every channel still
+                // declares the bytes that are no longer there.
+                bf["m_VertexData"]["m_DataSize"].AsByteArray = Array.Empty<byte>();
+                bf["m_StreamData"]["offset"].AsULong = 0;
+                bf["m_StreamData"]["size"].AsUInt = (uint)(vertexCount * 32);
+                bf["m_StreamData"]["path"].AsString = "archive:/CAB-absent/CAB-absent.resS";
+            }
+            else
+            {
+                bf["m_StreamData"]["offset"].AsULong = 0;
+                bf["m_StreamData"]["size"].AsUInt = 0;
+                bf["m_StreamData"]["path"].AsString = "";
+            }
         });
     }
 
@@ -442,6 +463,15 @@ internal static class SyntheticBundle
     private static int SkinBase(int skinWidth, bool implicitWeights) =>
         (implicitWeights ? 4 : 8) * skinWidth;
 
+    /// <summary>The per-vertex weight values a width stores, summing to 1. Public so a test asserting
+    /// widened bytes states the same values the blob wrote.</summary>
+    public static float[] SkinSplit(int skinWidth) => skinWidth switch
+    {
+        2 => new[] { 0.75f, 0.25f },
+        3 => new[] { 0.5f, 0.375f, 0.125f },
+        _ => new[] { 1f },
+    };
+
     /// <summary>The stream-interleaved blob for <see cref="SkinnedChannels"/>: intermediate streams padded
     /// up to 16 bytes, the last one not, exactly as the engine lays them out.</summary>
     private static byte[] SkinnedVertexBlob(float[] positions, int vertexCount, int boneCount,
@@ -469,9 +499,13 @@ internal static class SyntheticBundle
             if (uvSeed != 0) BitConverter.GetBytes((float)(uvSeed + v)).CopyTo(blob, q + 4);
 
             int r = s0 + s1 + v * skinStride;
-            if (!implicitWeights) BitConverter.GetBytes(1f).CopyTo(blob, r);    // w0 = 1, the rest 0
-            BitConverter.GetBytes((uint)(v % boneCount))
-                .CopyTo(blob, r + (implicitWeights ? 0 : 4 * skinWidth));       // bi0
+            var split = SkinSplit(skinWidth);
+            if (!implicitWeights)
+                for (int k = 0; k < split.Length; k++)
+                    BitConverter.GetBytes(split[k]).CopyTo(blob, r + k * 4);
+            for (int k = 0; k < split.Length; k++)
+                BitConverter.GetBytes((uint)((v + k) % boneCount))
+                    .CopyTo(blob, r + (implicitWeights ? 0 : 4 * skinWidth) + k * 4);
         }
         return blob;
     }

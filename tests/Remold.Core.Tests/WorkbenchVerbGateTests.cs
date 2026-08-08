@@ -568,13 +568,13 @@ public class WorkbenchVerbGateTests
     }
 
     [Fact]
-    public void TheReducedLayoutBranchGetsItsOwnLine()
+    public void TheSkinLayoutBranchGetsItsOwnLine()
     {
         var body = PartNode("body");
         body.MeshReplaceBlock = StreamDump.SkinRefusal.SkinLayout;
 
         Assert.False(body.CanOpenInBlender);
-        Assert.Equal("This mesh's skin is reduced, and replacement needs a full poseable one. Hide and retexture still work.", body.BlenderHint);
+        Assert.Equal("This mesh's skin is stored in a shape replacement can't read. Hide and retexture still work.", body.BlenderHint);
     }
 
     [Fact]

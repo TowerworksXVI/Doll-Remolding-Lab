@@ -10,6 +10,7 @@ using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Remold.App.Views;
+using Remold.Core.Bundles;
 using Remold.Core.Migoto;
 using Remold.Core.Model;
 using Remold.Core.Project;
@@ -198,6 +199,7 @@ public partial class MainWindowViewModel
         // re-raises both halves of the Mods-folder gate.
         OnPropertyChanged(nameof(BuildDisabledReason));
         OnPropertyChanged(nameof(BuildButtonTip));
+        RaisePreviewBuildState();
         RaiseModsFolderGates();
     }
     partial void OnBuildSizeSummaryChanged(string value) => OnPropertyChanged(nameof(HasBuildSize));
@@ -245,6 +247,7 @@ public partial class MainWindowViewModel
         RaiseModsFolderGates();   // the loader may have been set, or moved, since the last visit
         // read the line off the list already on screen, so the bar is right through the refresh below
         RefreshBuildResultStale();
+        RefreshPreviewState();   // the image may have been deleted from the folder since the last visit
         RefreshBuildPreview();
     }
 
@@ -266,6 +269,7 @@ public partial class MainWindowViewModel
         PackageKeyCollisionTip = "";
         LastInstallPath = "";
         _refreshGeneration++;   // any refresh still in flight belongs to the mod we're leaving
+        ClearPreviewState();
         Footer = Footer.Cleared();
         ShowWarnings();
         ShowInfos();
@@ -308,8 +312,9 @@ public partial class MainWindowViewModel
     internal void CaptureBuildBaseline() => _pendingSignature = CurrentBuildSignature();
 
     /// <summary>Everything a build reads that this pane can change while a result is on screen: the mod
-    /// identity, every listed change with its tick and its whole key binding, and the MAPS each change
-    /// would ship. Excluded rows are IN it — re-ticking one is a real difference from what shipped.
+    /// identity, the preview image, every listed change with its tick and its whole key binding, and the
+    /// MAPS each change would ship. Excluded rows are IN it — re-ticking one is a real difference from what
+    /// shipped.
     /// Separators are control characters, so no field value can imitate one. Row ORDER counts: derivation
     /// order is deterministic, so two readings differ in order only when the authored list itself moved.</summary>
     private string CurrentBuildSignature()
@@ -318,7 +323,8 @@ public partial class MainWindowViewModel
         var (name, version, author, description, modKey) = IdentityForm();
         var sb = new StringBuilder()
             .Append(name).Append(field).Append(version).Append(field).Append(author).Append(field)
-            .Append(description).Append(field).Append(modKey).Append(record);
+            .Append(description).Append(field).Append(modKey).Append(field)
+            .Append(PreviewSignature()).Append(record);
         foreach (var row in BuildGroups.SelectMany(g => g.Rows))
             sb.Append(row.Character).Append(field).Append(row.Outfit).Append(field)
                 .Append(row.Mesh).Append(field).Append(row.Verb).Append(field)
@@ -553,10 +559,17 @@ public partial class MainWindowViewModel
     private int _shownWarningCount;
 
     /// <summary>Both sources at once: a completed run's warnings under their own lead-in, then the live
-    /// derivation's. <see cref="BuildWarningSource"/> owns which line belongs where and what collapses.</summary>
+    /// derivation's. <see cref="BuildWarningSource"/> owns which line belongs where and what collapses.
+    ///
+    /// <para>A missing preview joins the LIVE side: it is a fact about the mod as it stands, and it is read
+    /// off disk here rather than derived, so it appears whether or not the change list has been rebuilt
+    /// since the file went.</para></summary>
     private void ShowWarnings()
     {
-        var surface = BuildWarningSource.Current(_runWarnings, _derivationWarnings);
+        IReadOnlyList<string> live = MissingPreviewWarning() is { } missing
+            ? _derivationWarnings.Append(missing).ToList()
+            : _derivationWarnings;
+        var surface = BuildWarningSource.Current(_runWarnings, live);
         BuildWarnings.Clear();
         foreach (var w in surface.Lines) BuildWarnings.Add(w);
         _shownWarningCount = surface.Count;
@@ -631,6 +644,35 @@ public partial class MainWindowViewModel
             });
             IReadOnlyList<PartScheme.Slot>? PartSchemeFor(string stem) =>
                 schemeLazy.Value is { } byStem && byStem.TryGetValue(stem, out var slots) ? slots : null;
+            // The timeline clip names, from the same tables and on the same terms: lazily, on the build
+            // thread, and unreadable tables cost no build. The prefabs are resolved through the catalog
+            // this build already holds and opened through its bundle deobfuscator; the PARSE is its own
+            // (TimelineShoes reads each bundle with a reader of its own, not the build's). Nothing is read
+            // at launch, and only the handful of addresses that resolve for a built outfit are opened.
+            var timelineLazy = new Lazy<TimelineTemplates?>(() =>
+            {
+                try { return TimelineTemplates.Load(GameDatabase.FromGameDir(gameDirForScheme)); }
+                catch (Exception ex)
+                {
+                    lock (logLines) logLines.Add($"timeline tables unreadable, pools stay conservative: {ex.Message}");
+                    return null;
+                }
+            });
+            IReadOnlyList<TimelineShoe>? TimelineShoesFor(string stem)
+            {
+                if (timelineLazy.Value is not { } templates) return null;
+                var shoes = TimelineShoes.Read(vfs.Catalog, TryDeobfuscateBundle,
+                    templates.AddressesFor(stem), out int unreadable);
+                // Resolved-but-unopenable is NOT the same as "this outfit plays nothing that hides a
+                // node", and both answer with an empty list. The usual cause is the game holding the
+                // files, which the modder can act on — so it is said rather than left to look like a
+                // clean read.
+                if (unreadable > 0)
+                    lock (logLines)
+                        logLines.Add($"{stem}: {unreadable} timeline bundle(s) resolved but could not be "
+                            + "read, so their overrides demoted nothing; close the game for a full pass");
+                return shoes;
+            }
             var env = new BuildEnv(
                 ResolveSubjectForBuild,
                 a => vfs.Catalog.ResolveAddress(a),
@@ -638,7 +680,8 @@ public partial class MainWindowViewModel
                 vfs.CatalogVersion,
                 typeof(MainWindowViewModel).Assembly.GetName().Version?.ToString(),
                 sharing,
-                PartSchemeFor: PartSchemeFor);
+                PartSchemeFor: PartSchemeFor,
+                TimelineShoesFor: TimelineShoesFor);
             var result = await Task.Run(() => ModBuilder.Build(project, env, outRoot, msg =>
             {
                 lock (logLines) logLines.Add(msg);

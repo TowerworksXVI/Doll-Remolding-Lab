@@ -10,10 +10,11 @@ using Xunit;
 namespace Remold.Core.Tests;
 
 /// <summary>
-/// <see cref="SkinLayout"/>: the canonical float4/uint4 skin stream, and the widening that brings a
-/// one-influence layout into it. Both narrow spellings the corpus ships are here — weights and indices
-/// stored x1, and indices alone with each weight implicitly 1 — because only their bytes tell them apart
-/// and a reader keyed on the wrong one reads garbage silently.
+/// <see cref="SkinLayout"/>: the canonical float4/uint4 skin stream, and the widening that brings any
+/// stored influence width (1–4) into it. Both one-influence spellings the corpus ships are here — weights
+/// and indices stored x1, and indices alone with each weight implicitly 1 — because only their bytes tell
+/// them apart and a reader keyed on the wrong one reads garbage silently; so are the two- and
+/// three-influence pairs, whose stored split must land verbatim in the widened records.
 /// </summary>
 public class SkinLayoutTests : IDisposable
 {
@@ -81,16 +82,48 @@ public class SkinLayoutTests : IDisposable
         Assert.False(SkinLayout.Widen(field));   // nothing to do
     }
 
-    [Fact]
-    public void A_reduced_skin_has_no_canonical_form()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void A_below_four_skin_widens_with_its_stored_split_intact(int skinWidth)
     {
-        // Widening it would be lossless arithmetic, but the influences the posed draw used are gone from
-        // the stream, so there is nothing for recovery to solve against.
-        var field = Mesh("reduced", skinWidth: 2);
+        // The stored influences ARE the mesh's whole skin, so widening pads zero-weight slots and the
+        // split lands verbatim in the canonical records.
+        var field = Mesh($"pair{skinWidth}", skinWidth);
 
-        Assert.False(SkinLayout.Recoverable(field));
-        Assert.False(SkinLayout.Widen(field));
-        Assert.Throws<InvalidDataException>(() => SkinLayout.Canonical(field));
+        Assert.False(SkinLayout.IsCanonical(field));
+        Assert.False(SkinLayout.IsNarrow(field));   // narrow marks ONE influence, not "below four"
+        Assert.True(SkinLayout.Recoverable(field));
+
+        var split = SyntheticBundle.SkinSplit(skinWidth);
+        var s2 = SkinLayout.Canonical(field);
+        Assert.Equal(6 * SkinLayout.CanonicalStride, s2.Length);
+        for (int v = 0; v < 6; v++)
+        {
+            int o = v * SkinLayout.CanonicalStride;
+            for (int k = 0; k < 4; k++)
+            {
+                Assert.Equal(k < split.Length ? split[k] : 0f, BitConverter.ToSingle(s2, o + k * 4));
+                Assert.Equal(k < split.Length ? (uint)((v + k) % Bones.Length) : 0u,
+                    BitConverter.ToUInt32(s2, o + 16 + k * 4));
+            }
+        }
+
+        Assert.True(SkinLayout.Widen(field));
+        Assert.True(SkinLayout.IsCanonical(field));
+        var after = MeshRaw.From(field);
+        Assert.Equal(s2, after.StreamBytes(after.StreamIds.IndexOf(SkinLayout.SkinStream)));
+        Assert.False(SkinLayout.Widen(field));   // idempotent
+    }
+
+    [Fact]
+    public void The_bones_a_two_influence_mesh_poses_include_its_second_influence()
+    {
+        // One vertex, two bones: the second bone is reachable only through the second stored influence,
+        // so a reader that widened by the first slot alone would report it unposed.
+        var field = Mesh("second", skinWidth: 2, verts: 1);
+
+        Assert.Equal(Bones, StreamDump.WeightedBoneHashes(field).OrderBy(h => h).ToArray());
     }
 
     [Theory]

@@ -29,11 +29,12 @@ blender --background --factory-startup --python blender/bpy_test_remold_bridge.p
 
 ## Publish a release build
 
-Self-contained win-x64, and the whole output FOLDER is the release — it is zipped as-is. Output lands
-in `out/publish/win-x64`.
+Two steps: a self-contained win-x64 publish, then a repack into the release layout — the exe alone
+at the root, everything else under `app\`. The packed FOLDER is the release; it is zipped as-is.
 
 ```
 dotnet publish src/Remold.App -p:PublishProfile=win-x64
+dotnet run --project tools/PackRelease -- out/publish/win-x64 "out/release/Doll Remolding Lab"
 ```
 
 Single-file is not an option: the GPU texture encoder's DirectXTex assembly is mixed-mode, and a

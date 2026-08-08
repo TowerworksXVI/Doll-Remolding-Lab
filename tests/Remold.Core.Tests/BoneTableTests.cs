@@ -26,6 +26,27 @@ public class BoneTableTests
         Assert.Equal(expected, BoneTable.Hash(path));
     }
 
+    [Theory]
+    [InlineData("Root_M/Spring01", 0x05f0c65fu)]
+    [InlineData("Root_M/Spring01/Spring02/Spring03/Spring04/Spring05/Spring06", 0x68bd228fu)]
+    [InlineData("Root_M/SpringA01/SpringA02/SpringA03/SpringA04/SpringA05/SpringA06/SpringA07", 0x02ae5487u)]
+    [InlineData("Root_M/SpringB01", 0x3663de6bu)]
+    public void Hash_MatchesTheSpringChainMarkers(string path, uint expected)
+    {
+        // The spring-chain set is these paths' hashes; pinning the pairs here keeps the constant table
+        // derivable from the hash rule alone.
+        Assert.Equal(expected, BoneTable.Hash(path));
+        Assert.True(BoneTable.HasSpringChain(new[] { expected }));
+    }
+
+    [Fact]
+    public void HasSpringChain_IgnoresEverythingOutsideTheChains()
+    {
+        // 0xfc90d5f9 = "Root_M/spring": a mechanically-named gun part, not a simulated chain.
+        Assert.False(BoneTable.HasSpringChain(new uint[] { 0x20c78f46, 0xb0e35784, 0xfc90d5f9, 0 }));
+        Assert.False(BoneTable.HasSpringChain(System.Array.Empty<uint>()));
+    }
+
     [Fact]
     public void CanonicalBonePath_CharacterRigAnchorsOnRoot()
     {
@@ -77,5 +98,19 @@ public class BoneTableTests
         Assert.Equal("root/Root_M/Spine1_M", table.Path(0xb0e35784u));
         Assert.Null(table.Path(0xdeadbeefu));
         Assert.Equal(2, table.Resolved(new[] { 0x20c78f46u, 0xb0e35784u, 0xdeadbeefu }));
+    }
+
+    [Fact]
+    public void HasUnsupportedRig_IgnoresAnOrdinaryBoneTable()
+    {
+        // hashes a supported subject's bone table actually carries
+        Assert.False(BoneTable.HasUnsupportedRig(new[] { 0x5c6bc13du, 0x7a6134d1u, 0xf3ff2a11u, 0x3b4efd1fu }));
+        Assert.False(BoneTable.HasUnsupportedRig(System.Array.Empty<uint>()));
+    }
+
+    [Fact]
+    public void HasUnsupportedRig_OneListedBoneAnswersForTheTable()
+    {
+        Assert.True(BoneTable.HasUnsupportedRig(new uint[] { 0x5c6bc13d, 0x90c776f9, 0x7a6134d1 }));
     }
 }

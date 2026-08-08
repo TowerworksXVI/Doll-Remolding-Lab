@@ -15,6 +15,7 @@ namespace Remold.Core.Tests;
 /// it would hold every unrelated edit with it — and a path a released build already persisted would leave
 /// the dialog unsaveable for good. Install is where a host a built mod would not fire on is refused.
 /// </summary>
+[Collection("Dispatcher")]   // serialized with every other settings.json reader/writer — one file, one bin dir
 public class SettingsLoaderRowTests : IDisposable
 {
     private readonly string _root =

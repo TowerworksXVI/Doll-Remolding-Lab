@@ -71,9 +71,7 @@ public sealed class SceneRig
         if (!skin.IsSkinned) return null;
         try
         {
-            var am = new AssetsManager();
-            var bun = am.LoadBundleFile(new MemoryStream(deobfuscatedBundle), "live.bundle");
-            var inst = am.LoadAssetsFileFromBundle(bun, 0);
+            var (am, inst) = Load(deobfuscatedBundle);
 
             // the Mesh asset's pathId — the SMR's m_Mesh must point at it locally. A caller that knows the
             // exact id passes it, since enemy bundles ship same-named copies.
@@ -84,31 +82,12 @@ public sealed class SceneRig
                     catch { }
             if (meshPathId == 0) return null;
 
-            // its SkinnedMeshRenderer (first match; LOD tiers each have their own mesh + SMR)
-            AssetTypeValueField? smr = null;
-            foreach (var info in inst.file.AssetInfos.Where(i => i.TypeId == 137))
-                try
-                {
-                    var bf = am.GetBaseField(inst, info);
-                    var p = bf["m_Mesh"];
-                    if (p["m_FileID"].AsLong == 0 && p["m_PathID"].AsLong == meshPathId) { smr = bf; break; }
-                }
-                catch { }
-            if (smr is null) return null;
-
-            // ordered bone Transform pathIds — all must be local to this bundle
-            var boneIds = new List<long>(skin.BoneCount);
-            var bonesArr = smr["m_Bones"];
-            var elems = bonesArr.Children.Count == 1 && bonesArr.Children[0].FieldName == "Array"
-                ? bonesArr.Children[0].Children : bonesArr.Children;
-            foreach (var e in elems)
+            // the mesh is LOCAL here, so the reference must be too
+            return Read(am, inst, skin, smr =>
             {
-                if (e["m_FileID"].AsLong != 0) return null;
-                boneIds.Add(e["m_PathID"].AsLong);
-            }
-            if (boneIds.Count != skin.BoneCount) return null;
-
-            return FromScene(CollectNodes(am, inst), boneIds, skin);
+                var p = smr["m_Mesh"];
+                return p["m_FileID"].AsLong == 0 && p["m_PathID"].AsLong == meshPathId;
+            });
         }
         catch { return null; }
     }
@@ -123,36 +102,52 @@ public sealed class SceneRig
         if (!skin.IsSkinned || meshPathId == 0) return null;
         try
         {
-            var am = new AssetsManager();
-            var bun = am.LoadBundleFile(new MemoryStream(deobfuscatedPrefabBundle), "live.bundle");
-            var inst = am.LoadAssetsFileFromBundle(bun, 0);
-
-            // the SMR whose m_Mesh points at the mesh object; the mesh lives in a dependency bundle, so the
-            // path id is the join
-            AssetTypeValueField? smr = null;
-            foreach (var info in inst.file.AssetInfos.Where(i => i.TypeId == 137))
-                try
-                {
-                    var bf = am.GetBaseField(inst, info);
-                    if (bf["m_Mesh"]["m_PathID"].AsLong == meshPathId) { smr = bf; break; }
-                }
-                catch { }
-            if (smr is null) return null;
-
-            var boneIds = new List<long>(skin.BoneCount);
-            var bonesArr = smr["m_Bones"];
-            var elems = bonesArr.Children.Count == 1 && bonesArr.Children[0].FieldName == "Array"
-                ? bonesArr.Children[0].Children : bonesArr.Children;
-            foreach (var e in elems)
-            {
-                if (e["m_FileID"].AsLong != 0) return null;   // bones must be local
-                boneIds.Add(e["m_PathID"].AsLong);
-            }
-            if (boneIds.Count != skin.BoneCount) return null;
-
-            return FromScene(CollectNodes(am, inst), boneIds, skin);
+            var (am, inst) = Load(deobfuscatedPrefabBundle);
+            // the mesh lives in a dependency bundle, so the path id alone is the join
+            return Read(am, inst, skin, smr => smr["m_Mesh"]["m_PathID"].AsLong == meshPathId);
         }
         catch { return null; }
+    }
+
+    private static (AssetsManager Manager, AssetsFileInstance Instance) Load(byte[] deobfuscatedBundle)
+    {
+        var am = new AssetsManager();
+        var bun = am.LoadBundleFile(new MemoryStream(deobfuscatedBundle), "live.bundle");
+        return (am, am.LoadAssetsFileFromBundle(bun, 0));
+    }
+
+    /// <summary>What both public reads do once their own SMR is picked out: the bundle's first SMR that
+    /// <paramref name="selects"/> accepts (LOD tiers each have their own mesh + SMR, so first-match is the
+    /// selector's problem, not this one), its ordered bone Transform pathIds, and the rig those place.
+    /// Null when no SMR matches, when a bone lives outside this bundle — the Transform hierarchy here can't
+    /// place it, so no rest pose is derivable — or when the bone list doesn't line up with the skin. A
+    /// per-asset parse failure is skipped rather than fatal: a bundle carrying one unreadable renderer
+    /// still has its own to offer.</summary>
+    private static SceneRig? Read(AssetsManager am, AssetsFileInstance inst, MeshSkin skin,
+        Func<AssetTypeValueField, bool> selects)
+    {
+        AssetTypeValueField? smr = null;
+        foreach (var info in inst.file.AssetInfos.Where(i => i.TypeId == 137))
+            try
+            {
+                var bf = am.GetBaseField(inst, info);
+                if (selects(bf)) { smr = bf; break; }
+            }
+            catch { }
+        if (smr is null) return null;
+
+        var boneIds = new List<long>(skin.BoneCount);
+        var bonesArr = smr["m_Bones"];
+        var elems = bonesArr.Children.Count == 1 && bonesArr.Children[0].FieldName == "Array"
+            ? bonesArr.Children[0].Children : bonesArr.Children;
+        foreach (var e in elems)
+        {
+            if (e["m_FileID"].AsLong != 0) return null;   // bones must be local
+            boneIds.Add(e["m_PathID"].AsLong);
+        }
+        if (boneIds.Count != skin.BoneCount) return null;
+
+        return FromScene(CollectNodes(am, inst), boneIds, skin);
     }
 
     /// <summary>The bundle's Transform nodes with resolved GameObject names.</summary>
@@ -225,7 +220,7 @@ public sealed class SceneRig
         {
             var g = skin.BindPoses[i] * WorldOf(boneIds[i]);
             if (g0 is null) g0 = g;
-            else if (RestBake.RotationDiff(g, g0.Value) > 1e-3f || RestBake.TranslationDiff(g, g0.Value) > 1e-2f)
+            else if (RestBake.RotationDiff(g, g0.Value) > RestBake.RotationTol || RestBake.TranslationDiff(g, g0.Value) > RestBake.TranslationTol)
             { consistent = false; break; }
         }
         var uprighting = consistent && g0 is not null ? RestBake.Snap(g0.Value) : null;

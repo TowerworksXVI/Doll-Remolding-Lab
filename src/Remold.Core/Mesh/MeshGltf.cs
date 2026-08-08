@@ -113,11 +113,16 @@ public static class MeshGltf
     /// into the geometry while posing each bone at <c>inverse(bindPose)·G</c>, so model and rig stand
     /// upright together (see <see cref="RestBake"/>; undone at package build).</para>
     /// </summary>
+    /// <param name="extraBones">Bones of the SUBJECT this geometry does not pose, so the armature a modder
+    /// sees covers the whole outfit rather than the one part they opened (see <see cref="ExtraBone"/>).</param>
+    /// <param name="log">where an extra bone this export had to refuse is named (see
+    /// <see cref="AddExtraBones"/>); null drops those lines.</param>
     public static void ExportRiggedGlb(UnityMesh mesh, MeshSkin skin, Func<uint, string?> resolveBone,
         string outPath, string? baseColorPng = null, string? normalPng = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh = null,
         IReadOnlyList<string>? scenePaths = null, Matrix4x4? uprighting = null,
-        IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null)
+        IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null,
+        IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null)
     {
         // Uprighting is the ONLY placement this export applies, and it moves geometry and joints together.
         // A part whose prefab mounts it by an unbakeable offset gets no placement at all: its bytes have to
@@ -127,7 +132,7 @@ public static class MeshGltf
         var model = ModelRoot.CreateModel();
         var scene = model.UseScene("scene");
         var (jointNodes, armature) = BuildArmature(scene, skin, resolveBone, scenePaths,
-            uprighting, connectorRests);
+            uprighting, connectorRests, extraBones, log);
         var glSkin = BindSkin(model, mesh.Name + "_skin", jointNodes, armature);
 
         var (joints, weights) = SkinAttributes(mesh);
@@ -163,29 +168,71 @@ public static class MeshGltf
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? PerSubmesh = null,
         IReadOnlyList<Matrix4x4>? ContextPose = null);
 
+    /// <summary>One bone of the SUBJECT that the exported geometry does not pose: its bone-name hash, the
+    /// '/'-joined path it hangs on, and its rest world in Unity space — already composed with whatever
+    /// uprighting the export bakes, so this codec only reflects it (see
+    /// <see cref="AxisConvention.Reflect"/>).
+    ///
+    /// <para>These join the skin as JOINTS, appended after every joint the geometry poses and referenced by
+    /// no vertex — a zero-weighted TAIL on the joint list. Joints is what they have to be: Blender's glTF
+    /// importer turns into armature bones only the skin's joints and their node ancestors, so an extra
+    /// carried as a plain node lands in the scene as a loose empty, outside the armature and impossible to
+    /// weight-paint against (a vertex group binds to a bone, never to an empty). Appending at the TAIL is
+    /// what keeps the invariant the node representation was protecting: every joint the geometry poses holds
+    /// the index and the position it would have held with no extras at all, so a send that touched nothing
+    /// re-splits onto the same bones and JOINTS_0/WEIGHTS_0 are byte-identical either way. Each is
+    /// hash-named like any other joint, so weight painted onto one comes back on a joint
+    /// <see cref="MeshApply.ResolveAuthoredJoints"/> maps by hash like every other.</para>
+    ///
+    /// <para>BYTE-stability of the glb is NOT among the invariants, and the gap opens where an extra's path
+    /// is a CONNECTOR PREFIX of a bone the skin binds. Unplaced, that connector has no world; the extra gives
+    /// it one, so <see cref="BuildNodeTree"/> re-expresses each child's local as
+    /// <c>world·inverse(parentWorld)</c> and <see cref="BindSkin"/> derives the inverse-bind matrix from the
+    /// recomposed world — the joints under it shift by float epsilon (nothing at all on a translation-only
+    /// rig, ~1e-7 measured on a rotated one). The connector node also
+    /// gains the <c>_&lt;hash8&gt;</c> suffix it has no hash for while unplaced. Both are invisible to the
+    /// re-split, which keys on joint names and hashes; neither leaves room for a byte-compare across the
+    /// with/without pair.</para>
+    ///
+    /// <para>A bone the geometry DOES pose keeps its own placement: an entry whose path already carries a
+    /// bone is skipped, so nothing here can move a joint the skin binds — or duplicate it into the
+    /// tail.</para></summary>
+    public readonly record struct ExtraBone(uint Hash, string Path, Matrix4x4 RestWorld);
+
     /// <summary>
     /// Write several skinned parts into ONE glb sharing ONE armature = the <b>union</b> of all their bones.
     /// Each part keeps its own geometry + preview material and binds to the shared skin, its per-vertex
     /// JOINTS remapped from its own bone order into the union order. <c>ImportGlb(path, meshName)</c> reads
     /// any one part back by name, so the round-trip and package payload stay per-part.
     /// </summary>
-    public static void ExportCombinedRiggedGlb(IReadOnlyList<RiggedPart> parts, Func<uint, string?> resolveBone, string outPath)
+    /// <param name="extraBones">Bones of the SUBJECT that none of <paramref name="parts"/> poses — the rest
+    /// of the outfit's skeleton (see <see cref="ExtraBone"/>).</param>
+    /// <param name="log">where an extra bone this export had to refuse is named (see
+    /// <see cref="AddExtraBones"/>); null drops those lines.</param>
+    public static void ExportCombinedRiggedGlb(IReadOnlyList<RiggedPart> parts, Func<uint, string?> resolveBone,
+        string outPath, IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null)
     {
         var model = ModelRoot.CreateModel();
         var scene = model.UseScene("scene");
 
-        // 1. union of bones across every part (first part to use a bone fixes its pose)
+        // 1. union of bones across every part (first part to use a bone fixes its pose), then the subject's
+        // remaining bones — added LAST so no part's joint index moves
         var (worldOf, hashOf, order) = NewBoneAccumulators();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var partPaths = parts.Select(p => CollectBones(p.Skin, resolveBone, worldOf, hashOf, order, seen,
             p.ScenePaths, p.Uprighting, p.ConnectorRests, p.ContextPose)).ToList();
+        var extraPaths = AddExtraBones(extraBones, worldOf, hashOf, order, seen, log);
         var (nodeOf, armature) = BuildNodeTree(scene, worldOf, hashOf, order);
 
-        // 2. union skin: the actual bones in hierarchy order; combined joint index per bone path.
+        // 2. union skin: the parts' own bones in hierarchy order, then the subject's remaining bones as a
+        // zero-weighted TAIL (see ExtraBone) — appended, never merged into the hierarchy walk, so every
+        // index a part remaps onto is the index it would have had with no extras at all.
         // Keyed on hashOf, not worldOf — a connector prefix gains a world when the scene rig supplies its
         // rest (see CollectBones), but only hash-named bones may be skin joints: a hash-less joint in a
         // send-back would poison the per-part re-split and every later open of that part.
-        var unionBones = order.Where(hashOf.ContainsKey).ToList();
+        var extraSet = new HashSet<string>(extraPaths, StringComparer.Ordinal);
+        var unionBones = order.Where(p => hashOf.ContainsKey(p) && !extraSet.Contains(p)).ToList();
+        unionBones.AddRange(extraPaths);
         var combinedIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < unionBones.Count; i++) combinedIndex[unionBones[i]] = i;
         var glSkin = BindSkin(model, "combined_skin", unionBones.Select(p => nodeOf[p]).ToList(), armature);
@@ -366,7 +413,12 @@ public static class MeshGltf
     }
 
     /// <summary>Create a skin over the given joint nodes (in joint order), deriving each inverse-bind matrix
-    /// from the node's exact rest world, and anchor it on the armature root.</summary>
+    /// from the node's exact rest world, and anchor it on the armature root.
+    ///
+    /// <para>The invert is unchecked because every joint reaching here already has an invertible rest: a
+    /// skinned bone's comes from inverting its bind pose, and an extra's is refused at
+    /// <see cref="AddExtraBones"/>. Were one to slip through, <see cref="Matrix4x4.Invert(Matrix4x4, out
+    /// Matrix4x4)"/> would leave the result full of NaN (measured), not zeroed.</para></summary>
     private static Skin BindSkin(ModelRoot model, string name, List<Node> jointNodes, Node armature)
     {
         var skin = model.CreateSkin(name);
@@ -423,7 +475,9 @@ public static class MeshGltf
 
     /// <summary>
     /// Build the armature for a skin and return the joint nodes <b>in bone order</b> (so a vertex's
-    /// BlendIndices index straight into <c>skin.Joints</c> with no remap) plus the skeleton root. Each
+    /// BlendIndices index straight into <c>skin.Joints</c> with no remap), followed by
+    /// <paramref name="extraBones"/> as a zero-weighted tail no vertex names (see <see cref="ExtraBone"/>),
+    /// plus the skeleton root. Each
     /// bone's rest world = <c>Reflect(inverse(bindPose))</c>; the path splits on '/' into a parented node
     /// chain, and intermediate "connector" prefixes that aren't skinned bones get an identity world. A
     /// node's local = <c>world · inverse(parentWorld)</c>, so every node's world lands back on its assigned
@@ -434,13 +488,70 @@ public static class MeshGltf
     private static (List<Node> jointNodes, Node armature) BuildArmature(
         Scene scene, MeshSkin skin, Func<uint, string?> resolveBone,
         IReadOnlyList<string?>? scenePaths = null, Matrix4x4? uprighting = null,
-        IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null)
+        IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null,
+        IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null)
     {
         var (worldOf, hashOf, order) = NewBoneAccumulators();
-        var paths = CollectBones(skin, resolveBone, worldOf, hashOf, order, new HashSet<string>(StringComparer.Ordinal),
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var paths = CollectBones(skin, resolveBone, worldOf, hashOf, order, seen,
             scenePaths, uprighting, connectorRests);
+        var extraPaths = AddExtraBones(extraBones, worldOf, hashOf, order, seen, log);
         var (nodeOf, armature) = BuildNodeTree(scene, worldOf, hashOf, order);
-        return (paths.Select(p => nodeOf[p]).ToList(), armature);   // joints in this skin's bone order
+        // this skin's bone order first — index-for-index what it would be with no extras — then the tail
+        return (paths.Concat(extraPaths).Select(p => nodeOf[p]).ToList(), armature);
+    }
+
+    /// <summary>
+    /// Fold the subject's remaining bones (<see cref="ExtraBone"/>) into the accumulated armature state,
+    /// AFTER every skinned bone is in: an entry whose path already carries a bone is skipped, so the joints
+    /// the skin binds keep both their placement and their index. Returns the paths that became bones here,
+    /// IN THE ORDER THEY WERE ADDED — the tail segment each export appends to its joint list.
+    ///
+    /// <para>That tail is this list, never a filter over <paramref name="order"/>: <paramref name="order"/>
+    /// is the path-ordering the node tree is built from, where an extra sitting on a CONNECTOR PREFIX of a
+    /// skinned bone was already registered as a prefix and would come back mid-list. Deriving the tail that
+    /// way would insert a joint ahead of joints the geometry poses and move their indices, which is the one
+    /// thing appending is for.</para>
+    ///
+    /// <para>A prefix these introduce that is neither a bone nor a known connector gets
+    /// <see cref="BuildNodeTree"/>'s identity world, as any unplaced connector does.</para>
+    ///
+    /// <para>A rest world that will not INVERT is refused here, named through <paramref name="log"/>.
+    /// <see cref="Matrix4x4.Invert(Matrix4x4, out Matrix4x4)"/> fills its result with NaN when it fails
+    /// (measured; it does not zero it), and two things downstream invert this world unchecked:
+    /// <see cref="BindSkin"/> for the joint's inverse-bind matrix, and <see cref="BuildNodeTree"/> for
+    /// every CHILD's local. One degenerate extra would therefore hand Blender an armature with NaN in it
+    /// rather than one missing a bone.</para>
+    /// </summary>
+    /// <param name="log">named refusals, one line per bone; null keeps them to the caller's silence.</param>
+    private static List<string> AddExtraBones(IReadOnlyList<ExtraBone>? extras,
+        Dictionary<string, Matrix4x4> worldOf, Dictionary<string, uint> hashOf, List<string> order,
+        HashSet<string> seen, Action<string>? log = null)
+    {
+        var added = new List<string>();
+        if (extras is null) return added;
+        foreach (var bone in extras)
+        {
+            // hashOf carries every bone already placed, skinned or extra, so a path can never join the tail
+            // twice and an extra can never shadow a joint the geometry poses
+            if (bone.Path.Length == 0 || hashOf.ContainsKey(bone.Path)) continue;
+            if (!Matrix4x4.Invert(bone.RestWorld, out _))
+            {
+                log?.Invoke($"bone {bone.Path}: it has no usable rest pose, so it stays off this armature");
+                continue;
+            }
+            var segs = bone.Path.Split('/');
+            for (int k = 1; k <= segs.Length; k++)
+            {
+                var prefix = string.Join("/", segs.Take(k));
+                if (seen.Add(prefix)) order.Add(prefix);
+            }
+            // a connector rest already placed this prefix from the prefab's own scene worlds — keep it
+            if (!worldOf.ContainsKey(bone.Path)) worldOf[bone.Path] = AxisConvention.Reflect(bone.RestWorld);
+            hashOf[bone.Path] = bone.Hash;
+            added.Add(bone.Path);
+        }
+        return added;
     }
 
     private static (Dictionary<string, Matrix4x4> worldOf, Dictionary<string, uint> hashOf, List<string> order)
@@ -1051,6 +1162,12 @@ public static class MeshGltf
     /// skin as ordinary <c>BlendIndices</c>/<c>BlendWeight</c> channels, paired with the
     /// <see cref="MeshSkin"/> naming and posing those bones. Its own joints are the bone list, so every
     /// influence the modder painted rides through — including one on a bone the part's game mesh lacks.
+    ///
+    /// <para>That bone list is the FILE's, which since <see cref="ExtraBone"/> spans the whole subject: the
+    /// zero-weighted tail comes back as bones like any other, at the worlds this file happened to bake. A
+    /// caller placing this skin beside other parts' has to reduce it to what the geometry rides first
+    /// (<see cref="MeshSkin.WeightedOnly"/>) — otherwise the tail claims the union's placement for bones
+    /// those other parts pose.</para>
     ///
     /// <para>Bind poses are reconstructed as <c>inverse(Reflect(world))</c> from the joint nodes' rest
     /// worlds (<see cref="AxisConvention.Reflect"/> is self-inverse). Any rest bake or scene pose is already

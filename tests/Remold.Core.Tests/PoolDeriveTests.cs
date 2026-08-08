@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
+using Remold.Core.Model;
 using Xunit;
 using static Remold.Core.Tests.Support.PoolFixtures;
 
@@ -132,6 +133,30 @@ public class PoolDeriveTests
     }
 
     [Fact]
+    public void An_isolated_subjects_parts_admit_only_the_target()
+    {
+        // The weapon-family rule: parts are separate game objects with no co-draw guarantee, so a
+        // Replace on any of them pools that part alone whatever the per-part rules would admit.
+        var (candidates, excluded) = PoolDerive.PoolCandidates(NarrowHairRoster, "body",
+            partsPoolAlone: true);
+
+        Assert.Equal(new[] { "body" }, candidates.Select(p => p.Mesh));
+        Assert.Equal(new[] { "face", "cloth", "hair" }, excluded.Select(m => m.Mesh));
+        Assert.All(excluded, m => Assert.Contains("draw independently", m.Why));
+    }
+
+    [Fact]
+    public void An_isolated_subject_forms_no_coverage_group()
+    {
+        // Even the target's own arm would lean on sibling posers, and no sibling of an isolated
+        // subject is guaranteed on screen with the target.
+        var (candidates, _) = PoolDerive.PoolCandidates(NarrowHairRoster, "body", partsPoolAlone: true);
+
+        Assert.Empty(PoolDerive.VariantGroups(NarrowHairRoster, schemeSlots: null,
+            System.Array.Empty<PoolDerive.MissingPart>(), candidates, "body", partsPoolAlone: true));
+    }
+
+    [Fact]
     public void A_narrow_part_left_out_takes_no_bone_of_another_parts_pool()
     {
         // Hash 11 is the body's, tabled by the narrow hair too. A Replace on the body pools the body alone,
@@ -172,6 +197,183 @@ public class PoolDeriveTests
         Assert.Equal(new[] { "body", "hair" },
             PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), NarrowHairRoster),
                 NarrowHairRoster, tiers, maxParts: 8).Pool);
+    }
+
+    // ---- candidacy of a part outside the shadow pass ----------------------------------------------
+
+    /// <summary>The shared roster with the hair's renderer marked shadow-casting Off. It tables hash 30
+    /// alone, and hash 11 is the one it shares with the body.</summary>
+    private static readonly IReadOnlyList<PoolDerive.PartBones> ShadowOffHairRoster = new[]
+    {
+        Part("face", 1, 2, 3),
+        Part("body", 10, 11, 12, 13, 2),
+        Part("cloth", 20, 21),
+        new PoolDerive.PartBones("hair", new HashSet<uint> { 30, 11 }, CastsShadows: false),
+    };
+
+    [Fact]
+    public void A_shadow_off_part_is_a_candidate_only_for_a_replace_on_itself()
+    {
+        var (forBody, excluded) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "body");
+        Assert.Equal(new[] { "face", "body", "cloth" }, forBody.Select(p => p.Mesh));
+        Assert.Equal("hair", Assert.Single(excluded).Mesh);
+        Assert.Contains("casts no shadow", excluded[0].Why);
+
+        // the target is always admitted: its own capture fires exactly when the replacement is visible
+        var (forHair, none) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "hair");
+        Assert.Equal(new[] { "face", "body", "cloth", "hair" }, forHair.Select(p => p.Mesh));
+        Assert.Empty(none);
+    }
+
+    [Fact]
+    public void A_shadow_off_part_left_out_takes_no_bone_of_another_parts_pool()
+    {
+        // Hash 11 is the body's, tabled by the shadow-off hair too. A Replace on the body pools the body
+        // alone, where under the whole roster the hair would have joined it.
+        var donor = Donor(10, 11);
+        var (candidates, excluded) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "body");
+        Assert.Equal(new[] { "body" },
+            PoolDerive.Derive(donor, candidates, missingParts: excluded, replacedPart: "body").Pool);
+        Assert.Equal(new[] { "body", "hair" }, PoolDerive.Derive(donor, ShadowOffHairRoster).Pool);
+    }
+
+    [Fact]
+    public void A_bone_only_a_left_out_shadow_off_part_owns_names_that_part()
+    {
+        // The user-visible payoff: the refusal names the part AND why it was held back.
+        var (candidates, excluded) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "body");
+        var e = Assert.Throws<InvalidDataException>(() =>
+            PoolDerive.Derive(Donor(10, 30), candidates, missingParts: excluded, replacedPart: "body"));
+        Assert.Contains("Left out of the pool: 'hair' · it casts no shadow", e.Message);
+        Assert.DoesNotContain("different armature", e.Message);
+    }
+
+    [Fact]
+    public void A_shadow_off_part_is_no_tier_coverage_carrier_for_another_part()
+    {
+        // Candidacy is the ONE seam: tier coverage reads the same set, so the shadow-off hair can't be
+        // recruited to carry the body tier's bone by the back door.
+        var (candidates, _) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "body");
+        var derived = PoolDerive.Derive(Donor(10, 11, 12), candidates, replacedPart: "body");
+        var tiers = TiersOf(
+            Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 30)),
+            Draws("hair", new uint[] { 30 }, Tier("hair_lod1", "h1", 30)));
+
+        var e = Assert.Throws<InvalidDataException>(() =>
+            PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8));
+
+        Assert.Contains("poses bone 0x0000001e that no part of this outfit can supply", e.Message);
+        // the same tier over the whole roster is covered, so it is candidacy that decided this
+        Assert.Equal(new[] { "body", "hair" },
+            PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), ShadowOffHairRoster),
+                ShadowOffHairRoster, tiers, maxParts: 8).Pool);
+    }
+
+    [Fact]
+    public void A_part_failing_two_rules_reports_the_earlier_one()
+    {
+        // Narrow AND shadow-off: the narrow rule runs first, so that is the reason the modder is given.
+        var roster = new[]
+        {
+            Part("body", 10, 11),
+            new PoolDerive.PartBones("hair", new HashSet<uint> { 30 }, Narrow: true, CastsShadows: false),
+        };
+        var (_, excluded) = PoolDerive.PoolCandidates(roster, "body");
+        Assert.Contains("one influence per vertex", Assert.Single(excluded).Why);
+    }
+
+    // ---- candidacy of a part the game's own scene logic can withhold ------------------------------
+
+    /// <summary>The shared roster with the coat marked by the dorm context component's coat list. It
+    /// tables hash 30 alone, and hash 11 is the one it shares with the body.</summary>
+    private static IReadOnlyList<PoolDerive.PartBones> WithheldCoatRoster(VisibilityOverride why) => new[]
+    {
+        Part("face", 1, 2, 3),
+        Part("body", 10, 11, 12, 13, 2),
+        Part("cloth", 20, 21),
+        new PoolDerive.PartBones("coat", new HashSet<uint> { 30, 11 }, Visibility: why),
+    };
+
+    [Theory]
+    [InlineData(VisibilityOverride.CoatList, "dresses it on and off separately from the scene")]
+    [InlineData(VisibilityOverride.DormHidden, "hides it in the dorm whatever its name says")]
+    [InlineData(VisibilityOverride.LobbyHidden, "hides it on the crew deck whatever its name says")]
+    [InlineData(VisibilityOverride.TimelineNamed, "a dorm scene can hide or reveal it mid-pose")]
+    public void A_withheld_part_is_a_candidate_only_for_a_replace_on_itself(
+        VisibilityOverride why, string expectedReason)
+    {
+        var roster = WithheldCoatRoster(why);
+        var (forBody, excluded) = PoolDerive.PoolCandidates(roster, "body");
+        Assert.Equal(new[] { "face", "body", "cloth" }, forBody.Select(p => p.Mesh));
+        Assert.Equal("coat", Assert.Single(excluded).Mesh);
+        // each mechanism keeps its own sentence, so a refusal teaches which of the game's data said so
+        Assert.Contains(expectedReason, excluded[0].Why);
+
+        // the target is always admitted: its own capture fires exactly when the replacement is visible
+        var (forCoat, none) = PoolDerive.PoolCandidates(roster, "coat");
+        Assert.Equal(new[] { "face", "body", "cloth", "coat" }, forCoat.Select(p => p.Mesh));
+        Assert.Empty(none);
+    }
+
+    [Fact]
+    public void A_withheld_part_left_out_takes_no_bone_of_another_parts_pool()
+    {
+        // Hash 11 is the body's, tabled by the withheld coat too. A Replace on the body pools the body
+        // alone, where under the whole roster the coat would have joined it.
+        var roster = WithheldCoatRoster(VisibilityOverride.CoatList);
+        var donor = Donor(10, 11);
+        var (candidates, excluded) = PoolDerive.PoolCandidates(roster, "body");
+        Assert.Equal(new[] { "body" },
+            PoolDerive.Derive(donor, candidates, missingParts: excluded, replacedPart: "body").Pool);
+        Assert.Equal(new[] { "body", "coat" }, PoolDerive.Derive(donor, roster).Pool);
+    }
+
+    [Fact]
+    public void A_bone_only_a_left_out_withheld_part_owns_names_that_part()
+    {
+        // The user-visible payoff: the refusal names the part AND why it was held back.
+        var (candidates, excluded) =
+            PoolDerive.PoolCandidates(WithheldCoatRoster(VisibilityOverride.LobbyHidden), "body");
+        var e = Assert.Throws<InvalidDataException>(() =>
+            PoolDerive.Derive(Donor(10, 30), candidates, missingParts: excluded, replacedPart: "body"));
+        Assert.Contains("Left out of the pool: 'coat' · the game hides it on the crew deck", e.Message);
+        Assert.DoesNotContain("different armature", e.Message);
+    }
+
+    [Fact]
+    public void A_withheld_part_is_no_tier_coverage_carrier_for_another_part()
+    {
+        // Candidacy is the ONE seam: tier coverage reads the same set, so the withheld coat can't be
+        // recruited to carry the body tier's bone by the back door.
+        var roster = WithheldCoatRoster(VisibilityOverride.CoatList);
+        var (candidates, _) = PoolDerive.PoolCandidates(roster, "body");
+        var derived = PoolDerive.Derive(Donor(10, 11, 12), candidates, replacedPart: "body");
+        var tiers = TiersOf(
+            Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 30)),
+            Draws("coat", new uint[] { 30 }, Tier("coat_lod1", "c1", 30)));
+
+        var e = Assert.Throws<InvalidDataException>(() =>
+            PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8));
+
+        Assert.Contains("poses bone 0x0000001e that no part of this outfit can supply", e.Message);
+        // the same tier over the whole roster is covered, so it is candidacy that decided this
+        Assert.Equal(new[] { "body", "coat" },
+            PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), roster),
+                roster, tiers, maxParts: 8).Pool);
+    }
+
+    [Fact]
+    public void A_part_failing_the_shadow_rule_and_the_visibility_rule_reports_the_shadow_one()
+    {
+        // The visibility rule runs LAST, so an earlier rule that also catches the part keeps its say.
+        var roster = new[]
+        {
+            Part("body", 10, 11),
+            new PoolDerive.PartBones("coat", new HashSet<uint> { 30 },
+                CastsShadows: false, Visibility: VisibilityOverride.CoatList),
+        };
+        var (_, excluded) = PoolDerive.PoolCandidates(roster, "body");
+        Assert.Contains("casts no shadow", Assert.Single(excluded).Why);
     }
 
     [Fact]

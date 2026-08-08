@@ -29,9 +29,10 @@ namespace Remold.Core.Workbench;
 public static class RosterSnapshot
 {
     // Bump on any change to what the fill KEEPS or how a part token is derived — the stored lists would
-    // otherwise be answered as if the current rules had produced them. The curated set is keyed
+    // otherwise be answered as if the current rules had produced them, and a subject POPULATION the file
+    // predates (the weapon rosters) would read as dropped rather than unfilled. The curated set is keyed
     // separately (CuratedSet), so adding or re-routing an entry there needs no bump.
-    private const int Schema = 7;
+    private const int Schema = 8;
 
     private sealed record CacheFile(int SchemaVersion, string CatalogVersion, string? CuratedSet,
         Dictionary<long, List<string>> PartsByModelConfigId);

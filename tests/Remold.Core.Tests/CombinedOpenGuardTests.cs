@@ -5,9 +5,9 @@ using Xunit;
 
 namespace Remold.Core.Tests;
 
-/// <summary>The cached combined-glb reuse gate: WHEN a cached session glb may be launched as-is, and when
-/// it must be rebuilt — a changed part set, a changed edit, a game update, or a file this app didn't
-/// publish.</summary>
+/// <summary>The cached combined-glb reuse gate, both halves: WHEN a cached session glb may be launched
+/// as-is, and when it must be rebuilt — a changed part set, a changed edit, a game update, or a file this
+/// app didn't publish — plus whether a fresh build may be left cached for the next open at all.</summary>
 public class CombinedOpenGuardTests
 {
     private static readonly string[] NoTextures = System.Array.Empty<string>();
@@ -190,6 +190,35 @@ public class CombinedOpenGuardTests
         Assert.False(AssetExporter.CombinedCacheHit(combined, fp, "fp-1"));   // nothing cached at all
         System.IO.File.WriteAllText(combined, "SESSION-GLB");
         Assert.False(AssetExporter.CombinedCacheHit(combined, fp, "fp-1"));   // a file nobody blessed
+    }
+
+    // ---- the bless side: may a fresh build be LEFT cached for the next open? ----
+
+    private static readonly string[] Nothing = System.Array.Empty<string>();
+    private static readonly string[] OneRow = { "cloth1" };
+
+    [Fact]
+    public void CombinedCacheable_WhenNothingWasUnavailable()
+    {
+        // Also the regression this gate exists for: a row that measured unmeasurable degrades on EVERY
+        // rerun (every character's face row does) while the catalog serves the same bytes each time, so
+        // the cached tail is what a rebuild would write. Such a row is deliberately not one of the four
+        // inputs — a build carrying only those degrades has to look exactly like a clean one here, which
+        // is why this case is spelled with empty collections rather than a "degraded" argument.
+        Assert.True(AssetExporter.CombinedCacheable(Nothing, hasRoster: true, Nothing, rosterInputsUnreadable: false));
+    }
+
+    [Fact]
+    public void CombinedCacheable_AnyOneUnavailableInputBlocksReuse()
+    {
+        // a part carrying an edit that fell back to the game copy: the fingerprint would claim the edit
+        Assert.False(AssetExporter.CombinedCacheable(OneRow, hasRoster: true, Nothing, rosterInputsUnreadable: false));
+        // no roster at all
+        Assert.False(AssetExporter.CombinedCacheable(Nothing, hasRoster: false, Nothing, rosterInputsUnreadable: false));
+        // a row whose bytes were unavailable this run — it may read differently once the lock clears
+        Assert.False(AssetExporter.CombinedCacheable(Nothing, hasRoster: true, OneRow, rosterInputsUnreadable: false));
+        // the roster's own inputs didn't read whole
+        Assert.False(AssetExporter.CombinedCacheable(Nothing, hasRoster: true, Nothing, rosterInputsUnreadable: true));
     }
 
     private sealed class TempWorkspace : System.IDisposable

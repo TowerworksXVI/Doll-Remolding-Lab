@@ -56,7 +56,12 @@ public sealed class SharingIndex
     // Bump on any change to what is measured, how wearers/witnesses are derived, or the row shape. This
     // is also the ONLY lever over the app's own side of a measurement — a mesh prefix, a token rule, a
     // part-ownership test — since a subject's fingerprint tracks the game's data and not this code.
-    private const int Schema = 4;
+    // The one row field this does not have to cover is R's SHAPE: a read record in any other format than
+    // the one BundleReads writes fails its length check and re-measures the row on its own. What the shape
+    // cannot say is which HASH the third key of each triple is — schema 5 shipped two incompatible answers
+    // to that inside one arc (the physical filename, then the content hash), both a whole number of
+    // triples, so the version is what tells them apart.
+    private const int Schema = 6;
 
     /// <summary>One roster outfit that wears an asset. Display fields fall back to the internal
     /// names when localization resolved nothing.</summary>
@@ -69,9 +74,8 @@ public sealed class SharingIndex
     /// meshes ELIGIBLE to witness its presence, the fingerprint of the catalog scope, and the
     /// <see cref="BundleReads"/> record of the bundles read. <see cref="WitnessCandidates"/> is eligibility
     /// only — privacy is derived across the surviving population at load, so under-listing costs witnesses
-    /// but can never mint a wrong one. <see cref="Reads"/> null is the SEED-BOOTSTRAP allowance: the
-    /// shipped seed predates the field, and such a row is reusable on its fingerprint alone until it is
-    /// measured again.</summary>
+    /// but can never mint a wrong one. <see cref="Reads"/> null is the BOOTSTRAP allowance: a row carrying
+    /// no read record at all is reusable on its fingerprint alone until it is measured again.</summary>
     public sealed record Observation(string Fingerprint, IReadOnlyList<string> Mesh,
         IReadOnlyList<string> Tex, IReadOnlyList<string> WitnessCandidates, string? Reads = null);
 
@@ -222,33 +226,40 @@ public sealed class SharingIndex
 
     // ---- witness eligibility --------------------------------------------------------------------------
 
-    // Modular outfit pieces (P1_/P2_/P3_…) mix per player choice, so any combination can co-draw; a
-    // context-locked variant (_Dorm/_Fight) draws in one scene class only. Neither is a reliable
-    // presence signal, however private its ib. Both stay fully editable — this gates only what may
-    // WITNESS presence.
-    private static readonly Regex ModularToken = new(@"(^|_)[Pp]\d+_", RegexOptions.Compiled);
-
+    // Four exclusions, none of them a reliable presence signal however private the ib. Modular outfit
+    // pieces (P1_/P2_/P3_…) mix per player choice, so any combination can co-draw; a context-locked
+    // variant (_Dorm/_Fight) draws in one scene class only; a renderer outside the shadow pass
+    // (m_CastShadows Off, carried per tier) issues no draw at all once the camera leaves it, where a
+    // casting one keeps a depth-only draw going; and a node the game's own dorm and lobby logic can
+    // withhold draws on a condition its name does not carry. All four stay fully editable — this gates
+    // only what may WITNESS presence. The name-shaped two answer here; the other two ride flags read off
+    // the prefab, so neither costs a read of its own.
+    //
+    // The modular seam is ShoeNodeMatch's, not a copy: the timeline matcher and this measurement have to
+    // agree on what "modular" means, so there is one home for the shape and both read it.
     private static bool ContextLocked(string name) =>
         name.EndsWith("_dorm", StringComparison.OrdinalIgnoreCase)
         || name.EndsWith("_fight", StringComparison.OrdinalIgnoreCase);
 
     internal static bool EligibleWitnessName(string name) =>
-        !ModularToken.IsMatch(name) && !ContextLocked(name);
+        !ShoeNodeMatch.CarriesModularSeam(name) && !ContextLocked(name);
 
     // ---- build ----------------------------------------------------------------------------------------
 
     /// <summary>
     /// Measures the population, reading only what <paramref name="previous"/> cannot supply: an outfit
-    /// whose <see cref="SubjectFingerprint"/> still matches AND whose <see cref="BundleReads"/> still join
-    /// to the same bundles keeps its row; everything else (moved, never covered, FAILED) is read. Minutes
+    /// whose <see cref="SubjectFingerprint"/> still matches AND whose <see cref="BundleReads"/> still
+    /// resolve to the same bundle content keeps its row; everything else (moved, never covered, FAILED) is
+    /// read. Minutes
     /// on a whole population when nothing is kept; safe to cancel — no partial state is published.
     /// <paramref name="population"/> must carry the launch-shaped roster (display names enriched, curated
     /// skins merged) so curated subjects are covered. The plan pass is catalog-only, so a run with nothing
     /// to re-read opens no bundle and reports no progress.
     /// </summary>
     public static SharingIndex Build(SharingPopulation population, CatalogIndex catalog,
-        Func<string, byte[]?> tryDeobfuscate, string catalogVersion, SharingIndex? previous = null,
-        IProgress<SharingProgress>? progress = null, CancellationToken ct = default)
+        Func<string, string?> contentHashOf, Func<string, byte[]?> tryDeobfuscate, string catalogVersion,
+        SharingIndex? previous = null, IProgress<SharingProgress>? progress = null,
+        CancellationToken ct = default)
     {
         var roster = population.Roster;
         var reader = new BundleReader();
@@ -266,7 +277,7 @@ public sealed class SharingIndex
         // Pass 1 — what has to be read. A reusable row needs a prior measurement of THAT outfit under a
         // matching fingerprint AND unmoved read bundles; a prior FAILURE is never reused, since a failure is
         // a fact about the run (a bundle held open) and not about the catalog. Catalog reads only.
-        var readKeys = previous is null ? null : BundleReads.CurrentKeys(catalog);
+        var readKeys = previous is null ? null : BundleReads.CurrentKeys(catalog, contentHashOf);
         var plan = new List<(Character Character, Outfit Outfit, string Fingerprint, Observation? Reuse)>();
         foreach (var character in roster)
         foreach (var outfit in character.Outfits)
@@ -300,9 +311,16 @@ public sealed class SharingIndex
             var outfitMesh = new List<string>();
             var outfitTex = new List<string>();
             var outfitWitness = new List<string>();
-            // Every bundle this outfit's mesh and texture identities came out of, whether the value was read
-            // here or served from a cross-outfit memo: the row records what its data DEPENDS on, and a memo
-            // hit depends on the same bundle as the read that filled it.
+            // Every bundle this outfit's measurement DEPENDS on, whether the value was read here or served
+            // from a cross-outfit memo (a memo hit depends on the same bundle as the read that filled it):
+            // the mesh and texture bundles gathered below, plus the assembly prefabs the model was parsed
+            // out of and the bundles its materials were read out of. Those last two belong here even though
+            // no hash is taken from them. A prefab decides which slots become parts, which tiers a part has,
+            // and whether each renderer casts, so one rewritten in place changes this row's mesh set and its
+            // witness list; a material decides which texture maps exist and what each binds, so one
+            // rewritten in place changes this row's texture list. Either does it without any bundle whose
+            // hashes were read having moved at all — a material's own bundle is only among the texture
+            // bundles when the texture happens to live beside it.
             var outfitReads = new HashSet<string>(StringComparer.Ordinal);
 
             SubjectModel model;
@@ -320,6 +338,8 @@ public sealed class SharingIndex
             // skeleton rides its own channel and costs nothing here, since this measurement reads
             // parts and textures only.
             foreach (var prob in model.Problems) problems.Add($"{outfit.Stem}: {prob}");
+            foreach (var bundle in model.PrefabBundles ?? Array.Empty<string>()) outfitReads.Add(bundle);
+            foreach (var bundle in model.MaterialBundles ?? Array.Empty<string>()) outfitReads.Add(bundle);
 
             var bundleBytes = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
             byte[]? Bytes(string bundleId) =>
@@ -327,22 +347,34 @@ public sealed class SharingIndex
 
             foreach (var part in model.Parts)
             {
-                var tiers = new List<(string Name, string Bundle, long PathId)>();
-                void Tier(string name, string address, string? smrBundle, long smrPathId)
+                // The shadow-pass flag and the visibility override are both keyed per TIER: the list
+                // interleaves the representative slot and the siblings, each tier is its own renderer with
+                // its own m_CastShadows, and the dorm lists name tier nodes one at a time.
+                var tiers = new List<(string Name, string Bundle, long PathId, bool Casts, VisibilityOverride Vis)>();
+                void Tier(string name, string address, string? smrBundle, long smrPathId, bool casts,
+                    VisibilityOverride vis)
                 {
                     if (MeshName.IsUnrenderedTier(name)) return;
-                    if (!string.IsNullOrEmpty(smrBundle) && smrPathId != 0) { tiers.Add((name, smrBundle!, smrPathId)); return; }
+                    if (!string.IsNullOrEmpty(smrBundle) && smrPathId != 0) { tiers.Add((name, smrBundle!, smrPathId, casts, vis)); return; }
                     if (string.IsNullOrEmpty(address)) { problems.Add($"{outfit.Stem}: '{name}' has no mesh identity"); return; }
                     var owner = catalog.ResolveAddress(address);
                     if (owner is null) { problems.Add($"{outfit.Stem}: no catalog entry for '{address}'"); return; }
-                    tiers.Add((name, owner, 0));
+                    tiers.Add((name, owner, 0, casts, vis));
                 }
-                Tier(part.SlotName, part.MeshAddress, part.MeshBundle, part.MeshPathId);
+                Tier(part.SlotName, part.MeshAddress, part.MeshBundle, part.MeshPathId, part.CastsShadows,
+                    part.Visibility);
                 foreach (var t in part.SiblingTiers ?? Array.Empty<Export.RecipeTierSlot>())
-                    Tier(t.SlotName, t.MeshAddress, t.MeshBundle, t.MeshPathId);
+                    Tier(t.SlotName, t.MeshAddress, t.MeshBundle, t.MeshPathId, t.CastsShadows, t.Visibility);
 
-                bool partEligible = EligibleWitnessName(part.Token);
-                foreach (var (name, bundleId, pathId) in tiers)
+                // DELIBERATELY stricter than the build side's per-tier gates in
+                // ModBuilder.WardrobeWitnesses: a part whose REPRESENTATIVE slot is shadow-off or
+                // visibility-withheld is refused wholesale here even when a sibling tier is clean, because
+                // this index answers "is this outfit worn" for a whole population and a part the game may
+                // stop drawing is no basis for that claim at any tier — do not harmonize the two by
+                // loosening this side.
+                bool partEligible = EligibleWitnessName(part.Token) && part.CastsShadows
+                    && part.Visibility == VisibilityOverride.None;
+                foreach (var (name, bundleId, pathId, casts, vis) in tiers)
                 {
                     outfitReads.Add(bundleId);
                     string key = $"{bundleId}|{name}|{pathId}";
@@ -355,7 +387,8 @@ public sealed class SharingIndex
                         ibCache[key] = ib;
                     }
                     outfitMesh.Add(ib);
-                    if (partEligible && EligibleWitnessName(name) && !outfitWitness.Contains(ib))
+                    if (partEligible && casts && vis == VisibilityOverride.None
+                        && EligibleWitnessName(name) && !outfitWitness.Contains(ib))
                         outfitWitness.Add(ib);
                 }
 
@@ -396,7 +429,7 @@ public sealed class SharingIndex
             }
             wearers.Add(new Wearer(character.Name, character.DisplayName, outfit.Stem, outfit.DisplayName));
             observations.Add(new Observation(fingerprint, outfitMesh, outfitTex, outfitWitness,
-                BundleReads.Of(catalog, outfitReads)));
+                BundleReads.Of(catalog, contentHashOf, outfitReads)));
         }
 
         return new SharingIndex(catalogVersion, wearers.ToArray(), observations.ToArray(),
@@ -406,7 +439,8 @@ public sealed class SharingIndex
     /// <summary>The row to keep for an outfit whose measurement is still current, or null when there is
     /// none. Two tests, because they cover different things: the fingerprint says the catalog SCOPE the
     /// reads were planned from has not moved, and the read record says the bundles they actually came out
-    /// of have not — a mesh owner resolves catalog-wide and can sit outside that scope.
+    /// of still hold the same content — a mesh owner resolves catalog-wide and can sit outside that scope,
+    /// and a bundle's content can be rewritten under a name the catalog still spells the same.
     ///
     /// <para>A duplicate door keeps its row like any other — the filter is derived, so a door that stops
     /// being one after the catalog moves comes back without a read.</para></summary>
@@ -478,8 +512,7 @@ public sealed class SharingIndex
     // content hashes, and the diagnostic text that named stems is not persisted at all. That is what makes
     // one machine's measurement shippable to every other install — and it holds only as long as each new
     // field is checked against it.
-    // R absent = a row written before the read record existed (the shipped seed's), reusable on its
-    // fingerprint alone; see Observation.Reads.
+    // R absent = a row carrying no read record, reusable on its fingerprint alone; see Observation.Reads.
     private sealed record OutfitRow(string K, string F, List<string> M, List<string> T, List<string> W,
         string? R = null);
     private sealed record CacheFile(int SchemaVersion, string CatalogVersion,

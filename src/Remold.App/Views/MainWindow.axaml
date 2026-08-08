@@ -1,12 +1,12 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Remold.App.ViewModels"
-        xmlns:core="using:Remold.Core"
         xmlns:views="using:Remold.App.Views"
+        xmlns:conv="using:Avalonia.Data.Converters"
         x:Class="Remold.App.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1200" Height="800"
-        MinWidth="760" MinHeight="480"
+        MinWidth="920" MinHeight="480"
         Background="{StaticResource HudBgBrush}"
         Icon="/Assets/icon.ico"
         Title="Doll Remolding Lab">
@@ -104,7 +104,7 @@
               <MenuItem Header="Open Recent" Name="RecentMenu" ItemsSource="{Binding RecentMods}"
                         IsEnabled="{Binding HasRecentMods}">
                 <MenuItem.ItemTemplate>
-                  <DataTemplate x:DataType="core:RecentMod">
+                  <DataTemplate x:DataType="vm:RecentModVm">
                     <TextBlock Text="{Binding Name}" />
                   </DataTemplate>
                 </MenuItem.ItemTemplate>
@@ -114,7 +114,7 @@
                      Recent itself (a MenuItem under the File MenuItem), which would give the header the typed
                      RecentMod command with the VM as its parameter and crash CanExecute when File opens. -->
                 <MenuItem.Styles>
-                  <Style Selector="MenuItem#RecentMenu > MenuItem" x:DataType="core:RecentMod">
+                  <Style Selector="MenuItem#RecentMenu > MenuItem" x:DataType="vm:RecentModVm">
                     <Setter Property="Command"
                             Value="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}" />
                     <Setter Property="CommandParameter" Value="{Binding}" />
@@ -127,8 +127,12 @@
               <MenuItem Header="Close Mod" Command="{Binding CloseModCommand}" IsEnabled="{Binding !ShowHome}" />
             </MenuItem>
             <MenuItem Header="Tools">
+              <!-- the tooltip is where the OTHER rescan lives: this one re-reads the install and keeps every
+                   rebuilt cache, and the variant that drops them is a Settings row nobody would go looking
+                   for from here -->
               <MenuItem Header="Rescan game files" Command="{Binding ReloadRosterCommand}"
-                        IsEnabled="{Binding !IsScanning}" />
+                        IsEnabled="{Binding !IsScanning}"
+                        ToolTip.Tip="Keeps rebuilt caches. Settings · Force rescan clears them too." />
               <MenuItem Header="Locate game…" Click="OnLocateGame" />
               <MenuItem Header="Settings…" Click="OnSettings" />
             </MenuItem>
@@ -214,11 +218,11 @@
                        Text="Scanning game files. Characters unlock as they're confirmed." />
           </StackPanel>
 
-          <!-- Two roster tabs over the same live roster (both TreeViews over CharacterVm): tab 1 the
-               playable characters, tab 2 the enemies/NPCs. -->
+          <!-- Three roster tabs over the same live roster (all TreeViews over CharacterVm): the playable
+               characters, the enemies/NPCs, and the weapons. -->
           <TabControl Grid.Row="1" Padding="0">
 
-            <!-- Shared by the Characters and Enemies grids below — both are TreeViews over CharacterVm. -->
+            <!-- Shared by every roster grid below — all are TreeViews over CharacterVm. -->
             <TabControl.Styles>
               <!-- multi-outfit character groups are default-COLLAPSED: each CharacterVm's IsExpanded (false by
                    default) drives its row two-way; reflection binding tolerates a leaf row whose VM lacks the
@@ -242,6 +246,10 @@
                     <CheckBox IsThreeState="False" IsChecked="{Binding SubjectInMod}">
                       <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
                     </CheckBox>
+                    <!-- weapon-tier badge (R / SR / SSR) in its tier color -->
+                    <TextBlock Text="{Binding SubjectBadge}" Foreground="{Binding SubjectBadgeBrush}"
+                               FontSize="10" FontWeight="Bold" VerticalAlignment="Center"
+                               IsVisible="{Binding HasSubjectBadge}" />
                     <TextBlock Text="{Binding TreeDetail}" Foreground="{StaticResource HudSubtextBrush}"
                                FontSize="11" VerticalAlignment="Center" IsVisible="{Binding HasTreeDetail}" />
                     <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
@@ -278,6 +286,10 @@
                     <CheckBox IsThreeState="False" IsChecked="{Binding IsInMod}">
                       <TextBlock Text="{Binding Label}" Foreground="{StaticResource HudAmberBrush}" />
                     </CheckBox>
+                    <!-- weapon-tier badge (R / SR / SSR) in its tier color -->
+                    <TextBlock Text="{Binding Badge}" Foreground="{Binding BadgeBrush}"
+                               FontSize="10" FontWeight="Bold" VerticalAlignment="Center"
+                               IsVisible="{Binding HasBadge}" />
                     <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
                                VerticalAlignment="Center" IsVisible="{Binding HasEdits}"
                                ToolTip.Tip="This subject has edits in the mod." />
@@ -345,6 +357,29 @@
               </Grid>
             </TabItem>
 
+            <!-- ===== Weapons — weapon groups per owner character (R/SR/SSR badges, plus the Battle Pass
+                 loose group), then the per-type standalone-skin groups. A skin applies to any weapon of
+                 its type, so skins are their own subjects, not variants under a weapon. ===== -->
+            <TabItem Header="{Binding WeaponsTabHeader}">
+              <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
+                <TextBox Grid.Row="0" Watermark="Search weapons…" Text="{Binding WeaponSearchText}"
+                         Margin="0,0,0,10" />
+                <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+                  <Panel>
+                    <TextBlock Text="Reading game files…" Margin="14"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding IsLoading}" />
+                    <TextBlock Text="{Binding WeaponsNoMatch}" Margin="14" TextWrapping="Wrap"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding HasWeaponsNoMatch}" />
+                    <TreeView ItemsSource="{Binding Weapons}" Background="Transparent" Padding="6"
+                              DoubleTapped="OnPickRowDoubleTapped" />
+                  </Panel>
+                </Border>
+              </Grid>
+            </TabItem>
+
           </TabControl>
 
           <!-- footer (S9 inc4): no Add/queue — Pick just selects subjects. A subject is authored in Edit
@@ -377,46 +412,147 @@
             <Border Background="{StaticResource HudPanelBrush}" BorderBrush="{StaticResource HudBorderBrush}"
                     BorderThickness="1" CornerRadius="3" Padding="12,10"
                     IsEnabled="{Binding !IsModBuilding}">
-              <Grid ColumnDefinitions="*,12,180,12,110" RowDefinitions="Auto,Auto,Auto,Auto">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Name" FontSize="11"
-                           Foreground="{StaticResource HudSubtextBrush}" />
-                <TextBlock Grid.Row="0" Grid.Column="2" Text="Author" FontSize="11"
-                           Foreground="{StaticResource HudSubtextBrush}" />
-                <TextBlock Grid.Row="0" Grid.Column="4" Text="Version" FontSize="11"
-                           Foreground="{StaticResource HudSubtextBrush}" />
-                <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PackageName}" Watermark="untitled mod" />
-                <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PackageAuthor}" Watermark="handle" />
-                <TextBox Grid.Row="1" Grid.Column="4" Text="{Binding PackageVersion}" Watermark="1.0" />
+              <!-- the fields on the left, the preview image in its own column on the right. The preview sits
+                   BESIDE the whole field grid rather than spanning its rows: a row-spanning child hands its
+                   height to the auto rows it crosses, which grew the block by 9px — beside them it competes
+                   with the block's total height instead, and the space the description box already claims
+                   costs the tile nothing.
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="Description" FontSize="11" Margin="0,10,0,0"
-                           Foreground="{StaticResource HudSubtextBrush}" />
-                <TextBlock Grid.Row="2" Grid.Column="2" Text="Toggle key" FontSize="11" Margin="0,10,0,0"
-                           Foreground="{StaticResource HudSubtextBrush}" />
-                <TextBox Grid.Row="3" Grid.Column="0" Text="{Binding PackageDescription}"
-                         AcceptsReturn="True" TextWrapping="Wrap" Height="72"
-                         Watermark="What this mod changes. Ships with the mod." />
-                <StackPanel Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="3" Spacing="6" VerticalAlignment="Top">
-                  <!-- the ⚠ names whatever else this key switches; a shared key is a choice, not a fault.
-                       ShowOnDisabled, like its per-row twin: the identity block goes off while a build runs,
-                       and a state that can't be read is no state -->
-                  <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Left">
-                    <TextBlock Text="⚠" FontSize="12" VerticalAlignment="Center"
-                               Foreground="{StaticResource HudAmberBrush}"
-                               IsVisible="{Binding HasPackageKeyCollision}"
-                               ToolTip.ShowOnDisabled="True"
-                               ToolTip.Tip="{Binding PackageKeyCollisionTip}" />
-                    <views:KeyCaptureButton BoundKey="{Binding PackageToggleKey, Mode=TwoWay}"
-                                            Padding="10,2" FontSize="11"
-                                            ToolTip.Tip="{Binding PackageToggleKeyTip}" />
-                    <Button Content="✕" Padding="7,2" FontSize="11"
-                            IsVisible="{Binding HasPackageToggleKey}"
-                            Command="{Binding ClearPackageToggleKeyCommand}"
-                            ToolTip.Tip="Clear the key." />
-                  </StackPanel>
-                  <TextBlock Text="No key means always on. A key toggles the mod in game. Keys reset each launch."
-                             FontSize="11" TextWrapping="Wrap"
+                   That last part depends on the description TextBox below keeping its Height="72": the field
+                   grid is the taller of the two columns only because of it, which is what leaves the tile
+                   fitting inside height the block was already spending. Shorten or unfix that box and the
+                   preview column becomes what drives the block's height — re-measure the block in all three
+                   preview states before changing it. -->
+              <Grid ColumnDefinitions="*,12,Auto">
+                <Grid Grid.Column="0" ColumnDefinitions="*,12,180,12,110" RowDefinitions="Auto,Auto,Auto,Auto">
+                  <TextBlock Grid.Row="0" Grid.Column="0" Text="Name" FontSize="11"
                              Foreground="{StaticResource HudSubtextBrush}" />
-                </StackPanel>
+                  <TextBlock Grid.Row="0" Grid.Column="2" Text="Author" FontSize="11"
+                             Foreground="{StaticResource HudSubtextBrush}" />
+                  <TextBlock Grid.Row="0" Grid.Column="4" Text="Version" FontSize="11"
+                             Foreground="{StaticResource HudSubtextBrush}" />
+                  <TextBox Grid.Row="1" Grid.Column="0" Text="{Binding PackageName}" Watermark="untitled mod" />
+                  <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding PackageAuthor}" Watermark="handle" />
+                  <TextBox Grid.Row="1" Grid.Column="4" Text="{Binding PackageVersion}" Watermark="1.0" />
+
+                  <TextBlock Grid.Row="2" Grid.Column="0" Text="Description" FontSize="11" Margin="0,10,0,0"
+                             Foreground="{StaticResource HudSubtextBrush}" />
+                  <TextBlock Grid.Row="2" Grid.Column="2" Text="Toggle key" FontSize="11" Margin="0,10,0,0"
+                             Foreground="{StaticResource HudSubtextBrush}" />
+                  <TextBox Grid.Row="3" Grid.Column="0" Text="{Binding PackageDescription}"
+                           AcceptsReturn="True" TextWrapping="Wrap" Height="72"
+                           Watermark="What this mod changes. Ships with the mod." />
+                  <StackPanel Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="3" Spacing="6" VerticalAlignment="Top">
+                    <!-- the ⚠ names whatever else this key switches; a shared key is a choice, not a fault.
+                         ShowOnDisabled, like its per-row twin: the identity block goes off while a build runs,
+                         and a state that can't be read is no state -->
+                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Left">
+                      <TextBlock Text="⚠" FontSize="12" VerticalAlignment="Center"
+                                 Foreground="{StaticResource HudAmberBrush}"
+                                 IsVisible="{Binding HasPackageKeyCollision}"
+                                 ToolTip.ShowOnDisabled="True"
+                                 ToolTip.Tip="{Binding PackageKeyCollisionTip}" />
+                      <views:KeyCaptureButton BoundKey="{Binding PackageToggleKey, Mode=TwoWay}"
+                                              Padding="10,2" FontSize="11"
+                                              ToolTip.ShowOnDisabled="True"
+                                              ToolTip.Tip="{Binding PackageToggleKeyTip}" />
+                      <Button Content="✕" Padding="7,2" FontSize="11"
+                              IsVisible="{Binding HasPackageToggleKey}"
+                              Command="{Binding ClearPackageToggleKeyCommand}"
+                              ToolTip.Tip="Clear the key." />
+                    </StackPanel>
+                  </StackPanel>
+                </Grid>
+
+                <!-- the preview image, down the block's right side and as tall as the block itself. Three
+                     states in one slot: none (the whole slot is the drop target and the browse affordance),
+                     one, and one whose file went missing. AllowDrop inherits down, so a drop anywhere on the
+                     slot — including on its buttons — reaches the pane's one handler. MinWidth, not a fixed
+                     column width: the three states are DESIGNED to measure inside it, and while they do they
+                     share one width and adding a preview doesn't shift the block sideways. That is a design
+                     contract, not something the layout enforces — a state that measured wider would simply
+                     widen the column. The 150 leaves a 136px content budget once the 12px padding and 2px
+                     border come off, and the widest state (the Replace/Remove row) clears it only on the
+                     current font metrics. Any change to those buttons' text, padding or font size has to be
+                     re-measured against this MinWidth rather than assumed to fit. -->
+                <Border x:Name="PreviewDrop" Grid.Column="2"
+                        DragDrop.AllowDrop="True"
+                        Background="{StaticResource HudPanelAltBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1"
+                        CornerRadius="3" Padding="6,5" MinHeight="44" MinWidth="150"
+                        IsEnabled="{Binding PreviewEnabled}"
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding PreviewPickTip}">
+                  <Panel>
+                    <!-- fills the slot in both directions: the whole empty box is the affordance, so the
+                         column the tile's height opens up is not dead to a click -->
+                    <Button Content="＋ Preview image" Classes="recent" FontSize="11"
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Padding="4,2" VerticalAlignment="Stretch" VerticalContentAlignment="Center"
+                            Click="OnPickPreview" IsVisible="{Binding HasNoPreview}" />
+                    <!-- image above, the two buttons pinned to the bottom of the column -->
+                    <Grid RowDefinitions="*,Auto" IsVisible="{Binding !HasNoPreview}">
+                      <!-- fixed box, uniform fit: a tall or wide source can't stretch the identity block.
+                           A file that IS there and won't decode gets the map cards' "no preview" tile at
+                           this size, so the state is visible rather than an empty hole above two live
+                           buttons. -->
+                      <Border Grid.Row="0" Width="112" Height="64" ClipToBounds="True"
+                              HorizontalAlignment="Center" VerticalAlignment="Center"
+                              IsVisible="{Binding HasPreview}">
+                        <!-- Fluent caps a tooltip at 320 wide, which would draw the 480-wide decode at 302
+                             and waste it. Raised HERE, not app-wide: every other tooltip in the app is a
+                             sentence, and a wider box would re-wrap all of them. -->
+                        <Border.Styles>
+                          <Style Selector="ToolTip">
+                            <Setter Property="MaxWidth" Value="504" />
+                          </Style>
+                        </Border.Styles>
+                        <!-- hover zoom: the slot is small on purpose, so the tip carries the image at the
+                             width it was decoded to, with the name·size line that used to be the whole
+                             tooltip under it. One tip, not an image fighting a text one. The image drops
+                             out when there is nothing decoded (the undecodable state), leaving exactly the
+                             line that state showed before. -->
+                        <ToolTip.Tip>
+                          <StackPanel Spacing="6" MaxWidth="480">
+                            <Image Source="{Binding PreviewImage}" Stretch="Uniform"
+                                   MaxWidth="480" MaxHeight="360"
+                                   IsVisible="{Binding PreviewImage,
+                                               Converter={x:Static conv:ObjectConverters.IsNotNull}}" />
+                            <TextBlock Text="{Binding PreviewThumbTip}" TextWrapping="Wrap" />
+                          </StackPanel>
+                        </ToolTip.Tip>
+                        <Panel>
+                          <Image Source="{Binding PreviewImage}" Stretch="Uniform" />
+                          <Border IsVisible="{Binding PreviewUndecodable}" CornerRadius="2"
+                                  Background="{StaticResource HudPanelBrush}"
+                                  BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1">
+                            <TextBlock Text="no preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Foreground="{StaticResource HudSubtextBrush}" FontSize="9" />
+                          </Border>
+                        </Panel>
+                      </Border>
+                      <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6"
+                                  VerticalAlignment="Center" IsVisible="{Binding PreviewMissing}">
+                        <TextBlock Text="⚠" FontSize="12" VerticalAlignment="Top"
+                                   Foreground="{StaticResource HudAmberBrush}" />
+                        <!-- capped so the wrapped lines can't widen the column past the width the other
+                             two states settle on -->
+                        <StackPanel VerticalAlignment="Center" MaxWidth="112">
+                          <!-- the file the project names, so the modder knows which one to put back -->
+                          <TextBlock Text="{Binding PreviewMissingTitle}" FontSize="11" TextWrapping="Wrap"
+                                     Foreground="{StaticResource HudTextBrush}" />
+                          <TextBlock Text="Replace it, or remove it." FontSize="11" TextWrapping="Wrap"
+                                     Foreground="{StaticResource HudSubtextBrush}" />
+                        </StackPanel>
+                      </StackPanel>
+                      <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="6" Margin="0,6,0,0"
+                                  HorizontalAlignment="Right">
+                        <Button Content="Replace" Padding="8,2" FontSize="11" Click="OnPickPreview" />
+                        <Button Content="Remove" Padding="8,2" FontSize="11"
+                                Command="{Binding RemovePreviewCommand}" />
+                      </StackPanel>
+                    </Grid>
+                  </Panel>
+                </Border>
               </Grid>
             </Border>
           </StackPanel>
@@ -725,16 +861,28 @@
             <TextBlock Text="Recent mods" Foreground="{StaticResource HudSubtextBrush}" FontWeight="SemiBold" FontSize="12" />
             <ItemsControl ItemsSource="{Binding RecentMods}">
               <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="core:RecentMod">
+                <DataTemplate x:DataType="vm:RecentModVm">
                   <Button Classes="recent" Margin="0,1" Padding="10,7" HorizontalAlignment="Stretch"
                           HorizontalContentAlignment="Left"
                           Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}"
                           CommandParameter="{Binding}">
-                    <StackPanel>
-                      <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
-                      <TextBlock Text="{Binding Path}" Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
-                                 TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
+                    <!-- the thumbnail slot is a FIXED box on every row, held whether or not the mod has a
+                         preview, so the names line up down the list. Empty it draws nothing at all — no
+                         border, no stand-in. Its height is under the row's own two lines, so a preview
+                         never makes a row taller than its neighbours. -->
+                    <Grid ColumnDefinitions="Auto,*">
+                      <Border Grid.Column="0" Width="56" Height="32" Margin="0,0,10,0"
+                              VerticalAlignment="Center" ClipToBounds="True">
+                        <Image Source="{Binding Thumb}" Stretch="Uniform" />
+                      </Border>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                        <!-- trimmed, so the full path is on hover: every trimmed label in the app pairs the
+                             two -->
+                        <TextBlock Text="{Binding Path}" Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
+                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Path}" />
+                      </StackPanel>
+                    </Grid>
                   </Button>
                 </DataTemplate>
               </ItemsControl.ItemTemplate>

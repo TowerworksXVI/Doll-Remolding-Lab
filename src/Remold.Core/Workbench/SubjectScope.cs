@@ -40,8 +40,11 @@ public sealed class SubjectScope
     private readonly List<string> _problems = new();
     private readonly HashSet<string> _hitSet;
     private readonly IReadOnlyList<string> _hitBundles;
+    private readonly Outfit _outfit;
 
     private List<SubjectCandidate>? _candidates;
+    private Dictionary<string, VisibilityOverride>? _visibility;
+    private List<string>? _visibilityContributors;
     // lazy CAB walk state: bundles [0.._nextToInspect) have had their CAB name read and cached
     private readonly Dictionary<string, string> _cabToBundle = new(StringComparer.Ordinal);
     private int _nextToInspect;
@@ -49,12 +52,13 @@ public sealed class SubjectScope
     private readonly string? _rootName;
 
     private SubjectScope(IReadOnlyList<string> hitBundles, IReadOnlyList<string> scopeBundles,
-        Func<string, byte[]?> tryDeobfuscate, string? rootName = null)
+        Func<string, byte[]?> tryDeobfuscate, Outfit outfit, string? rootName = null)
     {
         _hitBundles = hitBundles;
         _hitSet = new HashSet<string>(hitBundles, StringComparer.Ordinal);
         ScopeBundles = scopeBundles;
         _tryDeobfuscate = tryDeobfuscate;
+        _outfit = outfit;
         _rootName = rootName;
     }
 
@@ -76,10 +80,9 @@ public sealed class SubjectScope
     /// prefab is absent from one whose prefab is present and yielded nothing. Answers only once
     /// <see cref="Candidates"/> has been read — the parses that set it are that walk's.
     ///
-    /// <para>Scoped to the bundles the subject's own address or route resolves its prefab from, plus — on a
-    /// curated route, which pins one container root by NAME — any scope bundle where that named root was
-    /// found and declined. A dependency bundle's unrelated root says nothing about this subject: counting it
-    /// would report a present-but-unreadable prefab for a subject that ships none.</para></summary>
+    /// <para>Scoped to the bundles the subject's own address or route resolves its prefab from. A
+    /// dependency bundle's unrelated root says nothing about this subject: counting it would report a
+    /// present-but-unreadable prefab for a subject that ships none.</para></summary>
     public bool DeclinedRoot { get; private set; }
 
     /// <summary>Resolve the scope for one subject. Takes the parsed catalog, not a <see cref="GameVfs"/>, so
@@ -90,7 +93,7 @@ public sealed class SubjectScope
     {
         // FIRST, and on the STEM: a curated route must never become a way past the blacklist.
         if (RosterBlacklist.IsBlacklisted(outfit.Stem))
-            return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate);
+            return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit);
 
         // A curated direct-bundle subject (see Model.SubjectRoute): the catalog names no address for this
         // prefab, so there is no dependency row to close over. The route's own ExtraBundles stand in for
@@ -102,12 +105,12 @@ public sealed class SubjectScope
         if (outfit.Route is { Bundle: { } directBundle })
         {
             if (!catalog.BundleNameToInternalId.ContainsKey(directBundle))
-                return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate);
+                return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit);
             var direct = new List<string> { directBundle };
             var extras = new HashSet<string>(direct, StringComparer.Ordinal);
             foreach (var extra in outfit.Route.ExtraBundles)
                 if (extras.Add(extra)) direct.Add(extra);
-            return new SubjectScope(new[] { directBundle }, direct, tryDeobfuscate, outfit.Route.RootName);
+            return new SubjectScope(new[] { directBundle }, direct, tryDeobfuscate, outfit, outfit.Route.RootName);
         }
 
         // A curated addressable subject resolves through exactly the same catalog mechanics as a formula
@@ -132,7 +135,7 @@ public sealed class SubjectScope
         foreach (var deps in closures)
             foreach (var b in deps)
                 if (seen.Add(b)) scope.Add(b);
-        return new SubjectScope(hits, scope, tryDeobfuscate, outfit.Route?.RootName);
+        return new SubjectScope(hits, scope, tryDeobfuscate, outfit, outfit.Route?.RootName);
     }
 
     /// <summary>Every scope bundle that parses as an assembly prefab, deduped by ROOT NAME (first wins):
@@ -150,6 +153,32 @@ public sealed class SubjectScope
                 if (!_hitSet.Contains(b)) TryParse(b, discovered, ownPrefabSource: false);
             discovered.Sort((a, b) => string.CompareOrdinal(a.Root, b.Root));
 
+            // The dorm visibility lists are gathered across every parsed prefab that is a CONSTITUENT of this
+            // subject (see SubjectModelBuilder.IsSubjectConstituent), ahead of the root-name dedupe below. The
+            // context copies of one stem share a root name, so the dedupe keeps only the first — and the
+            // components ride whichever copy the game authored them on, usually not that one; both copies are
+            // already parsed here, so reading their lists costs no further I/O. The constituent gate is what
+            // keeps a genuinely FOREIGN root out: a dependency closure holds other subjects' prefabs (another
+            // doll's weapon, say), and a node name is not owned — theirs could collide with ours and withhold
+            // a part the game draws. Skipping a non-constituent is silent on purpose, for the same reason a
+            // sibling's foreign-prefixed slot is: it is correctly absent, not a failure to resolve OUR data.
+            var visibility = new Dictionary<string, VisibilityOverride>(StringComparer.OrdinalIgnoreCase);
+            var contributors = new List<string>();
+            foreach (var c in hits.Concat(discovered))
+                if (SubjectModelBuilder.IsSubjectConstituent(c.Prefab, _outfit)
+                    && c.Prefab.VisibilityOverrides is { } overrides)
+                {
+                    // the bundle joins the contributor record even when its entries lose every min-wins
+                    // fold: its content shaped the answer either way, and the record exists for a reader
+                    // (SubjectModel.PrefabBundles) asking what a rewrite in place would change
+                    if (overrides.Count > 0) contributors.Add(c.Bundle);
+                    foreach (var (node, why) in overrides)
+                        if (!visibility.TryGetValue(node, out var have) || why < have)
+                            visibility[node] = why;
+                }
+            _visibility = visibility;
+            _visibilityContributors = contributors;
+
             var seenRoots = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<SubjectCandidate>();
             foreach (var c in hits) if (seenRoots.Add(c.Root)) result.Add(c);
@@ -158,9 +187,43 @@ public sealed class SubjectScope
         }
     }
 
+    /// <summary>Node name → the game-side mechanism that can leave it undrawn, unioned across the prefabs in
+    /// this scope that parsed AND are constituents of this subject
+    /// (<see cref="SubjectModelBuilder.IsSubjectConstituent"/>) — including the context copies
+    /// <see cref="Candidates"/> drops for sharing a root name, and excluding the other subjects' prefabs a
+    /// dependency closure also holds. The lowest-valued mechanism wins a node several lists name, so one node
+    /// answers with one reason however the scope happens to order its bundles. Answers only once
+    /// <see cref="Candidates"/> has been read, which is the walk that parses them.</summary>
+    public IReadOnlyDictionary<string, VisibilityOverride> VisibilityOverrides
+    {
+        get
+        {
+            _ = Candidates;
+            return _visibility!;
+        }
+    }
+
+    /// <summary>The bundles whose prefabs CONTRIBUTED to <see cref="VisibilityOverrides"/> — constituents
+    /// carrying at least one list entry, including the context copies <see cref="Candidates"/> drops for
+    /// sharing a root name. A reader recording what this subject's answer DEPENDS on needs these beyond the
+    /// candidates: the dedupe keeps one copy per root, while the lists ride whichever copy the game authored
+    /// them on, so a contributor rewritten in place changes the model with no candidate bundle having moved.
+    /// Answers only once <see cref="Candidates"/> has been read.</summary>
+    public IReadOnlyList<string> VisibilityContributors
+    {
+        get
+        {
+            _ = Candidates;
+            return _visibilityContributors!;
+        }
+    }
+
     /// <param name="ownPrefabSource">True for a bundle the subject's own address or route resolves its
-    /// prefab from, which is what may answer <see cref="DeclinedRoot"/>. A closure-discovered dependency
-    /// may not, unless the parse was asked for one named root — then a decline is about THAT root.</param>
+    /// prefab from, which is what may answer <see cref="DeclinedRoot"/> — and where a curated route's
+    /// pinned root name applies. A closure-discovered dependency parses first-root like the formula
+    /// path's own dependencies: the pin is about the ADDRESSED bundle holding sibling roots, and a
+    /// weapon-style subject ships real constituent roots (its attachment assemblies) in dependency
+    /// bundles the pin would otherwise skip.</param>
     private void TryParse(string bundle, List<SubjectCandidate> into, bool ownPrefabSource)
     {
         // deobfuscation exceptions propagate (BUSY contract); null = absent, not a candidate
@@ -168,15 +231,16 @@ public sealed class SubjectScope
         if (dec is null) return;
         CharacterPrefab? prefab;
         bool declined;
-        // _rootName pins a curated route's container root; null (the stem formula) takes the bundle's
-        // first root that parses, which is safe there because address and root agree by construction
-        try { prefab = PrefabReader.Read(dec, _rootName, out declined); }
+        // _rootName pins a curated route's container root in the bundle its address resolves to; the
+        // stem formula takes the bundle's first root that parses, which is safe there because address
+        // and root agree by construction
+        try { prefab = PrefabReader.Read(dec, ownPrefabSource ? _rootName : null, out declined); }
         catch (Exception e)
         {
             _problems.Add($"Assembly prefab in bundle '{bundle}' couldn't be read ({e.Message}).");
             return;
         }
-        if (declined && (ownPrefabSource || _rootName is not null)) DeclinedRoot = true;
+        if (declined && ownPrefabSource) DeclinedRoot = true;
         if (prefab is null) return;   // no readable root — a dependency bundle, not an assembly prefab
         into.Add(new SubjectCandidate(prefab.RootName, bundle, dec, prefab));
     }

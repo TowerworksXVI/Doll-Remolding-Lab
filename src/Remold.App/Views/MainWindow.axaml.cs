@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Controls;
@@ -17,6 +19,66 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         AvaloniaXamlLoader.Load(this);
+        // The Build pane's preview slot takes a dropped image. DragEnter as well as DragOver, for the
+        // reason the workbench pane states: an unhandled DragEnter leaves the platform's permissive
+        // effects standing, and a release on that frame delivers a drop meant to be refused.
+        if (this.FindControl<Border>("PreviewDrop") is { } slot)
+        {
+            slot.AddHandler(DragDrop.DragEnterEvent, OnPreviewDragOver);
+            slot.AddHandler(DragDrop.DragOverEvent, OnPreviewDragOver);
+            slot.AddHandler(DragDrop.DropEvent, OnPreviewDrop);
+        }
+    }
+
+    /// <summary>Only a drag carrying a local image file offers the copy cursor — the workbench pane's rule,
+    /// mirrored: a drop that cannot land never invites the release. A payload that PASSES this can still be
+    /// refused once it lands, on state the hover doesn't read (how many files, and whether the project has a
+    /// folder yet), and that refusal writes the pane's line.</summary>
+    private void OnPreviewDragOver(object? sender, DragEventArgs e) =>
+        e.DragEffects = CarriesPreviewImage(e.Data) ? DragDropEffects.Copy : DragDropEffects.None;
+
+    /// <summary>Whether the dragged payload holds at least one local file with an extension the preview
+    /// control takes. The extension test is the VM's own, so the cursor and the refusal can't disagree about
+    /// what an image is.</summary>
+    private static bool CarriesPreviewImage(IDataObject data)
+    {
+        if (!data.Contains(DataFormats.Files)) return false;
+        if (data.GetFiles() is not { } files) return false;
+        foreach (var item in files)
+            if (item.TryGetLocalPath() is { } path && MainWindowViewModel.IsPreviewImage(path)) return true;
+        return false;
+    }
+
+    private void OnPreviewDrop(object? sender, DragEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) { e.DragEffects = DragDropEffects.None; return; }
+        // A drag that got this far showed the copy cursor, so an unreadable payload can't just vanish: the
+        // VM is handed an empty list and its refusal line answers for it.
+        var files = e.Data.GetFiles();
+        IReadOnlyList<string> paths = files is null
+            ? Array.Empty<string>()
+            : files.Select(f => f.TryGetLocalPath()).Where(p => p is not null).Select(p => p!).ToList();
+        // Normalize what goes back to the drag source — unset, it returns the platform's Copy|Move|Link.
+        e.DragEffects = DragDropEffects.Copy;
+        vm.DropPreview(paths);
+    }
+
+    /// <summary>The preview's browse route, for both the empty slot and Replace. Lands on the same VM call
+    /// the drop does, so the two ways in can't diverge.</summary>
+    private async void OnPickPreview(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var picked = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Pick a preview image",
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Images") { Patterns = MainWindowViewModel.PreviewPatterns },
+            },
+        });
+        var path = picked.FirstOrDefault()?.TryGetLocalPath();
+        if (!string.IsNullOrEmpty(path)) vm.SetPreviewFrom(path!);
     }
 
     /// <summary>Double-click a Pick row → open it in Edit, checking it first. A double-tap landing ON the
@@ -146,5 +208,13 @@ public partial class MainWindow : Window
         {
             if (await vm.ConfirmAppCloseAsync()) { _closeConfirmed = true; Close(); }
         });
+    }
+
+    /// <summary>The window is gone: release the native bitmaps behind the recent rows and the Build pane's
+    /// preview. OnClosed, not OnClosing — a close the modder backs out of leaves the images on screen.</summary>
+    protected override void OnClosed(EventArgs e)
+    {
+        base.OnClosed(e);
+        (DataContext as MainWindowViewModel)?.ReleasePreviewBitmaps();
     }
 }

@@ -13,6 +13,15 @@ public static class ComputeTemplates
     // %(...)d / %(...)s tokens are stamped by the Emit* methods; line endings are normalised to LF on
     // emit so output is byte-stable regardless of this file's on-disk endings
 
+    // The convert pass gives each pool part a constant buffer of its own, from this register up; b13 is
+    // the anchor's and the shader's other bindings sit below b5.
+    const int FirstPartRegister = 5, LastPartRegister = 12;
+
+    /// <summary>Pool parts one convert pass can bind constants for. A REGISTER-RANGE fact, not a policy:
+    /// <see cref="EmitConvert"/> lays each part's cbuffer out at a register of its own, and the shader has
+    /// exactly this many free before b13, the anchor's.</summary>
+    public const int MaxPartCBuffers = LastPartRegister - FirstPartRegister + 1;
+
     public const string RecoverTemplate =
 @"// Pooled recover for one part: a = Cpinv * posed(anchor verts), SCATTERED into the shared union
 // palette via Map (part-local bone -> union bone). The operator is SLIM: each bone reads only its
@@ -142,6 +151,114 @@ void main(uint3 tid : SV_DispatchThreadID){
 }
 ";
 
+    // The two row-solve bodies a group member's fused shader is stamped with — the same operator layouts
+    // the recover shaders read, wrapped as a function so the witness variant can call it for the witness
+    // bone as well as for the group bone the thread owns.
+    const string GroupRowSlim =
+@"Buffer<uint>          Sel    : register(t3);   // anchor vertex indices, bone b at [base, base+width)
+Buffer<uint>          Off    : register(t4);   // 2 per bone: base, width
+float4 Row(uint b, uint comp){
+    uint sbase=Off[b<<1], width=Off[(b<<1)|1];
+    float3 a=float3(0,0,0); uint cbase=(sbase<<2)+comp*width;
+    for(uint t=0;t<width;t++) a+=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+    return float4(a,(comp==3)?1.0:0.0);
+}";
+
+    const string GroupRowDense =
+@"static const uint N=%(N)d;   // this member mesh's verts — every row spans all of them
+float4 Row(uint b, uint comp){
+    float3 a=float3(0,0,0); uint base=((b<<2)|comp)*N;
+    for(uint v=0;v<N;v++) a+=Cpinv[base+v]*q[v].position;
+    return float4(a,(comp==3)?1.0:0.0);
+}";
+
+    public const string GroupFuseTemplate =
+@"// One wardrobe-group member's own draw, fused: recover this group's bones from the MEMBER's posed
+// vertices and rebase the rows into the anchor's draw space in the same dispatch. Exactly one variant
+// of the slot is worn and an unworn variant issues no draws, so whichever member drew last wrote these
+// rows — the draw stream is the freshness rule, and there is no per-frame flag.
+// Rows land in the group's APPENDED slot region of the CONVERTED palette, past the union and the
+// witness slots; the convert passes write only union rows, so the copy round-trip carries these
+// through untouched.
+// K comes from CONSTANTS: W_member is this draw's own vs-cb1, W_anchor the anchor's captured one.
+// ROWS = 4*groupBones; BASE = the group's first appended slot.
+struct Vtx { float3 position; float3 normal; float4 tangent; };
+StructuredBuffer<Vtx> q      : register(t0);   // the member's posed vb0, captured at this draw
+Buffer<float>         Cpinv  : register(t1);
+Buffer<uint>          Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
+RWBuffer<float4>      palOut : register(u1);
+cbuffer MemberCB : register(b5)  { float4 WM[4]; }
+cbuffer AnchorCB : register(b13) { float4 WA[4]; }
+static const uint ROWS=%(ROWS)d, BASE=%(BASE)d;
+%(ROWFN)s
+
+float4x4 AffineInverse(float4 r0, float4 r1, float4 r2, float4 r3){
+    float3 a=r0.xyz, b=r1.xyz, c=r2.xyz, t=r3.xyz;
+    float3 bc=cross(b,c), ca=cross(c,a), ab=cross(a,b);
+    float det=dot(a,bc);
+    float3 i0=float3(bc.x,ca.x,ab.x)/det;    // rows of R^-1 (row-vector convention)
+    float3 i1=float3(bc.y,ca.y,ab.y)/det;
+    float3 i2=float3(bc.z,ca.z,ab.z)/det;
+    float3 ti=-(t.x*i0+t.y*i1+t.z*i2);
+    return float4x4(float4(i0,0),float4(i1,0),float4(i2,0),float4(ti,1));
+}
+
+[numthreads(64,1,1)]
+void main(uint3 tid : SV_DispatchThreadID){
+    uint i=tid.x; if(i>=ROWS) return;
+    uint g=i>>2, comp=i&3;
+    uint b=Map[g];
+    if(b==0xFFFFFFFF) return;   // this member cannot condition the bone -> leave the row alone
+    float4x4 K=mul(float4x4(WM[0],WM[1],WM[2],WM[3]), AffineInverse(WA[0],WA[1],WA[2],WA[3]));
+    palOut[((BASE+g)<<2)|comp]=mul(Row(b,comp), K);
+}
+";
+
+    public const string GroupFuseWitnessTemplate =
+@"// One wardrobe-group member's own draw at a NON-lod0 tier, fused: recover this group's bones from the
+// MEMBER's posed vertices and rebase the rows into the anchor's draw space in the same dispatch.
+// K comes from GEOMETRY, not constants: tier renderers can bind vs-cb1 as a window into a shared
+// buffer that a whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and
+// the anchor pose soundly — the member's side inline here (a UAV write another thread makes is not
+// readable in the same dispatch), the anchor's read out of the raw palette slot its own recover wrote —
+// and K = inverse(M_witness_member) . M_witness_anchor. The anchor row is whatever its last recover
+// left, which is this frame's once the anchor has drawn and the previous frame's before that.
+// ROWS = 4*groupBones; BASE = the group's first appended slot.
+struct Vtx { float3 position; float3 normal; float4 tangent; };
+StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, captured at this draw
+Buffer<float>            Cpinv  : register(t1);
+Buffer<uint>             Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
+StructuredBuffer<float4> palRaw : register(t5);   // the RAW palette: the anchor's own recovered rows
+RWBuffer<float4>         palOut : register(u1);
+static const uint ROWS=%(ROWS)d, BASE=%(BASE)d;
+static const uint WITM=%(WITM)d;   // the witness bone's index in THIS member mesh
+static const uint WITA=%(WITA)d;   // the anchor-side witness recovery's base row in palRaw
+%(ROWFN)s
+
+float4x4 AffineInverse(float4 r0, float4 r1, float4 r2, float4 r3){
+    float3 a=r0.xyz, b=r1.xyz, c=r2.xyz, t=r3.xyz;
+    float3 bc=cross(b,c), ca=cross(c,a), ab=cross(a,b);
+    float det=dot(a,bc);
+    float3 i0=float3(bc.x,ca.x,ab.x)/det;    // rows of R^-1 (row-vector convention)
+    float3 i1=float3(bc.y,ca.y,ab.y)/det;
+    float3 i2=float3(bc.z,ca.z,ab.z)/det;
+    float3 ti=-(t.x*i0+t.y*i1+t.z*i2);
+    return float4x4(float4(i0,0),float4(i1,0),float4(i2,0),float4(ti,1));
+}
+
+[numthreads(64,1,1)]
+void main(uint3 tid : SV_DispatchThreadID){
+    uint i=tid.x; if(i>=ROWS) return;
+    uint g=i>>2, comp=i&3;
+    uint b=Map[g];
+    if(b==0xFFFFFFFF) return;   // this member cannot condition the bone -> leave the row alone
+    float4x4 MM=float4x4(Row(WITM,0),Row(WITM,1),Row(WITM,2),Row(WITM,3));
+    float4x4 MA=float4x4(palRaw[WITA],palRaw[WITA+1],palRaw[WITA+2],palRaw[WITA+3]);
+    float4x4 K=mul(AffineInverse(MM[0],MM[1],MM[2],MM[3]), MA);
+    palOut[((BASE+g)<<2)|comp]=mul(Row(b,comp), K);
+}
+";
+
     public const string SkinTemplate =
 @"// Skin the new body (VCOUNT verts, weighted to UNION bone order) with the CONVERTED palette.
 struct Vtx  { float3 position; float3 normal; float4 tangent; };
@@ -192,7 +309,7 @@ void main(uint3 tid : SV_DispatchThreadID){
         for (int pi = 0; pi < partCount; pi++)
         {
             if (pi > 0) cbufs.Append('\n');
-            cbufs.Append($"cbuffer PartCB{pi} : register(b{5 + pi}) {{ float4 W{pi}[4]; }}");
+            cbufs.Append($"cbuffer PartCB{pi} : register(b{FirstPartRegister + pi}) {{ float4 W{pi}[4]; }}");
         }
         var sel = new StringBuilder();
         for (int pi = 0; pi < partCount; pi++)
@@ -224,6 +341,32 @@ void main(uint3 tid : SV_DispatchThreadID){
             .Replace("%(P)d", wit.Count.ToString())
             .Replace("%(WIT)s", w.ToString());
     }
+
+    /// <summary>The row-solve body a fused group shader is stamped with: the ragged SLIM layout when the
+    /// member's operator shipped one, the dense all-vertex layout otherwise (<paramref name="n"/> = the
+    /// member mesh's vertex count, read only by the dense body).</summary>
+    static string GroupRowFn(bool slim, int n) =>
+        slim ? GroupRowSlim : GroupRowDense.Replace("%(N)d", n.ToString());
+
+    /// <summary>Stamp a group member's LOD0 fused shader: dispatch rows (4·group bones), the group's first
+    /// appended palette slot, and the member's operator layout. K is solved from the two constant
+    /// buffers.</summary>
+    public static string EmitGroupFuse(int groupBones, int slotBase, bool slim, int n) =>
+        Lf(GroupFuseTemplate)
+            .Replace("%(ROWS)d", (4 * groupBones).ToString())
+            .Replace("%(BASE)d", slotBase.ToString())
+            .Replace("%(ROWFN)s", Lf(GroupRowFn(slim, n)));
+
+    /// <summary>Stamp a group member's TIER fused shader: as <see cref="EmitGroupFuse"/>, plus the witness
+    /// bone's index in this member mesh and the base row of the anchor's own recovery of it.</summary>
+    public static string EmitGroupFuseWitness(int groupBones, int slotBase, bool slim, int n,
+        int witnessMemberBone, uint witnessAnchorRow) =>
+        Lf(GroupFuseWitnessTemplate)
+            .Replace("%(ROWS)d", (4 * groupBones).ToString())
+            .Replace("%(BASE)d", slotBase.ToString())
+            .Replace("%(WITM)d", witnessMemberBone.ToString())
+            .Replace("%(WITA)d", witnessAnchorRow.ToString())
+            .Replace("%(ROWFN)s", Lf(GroupRowFn(slim, n)));
 
     /// <summary>Stamp the skin shader with the body vertex count.</summary>
     public static string EmitSkin(int vcount) =>

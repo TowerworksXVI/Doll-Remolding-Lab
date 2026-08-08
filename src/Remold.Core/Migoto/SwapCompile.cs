@@ -95,8 +95,16 @@ public static class SwapCompile
     /// handed to one compile and not reused after. Null imports the glb here.</param>
     /// <param name="reader">Shares one parse of a bundle across the pool parts that live in it; null opens
     /// each bundle for this call alone.</param>
+    /// <param name="extraBones">Bones the compiled skin may ride that the pool itself does not carry — what
+    /// the coverage groups a build leans on certify, whether the group is a wardrobe SLOT or the
+    /// scene-context PAIR, handed in the caller's own settled order. They extend the valid-bone
+    /// surface as a DENSE continuation of the union (<c>unionBones + k</c>) and nothing else: the emitted
+    /// <c>unionorder.json</c> and the reported <c>UnionBones</c> stay the union, which is what the pool
+    /// parts' palette is built over. Where those indices land in the palette is the emission's own decision,
+    /// so it is not re-derivable here and is not derived here.</param>
     public static Result CompilePool(IReadOnlyList<PoolMesh> meshes, string weightedGlb, string outDir,
-        int layoutTargetIndex = 0, MeshApply.Payload? payload = null, BundleReader? reader = null)
+        int layoutTargetIndex = 0, MeshApply.Payload? payload = null, BundleReader? reader = null,
+        IReadOnlyList<uint>? extraBones = null)
     {
         if (!File.Exists(weightedGlb)) throw new FileNotFoundException($"weighted glb not found: {weightedGlb}");
         if (layoutTargetIndex < 0 || layoutTargetIndex >= meshes.Count)
@@ -118,23 +126,36 @@ public static class SwapCompile
 
         // ---- rewrite the layout-target field's bone table to the union, then run the proven pipeline ----
         var target = fields[layoutTargetIndex];
-        // The compile encodes the authored skin against the TARGET's stored layout, so a one-influence
-        // anchor would reduce the donor to its single influence and slice a narrow skin stream out the far
-        // end. Widen it first: the emitted stream is then the float4/uint4 shape the pooled machinery reads.
+        // The compile encodes the authored skin against the TARGET's stored layout, so an anchor stored
+        // below four influences would crush the donor's down to its width and slice a narrow skin stream
+        // out the far end. Widen it first: the emitted stream is then the float4/uint4 shape the pooled
+        // machinery reads.
         SkinLayout.Widen(target);
         var hArr = Arr(target["m_BoneNameHashes"]);
         var bArr = Arr(target["m_BindPose"]);
         hArr.Children.Clear();
         bArr.Children.Clear();
-        for (int u = 0; u < unionHashes.Count; u++)
+        // The extras ride after the union, in the order handed in, whether or not the union already carries
+        // the hash. A group's members are usually its only tablers, so the hash is absent and the extra is
+        // its one table entry; where a pool part does table it without posing it, the hash appears twice and
+        // the authored skin maps onto the LAST entry carrying it (MeshApply.ResolveAuthoredJoints). Either
+        // way the donor's weight reaches the extra rather than a union row no part writes — the whole reason
+        // the extra exists. Their bindpose entry is the identity and
+        // is safe as one: the authored skin is mapped onto this table BY HASH and the emitted streams carry
+        // indices, so nothing downstream of this rewrite reads a bindpose here — and the palette row a group
+        // bone gets is recovered from the wardrobe member's own mesh, which states its own bind space.
+        var identity = new float[] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        var tableHashes = unionHashes.Concat(extraBones ?? Array.Empty<uint>()).ToList();
+        for (int u = 0; u < tableHashes.Count; u++)
         {
             var he = ValueBuilder.DefaultValueFieldFromArrayTemplate(hArr);
-            he.AsUInt = unionHashes[u];
+            he.AsUInt = tableHashes[u];
             hArr.Children.Add(he);
             var be = ValueBuilder.DefaultValueFieldFromArrayTemplate(bArr);
             var leaves = FloatLeaves(be).ToList();
             if (leaves.Count != 16) throw new InvalidDataException($"bindpose template has {leaves.Count} float leaves");
-            for (int i = 0; i < 16; i++) leaves[i].AsFloat = unionBind[u][i];
+            var bind = u < unionHashes.Count ? unionBind[u] : identity;
+            for (int i = 0; i < 16; i++) leaves[i].AsFloat = bind[i];
             bArr.Children.Add(be);
         }
 
@@ -202,7 +223,7 @@ public static class SwapCompile
                 if (slotOf.TryGetValue(partHashes[pi][b], out var slot))
                 {
                     var d0 = unionBind[slot].Zip(raw, (a, x) => Math.Abs(a - x)).Max();
-                    if (d0 > 1e-5f)
+                    if (d0 > (float)BindSpace.MaxBindDisagreement)
                         throw new InvalidDataException($"bone {partHashes[pi][b]} bind pose differs across pool parts " +
                             $"(max diff {d0:g4}); no measured or corroborated rigid rotation relates the two spaces, " +
                             "so the part can't be converted into the reference part's space");
@@ -215,54 +236,100 @@ public static class SwapCompile
         return (unionHashes, unionBind);
     }
 
-    /// <summary>Restate every part authored in a different bind space in the reference's, in place. The
-    /// delta comes from the parts' MEASURED scene rests when both carry one — a composition of two
-    /// measurements needs no shared-bone corroboration, so it reaches a part sharing a single bone with the
-    /// reference — else it is fitted and corroborated over the shared bones
-    /// (<see cref="BindSpace.MinSharedBones"/>). A part neither route can relate rigidly is left alone for
-    /// the union gate to judge.
-    ///
-    /// <para>When the reference part's own rest is a snapped rotation (<see cref="TrySceneDelta"/>), the
-    /// whole set then restates once more into SCENE-REST space. That space is a property of the subject,
-    /// not of any one part, so every Replace on the subject states its union there and a dump two
-    /// pipelines share converts the same way in both. The extra restatement is one signed permutation
-    /// applied uniformly, so every agreement and every refusal the gates would have read is
-    /// preserved.</para></summary>
+    /// <summary>Restate every part authored in a different bind space in the reference's, in place: the raw
+    /// Unity bindpose floats adapted into <see cref="ReferenceConversions"/>' shape, and the conversion it
+    /// decides applied back onto them. A part it leaves unconverted is left alone for the union gate to
+    /// judge.</summary>
     static void RebaseToReference(List<List<uint>> partHashes, List<List<float[]>> partBinds, int referenceIndex,
         IReadOnlyList<Matrix4x4?>? measuredRests = null)
     {
         if (referenceIndex < 0 || referenceIndex >= partHashes.Count) return;
-        var referenceOf = new Dictionary<uint, Matrix4x4>();
-        for (int b = 0; b < partHashes[referenceIndex].Count; b++)
-            referenceOf[partHashes[referenceIndex][b]] = BindSpace.FromUnityFloats(partBinds[referenceIndex][b]);
 
+        var parts = new List<BindPart>(partHashes.Count);
         for (int pi = 0; pi < partHashes.Count; pi++)
         {
-            if (pi == referenceIndex) continue;
-            if (TryMeasuredDelta(measuredRests, pi, referenceIndex, out var measured))
-            {
-                if (measured is { } md) Rebase(pi, md);
-                continue;   // measured answer, including "same space" — the fitted path has nothing to add
-            }
-            var shared = new List<(Matrix4x4, Matrix4x4)>();
+            var bindOf = new Dictionary<uint, Matrix4x4>(partHashes[pi].Count);
             for (int b = 0; b < partHashes[pi].Count; b++)
-                if (referenceOf.TryGetValue(partHashes[pi][b], out var r))
-                    shared.Add((BindSpace.FromUnityFloats(partBinds[pi][b]), r));
-            if (BindSpace.Delta(shared) is not { } d) continue;
-            Rebase(pi, d);
+                bindOf[partHashes[pi][b]] = BindSpace.FromUnityFloats(partBinds[pi][b]);
+            parts.Add(new BindPart(partHashes[pi],
+                h => bindOf.TryGetValue(h, out var m) ? m : null,
+                measuredRests is not null && pi < measuredRests.Count ? measuredRests[pi] : null));
         }
 
-        if (measuredRests is not null && referenceIndex < measuredRests.Count
-            && TrySceneDelta(measuredRests[referenceIndex], out var scene))
-            for (int pi = 0; pi < partBinds.Count; pi++)
-                Rebase(pi, scene);
-
-        void Rebase(int pi, Matrix4x4 d)
+        // one composed delta per part, applied in one pass: the scene restatement is folded into the part
+        // delta rather than run as a second pass, and both are signed permutations, so the product is exact
+        var deltas = ReferenceConversions(parts, referenceIndex);
+        for (int pi = 0; pi < partBinds.Count; pi++)
         {
+            if (deltas[pi] is not { } d) continue;
             for (int b = 0; b < partBinds[pi].Count; b++)
                 partBinds[pi][b] = BindSpace.ToUnityFloats(
                     BindSpace.Rebase(BindSpace.FromUnityFloats(partBinds[pi][b]), d));
         }
+    }
+
+    /// <summary>One pool part as <see cref="ReferenceConversions"/> reads it, whichever source it came from
+    /// (a bundle's mesh field or a dumped <c>bindpose.json</c>): <paramref name="BoneHashes"/> in the part's
+    /// OWN declaration order — the order the fitted delta walks, so the delta a build derives never depends
+    /// on hash-table layout — <paramref name="BindOf"/> giving that part's bindpose for a hash (row-vector;
+    /// null for a hash the part doesn't carry), and <paramref name="MeasuredRest"/> the part's measured
+    /// bind→scene rest when its scene rig read consistent.</summary>
+    internal readonly record struct BindPart(
+        IReadOnlyList<uint> BoneHashes, Func<uint, Matrix4x4?> BindOf, Matrix4x4? MeasuredRest);
+
+    /// <summary>Each part's conversion into the pool's REFERENCE bind space, null where it is already in it.
+    /// The single home of that decision: the donor compile derives it from bundle fields and the emission
+    /// from dumped bindposes, and a disagreement would state one space in the compiled streams and another
+    /// in the palette that poses them.
+    ///
+    /// <para>A part is restated first by the delta the parts' MEASURED scene rests compose when both carry
+    /// one (<see cref="TryMeasuredDelta"/> — no shared bones needed), else by one fitted and corroborated
+    /// over the bones it shares with the reference (<see cref="FittedDelta"/>). A part neither route can
+    /// relate rigidly gets no conversion, leaving the caller's own gate to judge the difference.</para>
+    ///
+    /// <para>When the reference part's own rest is a snapped rotation (<see cref="TrySceneDelta"/>) that
+    /// restatement composes onto EVERY part's delta, the reference's included — scene-rest space is a
+    /// property of the subject rather than of any one part, so two pipelines pooling one part state it
+    /// identically. A composed result landing back on identity normalizes to null, so a converted path and a
+    /// conversion-free one read as the same answer.</para></summary>
+    internal static Matrix4x4?[] ReferenceConversions(IReadOnlyList<BindPart> parts, int referenceIndex)
+    {
+        var conversions = new Matrix4x4?[parts.Count];
+        if (referenceIndex < 0 || referenceIndex >= parts.Count) return conversions;
+
+        var rests = parts.Select(p => p.MeasuredRest).ToList();
+        Matrix4x4? scene = TrySceneDelta(rests[referenceIndex], out var sd) ? sd : null;
+        for (int pi = 0; pi < parts.Count; pi++)
+            conversions[pi] = Compose(
+                pi == referenceIndex ? null
+                : TryMeasuredDelta(rests, pi, referenceIndex, out var measured) ? measured
+                : FittedDelta(parts[pi], parts[referenceIndex]), scene);
+        return conversions;
+    }
+
+    /// <summary>The snapped delta carrying <paramref name="part"/> into <paramref name="reference"/>'s space,
+    /// fitted over the bones the two share and walked in the part's own bone order. Null when too few are
+    /// shared for the fit to be corroborated (<see cref="BindSpace.MinSharedBones"/>), when the delta varies
+    /// across them, or when the two already share a space.</summary>
+    internal static Matrix4x4? FittedDelta(BindPart part, BindPart reference)
+    {
+        var shared = new List<(Matrix4x4, Matrix4x4)>();
+        foreach (var h in part.BoneHashes)
+            if (reference.BindOf(h) is { } r && part.BindOf(h) is { } p)
+                shared.Add((p, r));
+        return BindSpace.Delta(shared);
+    }
+
+    /// <summary>Two conversions in sequence as one delta: <paramref name="first"/>, then
+    /// <paramref name="then"/> (row-vector, left-to-right); a null half means "no conversion". A product
+    /// landing back on identity NORMALIZES to null, so a caller comparing two paths' answers reads it as
+    /// equal to a delta-free one.</summary>
+    internal static Matrix4x4? Compose(Matrix4x4? first, Matrix4x4? then)
+    {
+        if (first is not { } f) return then;
+        if (then is not { } t) return first;
+        var c = f * t;
+        return c.IsIdentity ? null : c;
     }
 
     /// <summary>The reference part's own restatement into SCENE-REST space: true with the snapped
@@ -276,8 +343,8 @@ public static class SwapCompile
     {
         delta = default;
         if (rest is not { } g) return false;
-        if (RestBake.RotationDiff(g, Matrix4x4.Identity) <= 1e-3f
-            && RestBake.TranslationDiff(g, Matrix4x4.Identity) <= 1e-2f) return false;
+        if (RestBake.RotationDiff(g, Matrix4x4.Identity) <= RestBake.RotationTol
+            && RestBake.TranslationDiff(g, Matrix4x4.Identity) <= RestBake.TranslationTol) return false;
         if (RestBake.Snap(g) is not { } s) return false;
         delta = s;
         return true;
@@ -298,8 +365,8 @@ public static class SwapCompile
         if (rests[part] is not { } gp || rests[reference] is not { } gr) return false;
         if (!Matrix4x4.Invert(gr, out var grInv)) return false;
         var raw = gp * grInv;
-        if (RestBake.RotationDiff(raw, Matrix4x4.Identity) > 1e-3f
-            || RestBake.TranslationDiff(raw, Matrix4x4.Identity) > 1e-2f)
+        if (RestBake.RotationDiff(raw, Matrix4x4.Identity) > RestBake.RotationTol
+            || RestBake.TranslationDiff(raw, Matrix4x4.Identity) > RestBake.TranslationTol)
             delta = RestBake.Snap(raw);
         return true;
     }

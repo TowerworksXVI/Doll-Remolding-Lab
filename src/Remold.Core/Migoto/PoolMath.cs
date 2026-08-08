@@ -521,7 +521,9 @@ public static class PoolMath
     /// (asserted within 1e-5) since the union keeps one bindpose per bone — parts authored in bind spaces
     /// one rigid rotation apart are restated in the anchor's space before they get here (see
     /// <see cref="Mesh.BindSpace"/>), so what this refuses is a delta that is no rigid space difference at
-    /// all. Ownership = the pool part with the most summed weight on the bone (order-independent). This
+    /// all. Ownership = the pool part with the most summed weight on the bone (order-independent) — the
+    /// same per-bone quantity <see cref="StreamDump.WeightedBoneHashes"/> reads off a bundle's mesh field
+    /// and <see cref="MigotoEmitter.SummedWeights"/> off a dumped skin stream. This
     /// first-seen ordering is the single
     /// union-order authority — the emitted indices line up with any consumer given the SAME parts in the
     /// SAME order (it reproduces <see cref="SwapCompile.BuildUnionOrder"/>).
@@ -553,7 +555,7 @@ public static class PoolMath
                     var b = part.Binds[h];
                     double d0 = 0.0;
                     for (int i = 0; i < a.Length; i++) d0 = Math.Max(d0, Math.Abs(a[i] - b[i]));
-                    if (d0 > 1e-5)
+                    if (d0 > Mesh.BindSpace.MaxBindDisagreement)
                         throw new InvalidOperationException(
                             $"bone {h} has inconsistent bind poses across pool parts (max diff {d0:g4}); " +
                             "no measured or corroborated rigid rotation relates the two spaces, so the " +

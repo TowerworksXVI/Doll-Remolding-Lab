@@ -25,14 +25,24 @@ namespace Remold.Core.Mesh;
 /// </summary>
 public static class RestBake
 {
+    /// <summary>How far a measured transform's ROTATION entries may sit from the exact ones and still be
+    /// read as that rotation. The tight half of the split — rotation is what gets baked, so it has to be
+    /// right. Every caller measuring against <see cref="RotationDiff"/> gates on this one value, or two
+    /// stages of one build would disagree about whether a part's space relates rigidly to another's.</summary>
+    public const float RotationTol = 1e-3f;
+
+    /// <summary>The loose half of the split, for <see cref="TranslationDiff"/>: translation is DROPPED
+    /// rather than baked, so it only has to be ignorable. Real faces carry ~1mm of Y noise the tight gate
+    /// would reject, while a real placement offset (a weapon mount at ~0.376) stays well above this and
+    /// still refuses the bake.</summary>
+    public const float TranslationTol = 1e-2f;
+
     /// <summary>
     /// Snap a measured bind→scene transform to an exact axis-aligned rotation. Null (caller skips the
     /// bake) when it isn't one — significant translation, non-quarter-turn rotation, scale — or when it
-    /// snaps to identity. Translation gets a LOOSER gate because it is dropped, not baked: real faces
-    /// carry ~1mm of Y noise the tight gate would reject, while real placement offsets (a weapon mount
-    /// at ~0.376) stay well above it and still refuse the bake.
+    /// snaps to identity.
     /// </summary>
-    public static Matrix4x4? Snap(Matrix4x4 g, float tol = 1e-3f, float translationTol = 1e-2f)
+    public static Matrix4x4? Snap(Matrix4x4 g, float tol = RotationTol, float translationTol = TranslationTol)
     {
         // translation must be ignorable (it's dropped, not baked); then the projective row
         if (MathF.Abs(g.M41) > translationTol || MathF.Abs(g.M42) > translationTol || MathF.Abs(g.M43) > translationTol) return null;

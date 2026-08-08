@@ -136,6 +136,16 @@ public sealed record Outfit(
     /// LangPackage). Null when the stem has no ClothesData row (enemies/props/dorm variants are correctly
     /// nameless) or none was resolved, and the UI labels off the <see cref="Stem"/>.</summary>
     public string? DisplayName { get; init; }
+
+    /// <summary>The weapon-tab rarity (3=R, 4=SR, 5=SSR), shown as the row's tier badge. Null on
+    /// every non-weapon outfit, which carries no rarity.</summary>
+    public int? WeaponRarity { get; init; }
+
+    /// <summary>True on weapon-family subjects, whose parts are separate game objects with no co-draw
+    /// guarantee: every part pools alone, and no cross-part coverage group forms
+    /// (<see cref="Migoto.PoolDerive.PoolCandidates"/>). False on every outfit whose parts dress one
+    /// body.</summary>
+    public bool PartsPoolAlone { get; init; }
 }
 
 public enum OutfitKind

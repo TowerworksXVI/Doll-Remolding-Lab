@@ -57,7 +57,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     [ObservableProperty] private bool _isDirty;
     public string ModTitleDisplay =>
         (string.IsNullOrWhiteSpace(PackageName) ? "untitled mod" : PackageName.Trim()) + (IsDirty ? " *" : "");
-    public ObservableCollection<RecentMod> RecentMods { get; } = new();
+    public ObservableCollection<RecentModVm> RecentMods { get; } = new();
     public bool HasRecentMods => RecentMods.Count > 0;
 
     // Status bar: three facets (game / roster / Blender), a background-work cell, a notice cell.
@@ -86,6 +86,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     public ObservableCollection<CharacterVm> Enemies { get; } = new();
     [ObservableProperty] private string _enemySearchText = "";
 
+    // The Weapons tab: weapon groups per owner character (plus the Battle Pass loose group), then the
+    // per-type standalone-skin groups. Same VM shape, same candidate/confirm fill.
+    public ObservableCollection<CharacterVm> Weapons { get; } = new();
+    [ObservableProperty] private string _weaponSearchText = "";
+
     // Output folder (the mod's project dir) — for "Open output folder".
     [ObservableProperty] private string _exportOutDir = "";
     public string CharactersTabHeader
@@ -96,10 +101,15 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     {
         get { var n = _allEnemies.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Enemies ({n})" : "Enemies"; }
     }
+    public string WeaponsTabHeader
+    {
+        get { var n = _allWeapons.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Weapons ({n})" : "Weapons"; }
+    }
     private void RefreshTabHeaders()
     {
         OnPropertyChanged(nameof(CharactersTabHeader));
         OnPropertyChanged(nameof(EnemiesTabHeader));
+        OnPropertyChanged(nameof(WeaponsTabHeader));
     }
 
     // Edit — the Blender bridge
@@ -117,9 +127,12 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     [ObservableProperty] private string? _packageToggleKey;
     public string PackageToggleKeyLabel => ModKeys.Display(PackageToggleKey, BuildRowVm.NoKeyLabel);
     public bool HasPackageToggleKey => !string.IsNullOrWhiteSpace(PackageToggleKey);
+    /// <summary>The whole-mod key's one explanation. Every fact about it lives here, so the block beside it
+    /// is free for controls: what the key does, and — since a keyed mod always ships on — where every run
+    /// begins, in the same words the per-change rows use.</summary>
     public string PackageToggleKeyTip => HasPackageToggleKey
-        ? $"{PackageToggleKey} toggles the whole mod in game."
-        : "Bind a key that toggles the whole mod in game.";
+        ? $"{PackageToggleKey} toggles the whole mod in game. On at every launch."
+        : "No key means always on. Bind a key to toggle the whole mod in game.";
 
     /// <summary>Writes the same null the capture field's Delete writes, so both clears take the one
     /// identity-edit route.</summary>
@@ -138,10 +151,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     private List<CharacterVm> _allCharacters = new();
     private List<CharacterVm> _allEnemies = new();
+    private List<CharacterVm> _allWeapons = new();
     /// <summary>Every roster-tab pick grid. INVARIANT: any new roster-shaped tab adds its backing list to
     /// this concat, and tab-shared behavior enumerates AllPickRows and never a per-tab list — otherwise the
     /// new tab's picks silently fall out of the queue/ledger/restore.</summary>
-    private IEnumerable<CharacterVm> AllPickRows => _allCharacters.Concat(_allEnemies);
+    private IEnumerable<CharacterVm> AllPickRows => _allCharacters.Concat(_allEnemies).Concat(_allWeapons);
     // The forward view of the install (catalog + GFF manifest): the roster fill, the workbench and every
     // export resolve through it. Null (install unreadable) disables those routes behind their guards.
     private GameVfs? _vfs;
@@ -149,6 +163,12 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     // (AssetExporter.TextureStamps). Recorded ONLY after the build succeeds, so a failed build stays
     // retryable; a stamp mismatch re-rigs with the new image. Session-scoped.
     private readonly Dictionary<string, string> _riggedGlbs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The wardrobe scheme a rigged export classifies part presence by, read from the game's tables
+    /// once per game load and shared by every export after. Its own memo rather than the build's: the build
+    /// creates one per run, and an export happens between runs. Unreadable tables answer null, which
+    /// classifies wardrobe-shaped parts unknown and only WIDENS what an export offers. Dropped wherever the
+    /// forward view is.</summary>
+    private Lazy<Dictionary<string, IReadOnlyList<PartScheme.Slot>>?>? _exportSchemes;
     private string _pkgCharacter = "", _pkgOutfit = "";
     private readonly LabSettings _settings = LabSettings.Load();
 
@@ -202,9 +222,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     /// <summary>The app always constructs through the parameterless form. <paramref name="startLoad"/> is
     /// false only in tests — the game load reaches the registry, the install and the dispatcher.
     /// <paramref name="prewarmJob"/> replaces the queue's work likewise: the real job needs an install to
-    /// read.</summary>
+    /// read. <paramref name="cacheRootFor"/> redirects the sweep's cache root, which the CONSTRUCTION path
+    /// fires before any caller holds the instance — see <see cref="CacheRootFor"/>.</summary>
     internal MainWindowViewModel(bool startLoad,
-        Func<SubjectKey, IProgress<string>, CancellationToken, Task>? prewarmJob = null)
+        Func<SubjectKey, IProgress<string>, CancellationToken, Task>? prewarmJob = null,
+        Func<string>? cacheRootFor = null)
     {
         Workbench = new Workbench.WorkbenchVm(
             () => _project, () => _vfs, () => _friendly, () => _roster, TryDeobfuscateBundle,
@@ -213,7 +235,24 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         _prewarm = new PrewarmQueue<SubjectKey>(Tracked(prewarmJob ?? PrewarmOutfitAsync), SubjectKeyComparer.Instance);
         PackageAuthor = _settings.Author;   // remembered across sessions
         RefreshRecent();
-        if (startLoad) _ = Task.Run(LoadAsync);
+        // Settled before the sweep below can read it. The field stays assignable after construction — that
+        // is how a test drives the RELOAD's sweep — but the construction path's sweep runs inside this ctor,
+        // where no caller has the instance to assign to yet, so it can only be redirected from here.
+        if (cacheRootFor is not null) CacheRootFor = cacheRootFor;
+        // A sweep owed from an earlier session: armed on a Save, queued behind a hold, and closed on before
+        // any rescan ran. The debt is durable, so the FIRST load of this session is the rescan that honours
+        // it — and it is handed off here rather than left for a later reload, because the load starting
+        // below is the one that would otherwise rebuild the very caches it is owed.
+        //
+        // The reload's ordering rules (every declared hold down, the sharing pass cancelled) have nothing to
+        // stand for at this line: nothing has been started yet, there is no VFS, no sharing pass and no
+        // build. The one reader that follows is that load, and it waits the sweep out — see PendingCachePurge.
+        _forceRescanPending = _settings.ForceRescanOwed;
+        if (startLoad)
+        {
+            BeginForceRescanPurge();
+            _ = Task.Run(LoadAsync);
+        }
     }
 
     // ---- mod lifecycle ------------------------------------------------
@@ -330,7 +369,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     }
 
     [RelayCommand]
-    private async Task OpenRecent(RecentMod? m)
+    private async Task OpenRecent(RecentModVm? m)
     {
         if (m is null || !await ConfirmLeaveProjectAsync()) return;
         await OpenModAsync(m.Path);
@@ -361,6 +400,8 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             else { EnsureFolderMatchesName(); _project.Save(); }
             RememberRecent();
             IsDirty = false;
+            // the first save mints the folder a preview is copied INTO, so the control's gate re-reads here
+            RefreshPreviewState();
             BuildStatus = $"Saved to {_project.RootDir}";
             return (true, null);
         }
@@ -844,9 +885,12 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     private void RefreshRecent()
     {
+        // the rows are being replaced wholesale, so their native bitmaps go with them
+        foreach (var row in RecentMods) row.DisposeThumb();
         RecentMods.Clear();
-        foreach (var m in _settings.RecentMods) RecentMods.Add(m);
+        foreach (var m in _settings.RecentMods) RecentMods.Add(new RecentModVm(m));
         OnPropertyChanged(nameof(HasRecentMods));
+        FillRecentThumbs();
     }
 
     /// <summary>A collision-free project folder under <paramref name="root"/> for <paramref name="slug"/>.</summary>
@@ -1806,18 +1850,37 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (RescanMustWait)
         {
             _rescanAfterScan = true;
-            NoticeStatus = StatusFacet.Warn(RescanQueuedNotice, RescanQueuedDetail);
+            ShowQueuedRescanNotice(RescanQueuedNotice);
             return;
         }
         GameRescanOffered = false;
         Characters.Clear();
         Enemies.Clear();
+        Weapons.Clear();
         _allCharacters = new();
         _allEnemies = new();
+        _allWeapons = new();
         _vfs = null;
         _subjectModels.Clear();   // a memoized model describes the forward view being dropped here
+        _exportSchemes = null;    // …and the tables it was classified against are re-read with it
         _sharingCts?.Cancel();
         _sharingTask = null;
+        // A force rescan's deletions run HERE and nowhere else, and AFTER the sharing pass above is
+        // cancelled: that pass writes the sharing cache from a background thread under no hold at all, so a
+        // sweep ahead of the cancel is a sweep the pass can undo — it would re-write the very file the
+        // modder asked to clear, seeding the next measurement from pre-sweep rows.
+        //
+        // Every hold the app DECLARES (RescanMustWait) has let go by this line. One reader is not declared:
+        // the speculative prewarm's combined-rig build runs without _buildingCombinedRig set and reads and
+        // writes fingerprint sidecars while this runs. That gap is benign because a sidecar is COMPARED
+        // against the file beside it and never trusted — the worst case is a rebuilt cache the sweep meant
+        // to take, i.e. a slower next open. Owed until it runs, so a request queued under a build is
+        // honoured by whichever rescan finally happens.
+        //
+        // The DELETIONS themselves leave this thread (~1s per 10k cache files); what stays here is the
+        // decision and the order. See BeginForceRescanPurge for the guarantee that ties the two back
+        // together: the load started below waits the sweep out before it reads or writes a single cache.
+        BeginForceRescanPurge();
         SearchText = "";
         EnemySearchText = "";
         RefreshTabHeaders();   // the discarded trees held checked subjects — no stale "(N)" count
@@ -1843,11 +1906,14 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         RaiseModsFolderGates();   // the game half of the Launch gate is known now, scan or no scan
         // An in-flight load captured its own game dir at start and won't pick this one up, so queue a
         // rescan for when it lands rather than silently no-op until the user rescans.
+        //
+        // Its own title and leading sentence — the folder change is what the modder just did, and the notice
+        // answers that — with the SHARED queued detail after it: this is the same wait every other route
+        // queues, so a sweep owed while it stands has to be named here too.
         if (IsScanning)
         {
             _rescanAfterScan = true;
-            NoticeStatus = StatusFacet.Warn("Folder change pending",
-                "New folder takes effect after this scan. Rescanning next.");
+            ShowQueuedRescanNotice(GameDirChangedNotice, GameDirChangedLead);
             return;
         }
         ReloadRoster();
@@ -1870,6 +1936,46 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     internal const string RescanQueuedNotice = "Rescan queued";
     /// <inheritdoc cref="RescanQueuedNotice"/>
     internal const string RescanQueuedDetail = "Files re-read when the current work finishes.";
+    /// <summary>The same wait, when a force rescan is the thing waiting: deleting caches is a bigger promise
+    /// than re-reading files, so the detail says so. The CELL still reads "Rescan queued" — one wait, one
+    /// word for it — and this rides the tooltip beneath it.</summary>
+    internal const string RescanQueuedForceDetail =
+        "Caches cleared and files re-read when the current work finishes.";
+
+    /// <summary>The game folder changed under a scan in flight. Its own title, because what the modder just
+    /// did is the news; the wait itself is described by the shared detail after the lead.</summary>
+    internal const string GameDirChangedNotice = "Folder change pending";
+    /// <inheritdoc cref="GameDirChangedNotice"/>
+    internal const string GameDirChangedLead = "New folder takes effect after this scan.";
+
+    /// <summary>Which detail the queued-rescan notice carries: the force variant while a sweep is owed.</summary>
+    private string QueuedRescanDetail => _forceRescanPending ? RescanQueuedForceDetail : RescanQueuedDetail;
+
+    /// <summary>The standing queued-rescan notice's fixed half: the title and leading sentence it was
+    /// written with. Kept so the DETAIL can be re-rendered when what the wait will do changes under it —
+    /// a sweep taken back after the notice went up. Null until a queued line is written.</summary>
+    private (string Title, string Lead)? _queuedNoticeShape;
+
+    /// <summary>Write the queued-rescan notice: the site's own title and optional leading sentence, then the
+    /// shared detail that names the sweep while one is owed. THE one home for it, so the three routes that
+    /// can queue a rescan — the reload's own hold, a folder change under a scan, the game closing — can
+    /// never describe the same wait differently.</summary>
+    private void ShowQueuedRescanNotice(string title, string lead = "")
+    {
+        _queuedNoticeShape = (title, lead);
+        NoticeStatus = StatusFacet.Warn(title,
+            lead.Length == 0 ? QueuedRescanDetail : lead + " " + QueuedRescanDetail);
+    }
+
+    /// <summary>Re-render the standing queued-rescan notice against what is owed NOW. The notice is written
+    /// once, at the click that queued it, and keeps the wording it was written with; this is how a sweep
+    /// armed or taken back afterwards stops the standing line promising the wrong thing. A cell holding
+    /// anything else has been written over since and is left alone.</summary>
+    private void RefreshQueuedRescanNotice()
+    {
+        if (_queuedNoticeShape is { } shape && NoticeStatus.Text == shape.Title)
+            ShowQueuedRescanNotice(shape.Title, shape.Lead);
+    }
 
     /// <summary>Run a queued rescan once the roster's holds let go. Called at every load exit AFTER
     /// IsScanning clears and at the end of each build/materialize scope; it re-tests the hold rather than
@@ -1879,6 +1985,102 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (!_rescanAfterScan || RescanMustWait) return;
         _rescanAfterScan = false;
         ReloadRoster();
+    }
+
+    /// <summary>A force rescan is owed: the rebuilt caches are to be swept the next time
+    /// <see cref="ReloadRoster"/> really reloads. Set at Save, consumed there — never at the click, because
+    /// a build, scan, materialize or prewarm may be reading the very caches the sweep removes.
+    /// <para>Mirrors <see cref="LabSettings.ForceRescanOwed"/>, which is where the debt waits out an exit:
+    /// this field is seeded from it at construction, so a request armed under a build and then closed on is
+    /// honoured by the next session's first load rather than lost.</para></summary>
+    private bool _forceRescanPending;
+
+    /// <summary>Whether the force-rescan sweep is still owed, for tests that pin a queued force rescan
+    /// deleting nothing until the rescan runs.</summary>
+    internal bool ForceRescanPending => _forceRescanPending;
+
+    /// <summary>Where the sweep's derived-cache trees live. A seam because <see cref="LabPaths.CacheRoot"/>
+    /// is a static read of <c>%LOCALAPPDATA%</c>, which nothing redirects under test: a test that drove the
+    /// fired sweep against it would delete the caches of whoever ran the suite.
+    /// <para>Read INSIDE the sweep, on the pool thread, so a test can also hold the sweep open here and pin
+    /// what waits on it — see <see cref="PendingCachePurge"/>.</para>
+    /// <para>Assignable after construction for the sweep a RELOAD fires, and settable at construction (the
+    /// ctor's <c>cacheRootFor</c>) for the one the construction path fires, which runs before any caller
+    /// holds the instance.</para></summary>
+    internal Func<string> CacheRootFor = () => LabPaths.CacheRoot;
+
+    /// <summary>The sharing pass's cancellation source, for the test that pins the sweep running AFTER the
+    /// pass is cancelled — the pass writes its cache under no hold, so the order is the whole guarantee.</summary>
+    internal CancellationTokenSource? SharingPassCts { get => _sharingCts; set => _sharingCts = value; }
+
+    /// <summary>The sweep's file deletions, running off the UI thread. <see cref="Task.CompletedTask"/> when
+    /// no sweep has been started — a load that finds nothing owed waits on nothing.</summary>
+    private Task _forceRescanPurge = Task.CompletedTask;
+
+    /// <summary>What the load waits out before it reads or writes ANY cache. The whole point of the seam:
+    /// the deletions run in the background, but the reload that follows them must not race its own cache
+    /// writes against a sweep still removing the folder underneath — a rebuilt snapshot written mid-sweep is
+    /// exactly the stale file the modder asked to be rid of.
+    /// <para>Awaited at the top of <see cref="LoadAsync"/>, which is the one entry to every cache read the
+    /// reload takes. Internal so a test can pin the wait rather than the wording of a comment.</para></summary>
+    internal Task PendingCachePurge => _forceRescanPurge;
+
+    /// <summary>Consume an owed force rescan and hand its deletions to the thread pool. A no-op when nothing
+    /// is owed, so the two callers — the reload's ordering point, and the app's first load for a debt that
+    /// survived an exit — can call it unconditionally.
+    ///
+    /// <para>WHAT STAYS HERE: the decision, the settled debt, and <see cref="_riggedGlbs"/>, which is
+    /// view-model state and not the pool's to touch. What leaves is the disk work, which is the part that
+    /// costs about a second per ten thousand cache files.</para>
+    ///
+    /// <para>The debt is settled BEFORE the sweep rather than after it. A sweep interrupted part-way leaves
+    /// caches the next open rebuilds, which is the same cost as the held file this sweep already skips —
+    /// whereas a debt cleared only on completion is a debt re-armed by every crash, sweeping again on every
+    /// launch until one run finishes.</para>
+    ///
+    /// <para>ONE sweep is ever in flight, so the task this replaces is always finished with: the load it was
+    /// started for sets <see cref="IsScanning"/> before it begins, and every route back to here waits on that
+    /// through <see cref="RescanMustWait"/>.</para></summary>
+    private void BeginForceRescanPurge()
+    {
+        if (!_forceRescanPending) return;
+        _forceRescanPending = false;
+        if (_settings.ForceRescanOwed) { _settings.ForceRescanOwed = false; SaveSettings(); }
+        _riggedGlbs.Clear();   // this session's memo, so an unedited part re-rigs on the next open
+
+        // The settings are read HERE: the recents are a live list the pool must not be handed to enumerate
+        // later, and the library root goes with them. The cache root is a static path read and is taken
+        // inside the sweep, which is also where a test holds the sweep open (see CacheRootFor).
+        var recents = _settings.RecentMods.Select(m => m.Path).ToList();
+        var libraryRoot = _settings.ResolvedLibraryRoot;
+        _forceRescanPurge = Task.Run(() =>
+        {
+            // Nothing escapes: the load AWAITS this task, so a fault here would come out of the load rather
+            // than out of the sweep — a rescan that never finishes over a cache folder that wouldn't go.
+            // CacheReset already skips what it can't remove item by item; this is the outer edge of the same
+            // rule, and what it costs is a surviving cache, i.e. a slower next open.
+            try
+            {
+                CacheReset.ClearDerivedCaches(CacheRootFor());
+                CacheReset.ClearCombinedFingerprints(CacheReset.ProjectRoots(libraryRoot, recents));
+            }
+            catch
+            {
+                // Reaching HERE is the total failure — the walk itself fell over, so a sweep that removed
+                // nothing would otherwise be indistinguishable from one that finished. The request goes back
+                // on so the next rescan retries it, and so the queued notice and the reopened Settings row
+                // keep telling the truth about what is still owed.
+                //
+                // The SESSION flag only. The durable one stays down deliberately: a sweep that faults every
+                // time it runs would otherwise be re-armed on disk forever and re-sweep on every launch, and
+                // a debt this session couldn't pay is not one the next session should inherit.
+                //
+                // Written from the pool. It is a bool, and the reader that matters is behind this task's
+                // completion (the load awaits it), so a UI-thread read either sees the retry or is one this
+                // sweep's own reload would have overwritten anyway.
+                _forceRescanPending = true;
+            }
+        });
     }
 
     // ---- Settings (Tools → Settings…) -------------------------------------------------------------
@@ -1900,6 +2102,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         MigotoLoaderExe = _settings.MigotoLoaderExe,
         Author = _settings.Author,
         RecentCount = _settings.RecentMods.Count,
+        // The row opens on the truth: a sweep already owed — armed under a hold, or carried over from a
+        // session that closed before it ran — shows as armed rather than as an offer to arm it again.
+        ForceRescanOwed = _forceRescanPending,
         EncoderCpuLimit = _settings.EncoderCpuLimit,
     };
 
@@ -1930,15 +2135,45 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         _settings.GamePath = newGame;
 
         if (r.ClearRecents) { _settings.RecentMods.Clear(); RefreshRecent(); }
+        // Owed BEFORE any reload below, so whichever rescan runs is the one that sweeps. The recents this
+        // read enumerates are the post-clear list — a cleared entry's project keeps its sidecars, which the
+        // next open rebuilds anyway.
+        //
+        // ASSIGNED, not just set: the row opens on the state the app is in and its button toggles, so the
+        // form hands back the row's whole state and false from it means the request was taken back. (The
+        // form reads that state when it opens; a queued sweep that drains while the dialog is up therefore
+        // gets re-armed by a Save that never touched the row. It costs one more sweep of caches the app
+        // rebuilds, which is the harmless direction to be wrong in — and it costs only that, because the
+        // reload below is gated on the Save having ARMED the request rather than merely carrying it.)
+        //
+        // Durable, so a request armed under a build and then closed on is honoured by the next session
+        // rather than lost — settled again where the sweep is handed off (BeginForceRescanPurge).
+        _forceRescanPending = r.ForceRescan;
+        _settings.ForceRescanOwed = r.ForceRescan;
         SaveSettings();
+        // A queued notice may be standing over this Save — the request was armed under a build, and the
+        // build is still running. It was written with the wording of the moment it went up, so a sweep taken
+        // back here would leave it promising cleared caches for a wait that will now only re-read files.
+        RefreshQueuedRescanNotice();
 
         if (blenderChanged) RefreshBlenderStatus();
+        bool reloaded = false;
         if (gameChanged && newGame is { } g)
         {
             _gameDir = g;
             RaiseModsFolderGates();
-            if (!IsScanning) ReloadRoster();
+            if (!IsScanning) { ReloadRoster(); reloaded = true; }
         }
+        // The reload is what FIRES a newly armed sweep: ReloadRoster answers a busy app itself — the standing
+        // "Rescan queued" notice and the flag RunQueuedRescan drains — so the sweep waits with it rather than
+        // running under a hold.
+        //
+        // NEWLY armed, though, and not merely owed. A reload is a full re-read of the install, and the Save
+        // that hands back a request it opened with (the row untouched, or a queued sweep that drained while
+        // the dialog was up) has asked for nothing new: the debt stands on both flags, and the next rescan
+        // that happens for its own reasons honours it. Costing an unrelated settings edit a whole re-read is
+        // the thing this gate exists to prevent.
+        if (r.ForceRescan && !r.ForceRescanWasOwed && !reloaded) ReloadRoster();
     }
 
     /// <summary>Recompute the status-bar Blender line. Presence-only (no process spawn), so it runs
@@ -1964,6 +2199,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     partial void OnSearchTextChanged(string value) => ApplyFilter();
     partial void OnEnemySearchTextChanged(string value) => ApplyFilter();
+    partial void OnWeaponSearchTextChanged(string value) => ApplyFilter();
 
     // Opt-in launch timing (GF2_LAUNCH_TIMING=1): each LoadAsync phase's wall time to a log file. The app
     // is a WinExe — no console, and Debug trace is invisible without a debugger.
@@ -1993,6 +2229,17 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (TimeLaunch) try { if (System.IO.File.Exists(LaunchTimingLog)) System.IO.File.Delete(LaunchTimingLog); } catch { }
         try
         {
+            // THE GUARANTEE: a force rescan's deletions run off this thread, but no cache is read or written
+            // until they are done. Every cache the load touches — the catalog snapshot, the roster snapshot,
+            // the sharing measurement, thumbnails, the rig fingerprints — is behind this line, so the load
+            // can never write a rebuilt file into a folder the sweep is still emptying and leave the stale
+            // copy standing. Completed already when nothing was owed. See BeginForceRescanPurge for the
+            // handoff.
+            //
+            // INSIDE the try: the sweep swallows its own failures today, but a wait that ever did fault
+            // ahead of this line would leave IsScanning set with nothing left to clear it — the app scanning
+            // forever, with no notice and no working Rescan. The catch below is the load's one exit for that.
+            await PendingCachePurge.ConfigureAwait(false);
             // Off the UI thread (the whole method runs under Task.Run) — the registry/library scan belongs
             // there.
             _gameDir = ResolveGameDir();
@@ -2054,7 +2301,26 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             var enemyVms = enemyRoster.Select(c => new CharacterVm(c, OnSubjectToggled, OnCharacterToggled)).ToList();
             for (int i = 0; i < enemyRoster.Count; i++)
                 enemyVms[i].Populate(enemyRoster[i].Outfits.Select(o => (o, (IEnumerable<string>)Array.Empty<string>())), lightUp: false);
-            PhaseTime(_lt, "Phase 1: DB roster + enemy roster + VM construction");
+
+            // The Weapons tab rosters: weapons grouped by owner character, standalone skins grouped by
+            // weapon type, generic attachment models grouped by slot category. Best-effort like the
+            // enemy roster — unreadable weapon tables empty the tab with a status note, never fail the
+            // load.
+            List<Character> weaponRoster = new();
+            string? weaponRosterError = null;
+            try
+            {
+                weaponRoster = WeaponRoster
+                    .BuildWeaponsByCharacter(WeaponRoster.ReadWeapons(nameDb, loc), dbRoster)
+                    .Concat(WeaponRoster.BuildSkinsByType(WeaponRoster.ReadSkins(nameDb, loc)))
+                    .Concat(WeaponRoster.BuildAttachmentsBySlot(WeaponRoster.ReadAttachments(nameDb, loc)))
+                    .ToList();
+            }
+            catch (Exception e) { weaponRosterError = e.Message; }
+            var weaponVms = weaponRoster.Select(c => new CharacterVm(c, OnSubjectToggled, OnCharacterToggled)).ToList();
+            for (int i = 0; i < weaponRoster.Count; i++)
+                weaponVms[i].Populate(weaponRoster[i].Outfits.Select(o => (o, (IEnumerable<string>)Array.Empty<string>())), lightUp: false);
+            PhaseTime(_lt, "Phase 1: DB roster + enemy/weapon rosters + VM construction");
 
             // Presence-only (no process spawn), so it stays on the launch path without blocking it.
             var blenderExe = BlenderLocator.Find(_settings.PreferredBlender);
@@ -2064,9 +2330,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             {
                 _allCharacters = vms;
                 _allEnemies = enemyVms;
-                _roster = dbRoster.Concat(enemyRoster).ToList();   // full roster until finalize narrows it
+                _allWeapons = weaponVms;
+                _roster = dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList();   // full roster until finalize narrows it
                 // Built from the full roster so a mod OPENED DURING the load already reads friendly.
-                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).ToList());
+                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList());
                 GameStatus = StatusFacet.Good("Game");
                 StatusChars = "Reading game files…";
                 NoticeStatus = StatusFacet.None;   // clear any notice from a prior failed load
@@ -2119,32 +2386,39 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
             // The install's existing sharing data, joined HERE and not earlier: the file carries no
             // names, only keys onto the roster's own. The measurement decides which enemy doors are
-            // duplicates, so the roster needs it before it paints.
+            // duplicates, so the roster needs it before it paints. The weapon roster stays OUT: weapon
+            // parts draw independently of everything, so they hold no sharing rows and no witness roles.
             var population = SharingPopulation.Of(dbRoster, enemyRoster);
             var sharingBase = LoadSharingBase(LabPaths.SharingIndexFile(vfs.CatalogVersion),
                 LabPaths.SharingSeedFile, vfs.CatalogVersion, population);
             PhaseTime(_lt, "Phase 2: sharing base load");
 
             // PHASE 3, existence — a candidate iff the prefab-address formula resolves its stem in some
-            // context (catalog dictionary hits, no file reads). Characters and enemies ride ONE candidate
-            // list; IsEnemy only routes the row back to its own tab at the marshals.
-            var candidates = new List<(CharacterVm Vm, Character Character, List<Outfit> Outfits, bool IsEnemy)>();
+            // context (catalog dictionary hits, no file reads). All three tabs ride ONE candidate list;
+            // the Tab field only routes the row back to its own grid at the marshals.
+            var candidates = new List<(CharacterVm Vm, Character Character, List<Outfit> Outfits, bool IsEnemy, bool IsWeapon)>();
             for (int i = 0; i < dbRoster.Count; i++)
             {
                 // by OUTFIT, not stem: a curated subject's prefab is found through its own route
                 var outfits = dbRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
-                if (outfits.Count > 0) candidates.Add((vms[i], dbRoster[i], outfits, false));
+                if (outfits.Count > 0) candidates.Add((vms[i], dbRoster[i], outfits, false, false));
             }
             for (int i = 0; i < enemyRoster.Count; i++)
             {
                 var outfits = enemyRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
-                if (outfits.Count > 0) candidates.Add((enemyVms[i], enemyRoster[i], outfits, true));
+                if (outfits.Count > 0) candidates.Add((enemyVms[i], enemyRoster[i], outfits, true, false));
+            }
+            for (int i = 0; i < weaponRoster.Count; i++)
+            {
+                var outfits = weaponRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
+                if (outfits.Count > 0) candidates.Add((weaponVms[i], weaponRoster[i], outfits, false, true));
             }
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                _allCharacters = candidates.Where(c => !c.IsEnemy).Select(c => c.Vm).ToList();
+                _allCharacters = candidates.Where(c => !c.IsEnemy && !c.IsWeapon).Select(c => c.Vm).ToList();
                 _allEnemies = candidates.Where(c => c.IsEnemy).Select(c => c.Vm).ToList();
+                _allWeapons = candidates.Where(c => c.IsWeapon).Select(c => c.Vm).ToList();
                 ApplyFilter();
                 StatusChars = $"Reading models… 0/{candidates.Count}";
                 // The forward view is up, so the workbench no longer waits on the roster fill.
@@ -2250,6 +2524,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             {
                 var surviving = new List<CharacterVm>();
                 var survivingEnemies = new List<CharacterVm>();
+                var survivingWeapons = new List<CharacterVm>();
                 var confirmedRoster = new List<Character>();
                 foreach (var cand in candidates)
                 {
@@ -2258,17 +2533,18 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
                     // a picked subject — while the tab lists only what survives the filter.
                     confirmedRoster.Add(cand.Character with { Outfits = confirmed.Select(x => x.Outfit).ToList() });
                     if (Listed(cand.Character, cand.IsEnemy, confirmed).Count == 0) continue;
-                    (cand.IsEnemy ? survivingEnemies : surviving).Add(cand.Vm);
+                    (cand.IsEnemy ? survivingEnemies : cand.IsWeapon ? survivingWeapons : surviving).Add(cand.Vm);
                 }
                 _allCharacters = surviving;
                 _allEnemies = survivingEnemies;
+                _allWeapons = survivingWeapons;
                 _roster = confirmedRoster;
 
                 // Rebuilt from the same phase-1 roster, so the resolver covers every subject the fill saw
                 // and not just the ones that survived it.
-                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).ToList());
+                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList());
 
-                StatusChars = $"Characters: {surviving.Count} · Enemies: {survivingEnemies.Count} · catalog v{vfs.CatalogVersion}";
+                StatusChars = $"Characters: {surviving.Count} · Enemies: {survivingEnemies.Count} · Weapons: {survivingWeapons.Count} · catalog v{vfs.CatalogVersion}";
                 // Warnings ride the notice cell, not the roster line — full detail in its tooltip.
                 var notices = new List<(string Short, string Detail)>();
                 if (_settings.LoadedFromDefaultsAfterError)
@@ -2284,6 +2560,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
                 if (enemyRosterError is not null)
                     notices.Add(("enemy roster unreadable",
                         $"The enemy roster couldn't be read: {enemyRosterError}"));
+                if (weaponRosterError is not null)
+                    notices.Add(("weapon roster unreadable",
+                        $"The weapon roster couldn't be read: {weaponRosterError}"));
                 if (missing.Count > 0)
                     notices.Add(($"{missing.Count} file(s) missing",
                         $"{missing.Count} game file(s) missing; the install looks mid-update. Verify the install."));
@@ -2363,6 +2642,21 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             if (eq.Length == 0 || MatchesCharacter(c, eq))
                 Enemies.Add(c);
 
+        // Weapon groups by owner first, then the per-type skin groups, then the per-slot attachment
+        // groups — three branches of one tab, so none interleaves another's names. The search also
+        // reads the SUBJECT rows: a weapon's own name lives on the row, not the group ("Basic Muzzle
+        // Brake" sits under "Parts · Silencers"), so a group-only match would find nothing.
+        var wq = WeaponSearchText?.Trim() ?? "";
+        Weapons.Clear();
+        foreach (var c in _allWeapons
+                     .OrderBy(c => c.Name.StartsWith(WeaponRoster.PartGroupPrefix, StringComparison.Ordinal) ? 2
+                                 : c.Name.StartsWith(WeaponRoster.SkinGroupPrefix, StringComparison.Ordinal) ? 1 : 0)
+                     .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+            if (wq.Length == 0 || MatchesCharacter(c, wq)
+                || c.Outfits.Any(o => o.Label.Contains(wq, StringComparison.OrdinalIgnoreCase)
+                                   || o.Stem.Contains(wq, StringComparison.OrdinalIgnoreCase)))
+                Weapons.Add(c);
+
         RefreshEmptyStates();
     }
 
@@ -2403,8 +2697,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
 
     public string CharactersNoMatch => NoMatchLine(SearchText, Characters.Count);
     public string EnemiesNoMatch => NoMatchLine(EnemySearchText, Enemies.Count);
+    public string WeaponsNoMatch => NoMatchLine(WeaponSearchText, Weapons.Count);
     public bool HasCharactersNoMatch => CharactersNoMatch.Length > 0;
     public bool HasEnemiesNoMatch => EnemiesNoMatch.Length > 0;
+    public bool HasWeaponsNoMatch => WeaponsNoMatch.Length > 0;
     /// <summary><see cref="EnemyDoorNote"/> for the view, so the sentence has one home.</summary>
     public string EnemiesNoMatchNote => EnemyDoorNote;
 
@@ -2412,8 +2708,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     {
         OnPropertyChanged(nameof(CharactersNoMatch));
         OnPropertyChanged(nameof(EnemiesNoMatch));
+        OnPropertyChanged(nameof(WeaponsNoMatch));
         OnPropertyChanged(nameof(HasCharactersNoMatch));
         OnPropertyChanged(nameof(HasEnemiesNoMatch));
+        OnPropertyChanged(nameof(HasWeaponsNoMatch));
     }
 
     /// <summary>The measurement data already on this machine for the loaded catalog: the cache first,
@@ -2458,9 +2756,10 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             SetSharingFailed(cts, false);
             try
             {
-                var built = SharingIndex.Build(population, vfs.Catalog, TryDeobfuscateBundle, cv,
+                var built = SharingIndex.Build(population, vfs.Catalog,
+                    BundleReads.ContentHashLookup(vfs.Manifest), TryDeobfuscateBundle, cv,
                     basis.Index, progress, cts.Token);
-                if (ShouldWriteSharingCache(built, basis))
+                if (ShouldWriteSharingCache(built, basis, cts.Token))
                     try { built.Save(path); } catch { /* cache write is best-effort; next launch remeasures */ }
                 return built;
             }
@@ -2474,9 +2773,15 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
     /// Many failed outfits is a transient condition (typically the game holding its bundles), not a fact
     /// about the catalog — caching it would serve those outfits as uncovered until the next game update;
     /// a handful is the real per-catalog floor and caches. A result identical to the install's OWN cache
-    /// is not written; a basis adopted from the shipped seed always is — that mints the cache.</summary>
-    internal static bool ShouldWriteSharingCache(SharingIndex built, SharingBase basis)
+    /// is not written; a basis adopted from the shipped seed always is — that mints the cache.
+    /// <para>A CANCELLED pass writes nothing. The build normally throws on cancellation, but a pass that
+    /// finished in the same instant reaches here with its token already down — and by then the rescan that
+    /// cancelled it may have swept the cache folder, so the write would resurrect the file the modder asked
+    /// to clear and seed the next launch from rows measured before the sweep.</para></summary>
+    internal static bool ShouldWriteSharingCache(SharingIndex built, SharingBase basis,
+        CancellationToken token = default)
     {
+        if (token.IsCancellationRequested) return false;
         int totalOutfits = built.MeasuredOutfitCount + built.FailedOutfits.Count;
         if (built.FailedOutfits.Count > Math.Max(3, totalOutfits / 20)) return false;
         return basis.FromSeed || basis.Index is not { } cached || !built.SameRowsAs(cached);
@@ -3112,6 +3417,12 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         }
 
         var fellBackToGame = new List<string>();
+        // Every roster row the rig build couldn't measure, the subset whose BYTES were unavailable this
+        // run, and whether the roster's own inputs (wardrobe tables, subject model) read whole. Only the
+        // unreadable classes block caching — see the publish below.
+        var rosterDegraded = new List<string>();
+        var rosterUnreadable = new List<string>();
+        bool rosterInputsUnreadable = false;
         bool mapRecordLost = false;
         void Launch()
         {
@@ -3171,12 +3482,20 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         // Only the ASKED-FOR route: a speculative prewarm's rig build costs the modder no wait and blocks
         // no close, exactly as the prepares that precede it don't.
         _buildingCombinedRig = launch;
+        // A null roster is itself a degrade — the tail spans the whole skeleton — and the fingerprint can't
+        // tell that apart from a filtered one, so the publish below reads it too.
+        AssetExporter.SubjectRoster? exportRoster = null;
         try
         {
             await Task.Run(() =>
             {
-                try { AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, subject.Character, spec, texDir, status, combinedOut: tmp,
-                          recordedTextureBundles: recordedTex, vanillaFallbacks: fellBackToGame, ct: ct); }
+                try { exportRoster = ExportRoster(subject, out bool inputsUnreadable);
+                      rosterInputsUnreadable = inputsUnreadable;
+                      AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, subject.Character, spec, texDir, status, combinedOut: tmp,
+                          recordedTextureBundles: recordedTex, vanillaFallbacks: fellBackToGame,
+                          roster: exportRoster, rosterDegraded: rosterDegraded,
+                          candidacyCacheFile: LabPaths.CandidacyCacheFile, ct: ct,
+                          rosterUnreadable: rosterUnreadable); }
                 // a game-locked read propagates from BuildRiggedGlbs — surface the BUSY remedy below
                 catch (IOException) { combinedBusy = true; }
                 catch { /* leave it unbuilt — the temp simply won't exist, so nothing is published below */ }
@@ -3199,9 +3518,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         if (AssetExporter.PublishCombined(tmp, combined, fingerprintPath, fingerprint,
                 onMapSidecarLost: () => mapRecordLost = true))
         {
-            // A session where a part degraded to the game copy must not be reused: the fingerprint claims
-            // it carries that part's edit. Drop the sidecar so the next open rebuilds and re-states it.
-            if (fellBackToGame.Count > 0)
+            // The publish happens either way; what this decides is whether the next open may REUSE it.
+            if (!AssetExporter.CombinedCacheable(fellBackToGame, exportRoster is not null, rosterUnreadable,
+                    rosterInputsUnreadable))
                 try { if (File.Exists(fingerprintPath)) File.Delete(fingerprintPath); } catch { /* next open compares and misses anyway */ }
             if (launch) Launch();
             return;
@@ -3228,6 +3547,133 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         var target = PartMeshTarget(subject, partToken);
         if (target is null) { status.Report($"Couldn't find {partToken}'s mesh."); return; }
         await LaunchPartInBlender(target, subject, partToken, recipe.IsStatic, status);
+    }
+
+    /// <summary>
+    /// The rest of <paramref name="target"/>'s outfit, as rig-build spec rows carrying no <c>GlbOut</c>: with
+    /// no combined build either, each is read for its SKELETON alone (see
+    /// <see cref="AssetExporter.BuildRiggedGlbs"/>), which costs its bundle rather than a part export. That is
+    /// what lets the armature a lone part opens with span the subject, so weight can be painted onto a bone
+    /// this one part doesn't pose.
+    ///
+    /// <para>Their EDITS stay out of it — a sibling's GAME skin is what places its bones, and its workspace
+    /// glb is neither read nor written here. An UNATTRIBUTED target names no subject, and matching absent to
+    /// absent would drag another outfit's bones into this rig, so one opens alone.</para>
+    /// </summary>
+    internal static List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+        SkeletonOnlyParts(ModProject project, ProjectTarget target)
+    {
+        var rows = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>();
+        if (target.SubjectCharacter is not { Length: > 0 } || target.SubjectOutfit is not { Length: > 0 })
+            return rows;
+        foreach (var t in project.Targets)
+            if (t.AssetType == "Mesh" && !ReferenceEquals(t, target)
+                && string.Equals(t.SubjectCharacter, target.SubjectCharacter, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(t.SubjectOutfit, target.SubjectOutfit, StringComparison.OrdinalIgnoreCase))
+                rows.Add((t.ObjectName, t.Bundle, t.ObjectName, null, t.BakedRest, t.PathId ?? 0, null));
+        return rows;
+    }
+
+    /// <summary>
+    /// The subject's candidacy roster for a rigged export: every part of the SUBJECT MODEL — not only the
+    /// ones this project materialized — with the flags <see cref="AssetExporter.SubjectRoster"/> filters the
+    /// exported bone tail by. Without it an export offers bones a build is certain to refuse paint on.
+    ///
+    /// <para>Runs OFF the UI thread: building an unmemoized subject model costs its bundles. Null whenever
+    /// the answer would be a guess — no game files, or a model that wouldn't build — and a null roster
+    /// leaves the export offering the whole skeleton, exactly as before this filter.</para>
+    ///
+    /// <para>Visibility is the part's PREFAB-RESIDENT marker alone. The build merges in the
+    /// timeline-derived half as well, but timelines are a build-time input (catalog resolution) the
+    /// workbench model never carries, so a part withheld only by a timeline is admitted here. Deliberate:
+    /// the export over-offers by that part's bones and the build's posed gate refuses them, which beats
+    /// hiding bones a build would have accepted.</para>
+    /// </summary>
+    private AssetExporter.SubjectRoster? ExportRoster(Workbench.WorkbenchSubjectRef subject) =>
+        ExportRoster(subject, out _);
+
+    /// <summary><paramref name="inputsUnreadable"/> says the roster was shaped by inputs this run could
+    /// not fully read — wardrobe tables that wouldn't load, or a subject model that assembled with
+    /// problems (a locked prefab bundle drops parts and flags). Such a roster can read differently the
+    /// moment the lock clears, and none of it is in the combined fingerprint, so the combined publish
+    /// gate refuses to cache a session built on it. A model problem can also be a fact of the content;
+    /// gating on it anyway only costs that subject a rebuild, never a wrong tail.</summary>
+    private AssetExporter.SubjectRoster? ExportRoster(Workbench.WorkbenchSubjectRef subject,
+        out bool inputsUnreadable)
+    {
+        inputsUnreadable = false;
+        var catalog = _vfs?.Catalog;
+        if (catalog is null) return null;
+        SubjectModel model;
+        try
+        {
+            model = _subjectModels.GetOrBuild(subject.Character, subject.Outfit.Stem,
+                () => SubjectModelBuilder.Build(catalog, TryDeobfuscateBundle, subject.Outfit, subject.Character));
+        }
+        catch { return null; }   // silent: the export around this reports whatever it finds
+
+        var scheme = ExportScheme(subject.Outfit.Stem, out bool tablesUnreadable);
+        inputsUnreadable = tablesUnreadable || model.Problems.Count > 0;
+        return ExportRosterRows(catalog, model, scheme);
+    }
+
+    /// <summary>The roster rows themselves, once the model and the scheme are in hand: one row per part of
+    /// <paramref name="model"/> that resolves to a bundle, keyed by the representative slot name and carrying
+    /// the part token presence classifies from — two different strings, and pairing them the other way round
+    /// would classify every part unknown. Separated from <see cref="ExportRoster"/> so this assembly can be
+    /// exercised without a loaded game.</summary>
+    internal static AssetExporter.SubjectRoster ExportRosterRows(CatalogIndex catalog, SubjectModel model,
+        IReadOnlyList<PartScheme.Slot>? scheme)
+    {
+        var parts = new List<AssetExporter.RosterPart>();
+        foreach (var p in model.Parts)
+        {
+            // The same forward resolution the build's roster probe does: an smr-body part is addressed by
+            // bundle + path id (same-named copies in one enemy bundle), everything else by its recipe
+            // address through the catalog. A part neither reaches has no mesh to measure, so it stays out —
+            // which only narrows the offer.
+            bool smr = !string.IsNullOrEmpty(p.MeshBundle) && p.MeshPathId != 0;
+            var bundle = smr ? p.MeshBundle!
+                : string.IsNullOrEmpty(p.MeshAddress) ? null : catalog.ResolveAddress(p.MeshAddress);
+            if (string.IsNullOrEmpty(bundle)) continue;
+            parts.Add(new AssetExporter.RosterPart(p.SlotName, p.Token, bundle!, smr ? p.MeshPathId : 0,
+                p.CastsShadows, p.Visibility));
+        }
+        return new AssetExporter.SubjectRoster(parts, scheme, model.PartsPoolAlone);
+    }
+
+    /// <summary>The outfit's wardrobe slots, from the memo above. Read on the export thread; two callers
+    /// racing the first ask both build one <see cref="Lazy{T}"/> and one wins — a duplicated table read at
+    /// worst, never two different answers, since the tables are the same on both.
+    ///
+    /// <para>A FAILED table load is not "this outfit isn't modular": it flags
+    /// <paramref name="tablesUnreadable"/> so the roster it shaped reads as unreadable-input, and the memo
+    /// is dropped rather than kept — a session-long null would keep classifying every modular part unknown
+    /// long after the lock cleared. The reset races the same way the first ask does: a stale extra retry
+    /// at worst, never two different answers.</para></summary>
+    private IReadOnlyList<PartScheme.Slot>? ExportScheme(string stem) => ExportScheme(stem, out _);
+
+    private IReadOnlyList<PartScheme.Slot>? ExportScheme(string stem, out bool tablesUnreadable)
+    {
+        var gameDir = GameDir;
+        var lazy = _exportSchemes ??= new Lazy<Dictionary<string, IReadOnlyList<PartScheme.Slot>>?>(() =>
+        {
+            try
+            {
+                var db = GameDatabase.FromGameDir(gameDir);
+                return PartScheme.Load(db).ByStem(db);
+            }
+            catch { return null; }   // unreadable, not "no scheme" — flagged and retried, see above
+        }, LazyThreadSafetyMode.ExecutionAndPublication);
+        var byStem = lazy.Value;
+        if (byStem is null)
+        {
+            _exportSchemes = null;
+            tablesUnreadable = true;
+            return null;
+        }
+        tablesUnreadable = false;
+        return byStem.TryGetValue(stem, out var slots) ? slots : null;
     }
 
     /// <summary>Declare every session part whose GAME mesh can't be replaced unwritable, so the bridge
@@ -3916,6 +4362,13 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         // destroys that edit beyond recovery. An EDITED part launches the workspace glb exactly as it
         // stands; the texture stamp governs only the UNEDITED rebuild and is the reuse key — the rig
         // re-opens only while every texture it baked in is still the file it was built from.
+        //
+        // So for an edited part the workspace glb's ARMATURE is authoritative too, not just its geometry:
+        // rig and skin are one file, and there is no way to re-span the armature over the subject without
+        // rewriting the modder's mesh out from under them. A workspace glb carrying only the part's own
+        // bones therefore keeps that rig in every lone session it ever opens. The combined session is the
+        // route to the subject's whole skeleton for an edited part: it builds its armature per open and
+        // takes the part's geometry from the same workspace file without writing to it.
         var texStamp = _modRoot is null ? "" :
             AssetExporter.TextureStamps(AssetExporter.EmbeddedTexturePaths(_project, new[] { target.ObjectName }));
         if (_vfs is null || target.Edited || _project.IsEdited(target) || _modRoot is null
@@ -3940,7 +4393,11 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         var stagedGlb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(glbPath))!,
             "~rebuild." + Path.GetFileName(glbPath));
         // EditedGlb stays null: this route REWRITES the workspace glb and only runs for an unedited part.
-        var spec = new[] { (partToken, target.Bundle, target.ObjectName, (string?)stagedGlb, (IReadOnlyList<float>?)target.BakedRest, target.PathId ?? 0, (string?)null) };
+        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+        {
+            (partToken, target.Bundle, target.ObjectName, stagedGlb, target.BakedRest, target.PathId ?? 0, null),
+        };
+        spec.AddRange(SkeletonOnlyParts(_project, target));
         string? rigError = null;
         string? publishError = null;
         bool rigBusy = false;
@@ -3948,7 +4405,9 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
         {
             try
             {
-                var d = AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, target.SubjectCharacter ?? "", spec, texDir, status, recordedTextureBundles: recordedTex);
+                var d = AssetExporter.BuildRiggedGlbs(gameDir, vfs, outfit, target.SubjectCharacter ?? "", spec, texDir, status,
+                    recordedTextureBundles: recordedTex, roster: ExportRoster(subject),
+                    candidacyCacheFile: LabPaths.CandidacyCacheFile);
                 // Nothing staged ⇒ the rig never landed, and both files stand as they were — which is what
                 // the geometry-only refusal at the bottom is for.
                 if (d is not { Count: > 0 } || !File.Exists(stagedGlb)) return null;

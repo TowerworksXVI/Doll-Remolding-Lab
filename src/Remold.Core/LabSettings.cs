@@ -48,6 +48,14 @@ public sealed class LabSettings
     /// cores; a settings.json without the key deserializes to null. The key name is what released installs
     /// persist, so it stays as it is.</summary>
     public int? EncoderCpuLimit { get; set; }
+    /// <summary>A force rescan is still owed: the row was armed and saved, and the sweep it asked for has
+    /// not run yet. Durable so the debt survives an exit — the request is recorded at the Save and the sweep
+    /// waits for a rescan with nothing holding the roster, and closing the app in between must not quietly
+    /// drop it. Cleared the moment the sweep is handed off to run.
+    /// <para>ADDITIVE: a settings.json written by any released build has no such key and deserializes to
+    /// false, which is "nothing owed" — the only correct reading of a file written before the row
+    /// existed.</para></summary>
+    public bool ForceRescanOwed { get; set; }
     /// <summary>Recent mod projects, most-recent-first.</summary>
     public List<RecentMod> RecentMods { get; set; } = new();
 

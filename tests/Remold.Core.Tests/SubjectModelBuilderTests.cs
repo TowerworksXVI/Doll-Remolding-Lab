@@ -371,6 +371,311 @@ public class SubjectModelBuilderTests
         Assert.Equal(903L, tier.MeshPathId);
     }
 
+    // ---- the dorm visibility lists ride whichever context root ships them, so they are unioned across
+    // candidates exactly as the parts are. A part read from the priority candidate still has to see the
+    // list that named it in another. ----
+    [Fact]
+    public void PrefabModel_AVisibilityListInALaterCandidate_StillMarksThePart()
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        // candidate 0 (the stem's own prefab) owns both parts and carries NO dorm component at all …
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }, Mesh: (0, 900L)),
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_coat_lod0", new[] { (0, 0L) }, Mesh: (0, 901L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) });
+        // … while the sibling root carries its own copy of the coat AND the coat list that names it
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "sibling.bundle", rootName: "c_TestySSR0101_slg_skin_model",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_coat_lod0", new[] { (0, 0L) }, Mesh: (0, 902L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            visibility: new WorkbenchPrefab.VisibilityLists(
+                ControlVisibleNodes: new[] { "c_TestySSR01_slg_coat_lod0" }));
+
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var cat = Catalog("TestySSR01", "prefab.bundle", new[] { "sibling.bundle" });
+        var model = SubjectModelBuilder.Build(cat, deobfuscate,
+            new Outfit(1071, "TestySSR01", OutfitKind.Base), "Testy");
+
+        var coat = Assert.Single(model.Parts, p => p.Token == "coat");
+        // the part is owned by candidate 0, whose prefab lists nothing: only the union reaches the marker
+        Assert.Equal("TestySSR01", coat.SourceRoot);
+        Assert.Equal(VisibilityOverride.CoatList, coat.Visibility);
+
+        var body = Assert.Single(model.Parts, p => p.Token == "body");
+        Assert.Equal(VisibilityOverride.None, body.Visibility);
+    }
+
+    // ---- the shape the corpus actually has: the context copies of one stem share a ROOT NAME, so the
+    // candidate dedupe keeps only the first, and the dorm components ride whichever copy the game authored
+    // them on — usually not that one. The lists have to survive that dedupe. ----
+    [Fact]
+    public void PrefabModel_AVisibilityListOnTheDedupedContextCopy_StillMarksThePart()
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        const string stem = "TestySSR01";
+        var slots = new[]
+        {
+            new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }, Mesh: (0, 900L)),
+            new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_coat_lod0", new[] { (0, 0L) }, Mesh: (0, 901L)),
+        };
+        // the higher-priority context copy: the parts, and no dorm component at all …
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "combat.bundle", rootName: stem, slots: slots,
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) });
+        // … and the OTHER context copy, under the SAME root name, carrying the coat list
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "barrack.bundle", rootName: stem, slots: slots,
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            visibility: new WorkbenchPrefab.VisibilityLists(
+                ControlVisibleNodes: new[] { "c_TestySSR01_slg_coat_lod0" }));
+
+        var combat = GameVfs.PrefabAddress("Character/Player", stem);
+        var barrack = GameVfs.PrefabAddress("BarrackModel/Character", stem);
+        var cat = CatalogIndex.ForTest(
+            new[] { (combat, "combat.bundle"), (barrack, "barrack.bundle") },
+            new[] { (combat, new[] { "combat.bundle" }), (barrack, new[] { "barrack.bundle" }) });
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var outfit = new Outfit(1071, stem, OutfitKind.Base);
+
+        // the premise: the dedupe really does drop the copy that carries the list
+        var scope = SubjectScope.Build(cat, deobfuscate, outfit);
+        Assert.Single(scope.Candidates);
+        Assert.Null(Assert.Single(scope.Candidates).Prefab.VisibilityOverrides);
+
+        var model = SubjectModelBuilder.Build(cat, deobfuscate, outfit, "Testy");
+
+        Assert.Equal(VisibilityOverride.CoatList,
+            Assert.Single(model.Parts, p => p.Token == "coat").Visibility);
+        Assert.Equal(VisibilityOverride.None,
+            Assert.Single(model.Parts, p => p.Token == "body").Visibility);
+    }
+
+    [Fact]
+    public void PrefabModel_TheDedupedContextCopyJoinsThePrefabBundlesRecord()
+    {
+        // The reads-record half of the dedupe story: the copy the candidate dedupe DROPS is the one whose
+        // lists shape every part's withheld marker, so a reader recording what this model depends on
+        // (the sharing measurement, through SubjectModel.PrefabBundles) must see that bundle too — a
+        // rewrite of it in place changes the markers with no candidate bundle having moved.
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        const string stem = "TestySSR01";
+        var slots = new[]
+        {
+            new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }, Mesh: (0, 900L)),
+            new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_coat_lod0", new[] { (0, 0L) }, Mesh: (0, 901L)),
+        };
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "combat.bundle", rootName: stem, slots: slots,
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) });
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "barrack.bundle", rootName: stem, slots: slots,
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            visibility: new WorkbenchPrefab.VisibilityLists(
+                ControlVisibleNodes: new[] { "c_TestySSR01_slg_coat_lod0" }));
+
+        var combat = GameVfs.PrefabAddress("Character/Player", stem);
+        var barrack = GameVfs.PrefabAddress("BarrackModel/Character", stem);
+        var cat = CatalogIndex.ForTest(
+            new[] { (combat, "combat.bundle"), (barrack, "barrack.bundle") },
+            new[] { (combat, new[] { "combat.bundle" }), (barrack, new[] { "barrack.bundle" }) });
+
+        var model = SubjectModelBuilder.Build(cat, FixtureCrawl.DeobfuscateOver(abw),
+            new Outfit(1071, stem, OutfitKind.Base), "Testy");
+
+        Assert.NotNull(model.PrefabBundles);
+        Assert.Contains("combat.bundle", model.PrefabBundles!);     // the candidate
+        Assert.Contains("barrack.bundle", model.PrefabBundles!);    // the deduped contributor
+    }
+
+    // ---- a scope is a dependency CLOSURE, so it also holds prefabs belonging to OTHER subjects entirely —
+    // another doll's weapon riding in this doll's closure. A prefab's lists can only name its own nodes, but
+    // node NAMES are not owned: a subject's stem-rooted prefab owns its slots whatever they are called
+    // (SlotIsOwned), so a generic name like a weapon node's collides across subjects. Such a list must not
+    // withhold OUR part — the union takes only the subject's own constituents. ----
+    [Fact]
+    public void PrefabModel_AVisibilityListOnAForeignRootInTheClosure_LeavesThePartUnmarked()
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        // the subject's own prefab: a prefixed part and a GENERICALLY named one it owns by root, and no dorm
+        // component at all …
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }, Mesh: (0, 900L)),
+                new WorkbenchPrefab.SlotSpec("prop_lod0", new[] { (0, 0L) }, Mesh: (0, 901L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) });
+        // … and ANOTHER subject's prefab, reached through this subject's closure. It draws nothing of ours,
+        // and the node its coat list names is its OWN — one that happens to share our part's name.
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "foreign.bundle", rootName: "OtherySSR01_weapon",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec("prop_lod0", new[] { (0, 0L) }, Mesh: (0, 902L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            visibility: new WorkbenchPrefab.VisibilityLists(ControlVisibleNodes: new[] { "prop_lod0" }));
+
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var cat = Catalog("TestySSR01", "prefab.bundle", new[] { "foreign.bundle" });
+        var outfit = new Outfit(1071, "TestySSR01", OutfitKind.Base);
+
+        // the premise: the foreign prefab really is in scope and really did parse, so what keeps its list out
+        // is the union's own gate and nothing else
+        var scope = SubjectScope.Build(cat, deobfuscate, outfit);
+        Assert.Contains(scope.Candidates, c => c.Root == "OtherySSR01_weapon");
+
+        var model = SubjectModelBuilder.Build(cat, deobfuscate, outfit, "Testy");
+
+        var prop = Assert.Single(model.Parts, p => p.SlotName == "prop_lod0");
+        Assert.Equal("TestySSR01", prop.SourceRoot);          // ours, from our own prefab
+        Assert.Equal(901L, prop.MeshPathId);
+        Assert.Equal(VisibilityOverride.None, prop.Visibility);
+        Assert.Equal(VisibilityOverride.None,
+            Assert.Single(model.Parts, p => p.Token == "body").Visibility);
+        // the foreign prefab contributed no part either — which is WHY its lists say nothing about ours
+        Assert.DoesNotContain(model.Parts, p => p.SourceRoot == "OtherySSR01_weapon");
+    }
+
+    // ---- the control for the guard above: the SAME list naming the SAME node, carried by a copy under the
+    // subject's own STEM root. That copy draws nothing at all (its slot carries no mesh identity and no
+    // recipe row), so the root arm of the constituent test is the only thing that can admit it — and the
+    // marker still has to reach the part. ----
+    [Fact]
+    public void PrefabModel_AVisibilityListOnAStemRootedCopyThatDrawsNothing_StillMarksThePart()
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }, Mesh: (0, 900L)),
+                new WorkbenchPrefab.SlotSpec("prop_lod0", new[] { (0, 0L) }, Mesh: (0, 901L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) });
+        // the SAME root name, so the candidate dedupe drops this copy; its one slot carries no mesh identity,
+        // so it contributes nothing to the part union either
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "twin.bundle", rootName: "TestySSR01",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("prop_lod0", new[] { (0, 0L) }) },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            visibility: new WorkbenchPrefab.VisibilityLists(ControlVisibleNodes: new[] { "prop_lod0" }));
+
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var cat = Catalog("TestySSR01", "prefab.bundle", new[] { "twin.bundle" });
+        var outfit = new Outfit(1071, "TestySSR01", OutfitKind.Base);
+
+        // the premise: the copy carrying the list is the one the dedupe drops, so only the pre-dedupe union
+        // can reach it at all
+        var scope = SubjectScope.Build(cat, deobfuscate, outfit);
+        Assert.Equal("prefab.bundle", Assert.Single(scope.Candidates).Bundle);
+
+        var model = SubjectModelBuilder.Build(cat, deobfuscate, outfit, "Testy");
+
+        Assert.Equal(VisibilityOverride.CoatList,
+            Assert.Single(model.Parts, p => p.SlotName == "prop_lod0").Visibility);
+        Assert.Equal(VisibilityOverride.None,
+            Assert.Single(model.Parts, p => p.Token == "body").Visibility);
+    }
+
+    // ---- the tier gather carries the marker PER TIER: the dorm lists name individual tier nodes, so one
+    // tier of a part can be withheld while its representative draws. A tier is built on two separate
+    // routes — recipe-address-backed and serialized-mesh-backed — and each reads the tier's OWN node. ----
+    [Fact]
+    public void PrefabModel_AListNamingARecipeBackedTier_MarksThatTierAndNotThePart()
+    {
+        // The recipe route: the tier carries a recipe addressable, so it is built without resolving a
+        // serialized mesh. Its marker is its own node's, and the representative — which no list names —
+        // stays clean, which is what makes this per-TIER rather than per-part.
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        const string lod0 = "c_TestySSR01_slg_body_lod0", lod1 = "c_TestySSR01_slg_body_lod1";
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec(lod0, new[] { (0, 0L) }),
+                new WorkbenchPrefab.SlotSpec(lod1, new[] { (0, 0L) }),
+            },
+            recipe: new[] { (lod0, $"Assets/X/{lod0}.mesh"), (lod1, $"Assets/X/{lod1}.mesh") },
+            externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) },
+            visibility: new WorkbenchPrefab.VisibilityLists(DormHideNodes: new[] { lod1 }));
+
+        var model = SubjectModelBuilder.Build(Catalog("TestySSR01", "prefab.bundle"),
+            FixtureCrawl.DeobfuscateOver(abw), new Outfit(1071, "TestySSR01", OutfitKind.Base), "Testy");
+
+        var body = Assert.Single(model.Parts, p => p.Token == "body");
+        Assert.Equal(VisibilityOverride.None, body.Visibility);
+        var tier = Assert.Single(body.SiblingTiers!);
+        Assert.Equal(lod1, tier.SlotName);
+        Assert.Equal($"Assets/X/{lod1}.mesh", tier.MeshAddress);   // the recipe route really was taken
+        Assert.Equal(VisibilityOverride.DormHidden, tier.Visibility);
+    }
+
+    [Fact]
+    public void PrefabModel_AListNamingAMeshBackedTier_MarksThatTierAndNotThePart()
+    {
+        // The OTHER route, built by a line of its own: no recipe at all, so the tier's identity is the
+        // serialized mesh on its own renderer. The marker has to be read there too.
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        const string lod0 = "c_TestySSR01_slg_body_lod0", lod1 = "c_TestySSR01_slg_body_lod1";
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01",
+            slots: new[]
+            {
+                new WorkbenchPrefab.SlotSpec(lod0, new[] { (0, 0L) }, Mesh: (0, 900L)),
+                new WorkbenchPrefab.SlotSpec(lod1, new[] { (0, 0L) }, Mesh: (0, 901L)),
+            },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Bip001", -1) },
+            visibility: new WorkbenchPrefab.VisibilityLists(LobbyHideNodes: new[] { lod1 }));
+
+        var model = SubjectModelBuilder.Build(Catalog("TestySSR01", "prefab.bundle"),
+            FixtureCrawl.DeobfuscateOver(abw), new Outfit(1071, "TestySSR01", OutfitKind.Base), "Testy");
+
+        var body = Assert.Single(model.Parts, p => p.Token == "body");
+        Assert.Equal(VisibilityOverride.None, body.Visibility);
+        var tier = Assert.Single(body.SiblingTiers!);
+        Assert.Equal(lod1, tier.SlotName);
+        Assert.Equal(901L, tier.MeshPathId);            // the serialized-mesh route really was taken
+        Assert.Equal("", tier.MeshAddress);
+        Assert.Equal(VisibilityOverride.LobbyHidden, tier.Visibility);
+    }
+
     // ---- the tier gather's precedence: a tier SLOT NAME can repeat across candidates, and the copy that
     // belongs to the part is the OWNING candidate's, not the highest-priority one's. Candidate order first
     // would hand the part a tier mesh from a prefab it isn't made of, and ModBuilder ships that mesh. ----

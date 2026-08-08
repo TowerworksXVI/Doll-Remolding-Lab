@@ -13,8 +13,8 @@ namespace Remold.Core.Migoto;
 /// <summary>
 /// Dump a skinned bundle mesh into the raw buffers an offline 3DMigoto LBS build consumes. Each vertex
 /// stream IS a GPU buffer and m_IndexBuffer IS the index buffer, sliced without decode — except the skin
-/// stream, which goes out in the canonical float4/uint4 shape (<see cref="Mesh.SkinLayout"/>) so a
-/// one-influence mesh reads like any other. Emits into <c>outDir</c>:
+/// stream, which goes out in the canonical float4/uint4 shape (<see cref="Mesh.SkinLayout"/>) so a mesh
+/// stored at any influence width reads like any other. Emits into <c>outDir</c>:
 ///   stream0.buf / stream1.buf / stream2.buf   raw stream slices (pos·nrm·tan / color·uv / weights·indices)
 ///   ib.buf                                     raw m_IndexBuffer bytes
 ///   bindpose.json                              per-bone bindpose(16) + rest pivot(3)
@@ -29,26 +29,32 @@ public static class StreamDump
         string Mesh, int VertexCount, int BoneCount, int IndexFormat, int IndexBytes,
         IReadOnlyList<StreamInfo> Streams, string OutDir);
 
-    /// <summary>Which half of the recoverable-skin rule a mesh fails. The two are separate answers because
+    /// <summary>Why a mesh's geometry is not offered for Replace. The kinds are separate answers because
     /// they are separate facts about the mesh, and a caller phrasing them for the modder says different
-    /// things about each.</summary>
+    /// things about each. The first two are the halves of the recoverable-skin rule
+    /// (<see cref="UnrecoverableSkin"/>); <see cref="SpringRig"/> is the gate's own rule, asked of the
+    /// bone set rather than the skin stream.</summary>
     public enum SkinRefusal
     {
         /// <summary>The mesh carries blend shapes, so its posed vertices aren't pure LBS.</summary>
         BlendShapes,
 
         /// <summary>The skin stream carries no per-vertex influences recovery can read: it is absent, or it
-        /// stores a REDUCED 2-3 of the four the posed draw used.</summary>
+        /// is spelled in a shape no lossless widening brings to float4 weights + uint4 indices.</summary>
         SkinLayout,
+
+        /// <summary>The mesh is skinned to a runtime spring chain
+        /// (<see cref="Skeleton.BoneTable.HasSpringChain"/>): the game simulates those bones on its own,
+        /// so replacement geometry is withheld while retexture and hide stay open.</summary>
+        SpringRig,
     }
 
     /// <summary>Why this mesh can't feed palette recovery, or null when it can, plus the blend-shape count on
     /// the <see cref="SkinRefusal.BlendShapes"/> branch (0 on the other). Recovery needs a skin stream it can
-    /// read as float4 weights + uint4 indices (<see cref="Mesh.SkinLayout"/>, which also admits the
-    /// one-influence layouts that widen into that shape losslessly) and pure-LBS posing: static layouts carry
-    /// no such stream, a reduced one has lost influences its draws were posed by, and a blend-shape mesh's
-    /// morphs would be absorbed as bone error. THE one home for the rule — every phrasing of it derives from
-    /// here.</summary>
+    /// read as float4 weights + uint4 indices (<see cref="Mesh.SkinLayout"/>, which admits every stored
+    /// influence width that widens into that shape losslessly) and pure-LBS posing: static layouts carry no
+    /// such stream, and a blend-shape mesh's morphs would be absorbed as bone error. THE one home for the
+    /// rule — every phrasing of it derives from here.</summary>
     public static (SkinRefusal Kind, int BlendShapes)? UnrecoverableSkin(AssetTypeValueField meshField)
     {
         var shapesField = meshField["m_Shapes"];
@@ -70,12 +76,12 @@ public static class StreamDump
     }
 
     /// <summary>The route a Replace on this mesh takes, or null when its geometry can't be replaced at all.
-    /// A mesh that can feed palette recovery is <see cref="ReplaceRoute.Pooled"/> — including a
-    /// one-influence skin, whose single bone owns every vertex and whose draws the game poses like any
-    /// other. Of the ones that can't, a mesh storing NO influences is <see cref="ReplaceRoute.Rigid"/>:
-    /// nothing per vertex to reproduce. Blend shapes are refused, since their morphs are posing no geometry
-    /// swap reproduces; so is a reduced skin (2 or 3 stored influences), which IS posed per vertex and needs
-    /// exactly the recovery its stream can't feed. THE one home for the routing rule.</summary>
+    /// A mesh that can feed palette recovery is <see cref="ReplaceRoute.Pooled"/> — whatever width its skin
+    /// is stored at, its draws are posed by exactly what the stream carries. Of the ones that can't, a mesh
+    /// storing NO influences is <see cref="ReplaceRoute.Rigid"/>: nothing per vertex to reproduce. Blend
+    /// shapes are refused, since their morphs are posing no geometry swap reproduces; so is a skin spelled
+    /// in a shape recovery can't read, which IS posed per vertex and needs exactly the recovery its stream
+    /// can't feed. THE one home for the routing rule.</summary>
     public static ReplaceRoute? Route(AssetTypeValueField meshField) =>
         UnrecoverableSkin(meshField) switch
         {
@@ -97,36 +103,26 @@ public static class StreamDump
     }
 
     /// <summary><see cref="UnrecoverableSkin"/> phrased for the build log, or null when the mesh can feed
-    /// palette recovery. Names both layouts the skin rule refuses, for a caller that can meet either.</summary>
+    /// palette recovery. Every stored influence count 1–4 is one recovery accepts, so a layout refusal
+    /// with influences present is about the shape they are spelled in — an index format, a stream, a
+    /// channel sharing the stream — and only a mesh storing none is refused for the count itself.</summary>
     public static string? UnrecoverableSkinReason(AssetTypeValueField meshField) =>
-        SkinReason(meshField, "a rigid or reduced layout");
-
-    /// <summary>The same rule phrased where a RIGID layout is already accounted for — a caller that routed
-    /// those meshes elsewhere only ever reaches this with a reduced one, and naming a shape the mesh can't
-    /// have sends the reader looking for the wrong fault. Null when the mesh can feed palette
-    /// recovery.</summary>
-    public static string? ReducedSkinReason(AssetTypeValueField meshField) =>
-        SkinReason(meshField, "a reduced layout");
-
-    static string? SkinReason(AssetTypeValueField meshField, string layout) =>
         UnrecoverableSkin(meshField) switch
         {
             (SkinRefusal.BlendShapes, var n) => $"it carries {n} blend shapes (its posed vertices aren't pure LBS)",
-            // A mesh storing 0, 2 or 3 influences is refused for the count itself. One influence, or the
-            // full four, is a count recovery accepts, so what refuses those is the shape they are spelled
-            // in — an index width, a stream, a channel sharing the stream — and naming a count they don't
-            // have sends the reader looking for the wrong fault.
-            (SkinRefusal.SkinLayout, _) => StoredInfluences(meshField) is 1 or >= 4
-                ? "it carries a skin stream recovery can't read"
-                : $"its skin stream isn't float4 weights + uint4 indices ({layout})",
+            (SkinRefusal.SkinLayout, _) => StoredInfluences(meshField) == 0
+                ? "it carries no skin stream (a rigid layout)"
+                : "it carries a skin stream recovery can't read",
             _ => null,
         };
 
     /// <summary>The bone hashes this mesh's skin actually POSES: the ones carrying nonzero summed vertex
     /// weight. A hash listed in <c>m_BoneNameHashes</c> with no weight behind it moves no vertex, so the
     /// mesh asks a palette for nothing at that bone. The sum is the same one
-    /// <see cref="PoolMath.BuildUnion"/> assigns ownership by, so a caller reasoning about whether a bone's
-    /// palette row would be WRITTEN reads the same quantity the writer does.
+    /// <see cref="PoolMath.BuildUnion"/> assigns ownership by and <see cref="MigotoEmitter.SummedWeights"/> reads
+    /// off a dumped skin stream, so a caller reasoning about whether a bone's palette row would be WRITTEN
+    /// reads the same quantity the writer does. Three sources, one quantity: they must agree, or a mesh's
+    /// bones would be admitted by one gate and refused by another.
     ///
     /// <para>Throws <see cref="InvalidDataException"/> for a mesh the skin rule already refuses: without a
     /// skin stream <see cref="Mesh.SkinLayout"/> can read as float4 weights + uint4 indices there is nothing

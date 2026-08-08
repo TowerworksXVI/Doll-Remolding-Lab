@@ -154,6 +154,44 @@ public class MultiPipelineEmissionTests : IDisposable
                          File.ReadAllBytes(Path.Combine(second.OutDir, n!)));
     }
 
+    /// <summary>One physical mesh reached through two outfits can be keyed on its vb1 in one signature index
+    /// and on its ib in the other, so one part name arrives carrying two hashes. Each needs its own capture
+    /// section, and two sections under one name would leave the second dropped at parse time — the pipeline
+    /// behind it capturing nothing and posing its palette from garbage.</summary>
+    [Fact]
+    public void One_part_name_over_two_hashes_gets_two_distinctly_named_capture_sections()
+    {
+        var req = Request(out string outDir);
+        var pipes = req.Pipelines.ToList();
+        pipes[1] = pipes[1] with
+        {
+            CaptureHashes = new Dictionary<string, string> { ["shared"] = "dddd0001", ["beta"] = "bbbb0001" },
+        };
+        new MigotoEmitter().Build(req with { Pipelines = pipes });
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        var headers = Regex.Matches(ini, @"^\[TextureOverride_[^\]]+\]$", RegexOptions.Multiline)
+            .Select(m => m.Value).ToList();
+        Assert.NotEmpty(headers);
+        Assert.Equal(headers.Distinct(StringComparer.Ordinal).Count(), headers.Count);
+        // both spellings of the shared mesh keep a section, so both pipelines capture
+        Assert.Single(Regex.Matches(ini, @"^hash = cccc0001$", RegexOptions.Multiline));
+        Assert.Single(Regex.Matches(ini, @"^hash = dddd0001$", RegexOptions.Multiline));
+    }
+
+    /// <summary>An anchor the pool doesn't carry is refused before anything is emitted, naming the anchor
+    /// asked for.</summary>
+    [Fact]
+    public void An_anchor_that_is_not_a_pool_part_fails_loudly()
+    {
+        var req = Request(out _);
+        var pipes = req.Pipelines.ToList();
+        pipes[0] = pipes[0] with { Anchor = "ghost" };
+        var e = Assert.Throws<InvalidOperationException>(
+            () => new MigotoEmitter().Build(req with { Pipelines = pipes }));
+        Assert.Contains("anchor 'ghost' is not a pool part", e.Message);
+    }
+
     [Fact]
     public void One_part_name_over_two_different_dumps_fails_loudly()
     {

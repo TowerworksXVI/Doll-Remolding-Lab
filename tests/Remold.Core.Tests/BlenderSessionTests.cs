@@ -502,9 +502,78 @@ public class BlenderSessionTests
         // and the geometry is the raw bind-space bytes the compile round trips, on both
         Assert.Equal(MeshGltf.ImportGlb(combined, "weapon_lod0").Channels["Vertex"],
                      MeshGltf.ImportGlb(lone).Channels["Vertex"]);
+        // the lone armature spans the SUBJECT: the body's bones stand in the weapon's rig too, so weight can
+        // be painted onto them there — as zero-weighted joints appended AFTER the weapon's own bone, which
+        // keeps that bone on the index its geometry names while the body's bones still import as bones
+        var loneModel = SharpGLTF.Schema2.ModelRoot.Load(lone);
+        foreach (var bodyBone in SessionBones)
+            Assert.Contains(loneModel.LogicalNodes, n => n.Name == $"bone_{bodyBone:x8}");
+        Assert.Equal(new[] { joint }.Concat(SessionBones.Select(b => $"bone_{b:x8}")).ToArray(),
+            Enumerable.Range(0, loneModel.LogicalSkins.Single().JointsCount)
+                      .Select(i => loneModel.LogicalSkins.Single().Joints[i].Name).ToArray());
 
         static Matrix4x4 JointWorld(string glb, string node) => SharpGLTF.Schema2.ModelRoot.Load(glb)
             .LogicalNodes.Single(n => n.Name == node).WorldMatrix;
+    }
+
+    /// <summary>A lone open reads every OTHER part of the outfit for its bones alone. Those reads are the
+    /// only ones allowed to fail quietly: the part being opened decoded fine, so a sibling's bundle held by
+    /// the game costs that sibling's bones, not the session. The alternative is an open that used to work
+    /// refusing with the BUSY remedy over a file it never needed.</summary>
+    [Fact]
+    public void ALoneOpen_ASiblingsBundleLocked_OpensWithoutThatSiblingsBones()
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+        const string clothLogical = "ccccccccccccccccccccccccccccccc1.bundle";
+        const string bodyLogical = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1.bundle";
+        const string clothPhys = "33333333333333333333333333333333";
+        const string bodyPhys = "44444444444444444444444444444444";
+        var bodyFile = Path.Combine(abw, bodyPhys + ".bundle");
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(abw, clothPhys + ".bundle"), "cloth1_lod0",
+            SessionTri, SessionIdx, new[] { 33u }, bundleName: clothLogical);
+        SyntheticBundle.BuildOneSkinnedMesh(bodyFile, "body1_lod0",
+            SessionTri, SessionIdx, SessionBones, bundleName: bodyLogical);
+        var vfs = TestVfs.Create(g.Root, Array.Empty<(string, string)>(), null,
+            (clothLogical, clothPhys), (bodyLogical, bodyPhys));
+        // no combinedOut: the body row carries no GlbOut either, so it is read for its SKELETON alone
+        List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)> Spec(string glbOut) => new()
+        {
+            ("cloth1", clothLogical, "cloth1_lod0", glbOut, null, 0L, null),
+            ("body1", bodyLogical, "body1_lod0", null, null, 0L, null),
+        };
+        var outfit = new Outfit(0, "VesnaSSR01", OutfitKind.Base);
+
+        // unlocked, the sibling's bones do stand in the lone part's rig — the fixture has something to lose
+        var open = g.At(Path.Combine("meshes", "cloth1_lod0.glb"));
+        AssetExporter.BuildRiggedGlbs(g.Root, vfs, outfit, "Vesna", Spec(open), g.At("textures"));
+        Assert.All(SessionBones, h => Assert.Contains(SharpGLTF.Schema2.ModelRoot.Load(open).LogicalNodes,
+            n => n.Name == $"bone_{h:x8}"));
+
+        var busy = g.At(Path.Combine("meshes", "busy.glb"));
+        var log = new ListLog();
+        using (File.Open(bodyFile, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var done = AssetExporter.BuildRiggedGlbs(g.Root, vfs, outfit, "Vesna", Spec(busy), g.At("textures"), log);
+            Assert.Equal(new[] { "cloth1" }, done.ToArray());          // the open completed
+        }
+
+        var model = SharpGLTF.Schema2.ModelRoot.Load(busy);
+        Assert.Equal(new[] { "bone_00000021" },                        // its own bone, and only its own
+            Enumerable.Range(0, model.LogicalSkins.Single().JointsCount)
+                      .Select(i => model.LogicalSkins.Single().Joints[i].Name).ToArray());
+        Assert.All(SessionBones, h => Assert.DoesNotContain(model.LogicalNodes, n => n.Name == $"bone_{h:x8}"));
+        // and never silently: one line, naming the part whose bones are missing
+        Assert.Single(log.Lines, l => l.Contains("body1") && l.Contains("the game is using its files"));
+    }
+
+    /// <summary>A synchronous progress sink: <see cref="Progress{T}"/> posts through the sync context, so a
+    /// test asserting on the lines could read them before they arrive.</summary>
+    private sealed class ListLog : IProgress<string>
+    {
+        public List<string> Lines { get; } = new();
+        public void Report(string value) => Lines.Add(value);
     }
 
     // ---------------------------------------------------------------- the session's map list survives publish

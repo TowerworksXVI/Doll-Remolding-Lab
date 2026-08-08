@@ -212,7 +212,9 @@ public static class BlenderGate
     public const string ReadyAll = "Open every part in one Blender session. Send to Lab returns the edits";
     public const string BlendShapes =
         "This mesh uses expressions and cannot be replaced. Hide and retexture still work.";
-    public const string SkinLayout = "This mesh's skin is reduced, and replacement needs a full poseable one. Hide and retexture still work.";
+    public const string SkinLayout = "This mesh's skin is stored in a shape replacement can't read. Hide and retexture still work.";
+    public const string SpringRig =
+        "This mesh moves on the game's own spring bones and cannot be replaced. Hide and retexture still work.";
     public const string StaticOnly = "Static parts open one at a time. Select a part and use Open in Blender.";
     public const string StaticPart = "Static parts open on their own. Use Open in Blender.";
 
@@ -237,9 +239,13 @@ public static class BlenderGate
         return null;
     }
 
-    /// <summary>The line a refused mesh shows, per branch of the recoverable-skin rule.</summary>
-    public static string Blocked(StreamDump.SkinRefusal refusal) =>
-        refusal == StreamDump.SkinRefusal.BlendShapes ? BlendShapes : SkinLayout;
+    /// <summary>The line a refused mesh shows, per refusal kind.</summary>
+    public static string Blocked(StreamDump.SkinRefusal refusal) => refusal switch
+    {
+        StreamDump.SkinRefusal.BlendShapes => BlendShapes,
+        StreamDump.SkinRefusal.SpringRig => SpringRig,
+        _ => SkinLayout,
+    };
 }
 
 /// <summary>ONE pure rule for the Install action, the same shape as <see cref="BuildGate"/>: the button's

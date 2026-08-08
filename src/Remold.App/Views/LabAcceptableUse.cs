@@ -13,8 +13,9 @@ internal static class LabAcceptableUse
         "You agree not to bypass the game's release schedule or monetization.\n" +
         "This means: don't give paid or unreleased content to people who don't own it.\n" +
         "\n" +
-        "** No Permanent Paywalls\n" +
-        "You agree that if you release a file created by this tool in any paywalled form, you will release it publicly for free within 31 days afterward.\n" +
+        "** Mod At Your Own Risk\n" +
+        "You accept that modding may violate the game's terms of service.\n" +
+        "The Lab is deliberately read-only and hooks no running process, but I am not responsible for your account.\n" +
         "\n" +
         "** Mod Within The Law\n" +
         "You agree not to do anything with this tool that is illegal in your jurisdiction. Yes, this means you.\n" +

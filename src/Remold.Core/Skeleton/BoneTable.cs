@@ -80,6 +80,39 @@ public sealed class BoneTable
         return null;
     }
 
+    /// <summary>The runtime spring-chain bone-path hashes: the <c>Spring01–06</c>, <c>SpringA01–07</c>
+    /// and <c>SpringB01–07</c> chains of the charm accessory rigs, one hash per chain depth, all anchored
+    /// at <c>Root_M</c> (catalog 26109). The game drives these chains with its own runtime simulation —
+    /// they settle and swing on their own, with no animation clip behind them.</summary>
+    private static readonly HashSet<uint> SpringChainBones = new()
+    {
+        0x05f0c65f, 0xfa2995bf, 0xb62e3dbd, 0xc2298838, 0x52ee5434, 0x68bd228f,             // Spring01–06
+        0x34256032, 0xd5bafb58, 0x7fcf886a, 0x43e8a308, 0x7d29ffc4, 0x5c956b95, 0x02ae5487, // SpringA01–07
+        0x3663de6b, 0x6a3629cf, 0xb6a663c0, 0xd196f9b7, 0x2663be76, 0x84b6fae4, 0x2b587a92, // SpringB01–07
+    };
+
+    /// <summary>Whether a mesh's bone set rides a runtime spring chain. Such a mesh takes its motion
+    /// from simulation the build does not author against, so its geometry is not offered for Replace;
+    /// retexture and hide are unaffected. Tested on hashes so the answer needs no name resolution.</summary>
+    public static bool HasSpringChain(IEnumerable<uint> boneNameHashes) =>
+        boneNameHashes.Any(SpringChainBones.Contains);
+
+    /// <summary>The accessory-dynamics bone-path hashes this build path has no support for: per-outfit
+    /// chains that hang outside the shared skeleton and take their motion from their own animation, so a
+    /// pool read has no sibling space to restate them in (catalog 26109, measured over the corpus scan —
+    /// none of these appears on a mesh the build supports).</summary>
+    private static readonly HashSet<uint> UnsupportedRigBones = new()
+    {
+        0x051acc4a, 0x0fc15fa1, 0x212373c4, 0x90c776f9,
+        0x94bf642a, 0x9bf044a8, 0xd6304faa, 0xff05caee,
+    };
+
+    /// <summary>Whether a mesh's bone set rides a rig outside the supported set. Such a mesh is declined
+    /// like any other unsupported asset; retexture and hide are unaffected. Tested on hashes so the
+    /// answer needs no name resolution.</summary>
+    public static bool HasUnsupportedRig(IEnumerable<uint> boneNameHashes) =>
+        boneNameHashes.Any(UnsupportedRigBones.Contains);
+
     /// <summary>Segment names root→leaf up a transform's parent chain. Visited set guards cycles in
     /// malformed hierarchies.</summary>
     private static List<string> ChainToRoot(Dictionary<long, BundleReader.TransformNode> byId, long pathId)

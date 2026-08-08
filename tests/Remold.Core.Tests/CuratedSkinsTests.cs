@@ -577,6 +577,47 @@ public class CuratedSkinsTests
     }
 
     [Fact]
+    public void AddressRoute_PinsOnlyItsOwnBundle_ClosureConstituentsContributeTheirSlots()
+    {
+        // The pin is about the ADDRESSED bundle holding sibling roots; a dependency bundle parses
+        // first-root like the formula path's dependencies. Weapon subjects ship real constituent roots
+        // that way — the addressed prefab carries the body recipe, and the closure's model bundle holds
+        // the attachment assemblies under the subject's own mesh prefix.
+        using var g = new TempGame();
+        var abw = Corpus(g);
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            bundleName: "prefab.bundle", rootName: "WrenSSR01_WL",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("cw_WrenSSR01_WL_lod0",
+                Array.Empty<(int, long)>(), Mesh: (0, 902L)) },
+            recipe: Array.Empty<(string, string)>(),
+            externalCabs: Array.Empty<string>(),
+            bones: new[] { ("Weapon", -1) });
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            bundleName: "model.bundle", rootName: "cw_WrenSSR01_Sight_WL",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("cw_WrenSSR01_Sight_WL_lod0",
+                Array.Empty<(int, long)>(), Mesh: (0, 903L), Renderer: SlotRenderer.Static) },
+            recipe: null,
+            externalCabs: Array.Empty<string>());
+
+        const string address = "Assets/ConfigPrefab/Weapon/Player/WrenSSR01/WrenSSR01_WL.prefab";
+        var catalog = CatalogIndex.ForTest(
+            new[] { (address, "prefab.bundle") },
+            new[] { (address, new[] { "prefab.bundle", "model.bundle" }) });
+        var outfit = new Outfit(10133, "WrenSSR01_WL", OutfitKind.Other)
+        {
+            MeshPrefixOverride = "cw_WrenSSR01_",
+            Route = SubjectRoute.Addressable(address, "WrenSSR01_WL"),
+        };
+
+        var scope = SubjectScope.Build(catalog, FixtureCrawl.DeobfuscateOver(abw), outfit);
+
+        Assert.Equal(new[] { "WrenSSR01_WL", "cw_WrenSSR01_Sight_WL" },
+            scope.Candidates.Select(c => c.Root).ToArray());
+        Assert.Equal(new[] { "Sight_WL", "WL" },
+            SubjectModelBuilder.OwnedSlotTokens(scope.Candidates, outfit).ToArray());
+    }
+
+    [Fact]
     public void ACuratedRoute_IsNeverAWayPastTheBlacklist()
     {
         // The blacklist is checked on the STEM before any route is read. If that order ever inverts, a
