@@ -14,7 +14,7 @@ StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, cap
 Buffer<float>            Cpinv  : register(t1);
 Buffer<uint>             Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
 StructuredBuffer<float4> palRaw : register(t5);   // the RAW palette: the anchor's own recovered rows
-RWBuffer<float4>         palOut : register(u1);
+RWStructuredBuffer<float4> palOut : register(u1);
 static const uint ROWS=4, BASE=4;
 static const uint WITM=0;   // the witness bone's index in THIS member mesh
 static const uint WITA=8;   // the anchor-side witness recovery's base row in palRaw
@@ -22,8 +22,15 @@ Buffer<uint>          Sel    : register(t3);   // anchor vertex indices, bone b 
 Buffer<uint>          Off    : register(t4);   // 2 per bone: base, width
 float4 Row(uint b, uint comp){
     uint sbase=Off[b<<1], width=Off[(b<<1)|1];
-    float3 a=float3(0,0,0); uint cbase=(sbase<<2)+comp*width;
-    for(uint t=0;t<width;t++) a+=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+    precise float3 a=float3(0,0,0), correction=float3(0,0,0);
+    uint cbase=(sbase<<2)+comp*width;
+    for(uint t=0;t<width;t++){
+        precise float3 term=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+        precise float3 y=term-correction;
+        precise float3 next=a+y;
+        correction=(next-a)-y;
+        a=next;
+    }
     return float4(a,(comp==3)?1.0:0.0);
 }
 

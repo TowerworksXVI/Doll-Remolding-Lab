@@ -54,4 +54,46 @@ public class MigotoEmissionTests
         Assert.Contains("    if(pi==0) WP=float4x4(W0[0],W0[1],W0[2],W0[3]);", convert);
         Assert.Contains("    else if(pi==2) WP=float4x4(W2[0],W2[1],W2[2],W2[3]);", convert);
     }
+
+    [Fact]
+    public void ComputeTemplates_UsePortablePaletteAndRecoveryContracts()
+    {
+        var paletteWriters = new[]
+        {
+            ComputeTemplates.EmitRecover(8),
+            ComputeTemplates.EmitRecoverDense(n: 16, rows: 8),
+            ComputeTemplates.EmitConvert(partCount: 2, unionBones: 2),
+            ComputeTemplates.EmitConvertWitness(unionBones: 2, anchorIdx: 0,
+                new[] { (0xffffffffu, 0xffffffffu), (8u, 12u) }),
+            ComputeTemplates.EmitGroupFuse(groupBones: 2, slotBase: 4, slim: true, n: 16),
+            ComputeTemplates.EmitGroupFuseWitness(groupBones: 2, slotBase: 4, slim: false, n: 16,
+                witnessMemberBone: 0, witnessAnchorRow: 0),
+            ComputeTemplates.EmitTieFill(new[] { (1u, 0u) }, new[] { 2u }),
+        };
+
+        foreach (string shader in paletteWriters)
+        {
+            Assert.Contains("RWStructuredBuffer<float4>", shader);
+            Assert.DoesNotContain("RWBuffer<float4>", shader);
+        }
+
+        foreach (string recovery in new[]
+                 {
+                     ComputeTemplates.EmitRecover(8),
+                     ComputeTemplates.EmitRecoverDense(n: 16, rows: 8),
+                     ComputeTemplates.EmitGroupFuse(groupBones: 2, slotBase: 4, slim: true, n: 16),
+                     ComputeTemplates.EmitGroupFuse(groupBones: 2, slotBase: 4, slim: false, n: 16),
+                 })
+        {
+            Assert.Contains("precise float3 a=", recovery);
+            Assert.Contains("correction=(next-a)-y;", recovery);
+        }
+
+        string skin = ComputeTemplates.EmitSkin(16);
+        Assert.Contains("RWByteAddressBuffer", skin);
+        Assert.Contains("stride-zero raw compute buffer", skin);
+        Assert.Contains("StructuredBuffer<float4> palRows : register(t2);", skin);
+        Assert.Contains("uint p=b<<2;", skin);
+        Assert.DoesNotContain("StructuredBuffer<Mat>   palB", skin);
+    }
 }

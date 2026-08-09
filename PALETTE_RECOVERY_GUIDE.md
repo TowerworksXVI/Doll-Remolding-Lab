@@ -173,6 +173,105 @@ restore; later game draws may rely on the previous binding.
 Treat render targets, depth state, viewports, UAVs, vertex and index buffers, shader resources,
 samplers, and modified constants according to the interposer's actual save/restore semantics.
 
+### 3.3 Resource, view, and shader layouts must agree
+
+*Typical symptom: the same mod is correct on one GPU, rotated or left in bind pose on another, and
+explodes into screen-spanning triangles on a third even though every shader compiled and every resource
+was created successfully.*
+
+The resource contract is part of the algorithm. In D3D11, one logical buffer can be described in three
+places:
+
+1. The buffer descriptor and its `StructureByteStride`, miscellaneous flags, and bind flags.
+2. The SRV or UAV descriptor, including its format and raw/structured flags.
+3. The HLSL declaration, which becomes an element stride in the compiled shader bytecode.
+
+**Principle:** Those descriptions must agree exactly. A successful API call, shader compile, or draw is
+not evidence that a contradictory contract is portable. The D3D11 runtime and vendor drivers need not
+repair an invalid reinterpretation in the same way.
+
+Use one of these contracts deliberately:
+
+- **Structured:** Create a structured buffer, use `DXGI_FORMAT_UNKNOWN` views, set
+  `StructureByteStride = sizeof(T)`, and declare `StructuredBuffer<T>` or
+  `RWStructuredBuffer<T>`. Every shader binding that uses the same physical resource must retain that
+  element size.
+- **Typed:** Declare `Buffer<T>` or `RWBuffer<T>` and create a typed view whose DXGI format exactly
+  matches `T`. Do not bind an unknown-format structured view to a typed shader declaration.
+- **Raw:** Create a raw-capable buffer and `DXGI_FORMAT_R32_TYPELESS` view with the appropriate raw
+  SRV/UAV flag, keep `StructureByteStride = 0`, and declare `ByteAddressBuffer` or
+  `RWByteAddressBuffer`. Addressing is then explicit in bytes.
+
+An interposer's `copy` operation normally makes a bind-compatible resource; it does not promise to
+reinterpret its element layout to match a destination shader. In particular, do not assume that
+`cs-tN = copy Resource_Palette` changes a 16-byte structured resource into a 64-byte structured
+resource merely because the shader at tN declares a four-row matrix.
+
+#### Keep palettes in one physical element layout
+
+A robust palette representation is an array of 16-byte `float4` rows in every recovery, conversion,
+tie-fill, and skin pass:
+
+```hlsl
+RWStructuredBuffer<float4> paletteOut : register(u1);
+StructuredBuffer<float4>   paletteRows : register(t2);
+
+uint p = bone * 4;
+float4x4 M = float4x4(
+    paletteRows[p],
+    paletteRows[p + 1],
+    paletteRows[p + 2],
+    paletteRows[p + 3]);
+```
+
+The physical resource and both shader declarations then use a 16-byte structured stride. Do not bind
+that resource as `StructuredBuffer<Mat>` where `Mat` contains four `float4` rows: that declaration has
+a 64-byte element stride. It is valid only when the underlying resource is itself consistently laid
+out and viewed as 64-byte matrices in every producer and consumer.
+
+Similarly, a palette writer declared as `RWBuffer<float4>` requires a typed
+`DXGI_FORMAT_R32G32B32A32_FLOAT` UAV. If the interposer creates an unknown-format structured UAV,
+declare `RWStructuredBuffer<float4>` instead.
+
+#### Keep raw compute output separate from the draw vertex buffer
+
+A raw skinning output should remain raw:
+
+```hlsl
+RWByteAddressBuffer posedOut : register(u1);
+
+uint o = vertex * 40;
+posedOut.Store3(o,     asuint(position));
+posedOut.Store3(o + 12, asuint(normal));
+posedOut.Store4(o + 24, asuint(tangent));
+```
+
+Use a stride-zero raw UAV for that pass. After dispatch, unbind the UAV, copy its bytes into a separate
+vertex-buffer resource, and bind the draw with the measured 40-byte input-assembler stride. Do not
+combine a nonzero structured stride, raw UAV semantics, and vertex-buffer binding in one descriptor.
+The input-assembler stride is binding metadata; it is not a reason to give a raw resource a nonzero
+`StructureByteStride`.
+
+Apply the same discipline to captured input. If recovery declares `StructuredBuffer<Vtx>` and `Vtx`
+is 40 bytes, prove that the shader-readable copy has a 40-byte structured stride and contains the
+intended live `vb0`. If that cannot be guaranteed, use an explicitly raw capture and load fields by
+verified byte offset instead of relying on an inferred structured view.
+
+#### Observed portability failure
+
+One production chain exposed two independent violations:
+
+- A typed `RWBuffer<float4>` shader was fed a structured unknown-format palette UAV. Correcting both
+  sides to `RWStructuredBuffer<float4>` fixed a rotated, bind-pose result on an integrated GPU.
+- The same 16-byte palette-row resource was later read as `StructuredBuffer<Mat>` with a 64-byte shader
+  stride. One discrete GPU behaved as though it applied the resource's 16-byte addressing and read
+  matrix `b` from rows `b..b+3` instead of `4*b..4*b+3`, producing enormous triangles. Deliberately
+  applying that addressing on the previously working GPU reproduced the exact geometry; explicit
+  four-row indexing fixed the affected GPU.
+
+Neither run logged a shader compilation or resource-creation failure. The defect belonged to the mod,
+not the driver that exposed it.
+
 ## 4. Problem classes
 
 ### 4.1 The replacement uses bones its target does not carry
@@ -281,6 +380,14 @@ The witness bone must:
 One valid witness matrix determines K. During porting, compare K from several candidate witness bones
 over captured poses; disagreement reveals a bad identity, bind-space conversion, operator, or sample.
 
+Guard the runtime inverse as well as the offline witness selection. Before publishing converted rows,
+verify that the recovered witness is finite and its determinant is safely separated from zero. A witness
+that is sound over the build corpus can still receive stale, misaddressed, or otherwise corrupt runtime
+input. An unguarded inverse turns that upstream error into arbitrarily large finite matrices, which can
+look like an index-buffer failure rather than a conversion failure. The failure policy may retain a
+known-safe sample, choose a proven fallback, or suppress the replacement; it should not skin with an
+unvalidated inverse.
+
 **Policy:** When no sound witness exists, the production implementation falls back to constant
 conversion and names that dependency in the build log as riding draw order. A port that cannot
 prove or diagnose the fallback should refuse the cross-space dependency instead.
@@ -325,7 +432,23 @@ Gate each bone at build time using:
 - A dense recovery evaluated after conversion to the precision that ships.
 - Synthetic palettes that exercise rotation-like and translation terms.
 - A left-inverse defect for any reduced operator.
+- Per-row coefficient norms, especially the maximum absolute coefficient and L1 row sum.
+- Float32 execution variants that model the target shader: contracted and uncontracted multiply/add,
+  plausible reduction orders, and the actual packed source representation.
+- Small perturbations of live posed input, including one-ulp stress where appropriate. Coefficient
+  quantization alone does not model vendor differences already present in the captured positions.
 - Explicit NaN, infinity, singular-value, and support checks.
+
+Large coefficient norms are a warning about input-noise amplification, not proof that a visible failure
+comes from floating-point arithmetic. Replay saved live poses and compare the scale of numerical drift
+with the scale required to produce the symptom. If ordinary float/FMA variants move a palette by
+thousandths while the bad frame contains matrices in the thousands, investigate resource addressing,
+sample coherence, and buffer contents before blaming summation order.
+
+Compensated accumulation with `precise` intermediates is a conservative shader policy for an
+ill-conditioned pseudoinverse. It reduces driver-dependent contraction and reduction error for a given
+input. It cannot repair an already wrong vertex stream, a mismatched stride, or input noise amplified by
+the inverse, so it must accompany rather than replace the conditioning gates above.
 
 A weak bone may ride a sound nearby or co-weighted bone through a rigid tie. That is an approximation,
 not recovered animation.
@@ -631,6 +754,8 @@ the shader's complete input and temporal contract.
   different samples, their combination is wrong.
 - **Operator quality is bounded by source information and shipped precision.** Quantization and rank
   loss cannot be wished away by a higher-precision offline prototype.
+- **Undefined resource reinterpretation is not a portability strategy.** A resource descriptor, view,
+  and shader that disagree may appear correct on one driver and fail without an API error on another.
 - **A continuous split needs world-space agreement.** Matching authoring data alone does not establish
   that agreement.
 - **One global output is not automatically multi-instance safe.**
@@ -648,6 +773,12 @@ Retain enough artifacts to reproduce every gate.
 - Verify weight sums and stored influence semantics.
 - Detect duplicate or ambiguous bone identities.
 - Confirm every donor-used bone is covered.
+- Record byte width, element count, structure stride, view format, raw/structured flags, and bind flags
+  for every custom buffer.
+- Assert that every shader declaration agrees with the physical resource and view. In particular,
+  compare the compiled structured stride rather than inferring it only from the HLSL source.
+- Verify that buffer lengths are divisible by their declared physical element sizes and that every
+  dispatched or indexed access remains in range.
 
 ### 6.2 Recovery validation
 
@@ -655,6 +786,9 @@ Retain enough artifacts to reproduce every gate.
 - Report source forward-replay residuals.
 - Report per-bone synthetic recovery error at shipped precision.
 - Report rank or left-inverse defect for reduced operators.
+- Report maximum coefficient magnitude and row L1 norm.
+- Replay saved poses with representative float32 reduction/FMA behavior and small input perturbations.
+- Compare witness determinants and converted-palette magnitudes before and after stress.
 - Name every weak, tied, dense-width, or uncovered bone.
 
 ### 6.3 Scheduling validation
@@ -674,6 +808,21 @@ Retain enough artifacts to reproduce every gate.
 ### 6.5 Output validation
 
 - Forward-skin the original source mesh through the exact emitted operator and shader arithmetic.
+- Replay the actual D3D resource path where practical: capture or create the source buffer, construct the
+  same SRVs/UAVs, dispatch the emitted bytecode, perform the same copies, and read back the output.
+- Disassemble emitted bytecode and verify structured declarations such as
+  `dcl_resource_structured tN, stride`; compilation success alone is not layout validation.
+- Run the D3D11 debug layer and treat structure-stride and buffer-type mismatch messages as correctness
+  failures. In particular, watch for
+  `D3D11_MESSAGE_ID_DEVICE_SHADERRESOURCEVIEW_STRUCTURE_STRIDE_MISMATCH` and
+  `D3D11_MESSAGE_ID_DEVICE_UNORDEREDACCESSVIEW_STRUCTURE_STRIDE_MISMATCH`. An ordinary interposer log
+  may omit the final cached resource/view descriptor.
+- Compile with vendor backends when available and test at least two GPU vendors before calling the
+  resource contract portable.
+- Record the exact adapter model, driver version, shader compiler/version, and optimization flags for
+  every vendor result.
+- Hash the exact package sent to a remote tester and compare its file manifest with the local control.
+  A single-variable A/B build is useful only when no unrelated file changed.
 - Compare replacement positions in world space, not only in each local anchor space.
 - Test every render pass the host participates in.
 - Test camera edges, shadows, reflections, and detail transitions.
@@ -688,6 +837,30 @@ Retain enough artifacts to reproduce every gate.
 - Compare normal and tangent angles separately.
 - Fix isolated authoring defects in the authored mesh, not in generated buffers.
 
+### 6.7 Runtime binary-search modes
+
+When a remote machine is scarce or an ordinary log contains no API failure, ship one diagnostic build
+that can select progressively larger portions of the pipeline. Keep the normal corrected path as the
+default and label every captured result with its mode.
+
+| Mode | What the result isolates |
+| --- | --- |
+| Static bind vertex buffer, no compute | An explosion is below palette recovery: replacement draw routing, index/vertex binding, or the draw buffer itself |
+| Identity-palette skinning | If static draw works but this explodes, inspect skin inputs, skin shader addressing, UAV writes, and the UAV-to-vertex-buffer copy |
+| Recovery without space conversion | An explosion implicates capture or recovery; coherent but displaced geometry suggests recovery works and conversion is still required |
+| Constant-derived conversion | If this works while witness conversion fails, inspect witness identity, sample coherence, determinant, and inverse |
+| Normal witness conversion | The corrected production control case |
+
+All diagnostic modes that share a downstream pass must retain the same valid resource contracts. Do not
+let the diagnostic itself reintroduce a typed/structured or 16/64-byte stride mismatch.
+
+An intentionally forced interpretation can also test a concrete portability hypothesis on a working
+GPU. For example, reading palette rows `b..b+3` instead of `4*b..4*b+3` deterministically emulates the
+confirmed 16-byte-stride failure described above. A matching visual signature is strong corroboration,
+but the final confirmation remains: the corrected single-variable build works on the affected machine.
+
+### 6.8 Build diagnostics
+
 Generated diagnostics should state when a build:
 
 - Falls back to draw-order-dependent constants.
@@ -695,9 +868,14 @@ Generated diagnostics should state when a build:
 - Ties or identity-seeds a bone.
 - Depends on a presence latch.
 - Cannot establish a same-frame witness.
+- Suppresses or retains a previous sample because a runtime witness failed its finite/determinant guard.
 - Is limited to one live instance.
 
 A silent fallback is part of the deformation whether or not the user knows it happened.
+
+Resource/view/shader disagreement is not a diagnosable fallback. The emitter should refuse it. Generate
+or retain a resource-contract manifest so a report can name the physical stride, view type, shader
+element stride, and command that bound each disputed slot.
 
 ## 7. Order of attack
 
@@ -705,8 +883,10 @@ Prove the mechanism one rung at a time in the actual game:
 
 1. **Hide:** match and suppress the intended draw.
 2. **Same-count substitution:** prove stream layout and draw routing.
-3. **Static replacement draw:** prove custom buffers, indices, materials, and state restoration.
-4. **Fixed-palette skinning:** prove replacement skinning and normal/tangent handling.
+3. **Static replacement draw:** prove custom buffers, indices, materials, input-assembler strides, and
+   state restoration.
+4. **Fixed-palette skinning:** prove the palette row layout, raw-UAV-to-vertex-buffer path, replacement
+   skinning, and normal/tangent handling before adding recovery.
 5. **Live single-part recovery:** prove LBS compatibility and operator identifiability.
 6. **New topology:** prove bounds, passes, and material subdivision.
 7. **Pooled recovery:** add ownership, presence, and space conversion.
@@ -715,5 +895,7 @@ Prove the mechanism one rung at a time in the actual game:
 10. **Multiple instances and scenes:** prove the lifetime and state model beyond the first success case.
 
 At every rung, test more than one pose and preserve the smallest capture that disproves an assumption.
+Run resource-contract checks and the D3D debug layer from the first custom buffer onward rather than only
+after a vendor-specific failure appears.
 Prefer a refused build with a specific reason over a character that deforms subtly and only in one
 scene.

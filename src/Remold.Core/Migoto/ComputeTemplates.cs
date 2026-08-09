@@ -37,7 +37,7 @@ Buffer<float>         Cpinv  : register(t1);   // per bone: 4 rows of `width` co
 Buffer<uint>          Map    : register(t2);   // partBones entries: local bone -> union bone, or 0xFFFFFFFF
 Buffer<uint>          Sel    : register(t3);   // anchor vertex indices, bone b at [base, base+width)
 Buffer<uint>          Off    : register(t4);   // 2 per bone: base, width
-RWBuffer<float4>      palOut : register(u1);    // 4*unionBones rows (shared across all pool parts)
+RWStructuredBuffer<float4> palOut : register(u1); // 4*unionBones rows (shared across all pool parts)
 static const uint ROWS=%(ROWS)d;
 [numthreads(64,1,1)]
 void main(uint3 tid : SV_DispatchThreadID){
@@ -46,8 +46,17 @@ void main(uint3 tid : SV_DispatchThreadID){
     uint u=Map[localBone];
     if(u==0xFFFFFFFF) return;   // this part does NOT own the bone (another part supports it better) -> don't clobber
     uint sbase=Off[localBone<<1], width=Off[(localBone<<1)|1];
-    float3 a=float3(0,0,0); uint cbase=(sbase<<2)+comp*width;
-    for(uint t=0;t<width;t++) a+=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+    // These pseudo-inverse rows can be ill-conditioned. Keep the reduction ordered and compensate
+    // its rounding error so driver-specific contraction/reassociation cannot amplify it into the pose.
+    precise float3 a=float3(0,0,0), correction=float3(0,0,0);
+    uint cbase=(sbase<<2)+comp*width;
+    for(uint t=0;t<width;t++){
+        precise float3 term=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+        precise float3 y=term-correction;
+        precise float3 next=a+y;
+        correction=(next-a)-y;
+        a=next;
+    }
     palOut[(u<<2)|comp]=float4(a,(comp==3)?1.0:0.0);   // scatter into this bone's union slot
 }
 ";
@@ -62,7 +71,7 @@ struct Vtx { float3 position; float3 normal; float4 tangent; };
 StructuredBuffer<Vtx> q      : register(t0);
 Buffer<float>         Cpinv  : register(t1);
 Buffer<uint>          Map    : register(t2);   // partBones entries: local bone -> union bone, or 0xFFFFFFFF
-RWBuffer<float4>      palOut : register(u1);    // 4*unionBones rows (shared across all pool parts)
+RWStructuredBuffer<float4> palOut : register(u1); // 4*unionBones rows (shared across all pool parts)
 static const uint N=%(N)d, ROWS=%(ROWS)d;
 [numthreads(64,1,1)]
 void main(uint3 tid : SV_DispatchThreadID){
@@ -70,8 +79,17 @@ void main(uint3 tid : SV_DispatchThreadID){
     uint localBone=i>>2, comp=i&3;
     uint u=Map[localBone];
     if(u==0xFFFFFFFF) return;   // this part does NOT own the bone (another part supports it better) -> don't clobber
-    float3 a=float3(0,0,0); uint base=i*N;
-    for(uint v=0;v<N;v++) a+=Cpinv[base+v]*q[v].position;
+    // These pseudo-inverse rows can be ill-conditioned. Keep the reduction ordered and compensate
+    // its rounding error so driver-specific contraction/reassociation cannot amplify it into the pose.
+    precise float3 a=float3(0,0,0), correction=float3(0,0,0);
+    uint base=i*N;
+    for(uint v=0;v<N;v++){
+        precise float3 term=Cpinv[base+v]*q[v].position;
+        precise float3 y=term-correction;
+        precise float3 next=a+y;
+        correction=(next-a)-y;
+        a=next;
+    }
     palOut[(u<<2)|comp]=float4(a,(comp==3)?1.0:0.0);   // scatter into this bone's union slot
 }
 ";
@@ -87,7 +105,7 @@ void main(uint3 tid : SV_DispatchThreadID){
 cbuffer AnchorCB : register(b13) { float4 WA[4]; }   // parts occupy b5..b12 (max 8), anchor b13
 StructuredBuffer<float4> palRaw    : register(t0);
 Buffer<uint>             ownerPart : register(t1);   // per union bone: owning part index
-RWBuffer<float4>         palOut    : register(u1);
+RWStructuredBuffer<float4> palOut  : register(u1);
 static const uint ROWS=%(ROWS)d;
 
 float4x4 AffineInverse(float4 r0, float4 r1, float4 r2, float4 r3){
@@ -123,7 +141,7 @@ void main(uint3 tid : SV_DispatchThreadID){
 // (VSSetConstantBuffers1 FirstConstant), which a whole-resource copy cannot see through.
 StructuredBuffer<float4> palRaw    : register(t0);   // 4*(unionBones + witness slots) rows
 Buffer<uint>             ownerPart : register(t1);   // per union bone: owning part index
-RWBuffer<float4>         palOut    : register(u1);
+RWStructuredBuffer<float4> palOut  : register(u1);
 static const uint ROWS=%(ROWS)d;      // 4*unionBones — witness slots beyond are inputs only
 static const uint ANCHOR=%(ANCHOR)d;
 static const uint2 WIT[%(P)d] = { %(WIT)s };   // per part: base row of (partSide, anchorSide) witness; x=0xFFFFFFFF = no witness (keep the row as-is)
@@ -161,16 +179,30 @@ void main(uint3 tid : SV_DispatchThreadID){
 Buffer<uint>          Off    : register(t4);   // 2 per bone: base, width
 float4 Row(uint b, uint comp){
     uint sbase=Off[b<<1], width=Off[(b<<1)|1];
-    float3 a=float3(0,0,0); uint cbase=(sbase<<2)+comp*width;
-    for(uint t=0;t<width;t++) a+=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+    precise float3 a=float3(0,0,0), correction=float3(0,0,0);
+    uint cbase=(sbase<<2)+comp*width;
+    for(uint t=0;t<width;t++){
+        precise float3 term=Cpinv[cbase+t]*q[Sel[sbase+t]].position;
+        precise float3 y=term-correction;
+        precise float3 next=a+y;
+        correction=(next-a)-y;
+        a=next;
+    }
     return float4(a,(comp==3)?1.0:0.0);
 }";
 
     const string GroupRowDense =
 @"static const uint N=%(N)d;   // this member mesh's verts — every row spans all of them
 float4 Row(uint b, uint comp){
-    float3 a=float3(0,0,0); uint base=((b<<2)|comp)*N;
-    for(uint v=0;v<N;v++) a+=Cpinv[base+v]*q[v].position;
+    precise float3 a=float3(0,0,0), correction=float3(0,0,0);
+    uint base=((b<<2)|comp)*N;
+    for(uint v=0;v<N;v++){
+        precise float3 term=Cpinv[base+v]*q[v].position;
+        precise float3 y=term-correction;
+        precise float3 next=a+y;
+        correction=(next-a)-y;
+        a=next;
+    }
     return float4(a,(comp==3)?1.0:0.0);
 }";
 
@@ -189,7 +221,7 @@ struct Vtx { float3 position; float3 normal; float4 tangent; };
 StructuredBuffer<Vtx> q      : register(t0);   // the member's posed vb0, captured at this draw
 Buffer<float>         Cpinv  : register(t1);
 Buffer<uint>          Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
-RWBuffer<float4>      palOut : register(u1);
+RWStructuredBuffer<float4> palOut : register(u1);
 cbuffer MemberCB : register(b5)  { float4 WM[4]; }
 cbuffer AnchorCB : register(b13) { float4 WA[4]; }
 static const uint ROWS=%(ROWS)d, BASE=%(BASE)d;
@@ -234,7 +266,7 @@ StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, cap
 Buffer<float>            Cpinv  : register(t1);
 Buffer<uint>             Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
 StructuredBuffer<float4> palRaw : register(t5);   // the RAW palette: the anchor's own recovered rows
-RWBuffer<float4>         palOut : register(u1);
+RWStructuredBuffer<float4> palOut : register(u1);
 static const uint ROWS=%(ROWS)d, BASE=%(BASE)d;
 static const uint WITM=%(WITM)d;   // the witness bone's index in THIS member mesh
 static const uint WITA=%(WITA)d;   // the anchor-side witness recovery's base row in palRaw
@@ -268,13 +300,15 @@ void main(uint3 tid : SV_DispatchThreadID){
 @"// Skin the new body (VCOUNT verts, weighted to UNION bone order) with the CONVERTED palette.
 struct Vtx  { float3 position; float3 normal; float4 tangent; };
 struct Skin { float4 weight;   uint4  index;  };
-struct Mat  { float4 r0, r1, r2, r3; };
-// u1 is the draw's own vertex buffer bound directly: a buffer carrying the vertex-buffer bind flag
-// cannot be structured, so the 40-byte vertex is stored raw, by byte offset.
+// u1 is a stride-zero raw compute buffer. The command list unbinds it after dispatch, then copies
+// its bytes into the separate 40-byte vertex buffer used by the draw.
 RWByteAddressBuffer     rw_out : register(u1);
 StructuredBuffer<Vtx>   bindV  : register(t0);
 StructuredBuffer<Skin>  skinB  : register(t1);
-StructuredBuffer<Mat>   palB   : register(t2);
+// Palette resources are physically structured as 16-byte float4 rows. Keep the shader declaration
+// at that exact stride and assemble each 4-row matrix explicitly; rebinding the same resource as a
+// StructuredBuffer<Mat> declares a conflicting 64-byte stride and is driver-dependent.
+StructuredBuffer<float4> palRows : register(t2);
 static const uint VCOUNT=%(VCOUNT)d;
 [numthreads(64,1,1)]
 void main(uint3 tid : SV_DispatchThreadID){
@@ -283,7 +317,8 @@ void main(uint3 tid : SV_DispatchThreadID){
     float3 sp=0,sn=0,st=0;
     [unroll] for(int k=0;k<4;k++){
         float wk=S.weight[k]; uint b=S.index[k];
-        Mat Mb=palB[b]; float4x4 M=float4x4(Mb.r0,Mb.r1,Mb.r2,Mb.r3);
+        uint p=b<<2;
+        float4x4 M=float4x4(palRows[p],palRows[p+1],palRows[p+2],palRows[p+3]);
         sp+=wk*mul(float4(V.position,1.0),M).xyz;
         sn+=wk*mul(float4(V.normal,0.0),M).xyz;
         st+=wk*mul(float4(V.tangent.xyz,0.0),M).xyz;
@@ -308,7 +343,7 @@ void main(uint3 tid : SV_DispatchThreadID){
 // 4-component format does not compile on cs_5_0 (single-component 32-bit only), which is why every
 // compute in this emission reads through a StructuredBuffer and only WRITES its UAV.
 StructuredBuffer<float4> palIn  : register(t0);   // the CONVERTED palette, pre-fill
-RWBuffer<float4>         palOut : register(u1);
+RWStructuredBuffer<float4> palOut : register(u1);
 static const uint PAIRS=%(P)d, SEEDS=%(S)d;
 static const uint2 PAIR[%(PT)d] = { %(PAIRLIST)s };   // x = tied union slot, y = ancestor union slot
 static const uint  SEED[%(ST)d] = { %(SEEDLIST)s };   // union slots reset to identity

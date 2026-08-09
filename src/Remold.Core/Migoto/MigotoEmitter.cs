@@ -2125,8 +2125,8 @@ public sealed partial class MigotoEmitter
         foreach (var pipe in pipes)
         {
             string sfx = pipe.Sfx;
-            P.Append($"[Resource_Palette_{sfx}]\ntype = RWBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
-            P.Append($"[Resource_PaletteConv_{sfx}]\ntype = RWBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
+            P.Append($"[Resource_Palette_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
+            P.Append($"[Resource_PaletteConv_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
             P.Append($"[Resource_OwnerPart_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = owner_part_{sfx}.buf\n");
             foreach (var (part, _, _, _) in pipe.PartMeta)
             {
@@ -2182,12 +2182,13 @@ public sealed partial class MigotoEmitter
             P.Append($"[Resource_NewSkin_{sfx}]\ntype = RWBuffer\nstride = 32\nfilename = combined_skin_{sfx}.buf\n");
             P.Append($"[Resource_NewVB1_{sfx}]\ntype = RWBuffer\nstride = {pipe.Vb1Stride}\nfilename = combined_vb1_{sfx}.buf\n");
             P.Append($"[Resource_NewIB_{sfx}]\ntype = Buffer\nformat = {pipe.IbFmt}\nfilename = combined_ib_{sfx}.buf\n");
-            // The skin output IS the buffer the draw binds as vb0/vb3, so it carries
-            // D3D11_BIND_VERTEX_BUFFER — which D3D11 forbids on a structured buffer. Declared raw and
-            // both-bound so the skin compute writes it through a UAV bound DIRECTLY; a copy round-trip
-            // through cs-u1 would coerce a structured destination and fail to create.
-            P.Append($"[Resource_NewPosed_{sfx}]\ntype = RWByteAddressBuffer\nstride = 40\n"
-                   + $"bind_flags = vertex_buffer unordered_access\nfilename = combined_bind_{sfx}.buf\n");
+            // Keep the draw's 40-byte vertex resource separate from the compute shader's stride-zero
+            // raw UAV. D3D11's resource/view contracts do not permit one strided resource to serve both
+            // roles portably, so the completed raw bytes are copied into the draw buffer.
+            P.Append($"[Resource_NewPosed_{sfx}]\ntype = Buffer\nstride = 40\n"
+                   + $"bind_flags = vertex_buffer\nfilename = combined_bind_{sfx}.buf\n");
+            P.Append($"[Resource_NewPosedUAV_{sfx}]\ntype = RWByteAddressBuffer\nstride = 0\n"
+                   + $"bind_flags = unordered_access\nfilename = combined_bind_{sfx}.buf\n");
         }
         // rigid replacements declare only what they bind: the compiled streams, verbatim
         foreach (var r in rigids)
@@ -2391,12 +2392,13 @@ public sealed partial class MigotoEmitter
                        + $"Dispatch = {(4 * pairs + 63) / 64}, 1, 1\n"
                        + $"Resource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            // u1 is bound by reference, not copied: the shader writes every vertex, so there is nothing to
-            // seed, and the draw reads the same buffer straight after the post-unbind.
+            // Skin into a valid raw UAV, unbind it, then copy the bytes into the separate vertex resource.
+            // The shader writes every vertex, so the UAV's file seed exists only to establish its size.
             P.Append($"[CustomShaderSkin_{sfx}]\ncs = skin_cs_{sfx}.hlsl\n"
-                   + $"cs-u1 = Resource_NewPosed_{sfx}\ncs-t0 = copy Resource_NewBind_{sfx}\n"
+                   + $"cs-u1 = Resource_NewPosedUAV_{sfx}\ncs-t0 = copy Resource_NewBind_{sfx}\n"
                    + $"cs-t1 = copy Resource_NewSkin_{sfx}\ncs-t2 = copy Resource_PaletteConv_{sfx}\n"
-                   + $"Dispatch = {(pipe.Vcount + 63) / 64}, 1, 1\npost cs-u1 = null\n\n");
+                   + $"Dispatch = {(pipe.Vcount + 63) / 64}, 1, 1\ncs-u1 = null\n"
+                   + $"Resource_NewPosed_{sfx} = copy Resource_NewPosedUAV_{sfx}\npost cs-u1 = null\n\n");
 
             // A COMMAND LIST, not a [CustomShader]: a CustomShader invocation unconditionally
             // saves/restores the viewports and the full OM state (RTVs+UAVs+DSV) around every run — pure
