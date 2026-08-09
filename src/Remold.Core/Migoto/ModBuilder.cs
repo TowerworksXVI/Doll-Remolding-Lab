@@ -1219,9 +1219,11 @@ public static class ModBuilder
             // one subject probe the same parts, and an unreadable part is one exclusion, not one per Replace.
             var rosterProbes = new Dictionary<(string, string),
                 (List<PoolDerive.PartBones> Bones, Dictionary<string, SubjectPart> BySlot,
-                 List<PoolDerive.MissingPart> HeldBack, Dictionary<string, System.Numerics.Matrix4x4?> Rests)>();
+                 List<PoolDerive.MissingPart> HeldBack, Dictionary<string, System.Numerics.Matrix4x4?> Rests,
+                 Dictionary<uint, string> BonePaths)>();
             (List<PoolDerive.PartBones> Bones, Dictionary<string, SubjectPart> BySlot,
-             List<PoolDerive.MissingPart> HeldBack, Dictionary<string, System.Numerics.Matrix4x4?> Rests)
+             List<PoolDerive.MissingPart> HeldBack, Dictionary<string, System.Numerics.Matrix4x4?> Rests,
+             Dictionary<uint, string> BonePaths)
              RosterProbe(SubjectModel model)
             {
                 var subjectKey = (model.Character.ToLowerInvariant(), model.Stem.ToLowerInvariant());
@@ -1239,6 +1241,38 @@ public static class ModBuilder
                 var bySlot = new Dictionary<string, SubjectPart>(StringComparer.OrdinalIgnoreCase);
                 var heldBack = new List<PoolDerive.MissingPart>();
                 var rests = new Dictionary<string, System.Numerics.Matrix4x4?>(StringComparer.OrdinalIgnoreCase);
+                // One skeleton per subject: hash → '/'-joined full path, from the subject's OWN skeleton —
+                // per-part scene rigs only name a part's skin bones and can fail to read at all, while the
+                // prefab skeleton holds every chain. A mesh-stored bone hash can name any chain SUFFIX, not
+                // just the leaf (SceneRig's own matching rule), so every suffix spelling keys the full path;
+                // a hash two different bones can spell is dropped whole — a tie routed to the wrong limb
+                // would articulate the wrong side, and the seed is the tamer failure. Feeds the emitter's
+                // tie underlay; an unreadable skeleton just leaves it empty (ties degrade by name there).
+                var bonePaths = new Dictionary<uint, string>();
+                if (model.Skeleton is { } skel)
+                {
+                    var ambiguous = new HashSet<uint>();
+                    for (int i = 0; i < skel.BoneCount; i++)
+                    {
+                        var segs = new List<string>();
+                        var seen = new HashSet<int>();
+                        for (int cur = i; cur >= 0 && cur < skel.BoneCount && seen.Add(cur);
+                             cur = skel.Bones[cur].ParentIndex)
+                            segs.Add(skel.Bones[cur].Name);
+                        segs.Reverse();
+                        string path = string.Join("/", segs);
+                        for (int k = 0; k < segs.Count; k++)
+                        {
+                            uint h = Skeleton.BoneTable.Hash(string.Join("/", segs.Skip(k)));
+                            if (bonePaths.TryGetValue(h, out var prev))
+                            {
+                                if (!string.Equals(prev, path, StringComparison.Ordinal)) ambiguous.Add(h);
+                            }
+                            else bonePaths[h] = path;
+                        }
+                    }
+                    foreach (var h in ambiguous) bonePaths.Remove(h);
+                }
                 foreach (var p in model.Parts)
                 {
                     RefuseBlocked(p.SlotName, p.MeshAddress);   // outside the try: the catch takes a diagnostic and carries on
@@ -1312,7 +1346,7 @@ public static class ModBuilder
                         diagnostics.Add($"part '{p.Token}' excluded from pool derivation: {ex.Message}");
                     }
                 }
-                return rosterProbes[subjectKey] = (bones, bySlot, heldBack, rests);
+                return rosterProbes[subjectKey] = (bones, bySlot, heldBack, rests, bonePaths);
             }
 
             // What a part's LOD tiers ask of the union palette, and what the part can answer for another's:
@@ -1367,7 +1401,7 @@ public static class ModBuilder
                     warnings.Add($"recorded rest pose on '{edit.Mesh}' is not an axis-aligned rotation. "
                         + "The donor compiles without it");
 
-                var (partBones, partBySlot, heldBack, partRests) = RosterProbe(model);
+                var (partBones, partBySlot, heldBack, partRests, partPaths) = RosterProbe(model);
 
                 // The TARGET's own part being held back is answered here rather than left to fall out of pool
                 // derivation, which would derive a pool the replaced part isn't in and anchor the pipeline
@@ -1496,6 +1530,16 @@ public static class ModBuilder
                 // content hash with an already-captured tier of this pipeline, is left running vanilla. A
                 // tier whose hash ANOTHER pipeline already claimed refuses on the same terms as a pool
                 // part: the emitter merges by hash, so one section would serve both pipelines' recoveries.
+                // A tier left running vanilla still DRAWS, so its hash joins the part's presence latch as
+                // an extra sighting — a part visibly on screen at that detail must never read as absent,
+                // or the tie underlay would ride its bones rigidly over live articulation.
+                var presenceExtras = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                void PresenceExtra(string forPart, string hash)
+                {
+                    if (!presenceExtras.TryGetValue(forPart, out var list))
+                        presenceExtras[forPart] = list = new List<string>();
+                    if (!list.Contains(hash, StringComparer.Ordinal)) list.Add(hash);
+                }
                 foreach (var slotName in pool.Pool)
                 {
                     var p = partBySlot[slotName];
@@ -1509,8 +1553,8 @@ public static class ModBuilder
                         string h = tierSig.Key;
                         pipelineIbs.Add(tierSig.Ib);
                         // a key already captured is the same mesh (or an ambiguous class still pooled
-                        // on its shared ib)
-                        if (!pipelineHashes.Add(h)) continue;
+                        // on its shared ib) — its draws fire that section, so the sighting rides there
+                        if (!pipelineHashes.Add(h)) { PresenceExtra(partName, h); continue; }
                         // an ambiguous tier nothing in this pipeline captured runs vanilla: a capture on
                         // the shared signature would hold whichever mesh drew last. Where the two parts'
                         // textures separate them, a guard keeps the tier's section on its own draws.
@@ -1521,6 +1565,7 @@ public static class ModBuilder
                             if (tierRoute is null)
                             {
                                 pipelineHashes.Remove(h);
+                                PresenceExtra(partName, h);
                                 warnings.Add($"tier '{name}' shares its draw signature with '{tierSig.Mate}'. "
                                     + "Its vanilla draw is left running");
                                 continue;
@@ -1557,6 +1602,7 @@ public static class ModBuilder
                             // minted here may be withdrawn: a ridden claim's capture is another pipeline's,
                             // and that dump already succeeded under a name of its own.
                             if (mintedClaim) poolHashOwner.Remove(h);
+                            PresenceExtra(partName, h);
                             warnings.Add($"tier '{name}' can't serve the swap ({ex.Message}). Its vanilla draw is left running");
                             continue;
                         }
@@ -1730,6 +1776,10 @@ public static class ModBuilder
                     HideWhenOff = HidesWhenOff(edit),
                     Latch = pipeLatch,
                     Groups = carriedGroups.Count == 0 ? null : carriedGroups,
+                    BonePaths = partPaths.Count > 0 ? partPaths : null,
+                    PresenceHashes = presenceExtras.Count > 0
+                        ? presenceExtras.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value)
+                        : null,
                 });
             }
 

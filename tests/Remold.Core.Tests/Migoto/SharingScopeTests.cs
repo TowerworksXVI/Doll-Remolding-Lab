@@ -82,8 +82,8 @@ public class SharingScopeTests : IDisposable
         Assert.DoesNotContain("[TextureOverride_Retex_", ini);
         Assert.Contains($"[TextureOverride_RetexTag_{_world.StockTexHash}]\nhash = {_world.StockTexHash}\n"
             + $"filter_index = {MigotoEmitter.RetexTag(_world.StockTexHash)}\nmatch_priority = 100\n", ini);
-        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod0]\nhash = {lod0}\n", ini);
-        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod1]\nhash = {lod1}\n", ini);
+        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod0]\nhash = {lod0}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n", ini);
         // the probe/bind/restore shape: save by ref, find the tagged slot, bind only there, restore post
         Assert.Contains("Resource_RtxSave0 = ref ps-t0\n", ini);
         Assert.Contains($"if $zz_rt == {MigotoEmitter.RetexTag(_world.StockTexHash)}\n$zz_rslot = 0\nendif\n", ini);
@@ -170,8 +170,8 @@ public class SharingScopeTests : IDisposable
         // the latch: declared, committed in [Present], witnessed by the outfit's private meshes
         Assert.Contains("global $zz_gate_vesnassr01 = 0\nglobal $zz_seen_vesnassr01 = 0\n", ini);
         Assert.Contains("[Present]\n$zz_gate_vesnassr01 = $zz_seen_vesnassr01\n$zz_seen_vesnassr01 = 0\n", ini);
-        Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aabbccdd\n$zz_seen_vesnassr01 = 1\n", ini);
-        Assert.Contains("[TextureOverride_Witness_vesnassr01_1]\nhash = eeff0011\n$zz_seen_vesnassr01 = 1\n", ini);
+        Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aabbccdd\nmatch_priority = 0\n$zz_seen_vesnassr01 = 1\n", ini);
+        Assert.Contains("[TextureOverride_Witness_vesnassr01_1]\nhash = eeff0011\nmatch_priority = 0\n$zz_seen_vesnassr01 = 1\n", ini);
         // the bind sits under the latch; the save/restore does not (a gated-off draw must not restore stale refs)
         Assert.Contains("if $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx0\nendif\n", ini);
         int save = ini.IndexOf("Resource_RtxSave0 = ref ps-t0", StringComparison.Ordinal);
@@ -298,8 +298,8 @@ public class SharingScopeTests : IDisposable
         // and to one probe: the slot is read once, ahead of every bind that rides the answer
         Assert.Equal(1, CountOf(ini, "$zz_rslot = -1"));
         // both latches declared, committed, and witnessed independently
-        Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aaaa0001\n", ini);
-        Assert.Contains("[TextureOverride_Witness_vesnadorm_0]\nhash = aaaa0002\n", ini);
+        Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aaaa0001\nmatch_priority = 0\n", ini);
+        Assert.Contains("[TextureOverride_Witness_vesnadorm_0]\nhash = aaaa0002\nmatch_priority = 0\n", ini);
         // same character throughout — nothing to disclose
         Assert.Empty(r.Infos);
     }
@@ -528,8 +528,8 @@ public class SharingScopeTests : IDisposable
 
         string ini = ReadIni(r);
         // the shared tier's skip sits under the latch; the private tier's does not
-        Assert.Contains($"hash = {lod0}\nif $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\n", ini);
-        Assert.Contains($"hash = {lod1}\nhandling = skip\n", ini);
+        Assert.Contains($"hash = {lod0}\nmatch_priority = 0\nif $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\n", ini);
+        Assert.Contains($"hash = {lod1}\nmatch_priority = 0\nhandling = skip\n", ini);
         Assert.Contains(r.Infos, i => i.Contains("Karst") && i.Contains("hide"));
     }
 

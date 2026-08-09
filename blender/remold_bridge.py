@@ -366,6 +366,30 @@ def gf2_session_parts(session, mesh_names):
     return [n for n in mesh_names if n not in blocked]
 
 
+def gf2_claimed_meshes(session, mesh_names):
+    """Which mesh stands in for a declared writable part the glb doesn't carry, as
+    ``{mesh name: part name}``. An edited part's workspace glb holds the modder's mesh under the
+    modder's own name, so at re-open the name the app declared matches nothing. When exactly one
+    declared writable part is missing from the glb and exactly one mesh matches no declared part,
+    that mesh IS the part and its collection carries the part's contract name. Anything less exact
+    claims nothing — a mesh files under Reference rather than into the wrong part."""
+    declared = {p.get("name") for p in (session.get("parts") or [])
+                if isinstance(p, dict) and isinstance(p.get("name"), str)}
+    want = session.get("part")
+    if want:
+        declared.add(want)
+        writable = [want]
+    else:
+        blocked = {p.get("name") for p in (session.get("parts") or [])
+                   if isinstance(p, dict) and p.get("writable") is False}
+        writable = [n for n in declared if n not in blocked]
+    missing = [n for n in writable if n not in mesh_names]
+    strays = [n for n in mesh_names if n not in declared]
+    if len(missing) == 1 and len(strays) == 1:
+        return {strays[0]: missing[0]}
+    return {}
+
+
 def gf2_unskinned_parts(session):
     """The part names the app declared unskinned — a static-renderer prop's mesh, which carries no
     weights and whose session has no armature. Their vertices are outside the weight gate: counting
@@ -398,15 +422,20 @@ def gf2_build_collections(meshes, armature, session=None):
     scene_root = bpy.context.scene.collection
     mod = _ensure_collection(MOD_COLLECTION, scene_root)
     reference = _ensure_collection(REFERENCE_COLLECTION, scene_root)
-    writable = set(gf2_session_parts(session or {}, [mo.name for mo in meshes]))
+    names = [mo.name for mo in meshes]
+    writable = set(gf2_session_parts(session or {}, names))
+    claims = gf2_claimed_meshes(session or {}, names)
     parts = []
     for mo in meshes:
-        if mo.name not in writable:
+        part_name = claims.get(mo.name) or (mo.name if mo.name in writable else None)
+        if part_name is None:
             _move_to_collection(mo, reference)   # context: never shipped
             _set_hidden(mo, True)                # hidden by default. Unhide in the outliner to edit against.
             continue
-        part = _ensure_collection(mo.name, mod)
-        part[PART_MARKER] = mo.name   # the marker carries the part's contract name; a rename is detectable
+        if part_name != mo.name:
+            print(f"GF2: '{mo.name}' opened as part '{part_name}'")
+        part = _ensure_collection(part_name, mod)
+        part[PART_MARKER] = part_name   # the marker carries the part's contract name; a rename is detectable
         _move_to_collection(mo, part)
         parts.append(part)
     if armature is not None:
@@ -472,8 +501,9 @@ def gf2_import(glb_path):
     gf2_build_collections(meshes, arms[0] if arms else None, session)
     # Select the session's own part(s) only, after attribution: Reference context imports hidden,
     # and the initial framing should centre on what this session edits.
-    shipping = [mo for mo in meshes
-                if mo.name in set(gf2_session_parts(session, [m.name for m in meshes]))]
+    names = [m.name for m in meshes]
+    own = set(gf2_session_parts(session, names)) | set(gf2_claimed_meshes(session, names))
+    shipping = [mo for mo in meshes if mo.name in own]
     for mo in shipping:
         mo.select_set(True)
     if shipping:

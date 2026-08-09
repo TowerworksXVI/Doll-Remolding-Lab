@@ -201,8 +201,8 @@ public class RigidReplaceTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         // the vanilla draw is suppressed and the donor drawn in its place, at BOTH shipped tiers
-        Assert.Contains($"[TextureOverride_Rigid_crate_frame]\nhash = {lod0Hash}\n", ini);
-        Assert.Contains($"[TextureOverride_Rigid_crate_frame_1]\nhash = {lod1Hash}\n", ini);
+        Assert.Contains($"[TextureOverride_Rigid_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Rigid_crate_frame_1]\nhash = {lod1Hash}\nmatch_priority = 0\n", ini);
         Assert.Contains("handling = skip\nrun = CommandListRigid_crate_frame\n", ini);
         Assert.Contains("[CommandListRigid_crate_frame]", ini);
         Assert.Contains("vb0 = Resource_RigidVB0_crate_frame", ini);
@@ -239,7 +239,7 @@ public class RigidReplaceTests : IDisposable
             + $"filter_index = {panel}\nmatch_priority = 100\n", ini);
         // declared once, written only by the probes: no per-frame reset takes the verdict away
         Assert.Contains($"global ${v} = 0\n", ini);
-        Assert.Contains($"[TextureOverride_Rigid_crate_frame]\nhash = {lod0Hash}\n"
+        Assert.Contains($"[TextureOverride_Rigid_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n"
             + $"$zz_t = ps-t0\nif $zz_t == {frame}\n${v} = 1\nendif\n"
             + $"if $zz_t == {panel}\n${v} = 2\nendif\n", ini);
         Assert.Contains($"if ${v} == 1\nhandling = skip\n"
@@ -288,8 +288,8 @@ public class RigidReplaceTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
-        Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\n", ini);
-        Assert.Contains($"[TextureOverride_Cap_crate_frame_lod1]\nhash = {lod1Hash}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_crate_frame_lod1]\nhash = {lod1Hash}\nmatch_priority = 0\n", ini);
         Assert.Contains("CustomShaderRecover_crate_frame_crate_frame", ini);
         Assert.Contains("CustomShaderConvert_crate_frame", ini);
         Assert.Contains("CustomShaderSkin_crate_frame", ini);
@@ -320,7 +320,7 @@ public class RigidReplaceTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
-        Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n", ini);
         Assert.Contains("CustomShaderRecover_crate_frame_crate_frame", ini);
         Assert.Contains("CustomShaderConvert_crate_frame", ini);
         Assert.DoesNotContain("Rigid", ini);
@@ -460,10 +460,10 @@ public class RigidReplaceTests : IDisposable
         Assert.Contains($"[TextureOverride_RetexTag_{stock}]", ini);
         Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
         // both roles in ONE section per hash, in the pooled twin's order: skip + donor draw, then the block
-        Assert.Contains("[TextureOverride_Rigid_crate_frame]\nhash = aaaa0001\n"
+        Assert.Contains("[TextureOverride_Rigid_crate_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "handling = skip\nrun = CommandListRigid_crate_frame\n"
             + "Resource_RtxSave0 = ref ps-t0\n", ini);
-        Assert.Contains("[TextureOverride_Rigid_crate_frame_1]\nhash = aaaa0002\n"
+        Assert.Contains("[TextureOverride_Rigid_crate_frame_1]\nhash = aaaa0002\nmatch_priority = 0\n"
             + "handling = skip\nrun = CommandListRigid_crate_frame\n"
             + "Resource_RtxSave0 = ref ps-t0\n", ini);
         // the probe/bind/restore shape rides along whole, once per anchored hash
@@ -497,8 +497,8 @@ public class RigidReplaceTests : IDisposable
         });
         string ini = File.ReadAllText(Path.Combine(_out, "mod.ini"));
 
-        Assert.Contains("[TextureOverride_Rigid_crate_frame]\nhash = aaaa0001\n", ini);
-        Assert.Contains("[TextureOverride_RetexScope_crate_lid_lod0]\nhash = bbbb0001\n", ini);
+        Assert.Contains("[TextureOverride_Rigid_crate_frame]\nhash = aaaa0001\nmatch_priority = 0\n", ini);
+        Assert.Contains("[TextureOverride_RetexScope_crate_lid_lod0]\nhash = bbbb0001\nmatch_priority = 0\n", ini);
         // and the replacement's own section stays free of the block
         Assert.DoesNotContain("run = CommandListRigid_crate_frame\nResource_RtxSave0", ini);
         ModBuilderTests.AssertNoDuplicateSections(ini);
@@ -542,9 +542,9 @@ public class RigidReplaceTests : IDisposable
         emitter.Build(req);
         string ini = File.ReadAllText(Path.Combine(_out, "mod.ini"));
 
-        Assert.Contains("[TextureOverride_Rigid_c_t]\nhash = aaaa0001\n", ini);
-        Assert.Contains("[TextureOverride_Rigid_c_t_1]\nhash = aaaa0002\n", ini);
-        Assert.Contains("[TextureOverride_Rigid_c_t_1_]\nhash = aaaa0003\n", ini);
+        Assert.Contains("[TextureOverride_Rigid_c_t]\nhash = aaaa0001\nmatch_priority = 0\n", ini);
+        Assert.Contains("[TextureOverride_Rigid_c_t_1]\nhash = aaaa0002\nmatch_priority = 0\n", ini);
+        Assert.Contains("[TextureOverride_Rigid_c_t_1_]\nhash = aaaa0003\nmatch_priority = 0\n", ini);
         ModBuilderTests.AssertNoDuplicateSections(ini);
     }
 

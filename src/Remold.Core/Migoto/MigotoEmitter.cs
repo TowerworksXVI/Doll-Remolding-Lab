@@ -102,6 +102,20 @@ public sealed record ReplacePipeline
     /// this Replace's own target and candidate set. Null/empty = the pool poses every bone the donor
     /// rides.</summary>
     public IReadOnlyList<PoolGroup>? Groups { get; init; }
+
+    /// <summary>Bone hash → '/'-joined skeleton path (parents first), for whatever bones the caller could
+    /// read off the subject's scene rigs. Feeds the TIE UNDERLAY: a donor-used union bone another part
+    /// owns is filled with its nearest anchor-owned ancestor's row while that part's presence latch is
+    /// down, so a source the scene state never renders leaves a rigid ride instead of a bind-pose seed.
+    /// Null/missing bones get no tie — the underlay reseeds them to identity instead, named in the
+    /// build log.</summary>
+    public IReadOnlyDictionary<uint, string>? BonePaths { get; init; }
+
+    /// <summary>Extra presence-sighting ib hashes per pool part: tiers the builder DROPPED from
+    /// <see cref="Tiers"/> (unreadable, ambiguous, claim-refused) whose vanilla draw keeps running. The
+    /// part's latch must still see those draws, or the tie underlay would fire — a rigid ride — while
+    /// the part is visibly on screen articulating.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes { get; init; }
 }
 
 /// <summary>The coverage group as a build carries it: its id (<see cref="PoolDerive.CoverageGroupId"/>),
@@ -545,15 +559,29 @@ public sealed partial class MigotoEmitter
         IReadOnlyDictionary<string, string> CapHashes, int Ub, int Vcount, int Vb1Stride, string IbFmt,
         List<(int Count, int Start, int Base)> Draws, SubmeshMaps?[] SubMaps,
         HashSet<string>? NoSkip, List<(string Part, string Name, string Suffix, string Hash, int Rows)> TierMeta,
-        string? ToggleKey, string? Latch, bool HideWhenOff, List<GroupMemberEmission> GroupMembers,
-        List<GroupMemberClaim> GroupClaims);
+        bool Lod0WitnessConvert, string? ToggleKey, string? Latch, bool HideWhenOff, List<GroupMemberEmission> GroupMembers,
+        List<GroupMemberClaim> GroupClaims, List<(string Part, int Pairs)> Ties,
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes);
 
     /// <summary>One wardrobe-group member draw the ini carries a fused section for: the emission name its
     /// resources and shader are filed under, the ib hash the capture keys on, whether it is the member's
-    /// lod0 (K from draw constants) or a tier (K from witness geometry), and the bones its dispatch covers.
+    /// lod0, and the bones its dispatch covers. The dispatch normally runs in the ANCHOR's chain (K from
+    /// witness geometry, gated on the mesh's presence latch); <paramref name="AtDraw"/> marks the fallback
+    /// for a lod0 sharing no sound bone with the anchor — its dispatch stays at the member's own draw,
+    /// where its constants copy and its geometry are same-frame by construction (K from constants).
     /// Suppression is NOT here: it is owed to every mesh a hidden member claimed, which this list is only a
     /// subset of (see <see cref="GroupMemberClaim"/>).</summary>
-    sealed record GroupMemberEmission(string Name, string Hash, bool Lod0, int Bones);
+    /// <para><paramref name="PreferLod0"/> (tier meshes only): the member's lod0 emission name when it
+    /// carries a fused section of its own — the tier's in-chain dispatch defers to it when both latched
+    /// in one frame, so the colour draw never skins from a decimated recovery.</para>
+    sealed record GroupMemberEmission(string Name, string Hash, bool Lod0, int Bones, bool AtDraw = false,
+        string? PreferLod0 = null);
+
+    /// <summary>The presence latch of one captured mesh (pool part, tier or group member): its capture
+    /// section records the sighting, <c>[Present]</c> commits it, and a chain dispatch reading the gate
+    /// tests LAST frame's draw stream — a verdict constant across the current frame, independent of where
+    /// any draw falls in it.</summary>
+    static string MeshLatch(string name) => $"src_{name}";
 
     /// <summary>One wardrobe-group member draw the build CLAIMED a capture hash for, whether or not the
     /// emission ended up with a fused section for it: three verdicts drop a mesh after the claim (no lod0,
@@ -561,16 +589,134 @@ public sealed partial class MigotoEmitter
     /// than to the dispatch. <see cref="GroupMemberEmission"/> is the subset that also draws.</summary>
     sealed record GroupMemberClaim(string Name, string Hash, bool Hidden);
 
-    /// <summary>The sticky per-pipeline global a member LOD0 run-line waits on: set where the anchor's
-    /// constant buffer is captured — its lod0 capture and nowhere else, since that is the only draw whose
-    /// <c>copy vs-cb1</c> fills the resource a lod0 rebase reads. Never reset.</summary>
+    /// <summary>The sticky per-pipeline global an AT-DRAW member lod0 run-line waits on: set where the
+    /// anchor's constant buffer is captured — its lod0 capture and nowhere else, since that is the only
+    /// draw whose <c>copy vs-cb1</c> fills the resource a constants rebase reads. Never reset. In-chain
+    /// member dispatches carry no such flag: the chain itself runs at the anchor's draw.</summary>
     static string GroupCbVar(string sfx) => $"zz_grp_cb_{sfx}";
 
-    /// <summary>The sticky per-pipeline global a member TIER run-line waits on: set in EVERY anchor capture,
-    /// lod0 and each tier, because a tier rebase reads the anchor's witness rows out of the raw palette and
-    /// both the lod0 chain and the anchor's tier chains run the anchor's recover into it. Never reset, so a
-    /// session whose anchor renders only at tier detail still dispatches its members.</summary>
-    static string GroupSeenVar(string sfx) => $"zz_grp_seen_{sfx}";
+    /// <summary>The in-chain member dispatches, appended after the convert (their writes land in the
+    /// converted palette's appended region, which the converts carry through) and before the skin that
+    /// reads them. Each is gated on its own mesh's presence latch — LAST frame's draw stream, committed in
+    /// <c>[Present]</c>, so the verdict is one value for the whole frame no matter where the member's draw
+    /// falls in it. An unworn variant's latch clears and its dispatch stops; the worn one's rows stand.</summary>
+    static void MemberRuns(List<string> chain, PipelineEmission pipe, string sfx)
+    {
+        foreach (var m in pipe.GroupMembers)
+        {
+            if (m.AtDraw) continue;
+            chain.Add($"if ${GateVar(MeshLatch(m.Name))} == 1");
+            // Both of a member's meshes can latch in one frame (lod0 in the colour pass, a tier in
+            // shadow); dispatched unconditionally the tier would write LAST and the colour draw would
+            // skin from the decimated recovery. A tier defers to its member's live lod0.
+            if (!m.Lod0 && m.PreferLod0 is { } lod0)
+                chain.Add($"if ${GateVar(MeshLatch(lod0))} == 0");
+            chain.Add($"run = CustomShaderGroup_{m.Name}_{sfx}");
+            if (!m.Lod0 && m.PreferLod0 is not null) chain.Add("endif");
+            chain.Add("endif");
+        }
+    }
+
+    /// <summary>One pool mesh's recover run-line: the anchor's runs bare (the chain fires at its draw),
+    /// any other part's waits on the PART's presence latch — a source the scene state never renders never
+    /// runs its recover, so its owned rows stay for the tie underlay instead of a never-substantiated
+    /// copy posing them with garbage. The latch is part-grained (any of its meshes' draws raise it), so
+    /// a part on screen at another detail still recovers from its last captured pair — a consistent
+    /// stale frame, today's off-screen class — and the tie's complement gate leaves no state unserved.</summary>
+    static void RecoverRun(List<string> chain, PipelineEmission pipe, int partIdx, string meshName, string sfx)
+    {
+        if (partIdx == pipe.AnchorIdx)
+        {
+            chain.Add($"run = CustomShaderRecover_{meshName}_{sfx}");
+            return;
+        }
+        chain.Add($"if ${GateVar(MeshLatch(pipe.PartMeta[partIdx].Part))} == 1");
+        chain.Add($"run = CustomShaderRecover_{meshName}_{sfx}");
+        chain.Add("endif");
+    }
+
+    /// <summary>The tie underlay's run-lines, after the members and before the skin: one per tied part,
+    /// firing only while the part's latch is down — no draw of ANY of its meshes last frame, dropped
+    /// tiers included. The frame it returns, its gated recover resumes and overwrites the tied rows with
+    /// live articulation.</summary>
+    static void TieRuns(List<string> chain, PipelineEmission pipe, string sfx)
+    {
+        foreach (var (part, _) in pipe.Ties)
+        {
+            chain.Add($"if ${GateVar(MeshLatch(part))} == 0");
+            chain.Add($"run = CustomShaderTie_{part}_{sfx}");
+            chain.Add("endif");
+        }
+    }
+
+    /// <summary>Derive the tie underlay and write its shaders: for every donor-WEIGHTED union bone another
+    /// part owns, the deepest skeleton ancestor the anchor owns — anchor-owned rows are recovered at the
+    /// anchor's own draw, so the ancestor's converted row is live whenever the replacement is. A verbatim
+    /// row copy is the rigid ride (rows are combined bind→posed affines; the bind-relative delta cancels).
+    /// Bones with no path or no anchor-owned ancestor keep the identity seed, named in the build log —
+    /// bind-pose placement, strictly tamer than the unwritten-recover garbage the gate retired. One shader
+    /// per owner part, pairs in ascending tied-slot order, parts in pool order: rebuilds reproduce.</summary>
+    static List<(string Part, int Pairs)> TieUnderlay(string outDir, string sfx, PoolMath.UnionResult union,
+        int anchorIdx, List<string> parts, HashSet<int> donorSlots,
+        IReadOnlyDictionary<uint, string>? bonePaths, List<string> diagnostics)
+    {
+        var ties = new List<(string Part, int Pairs)>();
+        var anchorPaths = new List<(string Path, int Slot)>();
+        if (bonePaths is not null)
+            for (int u = 0; u < union.UnionHashes.Length; u++)
+                if (union.Owner[u] == anchorIdx && bonePaths.TryGetValue(union.UnionHashes[u], out var ap))
+                    anchorPaths.Add((ap, u));
+        var pairsByOwner = new Dictionary<int, List<(uint Tied, uint Ancestor)>>();
+        // Rows with no tie must still be WRITTEN while their owner is absent: the converts rewrite every
+        // union row unconditionally (constants-K through an absent part's never-filled CB is zero — the
+        // collapse this underlay exists to end; witness-K rides an arbitrary bone), so "keeps the seed"
+        // is only true if this dispatch puts the identity back after them.
+        var seedsByOwner = new Dictionary<int, List<uint>>();
+        void Seed(int owner, uint slot)
+        {
+            if (!seedsByOwner.TryGetValue(owner, out var list)) seedsByOwner[owner] = list = new List<uint>();
+            list.Add(slot);
+        }
+        for (int u = 0; u < union.UnionHashes.Length; u++)
+        {
+            if (union.Owner[u] == anchorIdx || !donorSlots.Contains(u)) continue;
+            uint hash = union.UnionHashes[u];
+            string owner = parts[union.Owner[u]];
+            if (bonePaths is null || !bonePaths.TryGetValue(hash, out var path))
+            {
+                Seed(union.Owner[u], (uint)u);
+                diagnostics.Add($"{sfx}: bone 0x{hash:x8} has no skeleton path — donor weight on it keeps "
+                    + $"the bind-pose seed while '{owner}' is absent");
+                continue;
+            }
+            int best = -1, bestLen = -1;
+            foreach (var (ap, slot) in anchorPaths)
+                if (ap.Length > bestLen && path.Length > ap.Length + 1 && path[ap.Length] == '/'
+                    && path.StartsWith(ap, StringComparison.Ordinal))
+                { best = slot; bestLen = ap.Length; }
+            if (best < 0)
+            {
+                Seed(union.Owner[u], (uint)u);
+                diagnostics.Add($"{sfx}: bone 0x{hash:x8} has no anchor-owned skeleton ancestor — donor "
+                    + $"weight on it keeps the bind-pose seed while '{owner}' is absent");
+                continue;
+            }
+            if (!pairsByOwner.TryGetValue(union.Owner[u], out var list))
+                pairsByOwner[union.Owner[u]] = list = new List<(uint, uint)>();
+            list.Add(((uint)u, (uint)best));
+            diagnostics.Add($"{sfx}: bone 0x{hash:x8} rides its ancestor 0x{union.UnionHashes[best]:x8} "
+                + $"rigidly while '{owner}' is absent");
+        }
+        foreach (int owner in pairsByOwner.Keys.Concat(seedsByOwner.Keys).Distinct().OrderBy(k => k))
+        {
+            var pairs = pairsByOwner.GetValueOrDefault(owner) ?? new List<(uint, uint)>();
+            var seeds = seedsByOwner.GetValueOrDefault(owner) ?? new List<uint>();
+            File.WriteAllText(Path.Combine(outDir, $"tiefill_{parts[owner]}_{sfx}.hlsl"),
+                ComputeTemplates.EmitTieFill(pairs, seeds));
+            ties.Add((parts[owner], pairs.Count + seeds.Count));
+        }
+        return ties;
+    }
 
     /// <summary>Move a compiled donor's group-bone indices off the dense continuation of the union and onto
     /// the palette slots the emission reserved for them: <c>unionBones + k</c> becomes
@@ -750,9 +896,19 @@ public sealed partial class MigotoEmitter
                 ClaimName(parts[i], dirs[i]);
                 var load = Load(dirs[i]);
                 partArts.Add(Operator(parts[i], dirs[i]));   // conditioning + rigid ties, once per part
-                partScatter.Add((uint[])union.ScatterMaps[i].Clone());
                 partMeta.Add((parts[i], load.P.GetLength(0), load.Nb, 4 * load.Nb));
             }
+            // Anchor-preferred ownership, applied before ANY consumer reads owner or scatter — the part
+            // scatter maps, the owner buffer, the tier scatter and the witness reservations all see one
+            // verdict. Needs the anchor's conditioning, which is why it waits for the operator loop.
+            int movedRows = union.Owner.Count(o => o != anchorIdx);
+            union = PoolMath.PreferAnchorOwnership(union, anchorIdx, partArts[anchorIdx].Weak);
+            movedRows -= union.Owner.Count(o => o != anchorIdx);
+            if (movedRows > 0)
+                diagnostics.Add($"{sfx}: {movedRows} union bone{(movedRows == 1 ? "" : "s")} re-owned to the "
+                    + "anchor — recovered at its own draw instead of another part's");
+            for (int i = 0; i < parts.Count; i++)
+                partScatter.Add((uint[])union.ScatterMaps[i].Clone());
             File.WriteAllBytes(Path.Combine(req.OutDir, $"owner_part_{sfx}.buf"),
                 UIntBytes(union.Owner.Select(o => (uint)o).ToArray()));
 
@@ -809,25 +965,40 @@ public sealed partial class MigotoEmitter
                         diagnostics.Add($"{t.Name}: bone 0x{tierHashes[b]:x8} is too weakly supported in this tier — "
                             + "its lod0 recovery is reused for draws at this tier");
                     }
+                // Anchor-preferred ownership widens what the ANCHOR's tiers are asked to serve; a bone
+                // the preference took on the lod0 verdict that this tier doesn't carry at all is served
+                // by nobody in this tier's chain — its lod0 row simply stands. Named so the class is
+                // visible if a decimated anchor tier ever drops a bone another part poses live.
+                if (pi == anchorIdx)
+                {
+                    var tierSet = new HashSet<uint>(tierHashes);
+                    for (int u2 = 0; u2 < union.UnionHashes.Length; u2++)
+                        if (union.Owner[u2] == anchorIdx && !tierSet.Contains(union.UnionHashes[u2]))
+                            diagnostics.Add($"{t.Name}: this anchor tier does not carry bone "
+                                + $"0x{union.UnionHashes[u2]:x8} — its lod0 row stands at this tier's draws");
+                }
                 tierWork.Add((t.Name, pi, scatter, art));
                 tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * load.Nb));
             }
 
-            // ---- witness bones: constants-free space conversion for tier chains -----------------------
+            // ---- witness bones: constants-free space conversion --------------------------------------
             // Per non-anchor part, pick a bone shared with the anchor and SOUND in every operator of both
             // (never weak/tied anywhere it appears). Both parts' recoveries of it are scattered into
             // reserved palette slots past the union; the witness convert reads them and solves
             // K = inv(M_w_part)·M_w_anchor per owned row. Draw constants play no role — some renderers
             // bind vs-cb1 as a window into a shared buffer that a whole-resource copy reads wrongly, and
             // per-part draw spaces genuinely differ (by up to ~150°).
-            // Ships for every pipeline with tiers, on the same condition as the tier chains that run it. A
-            // one-part pool designates no witness — no second draw space — and its rows pass through.
+            // LOD0 uses this route when every non-anchor OWNER has a sound witness. Tier chains continue to
+            // use every witness available and pass an unwitnessed owner's rows through, as before. A one-part
+            // pool designates no witness — no second draw space — and its anchor-owned rows pass through.
             uint nextSlot = (uint)ub;
             var witRows = Enumerable.Repeat((PartRow: 0xFFFFFFFFu, AnchorRow: 0xFFFFFFFFu), parts.Count).ToArray();
             // The anchor's operators, and the slots its recoveries of a witness bone are reserved in. Both
             // the tier converts below and the group members further down solve K against the anchor's own
             // recovery of a shared bone, and a second reservation for one bone would leave one of them
-            // reading a slot nothing writes.
+            // reading a slot nothing writes. Anchor-preferred ownership makes the anchor-side reservation a
+            // guard rather than a route: every selected witness bone is sound in the anchor's lod0 operator,
+            // which is exactly the verdict the preference takes, so the bone's union row IS the anchor's.
             var anchorOps = new List<(uint[] Scatter, OperatorArt Art)> { (partScatter[anchorIdx], partArts[anchorIdx]) };
             anchorOps.AddRange(tierWork.Where(t => t.PartIdx == anchorIdx).Select(t => (t.Scatter, t.Art)));
             var anchorASlots = new Dictionary<uint, uint>();   // witness bone -> reserved anchor-side slot
@@ -843,49 +1014,55 @@ public sealed partial class MigotoEmitter
                 if (idx >= 0) scatter[idx] = slot;
             }
 
-            if (tierMeta.Count > 0)
+            for (int pi = 0; pi < parts.Count; pi++)
             {
-                for (int pi = 0; pi < parts.Count; pi++)
+                if (pi == anchorIdx) continue;
+                var partOps = new List<(uint[] Scatter, OperatorArt Art)> { (partScatter[pi], partArts[pi]) };
+                partOps.AddRange(tierWork.Where(t => t.PartIdx == pi).Select(t => (t.Scatter, t.Art)));
+
+                uint witness = 0;
+                bool found = false;
+                foreach (var h in partArts[anchorIdx].Hashes)
+                    if (partOps.All(o => Sound(o.Art, h)) && anchorOps.All(o => Sound(o.Art, h)))
+                    { witness = h; found = true; break; }
+                if (!found)
                 {
-                    if (pi == anchorIdx) continue;
-                    var partOps = new List<(uint[] Scatter, OperatorArt Art)> { (partScatter[pi], partArts[pi]) };
-                    partOps.AddRange(tierWork.Where(t => t.PartIdx == pi).Select(t => (t.Scatter, t.Art)));
-
-                    uint witness = 0;
-                    bool found = false;
-                    foreach (var h in partArts[anchorIdx].Hashes)
-                        if (partOps.All(o => Sound(o.Art, h)) && anchorOps.All(o => Sound(o.Art, h)))
-                        { witness = h; found = true; break; }
-                    if (!found)
-                    {
-                        diagnostics.Add($"{sfx}: {parts[pi]} shares no sound bone with the anchor — its owned bones "
-                            + "keep the anchor's space at tier draws (may displace where renderers use per-part spaces)");
-                        continue;
-                    }
-
-                    int realSlot = Array.IndexOf(union.UnionHashes, witness);
-                    bool partOwns = union.Owner[realSlot] == pi;
-                    bool anchorOwns = union.Owner[realSlot] == anchorIdx;
-                    uint partRow, anchorRow;
-                    if (partOwns) partRow = (uint)(realSlot * 4);
-                    else
-                    {
-                        uint slot = nextSlot++;
-                        foreach (var o in partOps) Patch(o.Scatter, o.Art, witness, slot);
-                        partRow = slot * 4;
-                    }
-                    if (anchorOwns) anchorRow = (uint)(realSlot * 4);
-                    else
-                    {
-                        if (!anchorASlots.TryGetValue(witness, out uint slot))
-                        {
-                            anchorASlots[witness] = slot = nextSlot++;
-                            foreach (var o in anchorOps) Patch(o.Scatter, o.Art, witness, slot);
-                        }
-                        anchorRow = slot * 4;
-                    }
-                    witRows[pi] = (partRow, anchorRow);
+                    diagnostics.Add($"{sfx}: {parts[pi]} shares no sound bone with the anchor — its owned bones "
+                        + "have no current-frame geometry conversion");
+                    continue;
                 }
+
+                int realSlot = Array.IndexOf(union.UnionHashes, witness);
+                bool partOwns = union.Owner[realSlot] == pi;
+                bool anchorOwns = union.Owner[realSlot] == anchorIdx;
+                uint partRow, anchorRow;
+                if (partOwns) partRow = (uint)(realSlot * 4);
+                else
+                {
+                    uint slot = nextSlot++;
+                    foreach (var o in partOps) Patch(o.Scatter, o.Art, witness, slot);
+                    partRow = slot * 4;
+                }
+                if (anchorOwns) anchorRow = (uint)(realSlot * 4);
+                else
+                {
+                    if (!anchorASlots.TryGetValue(witness, out uint slot))
+                    {
+                        anchorASlots[witness] = slot = nextSlot++;
+                        foreach (var o in anchorOps) Patch(o.Scatter, o.Art, witness, slot);
+                    }
+                    anchorRow = slot * 4;
+                }
+                witRows[pi] = (partRow, anchorRow);
+            }
+
+            var lod0Owners = union.Owner.Where(pi => pi != anchorIdx).Distinct().ToList();
+            bool lod0WitnessConvert = lod0Owners.All(pi => witRows[pi].PartRow != uint.MaxValue);
+            if (!lod0WitnessConvert)
+                diagnostics.Add($"{sfx}: LOD0 has no complete current-frame witness conversion — it falls "
+                    + "back to per-draw constants, whose freshness depends on draw order");
+            if (lod0WitnessConvert || tierMeta.Count > 0)
+            {
                 File.WriteAllText(Path.Combine(req.OutDir, $"convert_witness_{sfx}.hlsl"),
                     ComputeTemplates.EmitConvertWitness(ub, anchorIdx, witRows.Select(w => (w.PartRow, w.AnchorRow)).ToList()));
             }
@@ -929,10 +1106,39 @@ public sealed partial class MigotoEmitter
                     }
                     var tiers = meshes.Where(m => !m.IsLod0).ToList();
 
-                    // Per member, one witness bone for every tier section it emits: sound in each of its
-                    // tier operators AND in each of the anchor's, so both sides' recoveries of it are
-                    // trustworthy. Constants play no part at tier draws (window binds), so a member with no
-                    // such bone emits no tier section at all — its lod0 still writes the rows.
+                    // Per member, a witness bone for every fused section it emits — sound in the mesh's own
+                    // operator AND in each of the anchor's, so both sides' recoveries of it are trustworthy.
+                    // The dispatches run in the ANCHOR's chain, where a geometric K is the only one that
+                    // cannot mix frames: the mesh's posed ref is current-frame there, but its constants copy
+                    // is from its own last draw — pairing those would rebase this frame's geometry through
+                    // last frame's transform. One witness for the lod0, one shared by the tiers (as the
+                    // tier scatter machinery always required).
+                    uint AnchorRowOf(uint bone)
+                    {
+                        int realSlot = Array.IndexOf(union.UnionHashes, bone);
+                        if (union.Owner[realSlot] == anchorIdx) return (uint)(realSlot * 4);
+                        if (!anchorASlots.TryGetValue(bone, out uint slot))
+                        {
+                            anchorASlots[bone] = slot = nextSlot++;
+                            foreach (var o in anchorOps) Patch(o.Scatter, o.Art, bone, slot);
+                        }
+                        return slot * 4;
+                    }
+                    ClaimName(lod0.Name, lod0.DumpDir);
+                    var lod0Art = Operator(lod0.Name, lod0.DumpDir);
+                    uint lod0Witness = 0, lod0WitnessRow = 0;
+                    bool lod0HasWitness = false;
+                    foreach (var h in partArts[anchorIdx].Hashes)
+                        if (Sound(lod0Art, h) && anchorOps.All(o => Sound(o.Art, h)))
+                        { lod0Witness = h; lod0HasWitness = true; break; }
+                    if (lod0HasWitness) lod0WitnessRow = AnchorRowOf(lod0Witness);
+                    else
+                        // The fallback keeps the capability at the cost the chain placement exists to
+                        // remove: this one mesh's write order against the anchor's chain is whatever the
+                        // draw stream decides.
+                        diagnostics.Add($"{sfx}: group member '{member.Mesh}' lod0 shares no sound bone "
+                            + "with the anchor — its rows rebase from draw constants at its own draw, and "
+                            + "their write order against the anchor's chain follows the frame's draw order");
                     uint witness = 0, witnessAnchorRow = 0;
                     bool hasWitness = false;
                     if (tiers.Count > 0)
@@ -955,22 +1161,10 @@ public sealed partial class MigotoEmitter
                                 + "the anchor, so its other LOD tiers write no rows. Its lod0 draw still does");
                             tiers.Clear();
                         }
-                        else
-                        {
-                            int realSlot = Array.IndexOf(union.UnionHashes, witness);
-                            if (union.Owner[realSlot] == anchorIdx) witnessAnchorRow = (uint)(realSlot * 4);
-                            else
-                            {
-                                if (!anchorASlots.TryGetValue(witness, out uint slot))
-                                {
-                                    anchorASlots[witness] = slot = nextSlot++;
-                                    foreach (var o in anchorOps) Patch(o.Scatter, o.Art, witness, slot);
-                                }
-                                witnessAnchorRow = slot * 4;
-                            }
-                        }
+                        else witnessAnchorRow = AnchorRowOf(witness);
                     }
 
+                    string? lod0Emitted = null;   // the lod0's emission name, once it ships an IN-CHAIN section
                     foreach (var mesh in tiers.Prepend(lod0))
                     {
                         ClaimName(mesh.Name, mesh.DumpDir);
@@ -1000,13 +1194,18 @@ public sealed partial class MigotoEmitter
                         if (gmap.All(v => v == PoolMath.Sentinel)) continue;   // nothing left for it to write
                         File.WriteAllBytes(Path.Combine(req.OutDir, $"{mesh.Name}_gmap_{sfx}.buf"), UIntBytes(gmap));
                         bool slim = slimParts.Contains(mesh.Name);
+                        bool atDraw = mesh.IsLod0 && !lod0HasWitness;
                         File.WriteAllText(Path.Combine(req.OutDir, $"grpfuse_{mesh.Name}_{sfx}.hlsl"),
-                            mesh.IsLod0
+                            atDraw
                                 ? ComputeTemplates.EmitGroupFuse(g.GroupBones.Count, (int)slotBase, slim, art.N)
-                                : ComputeTemplates.EmitGroupFuseWitness(g.GroupBones.Count, (int)slotBase, slim,
-                                    art.N, Array.IndexOf(art.Hashes, witness), witnessAnchorRow));
+                                : mesh.IsLod0
+                                    ? ComputeTemplates.EmitGroupFuseWitness(g.GroupBones.Count, (int)slotBase, slim,
+                                        art.N, Array.IndexOf(art.Hashes, lod0Witness), lod0WitnessRow)
+                                    : ComputeTemplates.EmitGroupFuseWitness(g.GroupBones.Count, (int)slotBase, slim,
+                                        art.N, Array.IndexOf(art.Hashes, witness), witnessAnchorRow));
+                        if (mesh.IsLod0 && !atDraw) lod0Emitted = mesh.Name;
                         groupSections.Add(new GroupMemberEmission(mesh.Name, mesh.CaptureHash, mesh.IsLod0,
-                            g.GroupBones.Count));
+                            g.GroupBones.Count, atDraw, mesh.IsLod0 ? null : lod0Emitted));
                     }
                 }
             }
@@ -1032,6 +1231,11 @@ public sealed partial class MigotoEmitter
             int vcount, vb1Stride;
             List<PoolMath.Submesh> submeshes;
             string ibFmt;
+            // Identity builds carry no ties — NOT because absence is harmless there (the identity body
+            // concatenates every part, so an absent part's region is on screen and its rows collapse the
+            // same way), but because the route ships from no app build (ModBuilder always sets DonorDir)
+            // and carries no bone paths to tie with. Emitter-API/test reach only; recorded, not cured.
+            var ties = new List<(string Part, int Pairs)>();
             if (pipe.DonorDir is null)
             {
                 var idParts = dirs.Select(d => LoadIdentityPart(d, Conv(d))).ToList();
@@ -1080,7 +1284,7 @@ public sealed partial class MigotoEmitter
                 string idxFmt = root.TryGetProperty("indexFormat", out var ifmt) ? (ifmt.GetString() ?? "") : "";
                 ibFmt = idxFmt.Contains("R32") ? "DXGI_FORMAT_R32_UINT" : "DXGI_FORMAT_R16_UINT";
 
-                var (_, newBi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(pipe.DonorDir, "stream2.buf")));
+                var (newW, newBi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(pipe.DonorDir, "stream2.buf")));
                 int maxBi = -1;
                 for (int i = 0; i < newBi.GetLength(0); i++)
                     for (int k = 0; k < 4; k++) maxBi = Math.Max(maxBi, newBi[i, k]);
@@ -1093,6 +1297,16 @@ public sealed partial class MigotoEmitter
                           "Recompile the donor against THIS union."
                         : $"{sfx}: new geometry references bone {maxBi} but the union and its wardrobe slots have " +
                           $"{donorBones} (0..{donorBones - 1}). Recompile the donor against THIS union.");
+
+                // ---- tie underlay: a donor-used union bone another part owns rides its nearest
+                // anchor-owned ancestor while that part's presence latch is down. Weighted use only — a
+                // slot the donor merely indexes at zero weight moves no vertex and earns no tie.
+                var donorSlots = new HashSet<int>();
+                for (int i = 0; i < newBi.GetLength(0); i++)
+                    for (int k = 0; k < 4; k++)
+                        if (newW[i, k] > 0 && newBi[i, k] < ub) donorSlots.Add(newBi[i, k]);
+                ties = TieUnderlay(req.OutDir, sfx, union, anchorIdx, parts, donorSlots,
+                    pipe.BonePaths, diagnostics);
             }
             vcountTotal += vcount;
 
@@ -1111,7 +1325,8 @@ public sealed partial class MigotoEmitter
             pipes.Add(new PipelineEmission(sfx, partMeta, anchorIdx, capHashes, ub, vcount, vb1Stride,
                 ibFmt, draws, subMaps,
                 pipe.NoSkipParts is { Count: > 0 } ns ? new HashSet<string>(ns, StringComparer.Ordinal) : null,
-                tierMeta, pipe.ToggleKey, pipe.Latch, pipe.HideWhenOff, groupSections, groupClaims));
+                tierMeta, lod0WitnessConvert, pipe.ToggleKey, pipe.Latch, pipe.HideWhenOff, groupSections, groupClaims, ties,
+                pipe.PresenceHashes));
         }
 
         // ---- rigid replacements: the compiled donor streams, shipped and drawn as they are ---------------
@@ -1227,7 +1442,47 @@ public sealed partial class MigotoEmitter
                 rigidOwner[h] = r;
             }
         RefuseHiddenScopedAnchors(hides, req.ScopedRetextures);
-        var sightings = RouteSightings(req.Latches, units, hides, req.ScopedRetextures, rigidOwner.Keys,
+        // Presence latches. Group members latch PER MESH (each fused dispatch reads its own mesh's
+        // buffer). Pool parts latch PER PART — one latch sighted by the part's lod0, every tier, and any
+        // dropped-tier hash the builder recorded (a dropped tier's vanilla draw still proves the part is
+        // on screen): the part's recovers gate on it and the tie underlay fires on its exact complement,
+        // so no state runs neither. A recover admitted by a tier's sighting reads the part's last
+        // captured lod0 pair (posed ref + CB copy, both from its last lod0 draw — a consistent stale
+        // frame, today's off-screen class). [Present] commits every latch; chains test last frame's
+        // verdict. The anchor needs none: the chain firing IS its draw.
+        var meshLatches = pipes.SelectMany(p =>
+            {
+                string anchor = p.PartMeta[p.AnchorIdx].Part;
+                return p.GroupMembers.Where(m => !m.AtDraw).Select(m => (m.Name, m.Hash))
+                    .Concat(p.PartMeta
+                        .Where(pm => !string.Equals(pm.Part, anchor, StringComparison.Ordinal))
+                        .SelectMany(pm =>
+                        {
+                            var hashes = new List<string>
+                            {
+                                p.CapHashes.TryGetValue(pm.Part, out var h) ? h : $"REPLACE_{pm.Part}_ib",
+                            };
+                            hashes.AddRange(p.TierMeta
+                                .Where(t => string.Equals(t.Part, pm.Part, StringComparison.Ordinal))
+                                .Select(t => t.Hash));
+                            hashes.AddRange(p.PresenceHashes?.GetValueOrDefault(pm.Part)
+                                ?? (IReadOnlyList<string>)Array.Empty<string>());
+                            return hashes.Select(x => (Name: pm.Part, Hash: x));
+                        }));
+            })
+            .GroupBy(x => x.Name, StringComparer.Ordinal)
+            .Select(g => new WitnessLatch(MeshLatch(g.Key),
+                g.Select(x => x.Hash).Distinct(StringComparer.Ordinal).ToList()))
+            .ToList();
+        // the src_ prefix is the routing key mesh latches carry through RouteSightings — a caller latch
+        // wearing it would collide with the namespace and mis-route, so it refuses like every other
+        // name collision in this file
+        foreach (var l in req.Latches ?? Array.Empty<WitnessLatch>())
+            if (l.Name.StartsWith("src_", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"latch '{l.Name}' collides with the mesh-latch namespace (src_*)");
+        var allLatches = (req.Latches ?? Array.Empty<WitnessLatch>()).Concat(meshLatches).ToList();
+        var sightings = RouteSightings(allLatches, units, hides, req.ScopedRetextures, rigidOwner.Keys,
             new HashSet<string>(guards.Keys, StringComparer.Ordinal),
             LiveSightings(req.TwinSightings, guards.Values));
         string retexIni = req.Retextures is { Count: > 0 } || req.ScopedRetextures is { Count: > 0 }
@@ -1237,7 +1492,7 @@ public sealed partial class MigotoEmitter
             : "";
         string ini = EmitIni(pipes, rigids, units, hides, sightings, slotTags, slimParts,
             req.ToggleKey, req.HideKeys, req.Retextures ?? Array.Empty<RetexEntry>(),
-            req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), req.Latches, req.HideLatches,
+            req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), allLatches, req.HideLatches,
             req.KeysStartingOff, guards) + retexIni;
         File.WriteAllText(Path.Combine(req.OutDir, "mod.ini"), ini);
 
@@ -1317,7 +1572,7 @@ public sealed partial class MigotoEmitter
         P.Append(WitnessIni(sightings));
         for (int i = 0; i < hides.Count; i++)
         {
-            P.Append($"[TextureOverride_Hide_{i}]\nhash = {hides[i]}\n");
+            OpenTextureOverride(P, $"Hide_{i}", hides[i]);
             // sighting UNGATED: a witness silenced while a key was off would read the outfit as
             // absent the frame it comes back on
             if (sightings.ByHash.TryGetValue(hides[i], out var seen))
@@ -1438,15 +1693,12 @@ public sealed partial class MigotoEmitter
                 var u = Unit(h, $"Cap_{part}");
                 u.Capture($"Resource_{part}_Posed = ref vb0");
                 u.Capture($"Resource_{part}_CB = copy vs-cb1");
-                // Both sticky flags, set right where the anchor's constants land: this is the ONE capture
-                // that fills the CB a member lod0 rebases through, and it is also an anchor capture, which
-                // is all a member tier's witness rows need. Never reset, so they stay 1 for the rest of the
-                // session once the anchor has drawn once.
-                if (idx == pipe.AnchorIdx && pipe.GroupMembers.Count > 0)
-                {
+                // The sticky flag an AT-DRAW member lod0 waits on, set right where the anchor's constants
+                // land: this is the ONE capture that fills the CB its rebase reads. Never reset, so it
+                // stays 1 for the rest of the session once the anchor has drawn once. In-chain members
+                // need no flag — the chain itself runs at the anchor's draw.
+                if (idx == pipe.AnchorIdx && pipe.GroupMembers.Any(m => m.AtDraw))
                     u.Capture($"${GroupCbVar(sfx)} = 1");
-                    u.Capture($"${GroupSeenVar(sfx)} = 1");
-                }
                 if (pipe.NoSkip?.Contains(part) != true) u.Suppress(skipGate);
                 if (idx == pipe.AnchorIdx)
                 {
@@ -1456,8 +1708,11 @@ public sealed partial class MigotoEmitter
                     {
                         $"if $zz_done_{sfx} == 0",
                     };
-                    foreach (var (p2, _, _, _) in pipe.PartMeta) chain.Add($"run = CustomShaderRecover_{p2}_{sfx}");
-                    chain.Add($"run = CustomShaderConvert_{sfx}");
+                    for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
+                        RecoverRun(chain, pipe, pi, pipe.PartMeta[pi].Part, sfx);
+                    chain.Add($"run = CustomShaderConvert{(pipe.Lod0WitnessConvert ? "W" : "")}_{sfx}");
+                    MemberRuns(chain, pipe, sfx);
+                    TieRuns(chain, pipe, sfx);
                     chain.Add($"run = CustomShaderSkin_{sfx}");
                     chain.Add($"$zz_done_{sfx} = 1");
                     chain.Add("endif");
@@ -1474,21 +1729,19 @@ public sealed partial class MigotoEmitter
             {
                 var u = Unit(t.Hash, $"Cap_{t.Name}");
                 u.Capture($"Resource_{t.Name}_Posed = ref vb0");
-                // An anchor capture at ANY detail proves the anchor drew, which is the whole precondition a
-                // member tier's witness rebase has: the chain below runs the anchor's recover into the raw
-                // palette exactly as the lod0 chain does. No CB flag here — a tier captures no constants.
-                if (t.Part == anchor && pipe.GroupMembers.Count > 0)
-                    u.Capture($"${GroupSeenVar(sfx)} = 1");
                 if (pipe.NoSkip?.Contains(t.Part) != true) u.Suppress(skipGate);
                 if (t.Part == anchor)
                 {
                     var chain = new List<string> { $"if $zz_done_{sfx}_{t.Suffix} == 0" };
-                    foreach (var (p2, _, _, _) in pipe.PartMeta)
+                    for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
                     {
+                        string p2 = pipe.PartMeta[pi].Part;
                         var pt = pipe.TierMeta.FirstOrDefault(x => x.Part == p2 && x.Suffix == t.Suffix);
-                        chain.Add($"run = CustomShaderRecover_{pt.Name ?? p2}_{sfx}");
+                        RecoverRun(chain, pipe, pi, pt.Name ?? p2, sfx);
                     }
                     chain.Add($"run = CustomShaderConvertW_{sfx}");
+                    MemberRuns(chain, pipe, sfx);
+                    TieRuns(chain, pipe, sfx);
                     chain.Add($"run = CustomShaderSkin_{sfx}");
                     chain.Add($"$zz_done_{sfx}_{t.Suffix} = 1");
                     chain.Add("endif");
@@ -1497,24 +1750,24 @@ public sealed partial class MigotoEmitter
                 }
             }
 
-            // wardrobe-group members: the member's own draw captures its posed vertices (and, at lod0, its
-            // draw constants) and runs the fused recover+rebase into the group's palette slots. The section
-            // is the one this hash already owns where another pipeline pools the same mesh — two sections on
-            // one hash leave the second dropped at parse time — and the member NEVER adds a skip of its own:
-            // an unworn variant issues no draws, so the worn one's draw is the whole freshness rule.
+            // wardrobe-group members: the member's own draw captures its posed vertices and latches its
+            // presence; the fused dispatch runs in the anchor's chains, gated on LAST frame's latch. The
+            // section is the one this hash already owns where another pipeline pools the same mesh — two
+            // sections on one hash leave the second dropped at parse time — and the member NEVER adds a
+            // skip of its own: an unworn variant issues no draws, so its latch clears and the chain stops
+            // dispatching it. Only an AT-DRAW fallback (lod0 with no anchor witness) still runs here,
+            // where its constants copy and its geometry are same-frame by construction.
             foreach (var m in pipe.GroupMembers)
             {
                 var u = Unit(m.Hash, $"Cap_{m.Name}");
                 u.Capture($"Resource_{m.Name}_Posed = ref vb0");
-                if (m.Lod0) u.Capture($"Resource_{m.Name}_CB = copy vs-cb1");
+                if (m.Lod0 && m.AtDraw) u.Capture($"Resource_{m.Name}_CB = copy vs-cb1");
+                if (!m.AtDraw) continue;   // presence latch lands via RouteSightings; no run lines
                 // Inside the pipeline's draw gate, exactly as the pool chains are: off dispatches nothing,
                 // and a dispatch left running with the key off would keep writing the group's palette rows.
-                // Dispatched at every matching draw rather than once a frame: the writes are idempotent
-                // within a frame, and a flag would cost the section a variable for nothing. The wait is on
-                // the state THIS dispatch reads — the anchor's constants at lod0, its witness rows at a tier.
                 var chain = new List<string>
                 {
-                    $"if ${(m.Lod0 ? GroupCbVar(sfx) : GroupSeenVar(sfx))} == 1",
+                    $"if ${GroupCbVar(sfx)} == 1",
                     $"run = CustomShaderGroup_{m.Name}_{sfx}",
                     "endif",
                 };
@@ -1572,7 +1825,13 @@ public sealed partial class MigotoEmitter
                 string ib = l.WitnessIbs[i], line = $"${SeenVar(l.Name)} = 1";
                 if (units.ByHash.TryGetValue(ib, out var u))
                 {
-                    if (guardedHashes?.Contains(ib) == true) u.Sight(line); else u.Capture(line);
+                    // An OUTFIT latch on a guarded hash sights AHEAD of the twin guard — either
+                    // sibling's draw proves the outfit is on screen. A MESH latch (the src_ family)
+                    // witnesses the same event as the capture it gates, so it sights INSIDE the
+                    // guard: a sibling's draw captures nothing and must not read as presence.
+                    if (guardedHashes?.Contains(ib) == true
+                        && !l.Name.StartsWith("src_", StringComparison.Ordinal)) u.Sight(line);
+                    else u.Capture(line);
                 }
                 else if (hideSet.Contains(ib) || anchors.Contains(ib))
                 {
@@ -1618,14 +1877,14 @@ public sealed partial class MigotoEmitter
         var P = new StringBuilder();
         foreach (var (l, i, extra) in sightings.Standalone)
         {
-            P.Append($"[TextureOverride_Witness_{l.Name}_{i}]\nhash = {l.WitnessIbs[i]}\n"
-                   + $"${SeenVar(l.Name)} = 1\n");
+            OpenTextureOverride(P, $"Witness_{l.Name}_{i}", l.WitnessIbs[i]);
+            P.Append($"${SeenVar(l.Name)} = 1\n");
             foreach (var line in extra) P.Append(line).Append('\n');
             P.Append('\n');
         }
         foreach (var (hash, lines) in sightings.Minted)
         {
-            P.Append($"[TextureOverride_TwinWit_{hash}]\nhash = {hash}\n");
+            OpenTextureOverride(P, $"TwinWit_{hash}", hash);
             foreach (var line in lines) P.Append(line).Append('\n');
             P.Append('\n');
         }
@@ -1728,6 +1987,14 @@ public sealed partial class MigotoEmitter
     ///
     /// <para>A guard carrying no tags writes NOTHING: its variable is written by sightings elsewhere in
     /// the ini, and a slot sweep here would read the slots for an answer no tag can give.</para></summary>
+    /// <summary>Open a hash-keyed TextureOverride section. Every one carries an explicit
+    /// <c>match_priority</c>: two mods remolding one subject legitimately put sections on the same
+    /// draws, and the runtime warns about a duplicate hash unless a priority on either section marks
+    /// the overlap deliberate. Zero keeps the section-name ordering an absent priority already gets;
+    /// the tag sections carry their shared 100 instead of this.</summary>
+    static void OpenTextureOverride(StringBuilder P, string name, string hash) =>
+        P.Append($"[TextureOverride_{name}]\nhash = {hash}\nmatch_priority = 0\n");
+
     static void AppendTwinProbe(StringBuilder P, TwinGuard guard)
     {
         if (guard.Tags.Count == 0) return;
@@ -1836,12 +2103,11 @@ public sealed partial class MigotoEmitter
         // derived value alongside the kind tags.
         var scopedHashes = (scopedRetextures ?? Array.Empty<ScopedRetexEntry>())
             .Select(e => e.StockHash).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        // Sticky per-pipeline globals, never reset, so a member's rebase can tell "no anchor draw yet" from
-        // "the anchor drew last frame". Two of them, because the two member routes wait on different state:
-        // the CB flag says the anchor's constants have been captured (its lod0 capture alone), the seen flag
-        // says the anchor has drawn at all (any capture, lod0 or tier).
-        var stickyFlags = pipes.Where(p => p.GroupMembers.Count > 0)
-            .SelectMany(p => new[] { GroupCbVar(p.Sfx), GroupSeenVar(p.Sfx) }).ToList();
+        // Sticky per-pipeline global, never reset, so an AT-DRAW member's rebase can tell "no anchor draw
+        // yet" from "the anchor drew last frame". Only the CB flag survives — in-chain member dispatches
+        // run at the anchor's own draw and need no proof of it.
+        var stickyFlags = pipes.Where(p => p.GroupMembers.Any(m => m.AtDraw))
+            .Select(p => GroupCbVar(p.Sfx)).ToList();
         P.Append(FlagsIni(doneFlags, slotTags, modKey,
             pipes.Select(x => x.ToggleKey)
                 .Concat(rigids.Select(x => x.ToggleKey))
@@ -1961,7 +2227,7 @@ public sealed partial class MigotoEmitter
         // ---- capture units: one section per unique ib hash, merged across pipelines ------------------
         foreach (var u in units.Ordered)
         {
-            P.Append($"[TextureOverride_{u.SectionName}]\nhash = {u.Hash}\n");
+            OpenTextureOverride(P, u.SectionName, u.Hash);
             // The CAPTURE sits inside the guard with the skip and the chain: this hash also fires on a
             // sibling mesh's draws, and a capture taken there would feed palette recovery the wrong
             // rest geometry for every pipeline reading it.
@@ -2008,7 +2274,7 @@ public sealed partial class MigotoEmitter
             {
                 string name = $"Rigid_{r.Sfx}{(i == 0 ? "" : $"_{i}")}";
                 while (!usedRigidNames.Add(name)) name += "_";
-                P.Append($"[TextureOverride_{name}]\nhash = {r.Hashes[i]}\n");
+                OpenTextureOverride(P, name, r.Hashes[i]);
                 // sighting UNGATED, as at hides: a witness silenced while a key was off would read the
                 // outfit as absent the frame it comes back on
                 if (sightings.ByHash.TryGetValue(r.Hashes[i], out var seen))
@@ -2047,7 +2313,7 @@ public sealed partial class MigotoEmitter
             int hi = 0;
             foreach (var h in hideHashes)
             {
-                P.Append($"[TextureOverride_Hide_{hi++}]\nhash = {h}\n");
+                OpenTextureOverride(P, $"Hide_{hi++}", h);
                 // sighting UNGATED: a witness silenced while a key was off would read the outfit as
                 // absent the frame it comes back on
                 if (sightings.ByHash.TryGetValue(h, out var seen))
@@ -2091,29 +2357,39 @@ public sealed partial class MigotoEmitter
             P.Append($"cs-cb13 = Resource_{anchor}_CB\n"
                    + $"Dispatch = {(4 * pipe.Ub + 63) / 64}, 1, 1\nResource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            // the witness convert, shared by every tier chain of this pipeline: K from shared-bone
-            // recoveries in the palette's reserved witness slots, no constant buffers
-            if (pipe.TierMeta.Count > 0)
+            // the witness convert, shared by LOD0 when complete and by every tier chain: K from
+            // shared-bone recoveries in the palette's reserved witness slots, no constant buffers
+            if (pipe.Lod0WitnessConvert || pipe.TierMeta.Count > 0)
                 P.Append($"[CustomShaderConvertW_{sfx}]\ncs = convert_witness_{sfx}.hlsl\n"
                        + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_Palette_{sfx}\ncs-t1 = Resource_OwnerPart_{sfx}\n"
                        + $"Dispatch = {(4 * pipe.Ub + 63) / 64}, 1, 1\nResource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            // the wardrobe-group members' fused recover+rebase, one per captured member draw. It writes the
-            // group's appended slots of the CONVERTED palette directly — the converts dispatch over union
-            // rows only, so their own round-trip carries these rows through.
+            // the wardrobe-group members' fused recover+rebase — run from the anchor's chains, gated on
+            // each mesh's presence latch (an AT-DRAW fallback runs from its own capture section instead).
+            // It writes the group's appended slots of the CONVERTED palette directly — the converts
+            // dispatch over union rows only, so their own round-trip carries these rows through.
             foreach (var m in pipe.GroupMembers)
             {
                 P.Append($"[CustomShaderGroup_{m.Name}_{sfx}]\ncs = grpfuse_{m.Name}_{sfx}.hlsl\n"
                        + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_{m.Name}_Posed\n"
                        + $"cs-t1 = Resource_{m.Name}_Cpinv\ncs-t2 = Resource_{m.Name}_GMap_{sfx}\n"
                        + (slimParts.Contains(m.Name) ? $"cs-t3 = Resource_{m.Name}_Sel\ncs-t4 = Resource_{m.Name}_Off\n" : ""));
-                if (m.Lod0)
+                if (m.AtDraw)
                     P.Append($"cs-cb5 = Resource_{m.Name}_CB\ncs-cb13 = Resource_{anchor}_CB\n");
                 else
                     P.Append($"cs-t5 = copy Resource_Palette_{sfx}\n");
                 P.Append($"Dispatch = {(4 * m.Bones + 63) / 64}, 1, 1\n"
                        + $"Resource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
             }
+
+            // the tie underlay's fill shaders: one per tied part, copying anchor-owned ancestor rows over
+            // the absent part's donor-ridden rows in the converted palette
+            foreach (var (part, pairs) in pipe.Ties)
+                P.Append($"[CustomShaderTie_{part}_{sfx}]\ncs = tiefill_{part}_{sfx}.hlsl\n"
+                       + $"cs-t0 = copy Resource_PaletteConv_{sfx}\n"
+                       + $"cs-u1 = copy Resource_PaletteConv_{sfx}\n"
+                       + $"Dispatch = {(4 * pairs + 63) / 64}, 1, 1\n"
+                       + $"Resource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
             // u1 is bound by reference, not copied: the shader writes every vertex, so there is nothing to
             // seed, and the draw reads the same buffer straight after the post-unbind.
@@ -2303,9 +2579,11 @@ public sealed partial class MigotoEmitter
             // the keys. A slot-tagged hash carries its kind value HERE instead of a SlotTag section of
             // its own — two sections on one hash trip the runtime's mod-conflict warning.
             if (slotTagKinds?.TryGetValue(e.Hash, out var kind) == true)
-                P.Append($"filter_index = {KindFilter(kind)}\n");
+                P.Append($"filter_index = {KindFilter(kind)}\nmatch_priority = 100\n");
             else if (twinProbed.Contains(e.Hash))
                 P.Append($"filter_index = {RetexTag(e.Hash)}\nmatch_priority = 100\n");
+            else
+                P.Append("match_priority = 0\n");
             // A rebind hides the stock texture from the guard probes — the bound replacement answers
             // to no tag — so this section matching its hash IS the sighting: it writes the tagged
             // sibling's verdict at bind time, outside the gate (a keyed-off rebind leaves the tagged
@@ -2414,7 +2692,7 @@ public sealed partial class MigotoEmitter
                 // (one character's two outfits, same part token) gets disambiguated here
                 string suffix = first;
                 while (!usedSuffixes.Add(suffix)) suffix += "_";
-                P.Append($"[TextureOverride_RetexScope_{suffix}]\nhash = {ibHash}\n");
+                OpenTextureOverride(P, $"RetexScope_{suffix}", ibHash);
                 if (sightings.ByHash.TryGetValue(ibHash, out var seen))
                     foreach (var line in seen) P.Append(line).Append('\n');
                 foreach (var line in body) P.Append(line).Append('\n');
@@ -2531,7 +2809,8 @@ public sealed partial class MigotoEmitter
             // A plain-retextured stock hash carries its kind value on the retexture's own section —
             // a second section here would trip the runtime's mod-conflict warning.
             if (retexturedHashes?.Contains(t.Hash) == true) continue;
-            P.Append($"[TextureOverride_SlotTag_{t.Hash}]\nhash = {t.Hash}\nfilter_index = {KindFilter(t.Kind)}\n\n");
+            P.Append($"[TextureOverride_SlotTag_{t.Hash}]\nhash = {t.Hash}\n"
+                   + $"filter_index = {KindFilter(t.Kind)}\nmatch_priority = 100\n\n");
         }
         P.Append(WitnessIni(sightings));
         return P.ToString();

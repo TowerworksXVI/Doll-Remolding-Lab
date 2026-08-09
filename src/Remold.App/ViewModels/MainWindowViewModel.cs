@@ -2269,7 +2269,7 @@ public partial class MainWindowViewModel : ObservableObject, Workbench.IWorkbenc
             // Localized display names for the Pick tree. Best-effort: a missing locale table leaves every
             // label on its token/stem. Loaded once here (~394k-row map) and reused for the enemy roster.
             LocalizationDb? loc = null;
-            try { loc = LocalizationDb.Load(nameDb.TableRoot); }   // English (Enus) is fixed for v1
+            try { loc = LocalizationDb.Load(nameDb); }   // English (Enus) is fixed for v1
             catch { /* locale table unreadable — labels fall back to tokens */ }
             DisplayNames? names = null;
             if (loc is not null)

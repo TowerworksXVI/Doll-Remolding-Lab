@@ -450,6 +450,71 @@ public class PoolMathTests
     }
 
     [Fact]
+    public void PreferAnchorOwnership_SoundAnchorBone_TakesTheRowFromTheWeightWinner()
+    {
+        // part0 bones [10,20,30]; part1 (the anchor) bones [20,40]. By weight part0 owns 20; the anchor's
+        // operator recovers 20 soundly, so ownership moves — and 10/30, which the anchor never maps, stay.
+        var bind = Bindpose();
+        var part0 = new PoolMath.UnionInput(
+            new uint[] { 10, 20, 30 },
+            new Dictionary<uint, double[]> { [10] = bind, [20] = bind, [30] = bind },
+            Stream2(new[] { (1.0, 0.0, 0.0, 0.0), (0.5, 0.5, 0.0, 0.0) },
+                    new[] { (0, 0, 0, 0), (1, 2, 0, 0) }));
+        var part1 = new PoolMath.UnionInput(
+            new uint[] { 20, 40 },
+            new Dictionary<uint, double[]> { [20] = bind, [40] = bind },
+            Stream2(new[] { (0.3, 0.7, 0.0, 0.0) }, new[] { (0, 1, 0, 0) }));
+        var u = PoolMath.BuildUnion(new[] { part0, part1 });
+        Assert.Equal(new[] { 0, 0, 0, 1 }, u.Owner);   // the argmax baseline this preference adjusts
+
+        var adjusted = PoolMath.PreferAnchorOwnership(u, anchorIdx: 1, anchorWeak: new[] { false, false });
+
+        Assert.Equal(new[] { 0, 1, 0, 1 }, adjusted.Owner);
+        // scatter maps follow: part0 loses 20 (sentinel), the anchor gains it
+        Assert.Equal(new uint[] { 0, PoolMath.Sentinel, 2 }, adjusted.ScatterMaps[0]);
+        Assert.Equal(new uint[] { 1, 3 }, adjusted.ScatterMaps[1]);
+        // slots and maps never move — compiled donor indices ride them
+        Assert.Equal(u.UnionHashes, adjusted.UnionHashes);
+        Assert.Equal(u.FullMaps, adjusted.FullMaps);
+    }
+
+    [Fact]
+    public void PreferAnchorOwnership_WeakAnchorBone_LeavesTheWeightWinnerOwning()
+    {
+        var bind = Bindpose();
+        var part0 = new PoolMath.UnionInput(
+            new uint[] { 10, 20 },
+            new Dictionary<uint, double[]> { [10] = bind, [20] = bind },
+            Stream2(new[] { (1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0) },
+                    new[] { (0, 0, 0, 0), (1, 0, 0, 0) }));
+        var part1 = new PoolMath.UnionInput(
+            new uint[] { 20 },
+            new Dictionary<uint, double[]> { [20] = bind },
+            Stream2(new[] { (0.4, 0.0, 0.0, 0.0) }, new[] { (0, 0, 0, 0) }));
+        var u = PoolMath.BuildUnion(new[] { part0, part1 });
+
+        // the anchor maps bone 20 but recovers it ill-conditioned — a weak verdict takes nothing, so the
+        // whole result is the input's
+        var adjusted = PoolMath.PreferAnchorOwnership(u, anchorIdx: 1, anchorWeak: new[] { true });
+
+        Assert.Equal(new[] { 0, 0 }, adjusted.Owner);
+        Assert.Equal(u.ScatterMaps, adjusted.ScatterMaps);
+    }
+
+    [Fact]
+    public void PreferAnchorOwnership_VerdictBoneCountMismatch_Throws()
+    {
+        var bind = Bindpose();
+        var part0 = new PoolMath.UnionInput(new uint[] { 10 },
+            new Dictionary<uint, double[]> { [10] = bind },
+            Stream2(new[] { (1.0, 0.0, 0.0, 0.0) }, new[] { (0, 0, 0, 0) }));
+        var u = PoolMath.BuildUnion(new[] { part0 });
+
+        Assert.Throws<ArgumentException>(() =>
+            PoolMath.PreferAnchorOwnership(u, anchorIdx: 0, anchorWeak: new[] { false, false }));
+    }
+
+    [Fact]
     public void BuildUnion_InconsistentBindposeAcrossParts_Throws()
     {
         var b0 = Bindpose();

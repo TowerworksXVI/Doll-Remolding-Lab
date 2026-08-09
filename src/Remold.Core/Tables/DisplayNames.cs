@@ -67,7 +67,7 @@ public sealed class DisplayNames
         // clobbered by another row's base-stem alias
         try
         {
-            foreach (var r in TableFile.ReadRows(db.TablePath("ClothesData", intl: true)))
+            foreach (var r in TableFile.ReadRows(db.TablePath("ClothesData")))
             {
                 var name = loc.Resolve(r, Cloth_Name);
                 if (name is null) continue;

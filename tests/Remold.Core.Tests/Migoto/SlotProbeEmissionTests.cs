@@ -77,9 +77,9 @@ public class SlotProbeEmissionTests : IDisposable
     public void Every_stock_map_gets_a_tag_with_its_kinds_filter_index()
     {
         var (ini, _, _) = Emit(Tags, donorTexed: true);
-        Assert.Contains($"[TextureOverride_SlotTag_f1f1a1a1]\nhash = f1f1a1a1\nfilter_index = {MigotoEmitter.FilterAlbedo}\n", ini);
-        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\n", ini);
-        Assert.Contains($"[TextureOverride_SlotTag_f3f3c3c3]\nhash = f3f3c3c3\nfilter_index = {MigotoEmitter.FilterRmo}\n", ini);
+        Assert.Contains($"[TextureOverride_SlotTag_f1f1a1a1]\nhash = f1f1a1a1\nfilter_index = {MigotoEmitter.FilterAlbedo}\nmatch_priority = 100\n", ini);
+        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\nmatch_priority = 100\n", ini);
+        Assert.Contains($"[TextureOverride_SlotTag_f3f3c3c3]\nhash = f3f3c3c3\nfilter_index = {MigotoEmitter.FilterRmo}\nmatch_priority = 100\n", ini);
         // no shader table at all: the probe replaced it
         Assert.DoesNotContain("[ShaderOverride", ini);
         Assert.DoesNotContain("$zz_pass", ini);
@@ -176,7 +176,7 @@ public class SlotProbeEmissionTests : IDisposable
         };
         var (ini, warnings, diagnostics) = Emit(dupes, donorTexed: true);
         Assert.Equal(1, ini.Split("[TextureOverride_SlotTag_f1f1a1a1]").Length - 1);
-        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\n", ini);
+        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\nmatch_priority = 100\n", ini);
         // which kind won is the emitter's own bookkeeping, not something the author can act on
         Assert.Contains(diagnostics, d => d.Contains("f2f2b2b2") && d.Contains("Normal") && d.Contains("Rmo"));
         Assert.DoesNotContain(warnings, w => w.Contains("tagged both"));
@@ -225,9 +225,9 @@ public class SlotProbeEmissionTests : IDisposable
 
         Assert.DoesNotContain("[TextureOverride_SlotTag_f1f1a1a1]", ini);
         Assert.Contains("[TextureOverride_Retex_alpha_a_f1f1a1a1]\nhash = f1f1a1a1\n"
-            + $"filter_index = {MigotoEmitter.FilterAlbedo}\nthis = Resource_Rtx0\n", ini);
+            + $"filter_index = {MigotoEmitter.FilterAlbedo}\nmatch_priority = 100\nthis = Resource_Rtx0\n", ini);
         // the other kinds' tags stand untouched
-        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\n", ini);
+        Assert.Contains($"[TextureOverride_SlotTag_f2f2b2b2]\nhash = f2f2b2b2\nfilter_index = {MigotoEmitter.FilterNormal}\nmatch_priority = 100\n", ini);
         Assert.DoesNotContain(warnings, w => w.Contains("f1f1a1a1"));
     }
 }

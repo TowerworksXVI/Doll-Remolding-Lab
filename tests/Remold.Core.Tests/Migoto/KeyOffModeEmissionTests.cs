@@ -104,7 +104,7 @@ public class KeyOffModeEmissionTests : IDisposable
     {
         string beta = Section(Build(hideWhenOff: true), "[TextureOverride_Cap_beta]");
         foreach (var run in new[] { "CustomShaderRecover_alpha_swap", "CustomShaderRecover_beta_swap",
-                                    "CustomShaderConvert_swap", "CustomShaderSkin_swap", "CommandListDraw_swap" })
+                                    "CustomShaderConvertW_swap", "CustomShaderSkin_swap", "CommandListDraw_swap" })
             Assert.Contains($"if $zz_key_f8 == 1\n", beta[..beta.IndexOf(run, StringComparison.Ordinal)]);
     }
 
@@ -116,7 +116,7 @@ public class KeyOffModeEmissionTests : IDisposable
         foreach (bool hide in new[] { false, true })
         {
             string alpha = Section(Build(hideWhenOff: hide), "[TextureOverride_Cap_alpha]");
-            Assert.Contains("hash = aaaa0001\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n", alpha);
+            Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n", alpha);
         }
     }
 
@@ -283,7 +283,7 @@ public class KeyOffModeEmissionTests : IDisposable
         Assert.Contains("global $zz_key_f8 = 0\n", ini);
         string alpha = Section(ini, "[TextureOverride_Cap_alpha]");
         // no mod key here, so the suppression is unconditional and the draw waits on the press
-        Assert.Contains("hash = aaaa0001\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n"
+        Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n"
             + "handling = skip\nif $zz_key_f8 == 1\n", alpha);
     }
 
@@ -344,7 +344,7 @@ public class KeyOffModeEmissionTests : IDisposable
     {
         string ini = BuildRigid(hideWhenOff: false);
 
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\n"
             + "handling = skip\nrun = CommandListRigid_frame\n"
             + "endif\nendif\n",
@@ -358,7 +358,7 @@ public class KeyOffModeEmissionTests : IDisposable
     {
         string ini = BuildRigid(hideWhenOff: true);
 
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "if $zz_key_f6 == 1\nhandling = skip\nendif\n"
             + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nrun = CommandListRigid_frame\nendif\nendif\n",
             Section(ini, "[TextureOverride_Rigid_frame]"));
@@ -371,7 +371,7 @@ public class KeyOffModeEmissionTests : IDisposable
     {
         string ini = BuildRigid(hideWhenOff: true);
 
-        Assert.Equal("[TextureOverride_Rigid_frame_1]\nhash = aaaa0002\n"
+        Assert.Equal("[TextureOverride_Rigid_frame_1]\nhash = aaaa0002\nmatch_priority = 0\n"
             + "if $zz_key_f6 == 1\nhandling = skip\nendif\n"
             + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nrun = CommandListRigid_frame\nendif\nendif\n",
             Section(ini, "[TextureOverride_Rigid_frame_1]"));
@@ -386,7 +386,7 @@ public class KeyOffModeEmissionTests : IDisposable
         string hiding = BuildRigid(hideWhenOff: true, changeKey: null);
 
         Assert.Equal(vanilla, hiding);
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "if $zz_key_f6 == 1\nhandling = skip\nrun = CommandListRigid_frame\nendif\n",
             Section(vanilla, "[TextureOverride_Rigid_frame]"));
     }
@@ -398,7 +398,7 @@ public class KeyOffModeEmissionTests : IDisposable
     {
         string ini = BuildRigid(hideWhenOff: true, latch: "vesnassr01");
 
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "if $zz_key_f6 == 1\nif $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\nendif\n"
             + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nif $zz_gate_vesnassr01 == 1\n"
             + "run = CommandListRigid_frame\nendif\nendif\nendif\n",
@@ -429,7 +429,7 @@ public class KeyOffModeEmissionTests : IDisposable
         });
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "$zz_seen_vesnassr01 = 1\n"
             + "if $zz_key_f6 == 1\nif $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\nendif\n"
             + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nif $zz_gate_vesnassr01 == 1\n"
@@ -445,7 +445,7 @@ public class KeyOffModeEmissionTests : IDisposable
         string ini = BuildRigid(hideWhenOff: true, modKey: null, startsOff: new[] { "F8" });
 
         Assert.Contains("global $zz_key_f8 = 0\n", ini);
-        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\n"
+        Assert.Equal("[TextureOverride_Rigid_frame]\nhash = aaaa0001\nmatch_priority = 0\n"
             + "handling = skip\n"
             + "if $zz_key_f8 == 1\nrun = CommandListRigid_frame\nendif\n",
             Section(ini, "[TextureOverride_Rigid_frame]"));
@@ -461,7 +461,7 @@ public class KeyOffModeEmissionTests : IDisposable
             hideHashes: new[] { "dddd4444" }, modKey: "F6",
             hideKeys: new Dictionary<string, string> { ["dddd4444"] = "F9" });
 
-        Assert.Contains("hash = dddd4444\nif $zz_key_f6 == 1\nif $zz_key_f9 == 1\nhandling = skip\nendif\nendif\n",
+        Assert.Contains("hash = dddd4444\nmatch_priority = 0\nif $zz_key_f6 == 1\nif $zz_key_f9 == 1\nhandling = skip\nendif\nendif\n",
             File.ReadAllText(Path.Combine(outDir, "mod.ini")));
     }
 }

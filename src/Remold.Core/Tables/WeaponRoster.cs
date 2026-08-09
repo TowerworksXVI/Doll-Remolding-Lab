@@ -78,7 +78,7 @@ public static class WeaponRoster
     public static List<WeaponSkinEntry> ReadSkins(GameDatabase db, LocalizationDb? loc)
     {
         var typeOf = new Dictionary<long, int>();
-        foreach (var row in TableFile.ReadRows(db.TablePath("WeaponSkinByTypeData", intl: true)))
+        foreach (var row in TableFile.ReadRows(db.TablePath("WeaponSkinByTypeData")))
         {
             var type = row.Num(ST_Type);
             if (type is null) continue;
@@ -87,7 +87,7 @@ public static class WeaponRoster
         }
 
         var list = new List<WeaponSkinEntry>();
-        foreach (var row in TableFile.ReadRows(db.TablePath("WeaponSkinData", intl: true)))
+        foreach (var row in TableFile.ReadRows(db.TablePath("WeaponSkinData")))
         {
             var id = row.Num(WS_Id);
             var path = row.Str(WS_ModelPath);
@@ -130,7 +130,7 @@ public static class WeaponRoster
         // varies by slot and is NOT the tier — so the join reads the family digit and lands on that
         // family's base row at whichever tier ships, whose path keys the name.
         var familyNames = new Dictionary<string, string>(StringComparer.Ordinal);
-        var skinRows = TableFile.ReadRows(db.TablePath("WeaponModSkinData", intl: true));
+        var skinRows = TableFile.ReadRows(db.TablePath("WeaponModSkinData"));
         foreach (var row in skinRows)
         {
             if (row.Str(MS_ModelPath) is not null) continue;

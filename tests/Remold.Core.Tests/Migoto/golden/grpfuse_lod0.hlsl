@@ -1,20 +1,23 @@
-// One wardrobe-group member's own draw, fused: recover this group's bones from the MEMBER's posed
-// vertices and rebase the rows into the anchor's draw space in the same dispatch. Exactly one variant
-// of the slot is worn and an unworn variant issues no draws, so whichever member drew last wrote these
-// rows — the draw stream is the freshness rule, and there is no per-frame flag.
-// Rows land in the group's APPENDED slot region of the CONVERTED palette, past the union and the
-// witness slots; the convert passes write only union rows, so the copy round-trip carries these
-// through untouched.
-// K comes from CONSTANTS: W_member is this draw's own vs-cb1, W_anchor the anchor's captured one.
+// One wardrobe-group member mesh's fused recover+rebase, run from the ANCHOR's chain gated on the
+// mesh's presence latch (last frame's draw stream): recover this group's bones from the MEMBER's
+// posed vertices — a by-ref capture, current-frame at the chain — and rebase the rows into the
+// anchor's draw space in the same dispatch.
+// K comes from GEOMETRY, not constants: in the chain the member's constants copy is from its own
+// last draw (frame-mixing), and tier renderers can bind vs-cb1 as a window into a shared buffer a
+// whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and the anchor
+// pose soundly — the member's side inline here (a UAV write another thread makes is not readable in
+// the same dispatch), the anchor's read out of the raw palette row its own recover wrote earlier in
+// this same chain, this frame — and K = inverse(M_witness_member) . M_witness_anchor.
 // ROWS = 4*groupBones; BASE = the group's first appended slot.
 struct Vtx { float3 position; float3 normal; float4 tangent; };
-StructuredBuffer<Vtx> q      : register(t0);   // the member's posed vb0, captured at this draw
-Buffer<float>         Cpinv  : register(t1);
-Buffer<uint>          Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
-RWBuffer<float4>      palOut : register(u1);
-cbuffer MemberCB : register(b5)  { float4 WM[4]; }
-cbuffer AnchorCB : register(b13) { float4 WA[4]; }
+StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, captured at this draw
+Buffer<float>            Cpinv  : register(t1);
+Buffer<uint>             Map    : register(t2);   // per GROUP bone: this member's local bone, or 0xFFFFFFFF
+StructuredBuffer<float4> palRaw : register(t5);   // the RAW palette: the anchor's own recovered rows
+RWBuffer<float4>         palOut : register(u1);
 static const uint ROWS=4, BASE=4;
+static const uint WITM=0;   // the witness bone's index in THIS member mesh
+static const uint WITA=8;   // the anchor-side witness recovery's base row in palRaw
 Buffer<uint>          Sel    : register(t3);   // anchor vertex indices, bone b at [base, base+width)
 Buffer<uint>          Off    : register(t4);   // 2 per bone: base, width
 float4 Row(uint b, uint comp){
@@ -41,6 +44,8 @@ void main(uint3 tid : SV_DispatchThreadID){
     uint g=i>>2, comp=i&3;
     uint b=Map[g];
     if(b==0xFFFFFFFF) return;   // this member cannot condition the bone -> leave the row alone
-    float4x4 K=mul(float4x4(WM[0],WM[1],WM[2],WM[3]), AffineInverse(WA[0],WA[1],WA[2],WA[3]));
+    float4x4 MM=float4x4(Row(WITM,0),Row(WITM,1),Row(WITM,2),Row(WITM,3));
+    float4x4 MA=float4x4(palRaw[WITA],palRaw[WITA+1],palRaw[WITA+2],palRaw[WITA+3]);
+    float4x4 K=mul(AffineInverse(MM[0],MM[1],MM[2],MM[3]), MA);
     palOut[((BASE+g)<<2)|comp]=mul(Row(b,comp), K);
 }

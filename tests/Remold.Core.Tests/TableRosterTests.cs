@@ -41,6 +41,34 @@ public class TableRosterTests
         return GameDatabase.FromGameDir(root);
     }
 
+    // ---- the locale-folder probe ----
+
+    /// <summary>The CN client ships every table in the Table root and leaves intl/jp/kr/tw/us empty; the
+    /// global client splits them, intl holding the locale-gated set (disjoint from the root's). One probe
+    /// order serves both: intl first (the global client's exact read), the root second (CN), the other
+    /// locale folders as a last resort. A table found nowhere resolves to the root path, so the failing
+    /// read names the common-denominator location.</summary>
+    [Fact]
+    public void TablePath_ProbesIntl_ThenRoot_ThenOtherLocales()
+    {
+        using var g = new TempGame();
+        string root = g.WriteTable("RootOnly", new byte[] { 1 });          // the CN shape
+        var db = GameDatabase.FromGameDir(root);
+        string t = db.TableRoot;
+        System.IO.Directory.CreateDirectory(System.IO.Path.Combine(t, "intl"));
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(t, "intl", "IntlOnly.bytes"), new byte[] { 1 });
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(t, "intl", "Both.bytes"), new byte[] { 1 });
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(t, "Both.bytes"), new byte[] { 2 });
+        System.IO.Directory.CreateDirectory(System.IO.Path.Combine(t, "jp"));
+        System.IO.File.WriteAllBytes(System.IO.Path.Combine(t, "jp", "JpOnly.bytes"), new byte[] { 1 });
+
+        Assert.Equal(System.IO.Path.Combine(t, "intl", "IntlOnly.bytes"), db.TablePath("IntlOnly"));
+        Assert.Equal(System.IO.Path.Combine(t, "RootOnly.bytes"), db.TablePath("RootOnly"));
+        Assert.Equal(System.IO.Path.Combine(t, "jp", "JpOnly.bytes"), db.TablePath("JpOnly"));
+        Assert.Equal(System.IO.Path.Combine(t, "intl", "Both.bytes"), db.TablePath("Both"));
+        Assert.Equal(System.IO.Path.Combine(t, "Absent.bytes"), db.TablePath("Absent"));
+    }
+
     // ---- the enemy roster's pure grouping/naming (GameDatabase.BuildEnemyRoster; the IO half reads
     // EnemyData #1/#17/#40/#23) ----
     [Fact]

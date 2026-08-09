@@ -35,7 +35,7 @@ public class DisplayNamesTests
         g.WriteIntlTable("ClothesData", TempGame.TableBytes(clothes));
         var root = g.WriteTable($"LangPackageTable{locale}Data", TempGame.TableBytes(lang));
         var db = GameDatabase.FromGameDir(root);
-        return (db, DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot, locale)));
+        return (db, DisplayNames.Build(db, LocalizationDb.Load(db, locale)));
     }
 
     [Fact]
@@ -136,7 +136,7 @@ public class DisplayNamesTests
             TempGame.LangRow(6002, "Talos (Controllable Test)"),
         }));
         var db = GameDatabase.FromGameDir(root);
-        var names = DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot, "Enus"));
+        var names = DisplayNames.Build(db, LocalizationDb.Load(db, "Enus"));
 
         Assert.Equal("Talos", names.Summon(10642));
         Assert.Null(names.Summon(10721));   // rows exist but carry no name wrapper
@@ -161,7 +161,7 @@ public class DisplayNamesTests
             TempGame.LangRow(6003, "Nira Projection (temp)"),
         }));
         var db = GameDatabase.FromGameDir(root);
-        var names = DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot, "Enus"));
+        var names = DisplayNames.Build(db, LocalizationDb.Load(db, "Enus"));
         var roster = new List<Character>
         {
             new(CharId: 1, Name: "Marlen", Family: "MarlenSSR", GunId: 1064, DormModelConfigId: 0,
@@ -189,7 +189,7 @@ public class DisplayNamesTests
         var root = g.WriteTable("LangPackageTableEnusData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
         var db = GameDatabase.FromGameDir(root);
 
-        var names = DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot, "Enus"));
+        var names = DisplayNames.Build(db, LocalizationDb.Load(db, "Enus"));
 
         Assert.Equal(0, names.CharacterCount);
         Assert.Null(names.Character(1071));
@@ -207,7 +207,7 @@ public class DisplayNamesTests
         var root = g.WriteTable("LangPackageTableEnusData", TempGame.TableBytes(new[] { TempGame.LangRow(5001, "Mirel") }));
         var db = GameDatabase.FromGameDir(root);
 
-        var names = DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot, "Enus"));
+        var names = DisplayNames.Build(db, LocalizationDb.Load(db, "Enus"));
 
         Assert.Equal("Mirel", names.Character(1071));
         Assert.Equal(0, names.OutfitStemCount);

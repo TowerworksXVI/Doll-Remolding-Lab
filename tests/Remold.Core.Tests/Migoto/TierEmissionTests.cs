@@ -61,6 +61,56 @@ public class TierEmissionTests : IDisposable
     }
 
     [Fact]
+    public void Lod0_chain_uses_current_frame_witness_conversion_without_tiers()
+    {
+        var req = Request(out string outDir);
+        GenericPositions(Path.Combine(_root, "alpha"), 32);
+        GenericPositions(Path.Combine(_root, "beta"), 16);
+        new MigotoEmitter().Build(req);
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        int at = ini.IndexOf("[TextureOverride_Cap_alpha]", StringComparison.Ordinal);
+        string section = ini[at..ini.IndexOf("\n\n", at, StringComparison.Ordinal)];
+        Assert.Contains("run = CustomShaderConvertW_swap", section);
+        Assert.DoesNotContain("run = CustomShaderConvert_swap", section);
+        Assert.Contains("[CustomShaderConvertW_swap]\ncs = convert_witness_swap.hlsl\n", ini);
+        Assert.True(File.Exists(Path.Combine(outDir, "convert_witness_swap.hlsl")));
+    }
+
+    [Fact]
+    public void Lod0_without_a_sound_witness_keeps_the_constant_fallback_explicit()
+    {
+        string ad = Path.Combine(_root, "alpha"); SyntheticPool.WritePartDump(ad, 1, 32, new[] { A });
+        string bd = Path.Combine(_root, "beta"); SyntheticPool.WritePartDump(bd, 2, 16, new[] { C });
+        GenericPositions(ad, 32);
+        GenericPositions(bd, 16);
+        string outDir = Path.Combine(_root, "out");
+        var result = new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", ad), new PoolPart("beta", bd) },
+                    Anchor = "alpha",
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string>
+                        { ["alpha"] = "aaaa0001", ["beta"] = "bbbb0001" },
+                },
+            },
+        });
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        int at = ini.IndexOf("[TextureOverride_Cap_alpha]", StringComparison.Ordinal);
+        string section = ini[at..ini.IndexOf("\n\n", at, StringComparison.Ordinal)];
+        Assert.Contains("run = CustomShaderConvert_swap", section);
+        Assert.DoesNotContain("run = CustomShaderConvertW_swap", section);
+        Assert.False(File.Exists(Path.Combine(outDir, "convert_witness_swap.hlsl")));
+        Assert.Contains(result.Diagnostics, d => d.Contains("freshness depends on draw order"));
+    }
+
+    [Fact]
     public void Anchor_tier_runs_the_chain_with_lod0_fallback_for_tierless_parts()
     {
         string td = Path.Combine(_root, "alpha_l1"); SyntheticPool.WritePartDump(td, 3, 24, new[] { A, B });

@@ -451,7 +451,7 @@ public class ToggleKeyTests : IDisposable
         Assert.DoesNotContain("[Key_", ini);
         Assert.DoesNotContain("[CommandListKey_", ini);
         Assert.DoesNotContain("persist", ini);
-        Assert.Contains("hash = aaaa1111\nhandling = skip\n", ini);
+        Assert.Contains("hash = aaaa1111\nmatch_priority = 0\nhandling = skip\n", ini);
     }
 
     [Fact]

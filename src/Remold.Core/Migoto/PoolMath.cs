@@ -516,6 +516,44 @@ public static class PoolMath
     public sealed record UnionResult(uint[] UnionHashes, uint[][] FullMaps, uint[][] ScatterMaps, int[] Owner);
 
     /// <summary>
+    /// Ownership with the pipeline's own anchor preferred: every union bone the anchor's operator recovers
+    /// SOUNDLY (its conditioning verdict, not its weight) moves to the anchor; the summed-weight argmax
+    /// stands only for bones the anchor cannot constrain. A row recovered at the anchor's own draw is fresh
+    /// exactly when the replacement is on screen, while another part's segment is only as fresh as that
+    /// part's last draw — and scene states exist that render a pool source not at all (measured: zoomed
+    /// dorm interactions issue zero draws for off-screen parts, shadow passes included), leaving its owned
+    /// rows garbage until it first appears. Weight said the other part knows the bone better; the gate says
+    /// the anchor knows it well enough, and the anchor is the one part guaranteed on screen.
+    /// <para>Scatter maps are rebuilt from the adjusted owner. Union hashes and full maps are unchanged —
+    /// ownership never moves a bone's union slot, so compiled donor indices are unaffected.</para>
+    /// </summary>
+    /// <param name="anchorWeak">The anchor operator's per-local-bone conditioning verdict
+    /// (<c>OperatorArt.Weak</c>), indexed like the anchor's <see cref="UnionInput.Hashes"/>. A weak bone —
+    /// including one the anchor's operator rescued with its own internal rigid tie — is NOT taken: the tie
+    /// rides a co-bone, and a part posing the bone soundly live beats a rigid stand-in.</param>
+    public static UnionResult PreferAnchorOwnership(UnionResult union, int anchorIdx, bool[] anchorWeak)
+    {
+        var anchorMap = union.FullMaps[anchorIdx];
+        if (anchorWeak.Length != anchorMap.Length)
+            throw new ArgumentException(
+                $"anchor conditioning verdict covers {anchorWeak.Length} bones but the anchor maps {anchorMap.Length}");
+        var owner = (int[])union.Owner.Clone();
+        for (int li = 0; li < anchorMap.Length; li++)
+            if (!anchorWeak[li]) owner[anchorMap[li]] = anchorIdx;
+
+        var scatterMaps = new uint[union.FullMaps.Length][];
+        for (int pi = 0; pi < union.FullMaps.Length; pi++)
+        {
+            var fm = union.FullMaps[pi];
+            var sm = new uint[fm.Length];
+            for (int li = 0; li < fm.Length; li++)
+                sm[li] = owner[fm[li]] == pi ? fm[li] : Sentinel;
+            scatterMaps[pi] = sm;
+        }
+        return union with { ScatterMaps = scatterMaps, Owner = owner };
+    }
+
+    /// <summary>
     /// Build the union bone order across the pool (first-seen in part order) plus the per-part full and
     /// scatter maps and per-bone ownership. A repeated bone hash must carry a byte-consistent bindpose
     /// (asserted within 1e-5) since the union keeps one bindpose per bone — parts authored in bind spaces
@@ -523,7 +561,8 @@ public static class PoolMath
     /// <see cref="Mesh.BindSpace"/>), so what this refuses is a delta that is no rigid space difference at
     /// all. Ownership = the pool part with the most summed weight on the bone (order-independent) — the
     /// same per-bone quantity <see cref="StreamDump.WeightedBoneHashes"/> reads off a bundle's mesh field
-    /// and <see cref="MigotoEmitter.SummedWeights"/> off a dumped skin stream. This
+    /// and <see cref="MigotoEmitter.SummedWeights"/> off a dumped skin stream. The emitter then layers
+    /// <see cref="PreferAnchorOwnership"/> on top once the anchor's conditioning verdict exists. This
     /// first-seen ordering is the single
     /// union-order authority — the emitted indices line up with any consumer given the SAME parts in the
     /// SAME order (it reproduces <see cref="SwapCompile.BuildUnionOrder"/>).

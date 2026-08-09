@@ -11,9 +11,9 @@
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- The About dialog reports Assembly.GetName().Version, so these are what a user quotes in a
          bug report; keep all three in step with Core's. -->
-    <Version>0.3.0</Version>
-    <AssemblyVersion>0.3.0.0</AssemblyVersion>
-    <FileVersion>0.3.0.0</FileVersion>
+    <Version>0.3.1</Version>
+    <AssemblyVersion>0.3.1.0</AssemblyVersion>
+    <FileVersion>0.3.1.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets\icon.ico" />

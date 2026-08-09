@@ -29,7 +29,7 @@ public class WeaponRosterTests
             TempGame.LangRow(501, "Quiet Argument"),
         }));
         var db = new GameDatabase(g.At(@"GF2_Exilium_Data\LocalCache\Data\Table"));
-        var loc = LocalizationDb.Load(db.TableRoot);
+        var loc = LocalizationDb.Load(db);
 
         var weapons = WeaponRoster.ReadWeapons(db, loc);
 
@@ -60,7 +60,7 @@ public class WeaponRosterTests
             TempGame.LangRow(601, "Skin - Dry Season"),
         }));
         var db = new GameDatabase(g.At(@"GF2_Exilium_Data\LocalCache\Data\Table"));
-        var loc = LocalizationDb.Load(db.TableRoot);
+        var loc = LocalizationDb.Load(db);
 
         var skins = WeaponRoster.ReadSkins(db, loc);
 
@@ -169,7 +169,7 @@ public class WeaponRosterTests
             TempGame.LangRow(702, "Skin - Holo Sight Mk.I"),
         }));
         var db = new GameDatabase(g.At(@"GF2_Exilium_Data\LocalCache\Data\Table"));
-        var loc = LocalizationDb.Load(db.TableRoot);
+        var loc = LocalizationDb.Load(db);
 
         var entries = WeaponRoster.ReadAttachments(db, loc);
 

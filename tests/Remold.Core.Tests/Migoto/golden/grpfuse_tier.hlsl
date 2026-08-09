@@ -1,11 +1,13 @@
-// One wardrobe-group member's own draw at a NON-lod0 tier, fused: recover this group's bones from the
-// MEMBER's posed vertices and rebase the rows into the anchor's draw space in the same dispatch.
-// K comes from GEOMETRY, not constants: tier renderers can bind vs-cb1 as a window into a shared
-// buffer that a whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and
-// the anchor pose soundly — the member's side inline here (a UAV write another thread makes is not
-// readable in the same dispatch), the anchor's read out of the raw palette slot its own recover wrote —
-// and K = inverse(M_witness_member) . M_witness_anchor. The anchor row is whatever its last recover
-// left, which is this frame's once the anchor has drawn and the previous frame's before that.
+// One wardrobe-group member mesh's fused recover+rebase, run from the ANCHOR's chain gated on the
+// mesh's presence latch (last frame's draw stream): recover this group's bones from the MEMBER's
+// posed vertices — a by-ref capture, current-frame at the chain — and rebase the rows into the
+// anchor's draw space in the same dispatch.
+// K comes from GEOMETRY, not constants: in the chain the member's constants copy is from its own
+// last draw (frame-mixing), and tier renderers can bind vs-cb1 as a window into a shared buffer a
+// whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and the anchor
+// pose soundly — the member's side inline here (a UAV write another thread makes is not readable in
+// the same dispatch), the anchor's read out of the raw palette row its own recover wrote earlier in
+// this same chain, this frame — and K = inverse(M_witness_member) . M_witness_anchor.
 // ROWS = 4*groupBones; BASE = the group's first appended slot.
 struct Vtx { float3 position; float3 normal; float4 tangent; };
 StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, captured at this draw

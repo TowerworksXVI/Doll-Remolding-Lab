@@ -703,8 +703,8 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
         Assert.DoesNotContain("[Constants]", ini);   // no retexture → no pass flags needed
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -737,8 +737,8 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
         Assert.DoesNotContain(hm, ini);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -759,8 +759,8 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
         Assert.DoesNotContain(hm, ini);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -784,7 +784,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain("$zz_pass", ini);
         Assert.DoesNotContain("match_first_index", ini);
         Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\n"
-            + $"hash = {_stockTexHash}\nthis = Resource_Rtx0\n", ini);
+            + $"hash = {_stockTexHash}\nmatch_priority = 0\nthis = Resource_Rtx0\n", ini);
         // the DDS is named for its SOURCE (one encode serves every stock texture it replaces)
         Assert.True(File.Exists(Path.Combine(r.OutDir, "rtx_skin_a.dds")));
 
@@ -2034,8 +2034,8 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         string sharedIb = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
         Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), sharedIb);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedVb1("s0.bundle", "c_vesna01_body_lod0")}\n", ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body2]\nhash = {SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0")}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedVb1("s0.bundle", "c_vesna01_body_lod0")}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body2]\nhash = {SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\n", ini);
         Assert.DoesNotContain($"hash = {sharedIb}", ini);
     }
 
@@ -2045,7 +2045,7 @@ public class ModBuilderTests : IDisposable
     /// that ends it.</summary>
     private static string SectionOn(string ini, string hash)
     {
-        int at = ini.IndexOf($"\nhash = {hash}\n", StringComparison.Ordinal);
+        int at = ini.IndexOf($"\nhash = {hash}\nmatch_priority = 0\n", StringComparison.Ordinal);
         Assert.True(at >= 0, $"no section carries hash {hash}");
         int start = ini.LastIndexOf('[', at);
         int end = ini.IndexOf("\n\n", at, StringComparison.Ordinal);
@@ -2152,12 +2152,12 @@ public class ModBuilderTests : IDisposable
         string v = $"zz_tw_{shared}";
         // the slot tag stands, and it is the only section on that hash
         Assert.Contains($"[TextureOverride_SlotTag_{_stockTexHash}]\nhash = {_stockTexHash}\n"
-            + "filter_index = 3301\n", ini);
+            + "filter_index = 3301\nmatch_priority = 100\n", ini);
         Assert.DoesNotContain($"[TextureOverride_TwinTag_{_stockTexHash}]", ini);
         Assert.Equal(1, CountOf(ini, $"hash = {_stockTexHash}\n"));
         // the sibling's base color is tagged by nobody else, so it still mints one
         Assert.Contains($"[TextureOverride_TwinTag_{_altTexHash}]\nhash = {_altTexHash}\n"
-            + $"filter_index = {MigotoEmitter.RetexTag(_altTexHash)}\n", ini);
+            + $"filter_index = {MigotoEmitter.RetexTag(_altTexHash)}\nmatch_priority = 100\n", ini);
         string cap = SectionOn(ini, shared);
         Assert.Contains($"$zz_t = ps-t0\nif $zz_t == 3301\n${v} = 1\nendif\n", cap);
         Assert.Contains($"if ${v} == 1\nResource_vesna_body_Posed = ref vb0\n", cap);
@@ -2260,8 +2260,14 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         Assert.DoesNotContain("[TextureOverride_Witness_", ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {shared}\n"
+        // the OUTFIT sighting rides ahead of the guard (either sibling's draw proves the outfit is on
+        // screen); the MESH latch sights INSIDE it — it witnesses the same event as the capture it
+        // gates, and a sibling's draw captures nothing, so it must not read as presence
+        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {shared}\nmatch_priority = 0\n"
             + "$zz_seen_vesnassr01 = 1\n$zz_t = ps-t0\n", ini);
+        Assert.Contains("Resource_vesna_mate_Posed = ref vb0\n"
+            + "Resource_vesna_mate_CB = copy vs-cb1\n$zz_seen_src_vesna_mate = 1\n",
+            SectionOn(ini, shared));
         AssertTwinVerdictIsProbedWhereItIsTested(ini);
         AssertStickyVerdictsSurviveTheFrame(ini);
     }
@@ -2338,10 +2344,10 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\nhash = {_stockTexHash}\n"
+        Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\nhash = {_stockTexHash}\nmatch_priority = 0\n"
             + "if $zz_key_f9 == 1\nthis = Resource_Rtx0\nendif\n", ini);
         Assert.DoesNotContain("filter_index", ini);
-        Assert.DoesNotContain("match_priority", ini);
+        Assert.DoesNotContain("match_priority = 100", ini);
     }
 
     [Fact]
@@ -2372,7 +2378,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain("zz_tw_", ini);
         Assert.DoesNotContain("TwinTag", ini);
         Assert.Contains($"[TextureOverride_Hide_0]\nhash = "
-            + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nhandling = skip\n", ini);
+            + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\nhandling = skip\n", ini);
     }
 
     [Fact]
@@ -2522,13 +2528,13 @@ public class ModBuilderTests : IDisposable
         string v = $"zz_tw_{shared}";
         // each option's companion mints a section of its own and writes that option's ordinal
         Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
         Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
         // the guarded section reads the verdict and probes no slot for it
         string cap = SectionOn(ini, shared);
         Assert.DoesNotContain("ps-t0\n", cap);
-        Assert.StartsWith($"[TextureOverride_Cap_vesna_dress1]\nhash = {shared}\nif ${v} == 1\n"
+        Assert.StartsWith($"[TextureOverride_Cap_vesna_dress1]\nhash = {shared}\nmatch_priority = 0\nif ${v} == 1\n"
             + "Resource_vesna_dress1_Posed = ref vb0\n", cap);
         Assert.Equal(1, CountOf(cap, "handling = skip"));
         Assert.Contains($"if ${v} == 1\nResource_vesna_dress1_Posed = ref vb0\n"
@@ -2702,7 +2708,7 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
         string belt1 = SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0");
-        Assert.Contains($"[TextureOverride_Cap_vesna_belt1]\nhash = {belt1}\n${v} = 1\n"
+        Assert.Contains($"[TextureOverride_Cap_vesna_belt1]\nhash = {belt1}\nmatch_priority = 0\n${v} = 1\n"
             + "Resource_vesna_belt1_Posed = ref vb0\n", ini);
         Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
         // the unpooled option's companion still mints one
@@ -2725,11 +2731,11 @@ public class ModBuilderTests : IDisposable
         string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
         string v = $"zz_tw_{shared}";
         Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
         Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
         string hide = SectionOn(ini, shared);
-        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nif ${v} == 1\nhandling = skip\nendif", hide);
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\nif ${v} == 1\nhandling = skip\nendif", hide);
         // no probe: an overlay build whose verdicts all arrive from sightings reads no slot at all
         Assert.DoesNotContain("zz_t = ps-t", ini);
         Assert.DoesNotContain("global $zz_t = 0", ini);
@@ -2755,7 +2761,7 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
         string belt2 = SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0");
-        Assert.Contains($"[TextureOverride_Hide_0]\nhash = {belt2}\n${v} = 2\nhandling = skip\n", ini);
+        Assert.Contains($"[TextureOverride_Hide_0]\nhash = {belt2}\nmatch_priority = 0\n${v} = 2\nhandling = skip\n", ini);
         Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt2}]", ini);
     }
 
@@ -2781,7 +2787,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        Assert.Contains($"[TextureOverride_Witness_vesnassr01_0]\nhash = {belt1}\n"
+        Assert.Contains($"[TextureOverride_Witness_vesnassr01_0]\nhash = {belt1}\nmatch_priority = 0\n"
             + $"$zz_seen_vesnassr01 = 1\n$zz_tw_{shared} = 1\n", ini);
         Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
     }
@@ -2819,8 +2825,8 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
-        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n${v} = 1\n", ini);
-        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n${v} = 2\n", ini);
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
         // one hash under two names, and no line on it at all
         string scarf = SkinnedIb("ss1.bundle", "c_vesna01_scarf1_lod0");
         Assert.Equal(SkinnedIb("ss2.bundle", "c_vesna01_scarf2_lod0"), scarf);
@@ -2881,7 +2887,7 @@ public class ModBuilderTests : IDisposable
         string ini1 = File.ReadAllText(Path.Combine(r1.OutDir, "mod.ini"));
         string hide1 = SectionOn(ini1, shared);
         // the slot sweep the texture route reads, then the skip on the verdict it wrote
-        Assert.StartsWith($"[TextureOverride_Hide_0]\nhash = {shared}\n$zz_t = ps-t", hide1);
+        Assert.StartsWith($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\n$zz_t = ps-t", hide1);
         Assert.EndsWith($"if $zz_tw_{shared} == 1\nhandling = skip\nendif", hide1);
         Assert.DoesNotContain("TextureOverride_TwinWit_", ini1);
 
@@ -2891,11 +2897,11 @@ public class ModBuilderTests : IDisposable
             WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true })), _out, zip: false);
 
         string ini2 = File.ReadAllText(Path.Combine(r2.OutDir, "mod.ini"));
-        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nif $zz_tw_{shared} == 2\n"
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\nif $zz_tw_{shared} == 2\n"
             + "handling = skip\nendif", SectionOn(ini2, shared));
-        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\n"
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n"
             + $"$zz_tw_{shared} = 1\n", ini2);
-        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\n"
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n"
             + $"$zz_tw_{shared} = 2\n", ini2);
         Assert.DoesNotContain("zz_t = ps-t", ini2);
     }
@@ -2953,7 +2959,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         AssertEveryReferencedFileShips(ini, r.OutDir);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\nmatch_priority = 0\n", ini);
         Assert.Contains("CustomShaderRecover_vesna_body_vesna_body", ini);
         Assert.Contains("CustomShaderConvert_vesna_body", ini);
         Assert.DoesNotContain("Rigid", ini);
@@ -3313,7 +3319,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         Assert.DoesNotContain("[TextureOverride_Witness_", ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body_lod1]\nhash = {lod1}\n"
+        Assert.Contains($"[TextureOverride_Cap_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n"
             + "Resource_vesna_body_lod1_Posed = ref vb0\n$zz_seen_vesnassr01 = 1\n", ini);
         // and the latch still gates the suppression it was built for
         Assert.Contains("if $zz_gate_vesnassr01 == 1\nhandling = skip\n", ini);
@@ -3364,8 +3370,8 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        Assert.Contains("[TextureOverride_Hide_0]\nhash = aaaa1111\n", ini);
-        Assert.Contains("[TextureOverride_Hide_1]\nhash = bbbb2222\n", ini);
+        Assert.Contains("[TextureOverride_Hide_0]\nhash = aaaa1111\nmatch_priority = 0\n", ini);
+        Assert.Contains("[TextureOverride_Hide_1]\nhash = bbbb2222\nmatch_priority = 0\n", ini);
         Assert.DoesNotContain("[TextureOverride_Hide_2]", ini);
     }
 
@@ -3382,10 +3388,10 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         Assert.DoesNotContain("[TextureOverride_Witness_vesnassr01_0]", ini);
-        Assert.Contains("[TextureOverride_Witness_vesnassr01_1]\nhash = cccc3333\n"
+        Assert.Contains("[TextureOverride_Witness_vesnassr01_1]\nhash = cccc3333\nmatch_priority = 0\n"
             + "$zz_seen_vesnassr01 = 1\n", ini);
         // ungated, and ahead of the skip: a latch reading its own witness must record every frame
-        Assert.Contains("[TextureOverride_Hide_0]\nhash = aaaa1111\n$zz_seen_vesnassr01 = 1\n"
+        Assert.Contains("[TextureOverride_Hide_0]\nhash = aaaa1111\nmatch_priority = 0\n$zz_seen_vesnassr01 = 1\n"
             + "handling = skip\n", ini);
     }
 
@@ -3631,7 +3637,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         // captured exactly like a donor-ridden pool part...
-        Assert.Contains($"[TextureOverride_Cap_vesna_cloth]\nhash = {SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0")}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_cloth]\nhash = {SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0")}\nmatch_priority = 0\n", ini);
         // ...and never suppressed: its vanilla draw is the recovery input for the bones it owns
         Assert.DoesNotContain("handling = skip", SectionBody(ini, "[TextureOverride_Cap_vesna_cloth]"));
         Assert.NotEmpty(SkipGuards(SectionBody(ini, "[TextureOverride_Cap_vesna_body]")));
@@ -4027,8 +4033,8 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
         Assert.DoesNotContain(hm, ini);
     }
 
@@ -4046,7 +4052,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        Assert.Contains($"hash = {SkinnedIb("s1.bundle", "c_vesna01_body_lod1")}\n", ini);
+        Assert.Contains($"hash = {SkinnedIb("s1.bundle", "c_vesna01_body_lod1")}\nmatch_priority = 0\n", ini);
         Assert.DoesNotContain(SkinnedIb("smid.bundle", "c_vesna01_body_lodm1"), ini);
     }
 }

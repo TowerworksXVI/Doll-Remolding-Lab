@@ -264,7 +264,7 @@ public class CuratedSkinsTests
         }));
         var root = g.WriteTable("LangPackageTableEnusData", TempGame.TableBytes(new[] { TempGame.LangRow(1, "x") }));
         var db = GameDatabase.FromGameDir(root);
-        var names = DisplayNames.Build(db, LocalizationDb.Load(db.TableRoot));
+        var names = DisplayNames.Build(db, LocalizationDb.Load(db));
 
         var curated = CuratedSkins.MergeInto(Array.Empty<Character>());
         var enriched = names.Enrich(curated);

@@ -1,295 +1,719 @@
-# Replacing skinned meshes in a game that pre-poses them — a porting guide
+# Replacing meshes that the game pre-skins
 
-*This is the technique Doll Remolding Lab is built on — **skinning-palette recovery** — written so
-it can be implemented on another game. Audience: a moderately technical modder or tools programmer.
-Nothing here requires this app, this game, or any knowledge of either.*
+*A game-agnostic porting guide to recovering and reusing a live bone palette.*
+
+This document describes a runtime mesh-replacement technique for games that submit already-posed
+skinned vertices instead of exposing their bone palette to an interposer such as 3DMigoto. It is a
+portable technique, but no implementation detail should be assumed portable without measurement.
+
+To keep that boundary visible, the guide uses three labels:
+
+- **Principle** — a mathematical or API-independent requirement.
+- **Measure** — an engine, game, or renderer behavior that must be established from captures.
+- **Policy** — a conservative implementation choice. Another implementation may support more.
+
+The examples come from one production implementation, but the rules are written so another game can
+be evaluated without inheriting its assumptions.
 
 ## 1. The wall
 
-Most mesh-replacement modding assumes the GPU receives a bind-pose mesh plus bone matrices, so an
-interposer (3DMigoto or similar) can substitute new geometry and let the game skin it. Some games
-instead skin on the CPU (or in an earlier compute pass): every draw the interposer sees receives
-**already-posed vertices**, and no bone matrices are bound anywhere in the draw. On such a game
-the community toolchain typically settles on two verbs and declares the rest impossible:
+Some games perform linear-blend skinning before the ordinary draw. The vertex shader receives a
+buffer whose positions, normals, and tangents are already posed. The bone matrices that produced it
+may have existed only in an earlier compute pass or in engine-private buffers that a draw interposer
+cannot address.
 
-- **Hide** a part (skip its draw), and
-- **Morph** it (push per-vertex offsets onto the posed vertices — same vertex count, no
-  reweighting, no new geometry).
+A conventional mesh override can replace those submitted vertices, but it cannot change their count
+or topology and still obtain animation. A same-count substitution can move the existing vertices,
+but new vertices have no posed positions.
 
-You cannot add a ponytail, swap in a different jacket, or change topology at all, because new
-vertices have nothing to be posed by.
+The useful observation is that the submitted positions contain enough linear evidence to recover
+some or all of the palette that posed them.
 
-## 2. The key idea
+## 2. The recovery model
 
-Linear-blend skinning is **linear in the bone matrices**. For each posed vertex:
+### 2.1 Linear-blend skinning as a linear system
 
-```
-posed_v = Σ_k  w_{v,k} · ( [bind_v, 1] · M_{b_{v,k}} )
-```
+Assume row-vector notation. For bind-position p at vertex v:
 
-Hold the bind-pose mesh — rest positions, per-vertex weights, bone indices, all readable from the
-game's asset files — and the posed buffer `q` the interposer intercepts satisfies `q = C·x`, where
-`C` is built **only** from bind positions × weights (constant every frame) and `x` is the stacked
-per-bone matrix rows: the per-frame palette, the thing the game consumed and never shipped.
+    posed_v = Σ_k w_v,k · ([p_v, 1] · M_b(v,k))
 
-So: precompute the pseudoinverse `C⁺` **offline, once per mesh**. Each frame, a small compute pass
-computes `x = C⁺·q` from the live posed buffer — the palette is recovered. A second compute pass
-then skins **your own geometry, any topology, any vertex count**, weighted to those same bones,
-and a custom draw call renders it in place of the original (whose draw you skip). Reuse whatever
-shaders the game itself bound at that draw and your mesh is lit and shadowed like a native part
-(outlined too, if the game draws outlines as a per-part pass).
+For N vertices and B bones, collect the posed xyz positions into q, the unknown affine palette rows
+into x, and construct C from the bind positions, bone indices, and weights:
 
-**Preconditions to verify on your game before building anything:**
+    q = C · x
 
-- The game is true LBS (not dual-quaternion or blendshape-composited on the parts you target).
-  Test: recover a palette from one intercepted frame, forward-skin the original bind mesh with it,
-  and compare against the intercepted buffer. True LBS reproduces it at the float32 noise floor;
-  anything structurally above that means a different skinning model.
-- The intercepted posed buffer is **vertex-order-aligned** with the mesh in the asset files (the
-  same test proves this).
-- You can extract, per mesh: rest positions, blend weights/indices, bind poses, index buffer.
-- Your interposer can run compute shaders, bind custom buffers, skip draws, and issue its own
-  indexed draws. Stock 3DMigoto can do all of this from a mod folder.
+For every nonzero influence of bone b at vertex v, the four columns belonging to b receive:
+
+    w_v,b · [p_v.x, p_v.y, p_v.z, 1]
+
+C is constant while the mesh's bind geometry and skin are constant. A recovery operator can
+therefore be computed offline:
+
+    x̂ = C⁺ · q
+
+At runtime, one compute pass applies that operator to the live posed positions. A second pass skins
+replacement geometry against the recovered palette.
+
+**Principle:** The recovered matrix is the complete bind-to-posed affine map used by the submitted
+positions. Matrix layout and multiplication order may be transposed in a column-vector engine, but
+the model is the same.
+
+### 2.2 Compatibility is not identifiability
+
+Two tests answer different questions and must not be conflated.
+
+The forward residual:
+
+    r_forward = C · (C⁺ · q) - q
+
+tests whether the captured positions are representable by the proposed LBS system. A small residual
+supports the hypotheses that the vertex order, bind data, skin data, and posing model are compatible.
+It does not prove any one of those hypotheses by itself, and a large residual does not identify which
+one failed.
+
+The left-inverse defect:
+
+    D = C⁺ · C - I
+
+tests whether the palette rows are identifiable. If C has a null space, multiple palettes can
+reproduce the original mesh exactly. The minimum-norm answer may still pose new geometry incorrectly
+because the new geometry has different positions or weights.
+
+**Principle:** A low source-mesh replay residual is necessary evidence for this technique, not proof
+that every recovered bone is usable by a replacement.
+
+**Measure:** Test several materially different animation poses. One pose can accidentally hide a
+wrong vertex order, a truncated operator, or an unobservable bone.
+
+**Measure:** Test the operator in the representation that will ship. Quantization of the source
+buffer, float32 operator coefficients, packed formats, and compute arithmetic are all part of the
+result.
+
+### 2.3 Preconditions
+
+Establish all of the following before building a full replacement pipeline:
+
+- The target draw is posed by LBS, or by a model that can be reduced to the same fixed linear system.
+- The intercepted posed positions are aligned to the asset mesh's vertex order.
+- Rest positions, bone identities, indices, weights, and bind poses can be read without guessing.
+- The interposer can bind custom resources, dispatch compute, suppress the original draw, and issue
+  a replacement indexed draw.
+- Every bone used materially by the replacement is recoverable from at least one admissible source,
+  or the build refuses it.
+- The replacement's vertex streams satisfy the shaders' actual input contract.
+- The source draw occurs in every scene and pass in which the replacement must appear, or another
+  host and routing strategy is supplied.
+
+Blend shapes, cloth deformation, vertex animation, procedural offsets, and post-skin effects do not
+automatically make the method impossible, but they invalidate the fixed C model unless their state
+and ordering are incorporated.
 
 ## 3. The minimal pipeline
 
-Offline, per replaced part: extract the bind mesh, build `C`, compute `C⁺`, ship it as a buffer
-alongside your replacement's geometry and weights. At runtime, per frame:
+Offline, for one replaced part:
 
-1. **Capture** the posed vertex buffer at the part's draw (match the draw by a content-derived
-   buffer hash — on our game every needed hash was computable offline from the asset files, so no
-   frame captures were needed for authoring).
-2. **Recover**: one compute dispatch, `x = C⁺·q`.
-3. **Skin**: one compute dispatch, LBS of your geometry against `x`.
-4. **Draw**: skip the original, issue your own `drawindexed` with the game's currently-bound
-   shaders and the part's textures.
+1. Extract the bind mesh and skin.
+2. Build and condition the recovery operator.
+3. Compile the replacement geometry and weights into the recovered palette's bone order.
+4. Ship the operator, bind vertices, replacement skin, index buffer, and required material streams.
 
-Run recover+skin **once per frame** (gate on a flag you reset at present), but let the draw fire at
-**every** pass the original part drew in — that is what gives your mesh shadows and outlines for
-free. Suppressing "extra" passes is a trap: it removes the mesh from the shadow map, not the noise.
-The complement also holds: your mesh appears only where its host part draws, so a pass that part
-never participates in (a reflection prepass, say) won't include the replacement either.
+At runtime:
 
-Two hygiene rules that cost us real debugging time: capture geometry **by reference** (posed
-buffers upload before the frame's first draw, so a reference is always current-frame) but capture
-per-draw constants **by copy at their own draw** (they're re-uploaded per draw; a reference aliases
-whichever draw came last). And save/restore **by reference** every binding you touch around your
-draws — setting a slot to null afterward is not a restore, it poisons every later draw that
-expected the game's binding to persist.
+1. **Capture** the live posed source positions.
+2. **Recover** the palette from those positions.
+3. **Convert** the recovered rows into the replacement host's object space when necessary.
+4. **Skin** the replacement geometry.
+5. **Draw** it while the game's intended shaders, constants, targets, and material resources are
+   bound.
+6. **Suppress** the original geometry for the same logical replacement.
 
-## 4. The problem classes
+Recover and skinning work should normally execute once per animation sample, while the draw should
+execute in every compatible pass in which the original host draws. Shadows, depth, and outlines are
+often separate draws rather than noise to suppress.
 
-Everything past the minimal pipeline exists because one of these problems is real on the game. They
-are listed roughly in the order you will meet them.
+That optimization has an important scope: “once” means once per live model instance and pose, not
+necessarily once per Present call. See the multiple-instance section below.
 
-### Your replacement uses bones its target part doesn't carry
+### 3.1 Resource lifetime and temporal coherence
 
-*(a hair replacement that should reach the shoulders; a coat spanning torso bones the original
-shirt never rigged)*
+Runtime correctness depends on both resource semantics and sample time.
 
-One part's mesh only constrains the bones it has weight on, so one recovery operator only sees a
-slice of the skeleton. **Pool**: recover from several of the character's parts at once, each
-covering its own bones, into one **union palette**. Give each bone a single owner — the pooled part
-with the most summed weight on it — and have each part's recovery write **only the rows it owns**
-(a scatter map with a "not mine" sentinel), so overlapping parts don't fight. Any rendered part can
-serve; the union of a character's drawn parts covers every bone the animation meaningfully drives,
-because a bone only produces visible motion by deforming something rendered.
+| Operation | What it preserves | Main failure mode |
+| --- | --- | --- |
+| Reference/alias | The resource object; later reads see its then-current contents | The engine may reuse, rename, window, or update it at another time |
+| Copy/snapshot | The bytes visible at the copy event | A consumer can run before this frame's producer and receive the previous snapshot |
+| Persistent output | The last value written by the mod | Another instance, scene, or stale source can reuse it |
 
-### Pooled parts don't share an object space
+**Principle:** Every value combined in one recovery and conversion must describe a coherent animation
+sample. “Captured at its own draw” is not sufficient when the consuming chain runs at another draw.
 
-*(the cape's object transform differs from the body's by a few degrees and a few centimeters)*
+**Measure:** Determine when each posed buffer is written, whether it is stable across the frame's
+passes, whether several renderers alias the same allocation, and whether constant-buffer subranges
+are used.
 
-A recovered palette maps bind space → **that part's** posed object space. Renderers of one
-character do not reliably share a transform, so rows recovered from part A are subtly wrong at
-part B's draw — a slow lean or drift, not an obvious explosion. Rebase each owned row into the
-anchor part's space: `row' = row · K` with `K = W_owner · W_anchor⁻¹`, the `W`s read from each
-draw's object-to-world constants (captured by copy, per the hygiene rule above).
+**Measure:** Record draw order in every important scene. A source that draws before the anchor in one
+scene may draw after it in another.
 
-### At some draws, the constants can't be read
+Common ways to establish coherence are:
 
-*(a preview ghost or minimap double of the character whose renderer binds constants as an offset
-window into one shared buffer — a naive read returns the wrong window)*
+- Defer consumption until every required source has produced a sample for the current instance.
+- Recover and store source rows at the source draw, then consume only after a current-sample barrier.
+- Derive object-space conversion from same-sample recovered geometry.
+- Restrict the pool to sources whose resource update and draw schedule make coherence provable.
 
-When constant capture is unreliable, derive `K` from **geometry alone**: pick a **witness bone**
-each pair shares (one both parts pose soundly), reserve palette slots for the two parts' separate
-recoveries of it, and compute `K = M_witness_part⁻¹ · M_witness_anchor` in the convert pass. Same
-rebase, no constants touched.
+A copied per-draw constant is safe only when its sample is proven coherent with the posed positions
+being recovered. A referenced posed buffer is current only when the engine's update behavior has been
+measured to make it so.
 
-### Parts were authored in different bind spaces
+### 3.2 State hygiene
 
-*(the body's bind pose stands upright; the cloth's lies face-down; a prop's lies on its side)*
+Save and restore by reference every binding the replacement changes. Clearing a slot to null is not a
+restore; later game draws may rely on the previous binding.
 
-A union palette keeps one bind pose per bone, so every pooled part must be restated into one
-space — pick the anchor's. The relation is a single rigid rotation when it's real; measure it
-(from the game's own scene rest transforms when available, else fit it over bones the parts share
-and require several corroborating bones), snap it to the exact axis-aligned rotation, and rebase
-the part's bind poses and geometry with it. **Refuse anything that doesn't snap or isn't uniform
-across shared bones** — bone-name identifiers collide across unrelated rigs, and "converting" on a
-coincidence deforms the mesh silently.
+Treat render targets, depth state, viewports, UAVs, vertex and index buffers, shader resources,
+samplers, and modified constants according to the interposer's actual save/restore semantics.
 
-### Some bones are numerically unrecoverable
+## 4. Problem classes
 
-*(a decimated distance-tier mesh leaves a bone 1–3% total weight on a handful of near-coplanar
-vertices — its recovered rows are garbage and the limb visibly breaks)*
+### 4.1 The replacement uses bones its target does not carry
 
-Inverting `C` is least-squares; a bone needs ≥4 well-spread weighted vertices to be determined.
-Gate every bone at build time: pose a synthetic test palette, recover it **through the operator
-rounded to the precision you actually ship** (float32 rounding is part of the product — a float64
-check passes rows that ship broken), and mark bones whose error exceeds a threshold as weak. A weak
-bone gets a **rigid tie**: its rows are replaced by its strongest co-riding sound bone's, so its
-geometry rides that bone instead of exploding. When the weight involved is trace weight on both
-sides, the tie is visually free — but a replacement that puts *real* weight on a bone your sources
-only trace-weight will visibly ride the tie. Treat "the replacement leans on a bone no source
-poses soundly" as a build-time refusal, not a silent tie.
+*Typical symptom: a replacement follows its host near the attachment point, but distant regions
+freeze, collapse, or ride the wrong body segment because the host never supplied those bones.*
 
-### The operators are too big
+A single mesh constrains only the bones represented by its weighted vertices. A coat, long hair, or a
+body-spanning donor may therefore need several source meshes.
 
-*(4·bones × vertices floats per part — ~16 MB for one 12k-vertex, 80-bone part, times every pooled
-part, times every detail tier)*
+Build a pool and a union palette:
 
-The full pseudoinverse row uses every vertex, but a bone's rows are determined by a small
-well-chosen subset: its top-weighted vertices spread by farthest-point sampling (rank collapses if
-you take them all from one seam), plus a few **discriminator** vertices weighted to its co-bones
-but not to it (otherwise a bone proportionally co-weighted with a neighbour is locally
-indistinguishable from it). Solve each bone locally over that subset and gate the result on its
-**left-inverse defect** — how far the rows are from a true left inverse over the subset — not on a
-single-pose residual, which a truncated solve can pass while being wrong for other poses. Escalate
-the subset size for failing bones; a bone that never passes falls back to full width alone. Ours
-came out ~35× smaller with every bone's defect within gate.
+1. Identify every bone used materially by the replacement.
+2. Find admissible source parts that actually pose those bones.
+3. Recover each source into a shared union layout.
+4. Assign one writer for every union bone.
+5. Give each source a scatter map; rows it does not own use a sentinel and are not written.
 
-### Each part ships several detail tiers
+**Principle:** One row needs one authoritative writer within a pipeline. Two approximate recoveries
+must not race to overwrite it.
 
-*(the game swaps to a decimated mesh at distance, or renders it for previews — with its own buffer
-hashes, so your overrides never fire on it)*
+A pool candidate is not admissible merely because it renders or lists the bone. It must satisfy the
+relevant conditions:
 
-Buffer hashes are per-mesh, and a tier is a different mesh: cover every renderable tier of every
-pooled part with its own capture/recover/draw chain, or the character pops back to vanilla exactly
-when the game picks the tier you skipped. Two subtleties: a tier may **pose a bone that no pooled
-top-detail part carries** (recruit a carrier — another part of the outfit whose top-detail mesh
-poses that bone *and* which has a tier drawn alongside the asking tier, else the row is unwritten
-exactly when it's read); and tiers are where ill-conditioned bones concentrate (see the
-conditioning gate above).
+- Its skin is readable and its posing model is compatible.
+- The bone has nonzero weighted support and passes the conditioning gate, or an explicit approximation
+  has been accepted.
+- The source is present whenever the replacement needs it, or a defined absence fallback exists.
+- Its required detail tier draws in the same context.
+- Its sample can be made temporally coherent with the consumer.
+- Its bind and draw spaces can be converted safely.
+- Its bone identity belongs to the same rig rather than merely sharing a name or hash.
 
-### A recovery source can be off screen while your replacement draws
+Bone coverage is not guaranteed by the union of whatever happens to render. A bone can drive a child
+transform or attachment without weighting an admissible source mesh. A materially used bone with
+neither a sound recovery nor an explicitly accepted approximation must refuse the build.
 
-*(pooling an everywhere-part's replacement on a combat-only accessory, or on one option of an
-outfit the player can switch)*
+### 4.2 Choosing the owner of an overlapping bone
 
-A palette segment is only as fresh as the last frame its source drew. A source that can be absent
-while the target draws poses the target's bones from a stale buffer. **Presence rule**: a part may
-feed the pool only if it is on screen **whenever the replaced part is**. Classify each part's
-presence along whatever axes the game has (scene context; selectable outfit options) from game
-data, and when the data can't classify a part, let it be replaced but never leaned on. The target
-itself is always admissible — its capture fires exactly when the replacement is visible.
+*Typical symptom: deformation is correct while one source is visible, then snaps, freezes, or takes a
+rigid fallback when that source disappears, even though another pooled part also carries the bone.*
 
-### A part outside the shadow pass draws nothing off camera
+Summed vertex weight is a useful support heuristic, but it is not the primary reliability rule.
 
-*(renderers authored with shadow casting Off: transparent overlays, and a scattering of opaque hair
-and head parts)*
+A robust selection is:
 
-The shadow pass is what keeps a culled part's segment fresh (see the hard limit below), so a part
-whose renderer opts out of it has no off-camera draw at all — frustum culling silences it
-completely. **Shadow rule**: read the renderer's shadow-casting flag off the prefab and admit a
-non-casting part to a pool, and to tier-bone carrier duty, only for its own replacement. The same
-flag disqualifies it as a **presence witness**: a mesh that vanishes with the camera can't vouch
-for what is worn. Its own replacement, retexture and hide are unaffected — each fires at that
-part's own draw, which is exactly when its output matters. Make the exclusion ride a *measured*
-Off, never an unread field.
+1. Discard sources that cannot meet the presence, scheduling, bone-identity, and space-conversion
+   requirements.
+2. If the pipeline anchor recovers the row soundly, give it ownership; its draw is the event that
+   requires the replacement.
+3. Otherwise choose the sound admissible source with the strongest geometric support.
+4. If none is sound, use only an explicitly accepted approximation; otherwise refuse the dependency.
 
-### The game's own scene logic hides parts their names say are visible
+**Policy:** The production implementation gives the anchor every bone its operator
+recovers soundly. For a bone the anchor cannot constrain, the summed-weight owner remains; if
+that owner's operator is weak, its configured rigid tie may stand in for recovery.
 
-*(components riding the model prefab that force nodes on or off per location, and per-clip node
-lists on the idle and interaction scenes a character plays)*
+Ownership is local to one pipeline. Two independently hosted replacements do not need the same owner
+for a shared bone. They need their final posed geometry to agree in world space.
 
-A part's name and its wardrobe slot are not the whole story: shipped alongside the model there is
-usually authored data that hides individual nodes in one location, dresses a garment on and off
-independently of the scene, or flips a node mid-animation. A part under any of those draws on a
-condition its name does not carry, so the presence rule above classifies it as visible and is
-wrong. **Visibility rule**: read those overrides and treat every part they name the way an
-unclassifiable part is treated — replaceable, but never leaned on for another part's pool, for
-tier-bone carrier duty, or as a presence witness. Read only the lists that can *subtract* a draw;
-one that only ever adds presence constrains nothing, and a serialized flag the game overwrites at
-every apply says nothing at all. Match the way the game matches, including the entries it resolves
-two ways and the ones it resolves neither way, so an override that does nothing in game demotes
-nothing here either. And demote only on a list that named the part: a prefab you could not read
-must leave every part admissible rather than none.
+### 4.3 Pooled parts use different draw spaces
 
-### Two different meshes share a match key
+*Typical symptom: the replacement develops a slow lean or positional drift relative to the body, or
+a split boundary opens farther as the character moves, rather than exploding immediately.*
 
-*(two outfit variants remodeled on the same index buffer; the same slot name reused with different
-geometry)*
+A recovered palette maps bind space into the source renderer's posed object space. Two renderers on
+one character need not use the same object-to-world transform.
 
-Content-derived hashes name **content**, and games reuse content across genuinely different
-draw-time meshes. Have a ladder of discriminators: a second buffer whose content does differ; else
-a runtime signal written into a persistent variable — recognizing a uniquely-tagged texture at the
-draw, or **sibling meshes that only ever appear with one variant** vouching for it; else refuse the
-replacement rather than let two meshes cross-fire one override. Assume from day one that "one hash
-= one mesh" is false somewhere in the corpus, and key your build's sections on a signature that
-survives that.
+For a row recovered from owner part P and consumed at anchor A:
 
-### Meshes that store fewer than four influences
+    row_anchor = row_part · K
+    K = W_part · inverse(W_anchor)
 
-*(one-influence rigid-worn props — glasses, badges, holsters, often index-only with implicit
-weight 1 — and two-influence bodies and cloth)*
+where W is object-to-world in row-vector convention.
 
-The stored influences are the mesh's whole skin: the draw is posed by exactly what the stream
-carries, at any width. Verify that before assuming it — per-vertex weight sums come out at 1 when
-the skin is complete, and visibly short if an exporter truncated influences away. Then widen
-losslessly to the canonical 4-wide layout (pad zero-weight slots) and they pool like anything
-else — with one caveat. Bone ownership (which part's captured draw a palette row is recovered
-from) goes to the highest summed weight, and weight-1.0 on every vertex gives a ONE-influence
-part an outsized sum for its size: measured on this corpus it wins ownership of roughly a third
-of the bones it contests against real deformers. Whether that's harmful is a question about the
-winner's draw reliability, not its weights — an always-drawn weight-1.0 rider is an exact read
-of its bone, while a source whose draw can be absent leaves a stale row. This corpus keeps
-one-influence parts out of other parts' pools as a conservative default; treat that as a policy
-to justify against your game's draw behavior, not a law. A genuine multi-influence split
-carries real fractions and pools freely.
+**Principle:** The source palette and K must describe the same animation sample. A correct formula
+with a previous-frame W is still wrong.
 
-### Meshes you must refuse (and say why)
+#### Conversion from draw constants
 
-- **Blendshape carriers**: morph deltas are added outside LBS, so recovery would absorb them as
-  bone error. Refuse replacement; hide/retexture still work.
-- **Parts posed by runtime physics** (spring/jiggle bone chains a simulation driver moves, not the
-  animation system — they show up as dedicated bone-name families): the driver's parameters are
-  authored against the original part, so this implementation refuses replacement rather than ship
-  new geometry riding a simulation it wasn't tuned for; hide/retexture still work.
-- **Skins spelled in a shape you can't read losslessly** (packed weight formats, a skin stream
-  shared with unrelated channels): refuse rather than guess at a stride.
-- **True statics** (no skin at all): no palette to recover — but none needed; a verbatim buffer
-  swap is the whole job. Route them there instead.
+Per-draw object transforms can provide K when:
 
-Make the refusal rule **one predicate in one place**, and derive the routing, the build error, and
-the UI gating from it — three hand-written copies of "can this mesh be replaced" will drift.
+- The correct logical constant range can be addressed.
+- Both transforms are snapshots of the intended source and anchor.
+- Their sample times are coherent with the recovered posed buffers.
+- The matrices are invertible and use the established convention.
 
-### Edits must survive a round trip through a DCC tool
+Constant copies are not made coherent merely by being copied at their respective draws. If the
+anchor consumes before the source draws this frame, the source copy is stale.
 
-*(Blender renames bones, reorders joints, appends `.001`, rewraps armatures)*
+#### Conversion from a geometry witness
 
-Positional joint identity dies in transit. Embed each bone's stable identity (the game's bone-name
-hash) **in the exported joint's name**, and resolve everything coming back by that hash, never by
-index or order. Influences painted to a bone the target doesn't carry: drop them, renormalize the
-survivors, and warn with the bone names — tolerant by default, loud when the dropped weight was
-real.
+When constants are unreadable, incorrectly windowed, or not provably coherent, use a shared witness
+bone that both parts recover:
 
-## 5. Hard limits
+    K = inverse(M_witness_part) · M_witness_anchor
 
-- **You cannot add bones.** The palette is recovered, not authored; articulation is capped by the
-  vanilla rig. If the game's hand is one wrist bone, replacement fingers ride that one bone.
-- A palette segment updates only when its source part draws. In practice this bites less than
-  feared — verify on your game whether culled parts still draw as shadow casters (ours do, which
-  keeps their segments fresh even fully off-camera). The exception is per-renderer: a part authored
-  with shadow casting Off has no such draw, and the shadow rule above keeps it out.
-- Precision is float32 end to end; every gate must measure what ships, not what a float64
-  prototype does.
+The witness bone must:
 
-## 6. Order of attack
+- Be the same stable bone identity on both parts.
+- Be expressed in reconciled bind spaces.
+- Be sound in every operator and tier that uses it.
+- Be recovered from the same animation sample on both sides.
+- Remain safely invertible over the supported animations.
 
-Climb a ladder, proving each rung in-game before the next: **hide** (skip the draw) →
-**same-count vertex substitution** → **static in-engine skin** (compute-skinned bind mesh, fixed
-palette) → **live recovery** (the true-LBS test *is* this rung) → **new topology via custom draw**
-→ **pooled multi-part**. Every rung isolates one mechanism, so when a rung fails you know which
-assumption about your game just broke. The problem classes of §4 then arrive one at a time, each
-announced by a specific visual defect — and each has the shape of a rule you can gate at build
-time, which is where you want every failure: a refused build with a reason beats a subtly leaning
-character every time.
+One valid witness matrix determines K. During porting, compare K from several candidate witness bones
+over captured poses; disagreement reveals a bad identity, bind-space conversion, operator, or sample.
+
+**Policy:** When no sound witness exists, the production implementation falls back to constant
+conversion and names that dependency in the build log as riding draw order. A port that cannot
+prove or diagnose the fallback should refuse the cross-space dependency instead.
+
+### 4.4 Parts were authored in different bind spaces
+
+*Typical symptom: one pooled part is rotated by a quarter-turn, lies face-down, or deforms around a
+consistent wrong axis while the other parts animate normally.*
+
+Pooling keeps one bind statement per bone, so all source geometry and bind poses must be expressed in
+one reference space, normally the anchor's.
+
+In general, a consistent invertible basis change can be applied to geometry and bind poses together.
+The exact formulas depend on the engine's matrix convention. The key invariant is that the
+bone-space quantity consumed by skinning remains unchanged.
+
+**Principle:** A valid basis change is uniform across corroborating shared bones. A transform inferred
+from one coincidentally matching bone is not evidence.
+
+**Policy:** The production implementation first composes measured scene-rest transforms for the part
+and reference. That route needs no shared bones, but the resulting relation must still snap to the
+supported pure axis-aligned signed-permutation rotation. When either measured rest is unavailable,
+the fallback fits the relation over shared bind poses and requires at least three corroborating
+bones. Translation, arbitrary rotation, scale, shear, nonuniform deltas, and weakly corroborated
+fallback matches are refused. That narrow gate reflects measured asset conventions, not a universal
+mathematical restriction.
+
+Stable bone identifiers can collide across unrelated rigs. Validate identity using bind agreement,
+rig structure, and multiple shared bones rather than trusting a hash alone.
+
+### 4.5 Some bones are numerically unrecoverable
+
+*Typical symptom: a small or decimated region flickers, stretches violently, or sends a limb away
+from the character only in particular poses, while most of the mesh remains correct.*
+
+For an unconstrained affine palette row, the local weighted homogeneous positions must span rank four.
+Four vertices are a minimum in the simple case, but vertex count alone is not sufficient: coplanar
+positions, trace weights, and proportional co-weighting can leave a bone unidentifiable.
+
+Gate each bone at build time using:
+
+- A dense recovery evaluated after conversion to the precision that ships.
+- Synthetic palettes that exercise rotation-like and translation terms.
+- A left-inverse defect for any reduced operator.
+- Explicit NaN, infinity, singular-value, and support checks.
+
+A weak bone may ride a sound nearby or co-weighted bone through a rigid tie. That is an approximation,
+not recovered animation.
+
+**Policy:** Ties are acceptable only when the replacement places negligible weight on the weak bone
+or the visual rigid ride is explicitly accepted. Material replacement weight on an unsupported bone
+should refuse the build.
+
+### 4.6 Dense operators are too large
+
+*Build-time signature: operator buffers dominate the mod size and multiply with every pooled part and
+detail tier, even though most bones depend strongly on only a small subset of vertices.*
+
+A dense pseudoinverse stores four rows per bone across every source vertex. Large meshes and several
+detail tiers can make that expensive.
+
+A reduced operator can select a per-bone subset:
+
+- Strongly weighted vertices distributed through bind space.
+- Discriminator vertices that constrain co-bones without carrying the target bone.
+- A widening schedule for bones that fail the local gate.
+- Dense-width fallback for an individual bone when reduction does not hold.
+
+Gate the reduced rows on their left-inverse defect, not only on one synthetic pose. A truncated solve
+can reproduce one palette while failing another.
+
+**Measure:** Report reduction ratios with the corpus, vertex counts, bone counts, thresholds, and
+buffer accounting that produced them. A number such as “35× smaller” is an observation, not a
+portable expectation.
+
+### 4.7 Each part has several detail tiers
+
+*Typical symptom: the replacement pops back to vanilla, loses a region, or changes deformation
+exactly when distance, a preview, or another rendering context selects a different tier.*
+
+Every independently rendered tier is a different source mesh with its own:
+
+- Match signature.
+- Vertex order and recovery operator.
+- Weighted bone support.
+- Conditioning result.
+- Bind-space evidence.
+- Draw schedule and possible constant-buffer layout.
+
+Cover every renderable tier required by the replacement. A tier can pose a bone absent from every
+pooled top-detail mesh; it then needs an eligible carrier that both poses the bone and has a
+corresponding tier in that context.
+
+Do not assume a top-detail row can stand during a lower-tier draw. Reuse is safe only when its sample,
+placement, and space conversion remain valid. Otherwise recover or tie the row in the tier's own
+chain.
+
+Detail tiers often make geometry witnesses more important because their constant bindings and draw
+order can differ from the top-detail renderer.
+
+### 4.8 A recovery source can be absent
+
+*Typical symptom: the replacement works in one outfit or scene but freezes, collapses, or inherits an
+old pose when an accessory, wardrobe option, or context-specific source stops drawing.*
+
+A palette segment is only as fresh as the last admissible sample written by its source.
+
+**Presence rule:** A part may feed another part's replacement only when it is present whenever that
+replacement needs the row, or when absence has an explicit safe fallback.
+
+Classify presence along the game's real axes: scene, wardrobe option, combat state, cinematic state,
+visibility animation, and any other mechanism observed to subtract draws. Unclassifiable parts may
+still host their own replacement, but should not be trusted as another part's source.
+
+Possible absence behavior includes:
+
+- Refuse the dependency.
+- Prefer a sound anchor recovery.
+- Tie the absent source's donor-used rows to sound anchor-owned ancestors.
+- Seed rows to identity only when bind placement is an intentional fallback.
+
+Presence latches are themselves sampled state. A previous-frame latch can be useful, but its delay and
+transition behavior must be tested.
+
+### 4.9 Off-camera and shadow behavior
+
+*Typical symptom: animation remains correct while the source is visible, then becomes stale when the
+camera turns away, or changes behavior when shadow distance and camera framing change.*
+
+Some games continue to submit an off-camera renderer to a shadow pass; others cull it, cache the
+shadow, restrict it by cascade, or never submit it.
+
+**Measure:** Trace real draw submission. A serialized “casts shadows” flag alone does not prove that a
+source refreshes off camera.
+
+**Policy:** In the production corpus, a measured shadow-casting Off disqualifies a
+part from feeding another part or serving as a presence witness. Its own replacement, hide, and
+retexture remain valid because those operations occur only at its own draw.
+
+### 4.10 Scene logic hides parts independently of their names
+
+*Typical symptom: a replacement fails only in a dorm, lobby, interaction, cinematic, or animation
+clip even though its mesh name and selected outfit are unchanged.*
+
+Do not infer presence only from mesh names or wardrobe slots. Search the game's authored data and
+runtime traces for systems that can subtract a draw: node visibility lists, scene overrides,
+animation events, preview modes, and option-specific companions.
+
+Demote only a part that measured data actually names or a runtime trace proves conditional. Failure
+to read an optional visibility source should not silently classify every part as absent.
+
+### 4.11 Different meshes share a match key
+
+*Typical symptom: enabling one replacement also suppresses or redraws another outfit, variant, or
+semantic part whose runtime section happens to match the same hashed content.*
+
+Content-derived hashes identify content, not necessarily one semantic mesh or one live instance.
+Games reuse buffers and index data.
+
+Use a discriminator ladder:
+
+1. Another bound buffer whose content differs.
+2. A uniquely tagged texture or material resource.
+3. A sibling draw that unambiguously establishes a variant or context.
+4. Another stable runtime signal.
+5. Refusal when the draws remain indistinguishable.
+
+Build sections around the complete signature actually needed to prevent cross-fire. Assume from the
+start that one hash can identify several semantic draws.
+
+### 4.12 Meshes store different influence widths
+
+*Typical symptom or build signature: a rigid prop is mistaken for an especially strong deformer, a
+narrow skin is rejected as incomplete, or widening/reduction silently changes its deformation.*
+
+One-, two-, three-, and four-influence skins can all be valid if the stored stream is complete.
+Verify the format semantics and weight sums before widening. Padding zero-weight slots into a
+canonical layout is lossless.
+
+One-influence meshes often accumulate high summed support because every vertex rides one bone at
+weight 1. That does not make them bad sources, but it makes weight-only ownership misleading.
+Evaluate their conditioning, presence, tier schedule, and sample freshness.
+
+**Policy:** The production corpus conservatively keeps one-influence parts out of
+other parts' pools. A genuine multi-influence split pools normally.
+
+### 4.13 Posing models and layouts the implementation refuses
+
+*Build-time signature: the source replay has structural residual, the skin stream cannot be decoded
+losslessly, or the part carries morph, cloth, physics, or procedural deformation outside the
+implementation's supported model.*
+
+Keep the routing predicate centralized so the UI, build, and runtime emission cannot disagree.
+
+- **Blend-shape carriers:** A static C does not model changing morph positions or post-skin morph
+  deltas. Supporting them requires the morph coefficients, deltas, ordering, and a verified combined
+  model. This implementation refuses replacement while allowing hide and retexture.
+- **Runtime-physics rigs:** Physics-driven bone transforms can still be recoverable LBS rows.
+  Refusing them is a quality policy when the replacement was not designed and tested against the
+  original simulation. It is not a mathematical limitation of palette recovery.
+- **Unreadable skin layouts:** Packed, shared, or unusual formats are acceptable only when they can
+  be decoded losslessly and aligned to vertices. Refuse rather than guess at a stride or semantic.
+- **True statics:** A skinless mesh has no palette to recover and needs none. Route it through a direct
+  geometry replacement using the draw's existing object transform.
+- **Other vertex deformation:** Cloth simulation, procedural vertex motion, and post-skin offsets need
+  their own captured state or model. Do not silently absorb them into bone error.
+
+### 4.14 Edits must survive a DCC round trip
+
+*Typical symptom or build signature: bones return reordered or renamed, vertices lose all supported
+weight, or the build reports influences painted to bones the target rig cannot resolve.*
+
+Joint-array position is not a stable identity. Preserve a stable game bone identifier as metadata or
+in a controlled joint-name token, then resolve the returned skin by that identifier.
+
+If the game uses hashes, validate collisions rather than assuming the hash is globally unique.
+Preserve enough rig and bind context to diagnose an ambiguous identifier.
+
+Define unresolved influence behavior explicitly:
+
+- If a vertex retains some supported weighted influences, drop unsupported ones, renormalize the
+  survivors, and warn.
+- If every weighted influence is unsupported, do not ship an all-zero skin. Refuse, or apply a clearly
+  documented fallback such as nearby original weights.
+- Report the number of affected vertices, missing bones, and materially dropped weight.
+- Reducing a four-wide authored skin to a narrower target should keep the strongest influences,
+  renormalize, and warn whenever nonzero weight was discarded.
+
+Tolerant behavior is a policy, not an excuse to hide deformation. Warnings must be visible at build
+time and specific enough for the author to repaint the mesh.
+
+### 4.15 One continuous donor surface is split across host pipelines
+
+*Typical symptom: a thin shading line remains at rest, while a positional gap opens and grows under
+motion even though the duplicated boundary positions and weights appear identical in the DCC tool.*
+
+This is the seam-critical case: one authored surface is divided because the game renders its regions
+as separate parts, anchors, or replacement pipelines.
+
+Before separation, record explicit boundary-pair identity. Coincident positions found later by a
+tolerance are not enough when several duplicated vertices share one location.
+
+For every paired boundary vertex, verify:
+
+- Bind positions agree in one declared space.
+- Bone identities and effective normalized weights agree; local joint indices may differ.
+- Both pipelines recover or approximate every materially weighted bone.
+- Bind-space conversions are compatible.
+- Final posed positions agree in world space across a representative motion set.
+- The two chains consume temporally coherent samples.
+
+Identical local positions and weights do not guarantee closure. If the pipelines use different
+anchors, their final equality is:
+
+    posed_left · W_left = posed_right · W_right
+
+A stale or inconsistent conversion opens the surface even when every authored boundary value is
+bit-identical.
+
+Do not require the same global bone owner across independent pipelines merely to close the seam.
+Different sound recoveries are valid when their converted world result agrees. Global re-ownership
+can weaken presence fallbacks without improving the boundary.
+
+Treat positional and shading continuity separately:
+
+- Preserve or jointly construct normals across the unsplit surface before duplication.
+- Preserve tangent direction and handedness across the boundary.
+- Preserve any outline, shell, or custom vertex direction field the game consumes.
+- Independent normal recalculation after separation normally creates a shading seam even when the
+  positions remain closed.
+
+Acceptance should measure paired world-space separation over several high-motion poses and report at
+least median, p95, and maximum error. Inspect normal and tangent angles independently.
+
+### 4.16 Several live instances share the same resources
+
+*Typical symptom: the second copy of a character adopts the first copy's pose, or whichever instance
+draws first controls the replacement output for every later instance in the frame.*
+
+Content hashes and global mod variables do not identify a character instance. If two actors with the
+same source meshes draw in one frame, a global “done this frame” flag and one persistent output buffer
+can make the second actor reuse the first actor's pose.
+
+**Measure:** Test duplicate actors, mirrors, previews, photo mode, co-op, enemies using player assets,
+and any scene that renders the model twice.
+
+Safe designs need one of:
+
+- A reliable instance discriminator and per-instance state.
+- Recompute at every logical anchor draw while distinguishing repeated passes of one instance.
+- An engine-provided instance index that can address separate output regions.
+- A documented refusal or limitation to one live instance.
+
+“Once per frame” is sound only after the instance scope has been proven.
+
+### 4.17 The host renderer controls submission and bounds
+
+*Typical symptom: added geometry disappears near the edge of the camera, fails to appear in a
+reflection, or stops casting a shadow while the original host's smaller bounds are culled.*
+
+An interposer override normally runs only after the engine submits the original host. The host's
+visibility tests, local bounds, occlusion state, LOD choice, and pass participation therefore gate the
+replacement.
+
+Replacement geometry extending beyond the host's bounds can disappear at camera edges or fail to cast
+expected shadows. A replacement cannot appear in a reflection, motion-vector pass, or auxiliary
+camera that never submits its host.
+
+**Measure:** Test the replacement's full extent against camera frusta, occlusion, shadow cameras,
+reflection cameras, and detail transitions. If bounds cannot be expanded in engine data, choose a host
+whose submission conservatively covers the replacement or document the limitation.
+
+### 4.18 Positions are not the whole shading contract
+
+*Typical symptom: the silhouette and animation are correct, but a dark seam, broken normal map,
+incorrect outline, or temporal smear remains.*
+
+Recovering positions proves nothing by itself about normals, tangents, outline fields, motion vectors,
+or material-specific vertex data.
+
+For rigid or uniform-scale bone transforms, applying the palette's linear part with homogeneous w=0
+and normalizing is often sufficient for normals and tangents. With nonuniform scale or shear, correct
+normal handling may require inverse-transpose logic or exact reproduction of the game's deformation
+path.
+
+Validate:
+
+- Normal and tangent skinning against captured originals.
+- Tangent handedness and normal-map orientation.
+- Outline or shell direction channels.
+- Material subdivision and per-submesh textures.
+- Depth, shadow, outline, reflection, and motion-vector passes.
+- Previous-pose data where temporal effects require it.
+
+Reusing the game's bound shader provides its lighting environment; it does not automatically satisfy
+the shader's complete input and temporal contract.
+
+## 5. Hard limits and scoped limitations
+
+- **Recovered animation is capped by observed animation sources.** The recovered palette supplies no
+  motion for a bone the game never poses. Extra bones require another authored, procedural, or
+  captured animation source outside this technique.
+- **A replacement depends on host submission.** It cannot appear in a context where no usable host
+  draw occurs.
+- **A source updates only when the measured resource or draw event updates it.** Persistence is not
+  freshness.
+- **Temporal coherence cannot be repaired by correct matrix algebra.** If two inputs describe
+  different samples, their combination is wrong.
+- **Operator quality is bounded by source information and shipped precision.** Quantization and rank
+  loss cannot be wished away by a higher-precision offline prototype.
+- **A continuous split needs world-space agreement.** Matching authoring data alone does not establish
+  that agreement.
+- **One global output is not automatically multi-instance safe.**
+- **Unsupported deformation models must be incorporated explicitly or refused.**
+
+## 6. Acceptance and observability
+
+Use thresholds relative to mesh scale and the visual requirement; there is no universal epsilon.
+Retain enough artifacts to reproduce every gate.
+
+### 6.1 Asset and stream validation
+
+- Decode positions, skin, bind poses, and indices independently of the runtime path.
+- Prove vertex-order alignment.
+- Verify weight sums and stored influence semantics.
+- Detect duplicate or ambiguous bone identities.
+- Confirm every donor-used bone is covered.
+
+### 6.2 Recovery validation
+
+- Capture several distinct poses.
+- Report source forward-replay residuals.
+- Report per-bone synthetic recovery error at shipped precision.
+- Report rank or left-inverse defect for reduced operators.
+- Name every weak, tied, dense-width, or uncovered bone.
+
+### 6.3 Scheduling validation
+
+- Trace source and anchor draw order in every important scene.
+- Record which frame or animation sample each captured resource represents.
+- Exercise a case where a source draws after the anchor.
+- Treat a constant fallback as unsafe until this trace proves otherwise.
+
+### 6.4 Space-conversion validation
+
+- Independently derive the matrix convention.
+- Compare constant-derived and geometry-derived K where both are available and coherent.
+- Compare several witness bones over several poses.
+- Reject singular witnesses and unexplained disagreement.
+
+### 6.5 Output validation
+
+- Forward-skin the original source mesh through the exact emitted operator and shader arithmetic.
+- Compare replacement positions in world space, not only in each local anchor space.
+- Test every render pass the host participates in.
+- Test camera edges, shadows, reflections, and detail transitions.
+- Test more than one live instance.
+
+### 6.6 Split-surface validation
+
+- Keep an explicit boundary-pair ledger.
+- Compare effective weights by bone identity.
+- Measure world-space separation over high-motion poses.
+- Report median, p95, and maximum.
+- Compare normal and tangent angles separately.
+- Fix isolated authoring defects in the authored mesh, not in generated buffers.
+
+Generated diagnostics should state when a build:
+
+- Falls back to draw-order-dependent constants.
+- Reuses a lower- or higher-tier row.
+- Ties or identity-seeds a bone.
+- Depends on a presence latch.
+- Cannot establish a same-frame witness.
+- Is limited to one live instance.
+
+A silent fallback is part of the deformation whether or not the user knows it happened.
+
+## 7. Order of attack
+
+Prove the mechanism one rung at a time in the actual game:
+
+1. **Hide:** match and suppress the intended draw.
+2. **Same-count substitution:** prove stream layout and draw routing.
+3. **Static replacement draw:** prove custom buffers, indices, materials, and state restoration.
+4. **Fixed-palette skinning:** prove replacement skinning and normal/tangent handling.
+5. **Live single-part recovery:** prove LBS compatibility and operator identifiability.
+6. **New topology:** prove bounds, passes, and material subdivision.
+7. **Pooled recovery:** add ownership, presence, and space conversion.
+8. **Detail tiers:** prove every tier's support and scheduling.
+9. **Split surfaces:** prove world-space boundary closure and shading continuity.
+10. **Multiple instances and scenes:** prove the lifetime and state model beyond the first success case.
+
+At every rung, test more than one pose and preserve the smallest capture that disproves an assumption.
+Prefer a refused build with a specific reason over a character that deforms subtly and only in one
+scene.

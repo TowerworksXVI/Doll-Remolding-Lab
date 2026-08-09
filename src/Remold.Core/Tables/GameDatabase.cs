@@ -47,10 +47,27 @@ public sealed class GameDatabase
     /// <summary>The token that splits a summon's model stem into owner prefix and summon suffix.</summary>
     private const string SummonToken = "_Summon";
 
-    /// <summary>Path to a root (global) table; <paramref name="intl"/> uses the en/global subfolder.</summary>
-    public string TablePath(string name, bool intl = false) =>
-        intl ? Path.Combine(_tableRoot, "intl", name + ".bytes")
-             : Path.Combine(_tableRoot, name + ".bytes");
+    /// <summary>Locale-folder probe order. The global client splits tables across <c>intl/</c> (the
+    /// locale-gated 445: weapon skins, clothes…) and the Table root (the shared rest), with jp/kr/tw/us
+    /// holding the other locales' variants; the CN client ships EVERYTHING in the Table root and leaves
+    /// all five locale folders empty. <c>intl</c> first preserves the global client's exact reads, the
+    /// root catches CN, and the remaining locales are a last resort for a client shipping only its
+    /// own folder.</summary>
+    private static readonly string[] LocaleProbe = { "intl", "", "jp", "kr", "tw", "us" };
+
+    /// <summary>Path to a table, resolved through the locale probe order — the first folder that holds
+    /// the file wins. A table found nowhere resolves to the Table-root path, so the caller's read fails
+    /// naming the common-denominator location.</summary>
+    public string TablePath(string name)
+    {
+        string file = name + ".bytes";
+        foreach (var loc in LocaleProbe)
+        {
+            string p = loc.Length == 0 ? Path.Combine(_tableRoot, file) : Path.Combine(_tableRoot, loc, file);
+            if (File.Exists(p)) return p;
+        }
+        return Path.Combine(_tableRoot, file);
+    }
 
     /// <summary>Read the full character roster with each character's outfits resolved.</summary>
     public List<Character> ReadRoster()

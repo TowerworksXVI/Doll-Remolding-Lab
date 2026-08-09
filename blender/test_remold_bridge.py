@@ -167,6 +167,47 @@ class SessionPartTests(unittest.TestCase):
         self.assertEqual(rb.gf2_session_parts(session, ["cloth1", "hair"]), ["cloth1"])
 
 
+class ClaimedMeshTests(unittest.TestCase):
+    """A re-opened edited part comes back under the modder's own mesh name, not the name the app
+    declared — the claim is what still lands it in a part collection instead of Reference."""
+
+    def test_a_lone_sessions_stray_mesh_is_claimed_for_the_missing_part(self):
+        session = {"part": "cloth1", "parts": [{"name": "cloth1", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["DonorSkirt"]), {"DonorSkirt": "cloth1"})
+
+    def test_a_part_the_glb_carries_by_name_claims_nothing(self):
+        session = {"part": "cloth1", "parts": [{"name": "cloth1", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["cloth1"]), {})
+
+    def test_two_stray_meshes_claim_nothing(self):
+        """One missing part and two candidates is a guess, and a wrong claim would ship the wrong
+        mesh under the part's name. Both stay Reference."""
+        session = {"part": "cloth1", "parts": [{"name": "cloth1", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["DonorA", "DonorB"]), {})
+
+    def test_no_session_claims_nothing(self):
+        self.assertEqual(rb.gf2_claimed_meshes({"part": None, "parts": []}, ["anything"]), {})
+
+    def test_an_open_all_session_claims_its_one_renamed_part(self):
+        session = {"part": None, "parts": [{"name": "body1", "edited": False},
+                                           {"name": "cloth1", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["body1", "DonorSkirt"]),
+                         {"DonorSkirt": "cloth1"})
+
+    def test_an_unwritable_parts_mesh_is_spoken_for_not_stray(self):
+        """The reference mesh matched its declared name, so the one stray pairs with the one missing
+        WRITABLE part — the unwritable entry neither claims nor blocks."""
+        session = {"part": None, "parts": [{"name": "face", "edited": False, "writable": False},
+                                           {"name": "hair", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["face", "DonorHair"]),
+                         {"DonorHair": "hair"})
+
+    def test_two_missing_writable_parts_claim_nothing(self):
+        session = {"part": None, "parts": [{"name": "hair", "edited": True},
+                                           {"name": "cloth1", "edited": True}]}
+        self.assertEqual(rb.gf2_claimed_meshes(session, ["DonorHair"]), {})
+
+
 class OverwriteWarningTests(unittest.TestCase):
     def test_nothing_edited_says_nothing(self):
         self.assertIsNone(rb.gf2_overwrite_warning([]))

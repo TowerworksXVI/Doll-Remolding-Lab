@@ -247,7 +247,7 @@ public class PosedSiblingBoneTests : IDisposable
             "pool (vesna_body): c_vesna01_body_lod0, c_vesna01_mate_lod0 (anchor c_vesna01_body_lod0)");
         ModBuilderTests.AssertNoDuplicateSections(ini);
         ModBuilderTests.AssertEveryReferencedFileShips(ini, r.OutDir);
-        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {Ib("sm.bundle", "c_vesna01_mate_lod0")}\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {Ib("sm.bundle", "c_vesna01_mate_lod0")}\nmatch_priority = 0\n", ini);
 
         // 3. the union carries the painted bone, and the compiled donor actually rides its slot
         var order = UnionOrder(r.OutDir, "vesna_body");

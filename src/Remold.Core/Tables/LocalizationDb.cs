@@ -29,11 +29,12 @@ public sealed class LocalizationDb
     private const int Lang_TextId = 1;   // LangPackageTable*: text-id
     private const int Lang_String = 2;   //                    localized string
 
-    /// <summary>Load one locale's text map from the Table root. <paramref name="locale"/> is the token
-    /// in the filename: <c>Enus Cn Zhtc Jajp Kokr Dede Eses Frfr Ptpt Thth Vtvi</c>.</summary>
-    public static LocalizationDb Load(string tableRoot, string locale = "Enus")
+    /// <summary>Load one locale's text map, resolved through the database's locale-folder probe like
+    /// every other table read. <paramref name="locale"/> is the token in the filename:
+    /// <c>Enus Cn Zhtc Jajp Kokr Dede Eses Frfr Ptpt Thth Vtvi</c>.</summary>
+    public static LocalizationDb Load(GameDatabase db, string locale = "Enus")
     {
-        var path = Path.Combine(tableRoot, $"LangPackageTable{locale}Data.bytes");
+        var path = db.TablePath($"LangPackageTable{locale}Data");
         var map = new Dictionary<long, string>(400_000);
         foreach (var row in TableFile.ReadRows(path))
         {

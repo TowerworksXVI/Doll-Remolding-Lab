@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Remold.Core.Migoto;
@@ -173,10 +175,11 @@ float4 Row(uint b, uint comp){
 }";
 
     public const string GroupFuseTemplate =
-@"// One wardrobe-group member's own draw, fused: recover this group's bones from the MEMBER's posed
-// vertices and rebase the rows into the anchor's draw space in the same dispatch. Exactly one variant
-// of the slot is worn and an unworn variant issues no draws, so whichever member drew last wrote these
-// rows — the draw stream is the freshness rule, and there is no per-frame flag.
+@"// One wardrobe-group member's FALLBACK dispatch, fused: recover this group's bones from the MEMBER's
+// posed vertices and rebase the rows into the anchor's draw space in the same dispatch. This variant
+// runs at the member's OWN draw — the one placement where its constants copy and its geometry are
+// same-frame by construction — and only for a lod0 sharing no sound bone with the anchor, where no
+// geometric K exists; its write order against the anchor's chain follows the frame's draw order.
 // Rows land in the group's APPENDED slot region of the CONVERTED palette, past the union and the
 // witness slots; the convert passes write only union rows, so the copy round-trip carries these
 // through untouched.
@@ -215,14 +218,16 @@ void main(uint3 tid : SV_DispatchThreadID){
 ";
 
     public const string GroupFuseWitnessTemplate =
-@"// One wardrobe-group member's own draw at a NON-lod0 tier, fused: recover this group's bones from the
-// MEMBER's posed vertices and rebase the rows into the anchor's draw space in the same dispatch.
-// K comes from GEOMETRY, not constants: tier renderers can bind vs-cb1 as a window into a shared
-// buffer that a whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and
-// the anchor pose soundly — the member's side inline here (a UAV write another thread makes is not
-// readable in the same dispatch), the anchor's read out of the raw palette slot its own recover wrote —
-// and K = inverse(M_witness_member) . M_witness_anchor. The anchor row is whatever its last recover
-// left, which is this frame's once the anchor has drawn and the previous frame's before that.
+@"// One wardrobe-group member mesh's fused recover+rebase, run from the ANCHOR's chain gated on the
+// mesh's presence latch (last frame's draw stream): recover this group's bones from the MEMBER's
+// posed vertices — a by-ref capture, current-frame at the chain — and rebase the rows into the
+// anchor's draw space in the same dispatch.
+// K comes from GEOMETRY, not constants: in the chain the member's constants copy is from its own
+// last draw (frame-mixing), and tier renderers can bind vs-cb1 as a window into a shared buffer a
+// whole-resource copy reads wrongly. Both sides recover one WITNESS bone the member and the anchor
+// pose soundly — the member's side inline here (a UAV write another thread makes is not readable in
+// the same dispatch), the anchor's read out of the raw palette row its own recover wrote earlier in
+// this same chain, this frame — and K = inverse(M_witness_member) . M_witness_anchor.
 // ROWS = 4*groupBones; BASE = the group's first appended slot.
 struct Vtx { float3 position; float3 normal; float4 tangent; };
 StructuredBuffer<Vtx>    q      : register(t0);   // the member's posed vb0, captured at this draw
@@ -290,7 +295,48 @@ void main(uint3 tid : SV_DispatchThreadID){
 }
 ";
 
+    public const string TieFillTemplate =
+@"// The tie underlay for one absent pool part. PAIR rows: a donor-ridden union row the part owns is
+// filled with its nearest ANCHOR-owned ancestor's converted row, verbatim — palette rows are combined
+// bind->posed affine maps, so a copy IS the rigid ride (the bind-relative delta cancels against the
+// ancestor's inverse bind). SEED rows (no path / no anchor-owned ancestor): identity — bind-pose
+// placement in the anchor's space. Both are needed because the converts rewrite EVERY union row: an
+// absent part's constants-K is zero (its CB was never filled) and witness-K rides an arbitrary bone,
+// so a row left to them collapses. Runs in the anchor's chains only while the part's presence latch is
+// down; the frame the part returns, its own recover overwrites these rows again.
+// Ancestor rows are read from a COPY of the converted palette, not the UAV: a typed UAV load of a
+// 4-component format does not compile on cs_5_0 (single-component 32-bit only), which is why every
+// compute in this emission reads through a StructuredBuffer and only WRITES its UAV.
+StructuredBuffer<float4> palIn  : register(t0);   // the CONVERTED palette, pre-fill
+RWBuffer<float4>         palOut : register(u1);
+static const uint PAIRS=%(P)d, SEEDS=%(S)d;
+static const uint2 PAIR[%(PT)d] = { %(PAIRLIST)s };   // x = tied union slot, y = ancestor union slot
+static const uint  SEED[%(ST)d] = { %(SEEDLIST)s };   // union slots reset to identity
+[numthreads(64,1,1)]
+void main(uint3 tid : SV_DispatchThreadID){
+    uint i=tid.x; if(i>=(PAIRS+SEEDS)*4) return;
+    uint p=i>>2, comp=i&3;
+    if(p<PAIRS){ palOut[(PAIR[p].x<<2)|comp]=palIn[(PAIR[p].y<<2)|comp]; return; }
+    palOut[(SEED[p-PAIRS]<<2)|comp]=float4(comp==0?1.0:0.0,comp==1?1.0:0.0,comp==2?1.0:0.0,comp==3?1.0:0.0);
+}
+";
+
     static string Lf(string s) => s.Replace("\r\n", "\n");
+
+    /// <summary>Stamp the tie-fill shader: ONE pool part's (tied, ancestor) union-slot pairs and its
+    /// identity-seed slots, each in ascending slot order (the derivation's own order, so rebuilds
+    /// reproduce). An empty list still stamps a one-element array — HLSL refuses zero-length — whose
+    /// count constant keeps every thread off it.</summary>
+    public static string EmitTieFill(IReadOnlyList<(uint Tied, uint Ancestor)> pairs, IReadOnlyList<uint> seeds) =>
+        Lf(TieFillTemplate)
+            .Replace("%(PAIRLIST)s", pairs.Count == 0 ? "uint2(0,0)"
+                : string.Join(", ", pairs.Select(p => $"uint2({p.Tied},{p.Ancestor})")))
+            .Replace("%(SEEDLIST)s", seeds.Count == 0 ? "0"
+                : string.Join(", ", seeds.Select(s => s.ToString())))
+            .Replace("%(PT)d", Math.Max(1, pairs.Count).ToString())
+            .Replace("%(ST)d", Math.Max(1, seeds.Count).ToString())
+            .Replace("%(P)d", pairs.Count.ToString())
+            .Replace("%(S)d", seeds.Count.ToString());
 
     /// <summary>Stamp the SLIM recover shader: dispatch rows ROWS. Per-bone anchor widths are data (the
     /// Off buffer), not compile-time constants.</summary>

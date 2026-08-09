@@ -189,10 +189,10 @@ public class MigotoEmitterGoldenTests : IDisposable
         // tier 1 outside, tier 2 inside — either one switches the Replace off
         Assert.Contains("if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nhandling = skip\n", ini);
         // an unkeyed hide still gates on the mod's key alone
-        Assert.Contains("hash = cccc3333\nif $zz_key_f6 == 1\nhandling = skip\nendif\n", ini);
-        Assert.Contains("hash = dddd4444\nif $zz_key_f6 == 1\nif $zz_key_f9 == 1\nhandling = skip\nendif\nendif\n", ini);
+        Assert.Contains("hash = cccc3333\nmatch_priority = 0\nif $zz_key_f6 == 1\nhandling = skip\nendif\n", ini);
+        Assert.Contains("hash = dddd4444\nmatch_priority = 0\nif $zz_key_f6 == 1\nif $zz_key_f9 == 1\nhandling = skip\nendif\nendif\n", ini);
         // captures are NOT gated: a pipeline switched back on mid-frame must have posed data to recover from
-        Assert.Contains("hash = aaaa1111\nResource_alpha_Posed = ref vb0\n", ini);
+        Assert.Contains("hash = aaaa1111\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\n", ini);
     }
 
     /// <summary>An overlay build with every retexture shape at once: a plain rebind, a keyed draw-scoped
@@ -279,7 +279,8 @@ public class MigotoEmitterGoldenTests : IDisposable
             "combined_bind_swap.buf", "combined_ib_swap.buf", "combined_skin_swap.buf", "combined_vb1_swap.buf",
             "convert_cs_swap.hlsl", "mod.ini", "neutral_n.dds", "neutral_rmo.dds",
             "owner_part_swap.buf", "palette_seed_swap.buf", "recover_alpha_cs.hlsl", "recover_beta_cs.hlsl",
-            "skin_cs_swap.hlsl", "sub1_n.dds", "sub1_r.dds", "sub1.dds", "union_swap.json",
+            "skin_cs_swap.hlsl", "sub1_n.dds", "sub1_r.dds", "sub1.dds", "tiefill_alpha_swap.hlsl",
+            "union_swap.json",
         }, files);
     }
 }

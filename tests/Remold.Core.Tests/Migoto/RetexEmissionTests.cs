@@ -52,8 +52,7 @@ public class RetexEmissionTests : IDisposable
         Assert.Contains(
             "[TextureOverride_Retex_ilse_face_a]\n"
             + $"hash = {hash}\n"
-            + $"filter_index = {tag}\n"
-            + "match_priority = 100\n"
+            + $"filter_index = {tag}\nmatch_priority = 100\n"
             + "$zz_tw_aaaa1111 = 1\n"
             + "this = Resource_Rtx0\n", ini);
         Assert.DoesNotContain($"[TextureOverride_TwinTag_{hash}]", ini);
@@ -77,7 +76,7 @@ public class RetexEmissionTests : IDisposable
             + "filename = face_a.dds\n"
             + "\n"
             + "[TextureOverride_Retex_ilse_face_a]\n"
-            + "hash = 3ff9db6d\n"
+            + "hash = 3ff9db6d\nmatch_priority = 0\n"
             + "this = Resource_Rtx0\n",
             ini);
         // the bind-time swap needs no pass knowledge at all
@@ -101,9 +100,9 @@ public class RetexEmissionTests : IDisposable
         });
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
-        Assert.Contains("[TextureOverride_Retex_body_a]\nhash = aaaa0001\nthis = Resource_Rtx0\n", ini);
-        Assert.Contains("[TextureOverride_Retex_body_n]\nhash = aaaa0002\nthis = Resource_Rtx1\n", ini);
-        Assert.Contains("[TextureOverride_Retex_body_r]\nhash = aaaa0003\nthis = Resource_Rtx2\n", ini);
+        Assert.Contains("[TextureOverride_Retex_body_a]\nhash = aaaa0001\nmatch_priority = 0\nthis = Resource_Rtx0\n", ini);
+        Assert.Contains("[TextureOverride_Retex_body_n]\nhash = aaaa0002\nmatch_priority = 0\nthis = Resource_Rtx1\n", ini);
+        Assert.Contains("[TextureOverride_Retex_body_r]\nhash = aaaa0003\nmatch_priority = 0\nthis = Resource_Rtx2\n", ini);
     }
 
     [Fact]
@@ -119,8 +118,8 @@ public class RetexEmissionTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
         Assert.Equal(1, CountOf(ini, "filename = shared.dds"));
-        Assert.Contains("[TextureOverride_Retex_one]\nhash = aaaa0001\nthis = Resource_Rtx0\n", ini);
-        Assert.Contains("[TextureOverride_Retex_two]\nhash = aaaa0002\nthis = Resource_Rtx0\n", ini);
+        Assert.Contains("[TextureOverride_Retex_one]\nhash = aaaa0001\nmatch_priority = 0\nthis = Resource_Rtx0\n", ini);
+        Assert.Contains("[TextureOverride_Retex_two]\nhash = aaaa0002\nmatch_priority = 0\nthis = Resource_Rtx0\n", ini);
     }
 
     [Fact]
@@ -163,7 +162,7 @@ public class RetexEmissionTests : IDisposable
         string golden = File.ReadAllText(Path.Combine(
             Path.GetDirectoryName(GoldenSelfPath())!, "golden", "mod.ini"));
         Assert.StartsWith(golden, ini);
-        Assert.Contains("[TextureOverride_Retex_face_a]\nhash = ffff0000\n", ini);
+        Assert.Contains("[TextureOverride_Retex_face_a]\nhash = ffff0000\nmatch_priority = 0\n", ini);
     }
 
     private static string GoldenSelfPath([System.Runtime.CompilerServices.CallerFilePath] string self = "") => self;

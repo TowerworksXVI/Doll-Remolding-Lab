@@ -9,9 +9,10 @@ namespace Remold.Core.Tests.Migoto;
 
 /// <summary>
 /// The wardrobe-group runtime: a bone no pool part poses takes an APPENDED palette slot past the union and
-/// the witness block, written at the drawing member's own dispatch rather than in the anchor's chain. Pins
-/// where the slots land, what the fused sections and shaders say, how the donor's compiled indices are moved
-/// onto them, and that a request carrying no group emits exactly what it emitted before.
+/// the witness block, written by fused member dispatches run from the anchor's chains behind each mesh's
+/// presence latch (an at-draw constants fallback survives for a lod0 sharing no sound bone with the
+/// anchor). Pins where the slots land, what the fused sections and shaders say, how the donor's compiled
+/// indices are moved onto them, and that a request carrying no group emits exactly what it emitted before.
 /// </summary>
 public class GroupEmissionTests : IDisposable
 {
@@ -255,29 +256,34 @@ public class GroupEmissionTests : IDisposable
 
     // ---- the member sections --------------------------------------------------------------------------
 
-    /// <summary>A member's lod0 rebases from draw CONSTANTS: its own vs-cb1, copied at its own draw, against
-    /// the anchor's captured one.</summary>
+    /// <summary>A member's lod0 rebases from WITNESS GEOMETRY, like its tiers: its dispatch runs in the
+    /// anchor's chain, where its own constants copy would be from its last draw — pairing that with a
+    /// current-frame posed ref would mix frames. The capture takes no constants and carries the presence
+    /// sighting instead.</summary>
     [Fact]
-    public void A_member_lod0_section_rebases_from_the_two_constant_buffers()
+    public void A_member_lod0_section_rebases_from_witness_geometry()
     {
         Build(Fixture(out string outDir, out _));
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         ModBuilderTests.AssertNoDuplicateSections(ini);
 
-        Assert.Contains("[TextureOverride_Cap_mv1]\nhash = aaaa0011\n"
-                      + "Resource_mv1_Posed = ref vb0\nResource_mv1_CB = copy vs-cb1\n", ini);
+        Assert.Contains("[TextureOverride_Cap_mv1]\nhash = aaaa0011\nmatch_priority = 0\n"
+                      + "Resource_mv1_Posed = ref vb0\n$zz_seen_src_mv1 = 1\n", ini);
+        string cap = Section(ini, "[TextureOverride_Cap_mv1]");
+        Assert.DoesNotContain("copy vs-cb1", cap);
         string sec = Section(ini, "[CustomShaderGroup_mv1_swap]");
         Assert.Contains("cs-u1 = copy Resource_PaletteConv_swap\n", sec);
         Assert.Contains("cs-t2 = Resource_mv1_GMap_swap\n", sec);
-        Assert.Contains("cs-cb5 = Resource_mv1_CB\n", sec);
-        Assert.Contains("cs-cb13 = Resource_beta_CB\n", sec);
+        Assert.Contains("cs-t5 = copy Resource_Palette_swap\n", sec);
         Assert.Contains("Resource_PaletteConv_swap = copy cs-u1\n", sec);
-        Assert.DoesNotContain("cs-t5", sec);
+        Assert.DoesNotContain("cs-cb", sec);
 
+        // witness = C, the bone mv1 and the anchor both pose soundly: mv1's local 0, union row 2
         string shader = File.ReadAllText(Path.Combine(outDir, "grpfuse_mv1_swap.hlsl"));
-        Assert.Contains("cbuffer MemberCB : register(b5)", shader);
-        Assert.Contains("cbuffer AnchorCB : register(b13)", shader);
-        Assert.DoesNotContain("palRaw", shader);
+        Assert.Contains("StructuredBuffer<float4> palRaw : register(t5);", shader);
+        Assert.Contains("static const uint WITM=0;", shader);
+        Assert.Contains("static const uint WITA=8;", shader);
+        Assert.DoesNotContain("cbuffer MemberCB", shader);
     }
 
     /// <summary>A member's TIER rebases from geometry instead: constants at a tier draw can be a window into
@@ -290,7 +296,7 @@ public class GroupEmissionTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
         // the tier capture takes no constant buffer at all
-        Assert.Contains("[TextureOverride_Cap_mv1_lod1]\nhash = aaaa0012\nResource_mv1_lod1_Posed = ref vb0\n", ini);
+        Assert.Contains("[TextureOverride_Cap_mv1_lod1]\nhash = aaaa0012\nmatch_priority = 0\nResource_mv1_lod1_Posed = ref vb0\n", ini);
         string cap = Section(ini, "[TextureOverride_Cap_mv1_lod1]");
         Assert.DoesNotContain("copy vs-cb1", cap);
 
@@ -304,19 +310,32 @@ public class GroupEmissionTests : IDisposable
         Assert.Contains("static const uint WITA=", shader);
     }
 
-    /// <summary>No bone the member and the anchor both pose soundly means no trustworthy K at a tier draw,
-    /// and production's own posture is to emit nothing rather than a guess. The member's lod0 still
-    /// writes.</summary>
+    /// <summary>No bone the member and the anchor both pose soundly means no geometric K anywhere: the
+    /// tiers emit nothing rather than a guess, and the lod0 falls back to the AT-DRAW constants dispatch —
+    /// the one placement where its constants copy and its geometry are same-frame — named in the build log
+    /// as riding the frame's draw order.</summary>
     [Fact]
-    public void A_member_sharing_no_sound_bone_with_the_anchor_emits_no_tier_section()
+    public void A_member_sharing_no_sound_bone_with_the_anchor_falls_back_to_its_own_draw()
     {
         var result = Build(Fixture(out string outDir, out _, m1Bones: new[] { G, G2 }));
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
         Assert.DoesNotContain("[CustomShaderGroup_mv1_lod1_swap]", ini);
         Assert.False(File.Exists(Path.Combine(outDir, "grpfuse_mv1_lod1_swap.hlsl")));
-        Assert.Contains("[CustomShaderGroup_mv1_swap]", ini);        // lod0 is untouched by the verdict
         Assert.Contains(result.Diagnostics, d => d.Contains("mv1") && d.Contains("no sound bone"));
+
+        // the lod0 keeps the capability at its own draw: constants capture, sticky CB wait, no latch
+        string cap = Section(ini, "[TextureOverride_Cap_mv1]");
+        Assert.Contains("Resource_mv1_CB = copy vs-cb1\n", cap);
+        Assert.Contains("if $zz_grp_cb_swap == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n", cap);
+        Assert.DoesNotContain("zz_seen_src_mv1", cap);
+        Assert.Contains("global $zz_grp_cb_swap = 0\n", ini);
+        string sec = Section(ini, "[CustomShaderGroup_mv1_swap]");
+        Assert.Contains("cs-cb5 = Resource_mv1_CB\n", sec);
+        Assert.Contains("cs-cb13 = Resource_beta_CB\n", sec);
+        Assert.Contains(result.Diagnostics, d => d.Contains("mv1") && d.Contains("draw order"));
+        // …while mv2, which shares C with the anchor, runs from the chain like any witnessed member
+        Assert.Contains("if $zz_gate_src_mv2 == 1\nrun = CustomShaderGroup_mv2_swap\nendif\n", ini);
     }
 
     /// <summary>A group bone the member's mesh cannot recover is dropped from that member's map rather than
@@ -378,13 +397,16 @@ public class GroupEmissionTests : IDisposable
         Assert.Equal(1u, BitConverter.ToUInt32(map, 0));   // G is mv1's second bone
     }
 
-    /// <summary>The witness K reads the ANCHOR's own recovery of the shared bone. Where another pool part
-    /// owns that bone's union row, the anchor's recovery has nowhere to land, so a slot past the group
-    /// region is reserved for it and the anchor's scatter map is patched onto it.</summary>
+    /// <summary>The witness K reads the ANCHOR's own recovery of the shared bone — which anchor-preferred
+    /// ownership guarantees lands in the bone's union row: witness selection requires the bone sound in the
+    /// anchor's lod0 operator, and that is exactly the verdict ownership preference takes. So no slot is
+    /// reserved past the group region even when another part outweighs the anchor on the bone (the
+    /// reservation branch survives in the emitter as a data-driven guard only).</summary>
     [Fact]
-    public void An_anchor_that_does_not_own_the_witness_bone_reserves_a_slot_for_its_recovery()
+    public void A_witness_bone_another_part_outweighs_is_still_anchor_owned_with_no_reserved_slot()
     {
-        // alpha carries C alone and outweighs the anchor on it, so C's union row is alpha's
+        // alpha carries C alone and outweighs the anchor on it — under weight-argmax alone C would be
+        // alpha's, and the anchor's witness recovery would need a reserved slot
         string ad = Dump("alpha", 1, 48, new[] { C });
         string bd = Dump("beta", 2, 32, new[] { B, C });
         string m1 = Dump("mv1", 4, 32, new[] { C, G });
@@ -424,55 +446,63 @@ public class GroupEmissionTests : IDisposable
             },
         });
 
-        // union 2 (C, B) + 1 group slot + 1 reserved for the anchor's witness recovery
+        // union 2 (C, B) + alpha's LOD0 part-side witness + 1 group slot — NO slot is reserved for
+        // the anchor side of either witness; both read C from the anchor-owned union row
         Assert.Equal(4 * 64, new FileInfo(Path.Combine(outDir, "palette_seed_swap.buf")).Length);
-        // …and the tier shader reads that slot's first row
-        Assert.Contains("static const uint WITA=12;",
+        // …and the tier shader reads the witness bone's own union row (C is union slot 0)
+        Assert.Contains("static const uint WITA=0;",
             File.ReadAllText(Path.Combine(outDir, "grpfuse_mv1_lod1_swap.hlsl")));
-        // the anchor's own scatter map now sends C's rows there
+        // the anchor owns C: its scatter sends C to the union row, while alpha's recovery of C is retained
+        // only in the reserved part-side witness slot used by the LOD0 conversion
         var betaMap = File.ReadAllBytes(Path.Combine(outDir, "beta_map_swap.buf"));
-        Assert.Contains(3u, Enumerable.Range(0, betaMap.Length / 4)
-            .Select(i => BitConverter.ToUInt32(betaMap, i * 4)));
+        Assert.Equal(new[] { 1u, 0u }, Enumerable.Range(0, betaMap.Length / 4)
+            .Select(i => BitConverter.ToUInt32(betaMap, i * 4)).ToArray());
+        var alphaMap = File.ReadAllBytes(Path.Combine(outDir, "alpha_map_swap.buf"));
+        Assert.Equal(2u, BitConverter.ToUInt32(alphaMap, 0));
     }
 
-    // ---- the first-frame guard ------------------------------------------------------------------------
+    // ---- the presence latch ---------------------------------------------------------------------------
 
-    /// <summary>Every member run-line waits on the state its own dispatch reads — a lod0 on the anchor's
-    /// captured CONSTANTS, a tier on the anchor having drawn at all — and both flags are sticky: [Present]
-    /// clears the per-frame chain flags and leaves these two alone.</summary>
+    /// <summary>Every member dispatch runs from the anchor's chains, between the convert and the skin,
+    /// gated on its own mesh's presence latch: the capture sights, [Present] commits, the chain tests LAST
+    /// frame's verdict — one value for the whole frame, indifferent to where the member's draw falls in it.
+    /// No sticky group flags exist when every member is witnessed: the chain runs at the anchor's draw,
+    /// which is all the proof the old flags carried.</summary>
     [Fact]
-    public void Every_member_run_line_waits_on_the_anchors_first_capture()
+    public void Every_member_dispatch_runs_from_the_chains_behind_its_latch()
     {
         Build(Fixture(out string outDir, out _));
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
-        Assert.Contains("global $zz_grp_cb_swap = 0\n", ini);
-        Assert.Contains("global $zz_grp_seen_swap = 0\n", ini);
-        // both set where the anchor's constants land, not in the chain that runs after them
-        Assert.Contains("Resource_beta_CB = copy vs-cb1\n$zz_grp_cb_swap = 1\n$zz_grp_seen_swap = 1\n", ini);
+        foreach (var m in new[] { "mv1", "mv1_lod1", "mv2" })
+        {
+            Assert.Contains($"global $zz_gate_src_{m} = 0\nglobal $zz_seen_src_{m} = 0\n", ini);
+            Assert.Contains($"$zz_gate_src_{m} = $zz_seen_src_{m}\n$zz_seen_src_{m} = 0\n",
+                Section(ini, "[Present]"));
+        }
+        Assert.DoesNotContain("zz_grp_cb", ini);
+        Assert.DoesNotContain("zz_grp_seen", ini);
 
-        string present = Section(ini, "[Present]");
-        Assert.Contains("$zz_done_swap = 0\n", present);
-        Assert.DoesNotContain("zz_grp_seen", present);
-        Assert.DoesNotContain("zz_grp_cb", present);
-
+        // the anchor's chain dispatches the members after the convert, before the skin that reads the
+        // rows (the fixture's one tier is alpha's, so the lod0 chain is the only chain; the anchor-tier
+        // fixture below pins the tier chain's copy). A member TIER defers to its member's live lod0 —
+        // both can latch in one frame, and the decimated recovery must not write last.
+        string memberBlock = "if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n"
+                           + "if $zz_gate_src_mv1_lod1 == 1\nif $zz_gate_src_mv1 == 0\n"
+                           + "run = CustomShaderGroup_mv1_lod1_swap\nendif\nendif\n"
+                           + "if $zz_gate_src_mv2 == 1\nrun = CustomShaderGroup_mv2_swap\nendif\n"
+                           + "if $zz_gate_src_alpha == 0\nrun = CustomShaderTie_alpha_swap\nendif\n"
+                           + "run = CustomShaderSkin_swap\n";
+        Assert.Contains("run = CustomShaderConvertW_swap\n" + memberBlock, ini);
         var lines = ini.Split('\n');
-        for (int i = 0; i < lines.Length; i++)
-            if (lines[i].StartsWith("run = CustomShaderGroup_", StringComparison.Ordinal))
-            {
-                bool tier = lines[i].Contains("_lod1_", StringComparison.Ordinal);
-                Assert.Equal(tier ? "if $zz_grp_seen_swap == 1" : "if $zz_grp_cb_swap == 1", lines[i - 1]);
-                Assert.Equal("endif", lines[i + 1]);
-            }
         Assert.Equal(3, lines.Count(l => l.StartsWith("run = CustomShaderGroup_", StringComparison.Ordinal)));
     }
 
-    /// <summary>The two waits are two preconditions, and an anchor that renders only at tier detail meets
-    /// exactly one of them: its tier capture proves it drew (which fills the witness rows a member TIER
-    /// rebases through) and copies no constants (which is all a member LOD0 rebase has). A session that
-    /// conflated them left every member dispatch dead until the anchor's first lod0 draw.</summary>
+    /// <summary>An anchor rendering only at tier detail still writes the group rows: its tier chain
+    /// carries the same gated member dispatches its lod0 chain does, after the witness convert. With every
+    /// member witnessed, no sticky group flag exists anywhere — the chain running IS the anchor's draw.</summary>
     [Fact]
-    public void An_anchor_tier_capture_reports_the_anchor_seen_but_not_its_constants()
+    public void An_anchor_tier_chain_dispatches_the_members_too()
     {
         string ad = Dump("alpha", 1, 32, new[] { A, B });
         string bd = Dump("beta", 2, 32, new[] { B, C });
@@ -518,25 +548,28 @@ public class GroupEmissionTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         ModBuilderTests.AssertNoDuplicateSections(ini);
+        Assert.DoesNotContain("zz_grp_cb", ini);
+        Assert.DoesNotContain("zz_grp_seen", ini);
 
-        string lod0Cap = Section(ini, "[TextureOverride_Cap_beta]");
-        Assert.Contains("$zz_grp_cb_swap = 1\n", lod0Cap);
-        Assert.Contains("$zz_grp_seen_swap = 1\n", lod0Cap);
-
-        string tierCap = Section(ini, "[TextureOverride_Cap_beta_lod1]");
-        Assert.Contains("$zz_grp_seen_swap = 1\n", tierCap);
-        Assert.DoesNotContain("zz_grp_cb", tierCap);
-        Assert.DoesNotContain("copy vs-cb1", tierCap);
-
-        Assert.Contains("if $zz_grp_cb_swap == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n",
-            Section(ini, "[TextureOverride_Cap_mv1]"));
-        Assert.Contains("if $zz_grp_seen_swap == 1\nrun = CustomShaderGroup_mv1_lod1_swap\nendif\n",
-            Section(ini, "[TextureOverride_Cap_mv1_lod1]"));
+        string memberBlock = "if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n"
+                           + "if $zz_gate_src_mv1_lod1 == 1\nif $zz_gate_src_mv1 == 0\n"
+                           + "run = CustomShaderGroup_mv1_lod1_swap\nendif\nendif\n"
+                           + "if $zz_gate_src_alpha == 0\nrun = CustomShaderTie_alpha_swap\nendif\n"
+                           + "run = CustomShaderSkin_swap\n";
+        Assert.Contains("run = CustomShaderConvertW_swap\n" + memberBlock,
+            Section(ini, "[TextureOverride_Cap_beta]"));
+        Assert.Contains("run = CustomShaderConvertW_swap\n" + memberBlock,
+            Section(ini, "[TextureOverride_Cap_beta_lod1]"));
+        // the member sections themselves run nothing — they capture and sight
+        Assert.DoesNotContain("run = ", Section(ini, "[TextureOverride_Cap_mv1]"));
+        Assert.Contains("$zz_seen_src_mv1_lod1 = 1\n", Section(ini, "[TextureOverride_Cap_mv1_lod1]"));
     }
 
-    /// <summary>A member dispatch is a dispatch: it sits inside the pipeline's draw gate exactly as the pool
-    /// chains do, so the mod's stated "off dispatches nothing" holds. The sticky wait stays INSIDE the gate —
-    /// the gate is about the key, the wait about state the dispatch reads.</summary>
+    /// <summary>A member dispatch is a dispatch: it runs inside the chain, and the chain sits inside the
+    /// pipeline's draw gate, so the mod's stated "off dispatches nothing" holds. The latch stays INSIDE
+    /// the gate — the gate is about the key, the latch about what drew last frame. Sightings stay
+    /// UNGATED, like every latch sighting: a member silenced while the key was off must read as worn the
+    /// frame it comes back on.</summary>
     [Fact]
     public void Member_dispatches_sit_inside_the_pipelines_draw_gate()
     {
@@ -544,20 +577,12 @@ public class GroupEmissionTests : IDisposable
         Build(req with { Pipelines = new[] { req.Pipelines[0] with { ToggleKey = "F8" } } });
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
-        Assert.Contains("if $zz_key_f8 == 1\nif $zz_grp_cb_swap == 1\n"
-                      + "run = CustomShaderGroup_mv1_swap\nendif\nendif\n", ini);
-        Assert.Contains("if $zz_key_f8 == 1\nif $zz_grp_seen_swap == 1\n"
-                      + "run = CustomShaderGroup_mv1_lod1_swap\nendif\nendif\n", ini);
-
-        var lines = ini.Split('\n');
-        int dispatches = 0;
-        for (int i = 0; i < lines.Length; i++)
-            if (lines[i].StartsWith("run = CustomShaderGroup_", StringComparison.Ordinal))
-            {
-                Assert.Equal("if $zz_key_f8 == 1", lines[i - 2]);
-                dispatches++;
-            }
-        Assert.Equal(3, dispatches);
+        // the whole chain — members included — opens behind the key
+        Assert.Contains("if $zz_key_f8 == 1\nif $zz_done_swap == 0\n", ini);
+        Assert.Contains("if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n", ini);
+        // the sighting is a bare capture line, not under the key
+        Assert.Contains("Resource_mv1_Posed = ref vb0\n$zz_seen_src_mv1 = 1\n", ini);
+        Assert.DoesNotContain("if $zz_key_f8 == 1\n$zz_seen_src_mv1 = 1", ini);
     }
 
     // ---- the capture-section merge --------------------------------------------------------------------
@@ -620,7 +645,10 @@ public class GroupEmissionTests : IDisposable
         string cap = Section(ini, "[TextureOverride_Cap_mv1]");
         Assert.Equal(1, cap.Split("Resource_mv1_Posed = ref vb0\n").Length - 1);   // captured once
         Assert.Contains("handling = skip\n", cap);                                  // the pooling pipeline's
-        Assert.Contains("run = CustomShaderGroup_mv1_swap\n", cap);                 // the member's, unsuppressed
+        Assert.Contains("$zz_seen_src_mv1 = 1\n", cap);                             // the member's sighting
+        // the member's dispatch lives in the group pipeline's chain, gated on that latch
+        Assert.Contains("if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n",
+            Section(ini, "[TextureOverride_Cap_beta]"));
     }
 
     /// <summary>A member the build also HIDES keeps its suppression: the hide pass leaves a hash a pipeline
@@ -651,7 +679,10 @@ public class GroupEmissionTests : IDisposable
         ModBuilderTests.AssertNoDuplicateSections(ini);
         string hidden = Section(ini, "[TextureOverride_Cap_mv1]");
         Assert.Contains("handling = skip\n", hidden);
-        Assert.Contains("run = CustomShaderGroup_mv1_swap\n", hidden);
+        // the skip stops the game's draw, not the override: the capture and the sighting still run at the
+        // suppressed draw, so the chain still dispatches the hidden member's rebase
+        Assert.Contains("$zz_seen_src_mv1 = 1\n", hidden);
+        Assert.Contains("if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n", ini);
         // the other variant's member is untouched: nothing hides it
         Assert.DoesNotContain("handling = skip\n", Section(ini, "[TextureOverride_Cap_mv2]"));
     }
@@ -756,22 +787,24 @@ public class GroupEmissionTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         ModBuilderTests.AssertNoDuplicateSections(ini);
 
-        // both arms capture at their own hashes, exactly as two variants of a slot do
-        Assert.Contains("[TextureOverride_Cap_cloth_Fight]\nhash = aaaa0011\n"
-                      + "Resource_cloth_Fight_Posed = ref vb0\nResource_cloth_Fight_CB = copy vs-cb1\n", ini);
-        Assert.Contains("[TextureOverride_Cap_cloth_Dorm]\nhash = bbbb0011\n"
-                      + "Resource_cloth_Dorm_Posed = ref vb0\nResource_cloth_Dorm_CB = copy vs-cb1\n", ini);
+        // both arms capture at their own hashes and sight their latches, exactly as two variants of a
+        // slot do
+        Assert.Contains("[TextureOverride_Cap_cloth_Fight]\nhash = aaaa0011\nmatch_priority = 0\n"
+                      + "Resource_cloth_Fight_Posed = ref vb0\n$zz_seen_src_cloth_Fight = 1\n", ini);
+        Assert.Contains("[TextureOverride_Cap_cloth_Dorm]\nhash = bbbb0011\nmatch_priority = 0\n"
+                      + "Resource_cloth_Dorm_Posed = ref vb0\n$zz_seen_src_cloth_Dorm = 1\n", ini);
 
-        // one fused shader per member, rebasing from the two constant buffers
+        // one fused shader per member, rebasing from witness geometry in the anchor's chain
         foreach (var arm in new[] { "cloth_Fight", "cloth_Dorm" })
         {
             string sec = Section(ini, $"[CustomShaderGroup_{arm}_swap]");
             Assert.Contains($"cs-t2 = Resource_{arm}_GMap_swap\n", sec);
-            Assert.Contains($"cs-cb5 = Resource_{arm}_CB\n", sec);
-            Assert.Contains("cs-cb13 = Resource_beta_CB\n", sec);
+            Assert.Contains("cs-t5 = copy Resource_Palette_swap\n", sec);
+            Assert.DoesNotContain("cs-cb", sec);
+            Assert.Contains($"if $zz_gate_src_{arm} == 1\nrun = CustomShaderGroup_{arm}_swap\nendif\n", ini);
 
             string shader = File.ReadAllText(Path.Combine(outDir, $"grpfuse_{arm}_swap.hlsl"));
-            Assert.Contains("cbuffer MemberCB : register(b5)", shader);
+            Assert.Contains("StructuredBuffer<float4> palRaw : register(t5);", shader);
             // one group, one bone: both arms write the same appended slot, past union + witness
             Assert.Contains("ROWS=4, BASE=4;", shader);
         }
