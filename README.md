@@ -40,7 +40,7 @@ Press the "Build" button, and the Lab will assemble a working 3DMigoto mod for y
 
 ## Requirements
 
-- Windows 10 or 11, x64.
+- Windows 10 (22H2) or 11, x64.
 - **Girls' Frontline 2: Exilium**, with game files downloaded (launched to main menu at least once).
 - A GFL2-configured 3DMigoto loader, installed separately. Recommended: [DollMI](https://github.com/TowerworksXVI/DollMI), this app's companion mod manager. Two third-party loaders are also validated: the [3Dmigoto Mod Loader](https://www.nexusmods.com/girlsfrontline2exilium/mods/4) on Nexus, and [SSMT4](https://github.com/StarBobis/SSMT4-Alpha).
 - **Blender**, for mesh editing only. Any Blender 4.x or 5.x works, validated on 4.3 and 5.1.
