@@ -532,6 +532,23 @@ public static class ModBuilder
             string? OpKey(string bundleId, string meshName, long pathId) =>
                 env.CatalogVersion is { } cv ? $"{cv}|{bundleId}|{meshName}|{pathId}" : null;
 
+            // A replaced mesh's vanilla draw shapes: the (firstIndex, indexCount) of each submesh draw
+            // the game issues, plus the full index count — what the emitter's per-submesh draw sections
+            // match on. Parses the mesh out of its bundle; memoized like IbHash for the same reason.
+            var drawShapes = new Dictionary<string, DrawShapeSet>(StringComparer.Ordinal);
+            DrawShapeSet ShapesOf(string bundleId, string meshName, long pathId)
+            {
+                string key = $"{bundleId}|{meshName}|{pathId}";
+                if (drawShapes.TryGetValue(key, out var have)) return have;
+                var raw = Mesh.MeshRaw.From(
+                    reader.GetMeshField(Bundle(bundleId, $"mesh '{meshName}'"), meshName, pathId)
+                    ?? throw new InvalidDataException($"mesh '{meshName}' not found in '{bundleId}'"));
+                int step = raw.IndexFormat == 0 ? 2 : 4;
+                return drawShapes[key] = new DrawShapeSet(
+                    raw.Submeshes.Select(s => new DrawShape((int)(s.FirstByte / step), (int)s.IndexCount)).ToList(),
+                    raw.Index.Length / step);
+            }
+
             // ---- draw-signature keys ---------------------------------------------------------------
             // Sections act by hash, and one subject can ship two DIFFERENT meshes on one index-buffer
             // hash (wardrobe remodels reuse a garment's topology), so a section on that hash fires on
@@ -1477,12 +1494,17 @@ public static class ModBuilder
                 var pipelineHashes = new HashSet<string>(StringComparer.Ordinal);   // THIS pipeline's captures (signature keys)
                 var pipelineIbs = new HashSet<string>(StringComparer.Ordinal);      // the same meshes' ib hashes, for the sharing index
                 foreach (var s in pool.Pool) poolSlotNames.Add(s);
+                DrawShapeSet? anchorShapes = null;
                 foreach (var slotName in pool.Pool)
                 {
                     var p = partBySlot[slotName];
                     string partName = PartName(model.Character, p.Token);
                     var (name, bid, pid) = Tiers(p)[0];
                     var sig = SigOf(model, bid, name, pid);
+                    // the anchor hosts the donor draw, so its vanilla submesh shapes are what the
+                    // emitter's per-submesh draw routing matches on
+                    if (string.Equals(slotName, pool.Anchor, StringComparison.OrdinalIgnoreCase))
+                        anchorShapes = ShapesOf(bid, name, pid);
                     // A recovery source must be capturable alone: on a shared signature the capture
                     // holds whichever mesh drew last, and the palette rows this part owns would be
                     // recovered against the wrong rest geometry. A guard on the part's own textures
@@ -1606,8 +1628,12 @@ public static class ModBuilder
                             warnings.Add($"tier '{name}' can't serve the swap ({ex.Message}). Its vanilla draw is left running");
                             continue;
                         }
+                        // anchor tiers host the donor draw at their own detail level, so they carry their
+                        // mesh's own vanilla shapes for the same per-submesh routing as the anchor's lod0
                         poolTiers.Add(new PoolTier(partName, tierName, Remold.Core.Model.MeshName.Lod(name), dumpDir, h,
-                            OpKey(bid, name, pid)));
+                            OpKey(bid, name, pid),
+                            string.Equals(slotName, pool.Anchor, StringComparison.OrdinalIgnoreCase)
+                                ? ShapesOf(bid, name, pid) : null));
                         allCaptureHashes.Add(h);
                         // recorded only now: a tier that degraded to a warning above leaves no guard and no
                         // tag section behind it
@@ -1780,6 +1806,7 @@ public static class ModBuilder
                     PresenceHashes = presenceExtras.Count > 0
                         ? presenceExtras.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value)
                         : null,
+                    AnchorShapes = anchorShapes,
                 });
             }
 
@@ -1830,12 +1857,21 @@ public static class ModBuilder
                 var tierHashes = new List<string>();
                 var rigidIbs = new HashSet<string>(StringComparer.Ordinal) { ownSig.Ib };
                 var claimed = new HashSet<string>(StringComparer.Ordinal) { ownHash };
+                // each owned hash's vanilla shapes, for the emitter's per-submesh draw routing
+                var rigidShapes = new Dictionary<string, DrawShapeSet>(StringComparer.Ordinal)
+                {
+                    [ownHash] = ShapesOf(bid, name, pid),
+                };
                 foreach (var (tName, tBid, tPid) in Tiers(part).Skip(1))
                 {
                     if (Remold.Core.Model.MeshName.IsUnrenderedTier(tName)) continue;
                     var tierSig = SigOf(model, tBid, tName, tPid);
                     rigidIbs.Add(tierSig.Ib);
-                    if (claimed.Add(tierSig.Key)) tierHashes.Add(tierSig.Key);   // a key already claimed is the same mesh
+                    if (claimed.Add(tierSig.Key))
+                    {
+                        tierHashes.Add(tierSig.Key);   // a key already claimed is the same mesh
+                        rigidShapes[tierSig.Key] = ShapesOf(tBid, tName, tPid);
+                    }
                 }
                 foreach (var h in claimed) allCaptureHashes.Add(h);   // the hide pass leaves these sections alone
 
@@ -1867,6 +1903,7 @@ public static class ModBuilder
                     ToggleKey = ChangeKey(edit),
                     HideWhenOff = HidesWhenOff(edit),
                     Latch = rigidLatch,
+                    ShapesByHash = rigidShapes,
                 });
             }
 

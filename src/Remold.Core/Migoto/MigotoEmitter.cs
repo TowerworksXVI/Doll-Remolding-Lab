@@ -116,6 +116,12 @@ public sealed record ReplacePipeline
     /// part's latch must still see those draws, or the tie underlay would fire — a rigid ride — while
     /// the part is visibly on screen articulating.</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes { get; init; }
+
+    /// <summary>The ANCHOR part's vanilla lod0 draw-shape set. With two or more submeshes, the donor's
+    /// draw is routed per submesh: donor range k draws only at the vanilla draw matching submesh k's
+    /// shape, so each range renders under its own material's bound state instead of every range drawing
+    /// at every material's draw. Null (or a single submesh) keeps the draw in the capture section.</summary>
+    public DrawShapeSet? AnchorShapes { get; init; }
 }
 
 /// <summary>The coverage group as a build carries it: its id (<see cref="PoolDerive.CoverageGroupId"/>),
@@ -204,6 +210,11 @@ public sealed record RigidReplace
     /// <summary>Every ib hash this replacement owns a section for.</summary>
     public IEnumerable<string> Hashes =>
         new[] { Hash }.Concat(TierHashes ?? Array.Empty<string>());
+
+    /// <summary>Vanilla draw-shape sets per owned hash (<see cref="Hash"/> and tiers). A hash with a
+    /// multi-submesh set routes the donor draw per submesh, as <see cref="ReplacePipeline.AnchorShapes"/>
+    /// does for a pooled draw; a hash with no entry (or one submesh) keeps the draw in its section.</summary>
+    public IReadOnlyDictionary<string, DrawShapeSet>? ShapesByHash { get; init; }
 }
 
 /// <summary>
@@ -267,13 +278,24 @@ public sealed record PoolBuildRequest
     public IReadOnlyList<TwinSighting>? TwinSightings { get; init; }
 }
 
+/// <summary>One submesh draw of a replaced mesh as the game issues it: the draw's start index and index
+/// count. A multi-material mesh is drawn once per material, each draw covering one submesh's index
+/// range, and those two values are what a section can match a specific material's draw on.</summary>
+public readonly record struct DrawShape(int First, int Count);
+
+/// <summary>A replaced mesh's vanilla draw shapes: one <see cref="DrawShape"/> per submesh in submesh
+/// order, plus the full index count for a pass that draws the whole mesh in one call.</summary>
+public sealed record DrawShapeSet(IReadOnlyList<DrawShape> Shapes, int FullCount);
+
 /// <summary>One replaced LOD tier of a pool part: <paramref name="Part"/> is the pool part name,
 /// <paramref name="Name"/> the unique emission name, <paramref name="Suffix"/> the tier level key. The
 /// anchor's tier chain pairs every part's same-suffix tier, falling back to the part's lod0 recover for
 /// parts without that tier (whose lod0 capture refs stay current: buffers upload at frame start).
-/// <paramref name="OpKey"/> is the source mesh's stable identity, as on <see cref="PoolPart"/>.</summary>
+/// <paramref name="OpKey"/> is the source mesh's stable identity, as on <see cref="PoolPart"/>.
+/// <paramref name="Shapes"/> (anchor tiers only) is the tier mesh's vanilla draw-shape set; null keeps
+/// the draw in the capture section.</summary>
 public sealed record PoolTier(string Part, string Name, string Suffix, string DumpDir, string CaptureHash,
-    string? OpKey = null);
+    string? OpKey = null, DrawShapeSet? Shapes = null);
 
 /// <summary>
 /// One retextured stock texture. <paramref name="Name"/> is the section suffix (unique per entry);
@@ -558,10 +580,10 @@ public sealed partial class MigotoEmitter
         List<(string Part, int N, int Nb, int Rows)> PartMeta, int AnchorIdx,
         IReadOnlyDictionary<string, string> CapHashes, int Ub, int Vcount, int Vb1Stride, string IbFmt,
         List<(int Count, int Start, int Base)> Draws, SubmeshMaps?[] SubMaps,
-        HashSet<string>? NoSkip, List<(string Part, string Name, string Suffix, string Hash, int Rows)> TierMeta,
+        HashSet<string>? NoSkip, List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes)> TierMeta,
         bool Lod0WitnessConvert, string? ToggleKey, string? Latch, bool HideWhenOff, List<GroupMemberEmission> GroupMembers,
         List<GroupMemberClaim> GroupClaims, List<(string Part, int Pairs)> Ties,
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes);
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes, DrawShapeSet? AnchorShapes);
 
     /// <summary>One wardrobe-group member draw the ini carries a fused section for: the emission name its
     /// resources and shader are filed under, the ib hash the capture keys on, whether it is the member's
@@ -913,7 +935,7 @@ public sealed partial class MigotoEmitter
                 UIntBytes(union.Owner.Select(o => (uint)o).ToArray()));
 
             // ---- per-tier operators: same union and per-bone ownership as the part's lod0 -------------
-            var tierMeta = new List<(string Part, string Name, string Suffix, string Hash, int Rows)>();
+            var tierMeta = new List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes)>();
             var tierWork = new List<(string Name, int PartIdx, uint[] Scatter, OperatorArt Art)>();
             foreach (var t in pipe.Tiers ?? Array.Empty<PoolTier>())
             {
@@ -978,7 +1000,7 @@ public sealed partial class MigotoEmitter
                                 + $"0x{union.UnionHashes[u2]:x8} — its lod0 row stands at this tier's draws");
                 }
                 tierWork.Add((t.Name, pi, scatter, art));
-                tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * load.Nb));
+                tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * load.Nb, t.Shapes));
             }
 
             // ---- witness bones: constants-free space conversion --------------------------------------
@@ -1326,7 +1348,7 @@ public sealed partial class MigotoEmitter
                 ibFmt, draws, subMaps,
                 pipe.NoSkipParts is { Count: > 0 } ns ? new HashSet<string>(ns, StringComparer.Ordinal) : null,
                 tierMeta, lod0WitnessConvert, pipe.ToggleKey, pipe.Latch, pipe.HideWhenOff, groupSections, groupClaims, ties,
-                pipe.PresenceHashes));
+                pipe.PresenceHashes, pipe.AnchorShapes));
         }
 
         // ---- rigid replacements: the compiled donor streams, shipped and drawn as they are ---------------
@@ -1372,7 +1394,7 @@ public sealed partial class MigotoEmitter
                 rigids.Add(new RigidEmission(sfx, r.Hashes.ToList(),
                     streams.FirstOrDefault(s => s.Stream == 0).Stride,
                     hasVb1 ? streams.FirstOrDefault(s => s.Stream == 1).Stride : null,
-                    ibFmt, draws, subMaps, r.ToggleKey, r.Latch, r.HideWhenOff));
+                    ibFmt, draws, subMaps, r.ToggleKey, r.Latch, r.HideWhenOff, r.ShapesByHash));
             }
         }
 
@@ -1415,7 +1437,7 @@ public sealed partial class MigotoEmitter
                 .Select(e => (Hash: e.StockHash, Part: e.Part)),
             MintedTwinTagHashes(guards.Values).Select(h => (Hash: h, Part: "")));
         var hides = (req.HideHashes ?? Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToList();
-        var units = BuildCaptureUnits(pipes, req.ToggleKey);
+        var units = BuildCaptureUnits(pipes, req.ToggleKey, guards);
         foreach (var h in hides)
             if (units.ByHash.ContainsKey(h))
                 throw new InvalidOperationException(
@@ -1530,7 +1552,7 @@ public sealed partial class MigotoEmitter
         Directory.CreateDirectory(outDir);
         // no pipelines here, so no hash is capture-claimed; a sighting still routes into the hide or
         // scoped-anchor section that owns its ib
-        var units = BuildCaptureUnits(Array.Empty<PipelineEmission>(), modKey);
+        var units = BuildCaptureUnits(Array.Empty<PipelineEmission>(), modKey, guards);
         var sightings = RouteSightings(latches, units, hides, scoped,
             twins: LiveSightings(twinSightings, guards.Values));
         var P = new StringBuilder();
@@ -1631,7 +1653,22 @@ public sealed partial class MigotoEmitter
         public void Run(string line) => RunLines.Add(line);
         public void Suppress(Gate gate) { if (_skipSeen.Add(gate.Id)) SkipGates.Add(gate); }
         public bool Skips => SkipGates.Count > 0;
+        /// <summary>Per-submesh draw routing for this section's hash, when the replaced mesh has several
+        /// submeshes: the donor draw leaves the chain above and moves into extra sections on the same
+        /// hash, each matching one vanilla submesh draw's shape, so donor range k renders under submesh
+        /// k's own bound material instead of every range drawing at every material's draw. The extra
+        /// sections' names extend this section's, and equal match_priority runs same-hash sections in
+        /// name order, so the capture/compute chain always runs before the routed draw. A LIST because
+        /// several pipelines can anchor on one hash — the merged section carried every pipeline's draw
+        /// line, and the routed sections owe every pipeline its draws the same way.</summary>
+        public readonly List<RoutedDraw> RoutedDraws = new();
     }
+
+    /// <summary>One pipeline's routed donor draw: the command-list namespace (the pipeline suffix), the
+    /// replaced mesh's vanilla shape set, the draw's gate, and the donor's own draw count. Donor range k
+    /// belongs to vanilla submesh k; ranges past the last vanilla submesh join it.</summary>
+    sealed record RoutedDraw(string Sfx, DrawShapeSet Shapes, Gate DrawGate, int DonorDraws,
+        bool IsRigid = false);
 
     /// <summary>The build's capture sections, in emission order and by the hash each one owns.</summary>
     sealed record CaptureUnits(List<CaptureUnit> Ordered, Dictionary<string, CaptureUnit> ByHash);
@@ -1645,8 +1682,17 @@ public sealed partial class MigotoEmitter
     /// index and on its ib in another — and two sections under one name leave the second dropped at parse
     /// time, so a name already issued sends the second unit to a disambiguated one.</para>
     /// </summary>
-    static CaptureUnits BuildCaptureUnits(IReadOnlyList<PipelineEmission> pipes, string? modKey)
+    static CaptureUnits BuildCaptureUnits(IReadOnlyList<PipelineEmission> pipes, string? modKey,
+        IReadOnlyDictionary<string, TwinGuard> guards)
     {
+        // A hash routes its donor draw per submesh only when the replaced mesh really has several
+        // DRAWABLE submeshes (a zero-index-count submesh is a material slot with no geometry — the game
+        // issues no draw for it) AND the hash carries no twin guard: a guarded section's draw must stay
+        // inside the guard's verdict, so a guarded multi-submesh target keeps the draw in its capture
+        // section (every range at every fire).
+        DrawShapeSet? RoutedShapes(DrawShapeSet? shapes, string hash)
+            => shapes is not null && shapes.Shapes.Count(sh => sh.Count > 0) > 1
+                && !guards.ContainsKey(hash) ? shapes : null;
         var ordered = new List<CaptureUnit>();
         var byHash = new Dictionary<string, CaptureUnit>(StringComparer.Ordinal);
         var takenNames = new HashSet<string>(StringComparer.Ordinal);
@@ -1716,7 +1762,10 @@ public sealed partial class MigotoEmitter
                     chain.Add($"run = CustomShaderSkin_{sfx}");
                     chain.Add($"$zz_done_{sfx} = 1");
                     chain.Add("endif");
-                    chain.Add($"run = CommandListDraw_{sfx}");
+                    if (RoutedShapes(pipe.AnchorShapes, h) is { } routed0)
+                        u.RoutedDraws.Add(new RoutedDraw(sfx, routed0, drawGate, pipe.Draws.Count));
+                    else
+                        chain.Add($"run = CommandListDraw_{sfx}");
                     foreach (var line in drawGate.Wrap(chain)) u.Run(line);
                 }
             }
@@ -1745,7 +1794,10 @@ public sealed partial class MigotoEmitter
                     chain.Add($"run = CustomShaderSkin_{sfx}");
                     chain.Add($"$zz_done_{sfx}_{t.Suffix} = 1");
                     chain.Add("endif");
-                    chain.Add($"run = CommandListDraw_{sfx}");
+                    if (RoutedShapes(t.Shapes, t.Hash) is { } routedT)
+                        u.RoutedDraws.Add(new RoutedDraw(sfx, routedT, drawGate, pipe.Draws.Count));
+                    else
+                        chain.Add($"run = CommandListDraw_{sfx}");
                     foreach (var line in drawGate.Wrap(chain)) u.Run(line);
                 }
             }
@@ -1964,7 +2016,8 @@ public sealed partial class MigotoEmitter
     /// format its shipped buffers declare, its donor submesh draws and their texture asks.</summary>
     sealed record RigidEmission(string Sfx, IReadOnlyList<string> Hashes, int Vb0Stride, int? Vb1Stride,
         string IbFmt, List<(int Count, int Start, int Base)> Draws, SubmeshMaps?[] SubMaps,
-        string? ToggleKey, string? Latch, bool HideWhenOff)
+        string? ToggleKey, string? Latch, bool HideWhenOff,
+        IReadOnlyDictionary<string, DrawShapeSet>? ShapesByHash)
     {
         /// <summary>Draw-scoped retexture blocks anchored at one of this replacement's hashes, by hash —
         /// the rigid twin of <see cref="CaptureUnit.ScopeLines"/>; the owning section runs them instead of
@@ -1994,6 +2047,76 @@ public sealed partial class MigotoEmitter
     /// the tag sections carry their shared 100 instead of this.</summary>
     static void OpenTextureOverride(StringBuilder P, string name, string hash) =>
         P.Append($"[TextureOverride_{name}]\nhash = {hash}\nmatch_priority = 0\n");
+
+    /// <summary>The routed donor draw's sections: one per vanilla submesh, each firing only on the game
+    /// draw whose start index and index count it names, plus one for a draw covering the whole mesh in
+    /// one call. Donor range k draws at vanilla submesh k's fire (ranges past the last submesh join it),
+    /// so every range renders under its own material's bound state. All share the owning section's hash;
+    /// their names extend its, and equal match_priority runs same-hash sections in name order, so the
+    /// owning section's capture/compute always precedes these draws. A vanilla shape no section names
+    /// draws nothing — its original is already suppressed — and a full shape colliding with a submesh
+    /// shape yields that submesh's section alone (the two draws cannot be told apart).</summary>
+    static void EmitRoutedDrawSections(StringBuilder P, string hash, string ownerName,
+        IReadOnlyList<RoutedDraw> routedDraws)
+    {
+        // Every entry describes the one mesh this hash names, so their shape sets agree; the first
+        // states them. Two submeshes covering one index range are one draw the runtime cannot tell
+        // apart, so DISTINCT SHAPES — not submesh indices — get sections, and a zero-index-count
+        // submesh (a material slot with no geometry) never draws: donor ranges folding onto one land
+        // on the last drawable shape instead.
+        var shapes = routedDraws[0].Shapes.Shapes;
+        int lastDrawable = -1;
+        for (int k = 0; k < shapes.Count; k++) if (shapes[k].Count > 0) lastDrawable = k;
+        var groups = new List<(DrawShape Shape, int FirstK, List<int> Ks)>();
+        for (int k = 0; k < shapes.Count; k++)
+        {
+            if (shapes[k].Count == 0) continue;
+            int gi = groups.FindIndex(g => g.Shape == shapes[k]);
+            if (gi < 0) groups.Add((shapes[k], k, new List<int> { k }));
+            else groups[gi].Ks.Add(k);
+        }
+        // a donor range's target submesh, zero-count folds retargeted to the last drawable shape
+        int TargetK(int di)
+        {
+            int t = Math.Min(di, shapes.Count - 1);
+            return shapes[t].Count == 0 ? lastDrawable : t;
+        }
+        var emitted = new List<DrawShape>();
+        foreach (var (shape, firstK, ks) in groups)
+        {
+            var runs = routedDraws
+                .Select(r => (Routed: r, Dis: Enumerable.Range(0, r.DonorDraws)
+                    .Where(di => ks.Contains(TargetK(di))).ToList()))
+                .Where(x => x.Dis.Count > 0).ToList();
+            if (runs.Count == 0) continue;
+            OpenTextureOverride(P, $"{ownerName}_DrawS{firstK}", hash);
+            P.Append($"match_first_index = {shape.First}\n");
+            P.Append($"match_index_count = {shape.Count}\n");
+            foreach (var (routed, dis) in runs)
+            {
+                string listStem = routed.IsRigid ? "CommandListRigid" : "CommandListDraw";
+                routed.DrawGate.Open(P);
+                foreach (int di in dis) P.Append($"run = {listStem}S{di}_{routed.Sfx}\n");
+                routed.DrawGate.Close(P);
+            }
+            P.Append("\n");
+            emitted.Add(shape);
+        }
+        // the whole-mesh shape, unless a draw of that shape already belongs to an emitted section —
+        // the two draws cannot be told apart, and the submesh reading wins
+        int full = routedDraws[0].Shapes.FullCount;
+        if (emitted.Any(s => s.First == 0 && s.Count == full)) return;
+        OpenTextureOverride(P, $"{ownerName}_DrawFull", hash);
+        P.Append("match_first_index = 0\n");
+        P.Append($"match_index_count = {full}\n");
+        foreach (var routed in routedDraws)
+        {
+            routed.DrawGate.Open(P);
+            P.Append($"run = {(routed.IsRigid ? "CommandListRigid" : "CommandListDraw")}_{routed.Sfx}\n");
+            routed.DrawGate.Close(P);
+        }
+        P.Append("\n");
+    }
 
     static void AppendTwinProbe(StringBuilder P, TwinGuard guard)
     {
@@ -2143,7 +2266,7 @@ public sealed partial class MigotoEmitter
                 }
                 P.Append($"[Resource_{part}_Map_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {part}_map_{sfx}.buf\n");
             }
-            foreach (var (_, name, _, _, _) in pipe.TierMeta)
+            foreach (var (_, name, _, _, _, _) in pipe.TierMeta)
             {
                 if (declaredParts.Add(name))
                 {
@@ -2251,9 +2374,23 @@ public sealed partial class MigotoEmitter
             }
             foreach (var line in u.RunLines) P.Append(line).Append('\n');
             CloseTwinGuard(P, guarded);
-            // the scoped-retexture body carries its own probe and self-corrects, so it stays outside
-            foreach (var line in u.ScopeLines) P.Append(line).Append('\n');
+            // the scoped-retexture body carries its own probe and self-corrects, so it stays outside.
+            // On a ROUTED hash it moves to a section of its own that sorts after the draw sections:
+            // left here it would rebind the slots before the routed draw, and the donor's probe would
+            // read the retexture instead of the stock tags.
+            if (u.RoutedDraws.Count == 0)
+                foreach (var line in u.ScopeLines) P.Append(line).Append('\n');
             P.Append("\n");
+            if (u.RoutedDraws.Count > 0)
+            {
+                EmitRoutedDrawSections(P, u.Hash, u.SectionName, u.RoutedDraws);
+                if (u.ScopeLines.Count > 0)
+                {
+                    OpenTextureOverride(P, $"{u.SectionName}_Scope", u.Hash);
+                    foreach (var line in u.ScopeLines) P.Append(line).Append('\n');
+                    P.Append("\n");
+                }
+            }
         }
 
         // ---- rigid replacements: skip the vanilla draw, draw the donor in its place -------------------
@@ -2283,10 +2420,18 @@ public sealed partial class MigotoEmitter
                 // this hash also fires on a sibling mesh's draws, so the suppression and the donor draw
                 // wait for the probe to find this part's own tagged texture bound
                 bool rigidGuarded = OpenTwinGuardIfAny(P, guards, r.Hashes[i]);
+                // a multi-submesh target routes its donor draw per submesh (the pooled anchors' rule);
+                // a guarded hash keeps the draw here, inside the guard's verdict
+                DrawShapeSet? routedShapes =
+                    r.ShapesByHash?.GetValueOrDefault(r.Hashes[i]) is { } rs
+                        && rs.Shapes.Count(sh => sh.Count > 0) > 1
+                        && !guards.ContainsKey(r.Hashes[i]) ? rs : null;
                 if (oneGate)
                 {
                     drawGate.Open(P);
-                    P.Append($"handling = skip\nrun = CommandListRigid_{r.Sfx}\n");
+                    P.Append(routedShapes is null
+                        ? $"handling = skip\nrun = CommandListRigid_{r.Sfx}\n"
+                        : "handling = skip\n");
                     drawGate.Close(P);
                 }
                 else
@@ -2296,16 +2441,32 @@ public sealed partial class MigotoEmitter
                     skipGate.Open(P);
                     P.Append("handling = skip\n");
                     skipGate.Close(P);
-                    drawGate.Open(P);
-                    P.Append($"run = CommandListRigid_{r.Sfx}\n");
-                    drawGate.Close(P);
+                    if (routedShapes is null)
+                    {
+                        drawGate.Open(P);
+                        P.Append($"run = CommandListRigid_{r.Sfx}\n");
+                        drawGate.Close(P);
+                    }
                 }
                 CloseTwinGuard(P, rigidGuarded);
                 // after the suppression and the donor draw, and outside this replacement's gate — the same
-                // place a pooled capture section runs its scoped-retexture blocks
-                if (r.ScopeLines.TryGetValue(r.Hashes[i], out var scope))
-                    foreach (var line in scope) P.Append(line).Append('\n');
+                // place a pooled capture section runs its scoped-retexture blocks. On a routed hash the
+                // block moves after the draw sections, exactly as at a routed pooled capture.
+                bool hasScope = r.ScopeLines.TryGetValue(r.Hashes[i], out var scope);
+                if (routedShapes is null && hasScope)
+                    foreach (var line in scope!) P.Append(line).Append('\n');
                 P.Append("\n");
+                if (routedShapes is not null)
+                {
+                    EmitRoutedDrawSections(P, r.Hashes[i], name,
+                        new[] { new RoutedDraw(r.Sfx, routedShapes, drawGate, r.Draws.Count, IsRigid: true) });
+                    if (hasScope)
+                    {
+                        OpenTextureOverride(P, $"{name}_Scope", r.Hashes[i]);
+                        foreach (var line in scope!) P.Append(line).Append('\n');
+                        P.Append("\n");
+                    }
+                }
             }
         }
 
@@ -2344,7 +2505,7 @@ public sealed partial class MigotoEmitter
                        + (slimParts.Contains(part) ? $"cs-t3 = Resource_{part}_Sel\ncs-t4 = Resource_{part}_Off\n" : "")
                        + $"Dispatch = {(rows + 63) / 64}, 1, 1\nResource_Palette_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            foreach (var (_, name, _, _, rows) in pipe.TierMeta)
+            foreach (var (_, name, _, _, rows, _) in pipe.TierMeta)
                 P.Append($"[CustomShaderRecover_{name}_{sfx}]\ncs = recover_{name}_cs.hlsl\n"
                        + $"cs-u1 = copy Resource_Palette_{sfx}\ncs-t0 = copy Resource_{name}_Posed\n"
                        + $"cs-t1 = Resource_{name}_Cpinv\ncs-t2 = Resource_{name}_Map_{sfx}\n"
@@ -2418,6 +2579,22 @@ public sealed partial class MigotoEmitter
             P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
             if (donorTexed)
                 foreach (int s in ProbeSlots) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+            // The routed per-range lists: one per donor submesh, the full list's save/bind/restore shape
+            // drawing only that range. Referenced by the per-submesh sections a routed capture site emits;
+            // a site a twin guard kept on the full list leaves its per-range lists unreferenced and inert.
+            if (units.Ordered.Any(u => u.RoutedDraws.Any(rd => !rd.IsRigid && rd.Sfx == sfx)))
+                for (int di = 0; di < pipe.Draws.Count; di++)
+                {
+                    P.Append($"\n[CommandListDrawS{di}_{sfx}]\n"
+                           + "Resource_SaveVB0 = ref vb0\nResource_SaveVB1 = ref vb1\nResource_SaveVB3 = ref vb3\nResource_SaveIB = ref ib\n");
+                    if (donorTexed)
+                        foreach (int s in ProbeSlots) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
+                    P.Append($"vb0 = Resource_NewPosed_{sfx}\nvb1 = Resource_NewVB1_{sfx}\nvb3 = Resource_NewPosed_{sfx}\nib = Resource_NewIB_{sfx}\n");
+                    EmitDrawTextures(P, donorTexed, pipe.SubMaps, pipe.Draws, slotTags, texRes, only: di);
+                    P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
+                    if (donorTexed)
+                        foreach (int s in ProbeSlots) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+                }
             if (pipes.IndexOf(pipe) + 1 < pipes.Count) P.Append("\n");
         }
 
@@ -2441,6 +2618,23 @@ public sealed partial class MigotoEmitter
             P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
             if (rigidTexed)
                 foreach (int s in ProbeSlots) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+            // the rigid twin of the pooled per-range lists above
+            if (r.Hashes.Any(h => r.ShapesByHash?.GetValueOrDefault(h) is { } hs
+                && hs.Shapes.Count(sh => sh.Count > 0) > 1 && !guards.ContainsKey(h)))
+                for (int di = 0; di < r.Draws.Count; di++)
+                {
+                    P.Append($"\n[CommandListRigidS{di}_{r.Sfx}]\n"
+                           + "Resource_SaveVB0 = ref vb0\nResource_SaveVB1 = ref vb1\nResource_SaveVB3 = ref vb3\nResource_SaveIB = ref ib\n");
+                    if (rigidTexed)
+                        foreach (int s in ProbeSlots) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
+                    P.Append($"vb0 = Resource_RigidVB0_{r.Sfx}\n");
+                    if (r.Vb1Stride is not null) P.Append($"vb1 = Resource_RigidVB1_{r.Sfx}\n");
+                    P.Append($"vb3 = Resource_RigidVB0_{r.Sfx}\nib = Resource_RigidIB_{r.Sfx}\n");
+                    EmitDrawTextures(P, rigidTexed, r.SubMaps, r.Draws, slotTags, texRes, only: di);
+                    P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
+                    if (rigidTexed)
+                        foreach (int s in ProbeSlots) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+                }
         }
         return P.ToString();
     }
@@ -2450,7 +2644,7 @@ public sealed partial class MigotoEmitter
     /// bound right now, then per submesh the binds that row asked for and its drawindexed.</summary>
     static void EmitDrawTextures(StringBuilder P, bool donorTexed, SubmeshMaps?[] subMaps,
         IReadOnlyList<(int Count, int Start, int Base)> draws, IReadOnlyList<StockMapTag> slotTags,
-        IReadOnlyDictionary<string, string> texRes)
+        IReadOnlyDictionary<string, string> texRes, int only = -1)
     {
         // an ordered list, not a map: the emitted text is a pinned contract, so bind order is fixed
         var slotVars = new[]
@@ -2492,8 +2686,10 @@ public sealed partial class MigotoEmitter
         // found the anchor's map of that kind in. The list is sequential and one binding outlives the
         // draw that set it, so a slot an earlier submesh bound is put back from its save when a later
         // one inherits — otherwise an untouched submesh would draw wearing its neighbour's map.
+        // A single-range list (only >= 0) emits exactly that submesh's binds and draw: alone in its
+        // list, it inherits from the game's own binds rather than a neighbour's leftovers.
         var bound = new Dictionary<StockMapKind, string?>();   // null/absent = the game's own bind
-        for (int di = 0; di < draws.Count; di++)
+        for (int di = only >= 0 ? only : 0; di < (only >= 0 ? only + 1 : draws.Count); di++)
         {
             if (donorTexed)
                 foreach (var (kind, slotVar) in slotVars)

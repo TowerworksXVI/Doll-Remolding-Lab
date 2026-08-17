@@ -283,4 +283,313 @@ public class MigotoEmitterGoldenTests : IDisposable
             "union_swap.json",
         }, files);
     }
+
+    /// <summary>A pipeline whose anchor's vanilla mesh has TWO submeshes (a multi-material renderer):
+    /// the donor draw leaves the capture section and routes per vanilla submesh draw. The donor's four
+    /// submeshes fold onto the two vanilla shapes — range 0 at submesh 0's draw, ranges 1..3 at submesh
+    /// 1's — and a full-mesh-shaped draw gets every range. The anchor's own lod1 routes on its tier
+    /// mesh's shapes the same way.</summary>
+    private string RunRoutedBuild()
+    {
+        string dumps = Path.Combine(_root, "dumps");
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "beta"), seed: 60, verts: 64, boneHashes: new uint[] { 201, 202 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "beta_lod1"), seed: 70, verts: 32, boneHashes: new uint[] { 201, 202 });
+        string donor = Path.Combine(_root, "donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 4, submeshes: 4);
+
+        string outDir = Path.Combine(_root, "out");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")), new PoolPart("beta", Path.Combine(dumps, "beta")) },
+                    DonorDir = donor,
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111", ["beta"] = "bbbb2222" },
+                    Tiers = new[]
+                    {
+                        new PoolTier("beta", "beta_lod1", "lod1", Path.Combine(dumps, "beta_lod1"), "bbbb2223",
+                            Shapes: new DrawShapeSet(new[] { new DrawShape(0, 30), new DrawShape(30, 42) }, 72)),
+                    },
+                    AnchorShapes = new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144),
+                },
+            },
+        });
+        AssertEmittedIniIsClean(outDir);
+        return outDir;
+    }
+
+    [Fact]
+    public void A_multi_submesh_anchor_routes_each_donor_range_to_its_own_vanilla_draw()
+    {
+        string ini = File.ReadAllText(Path.Combine(RunRoutedBuild(), "mod.ini"));
+
+        // the capture sections keep capture/skip/compute and lose the draw
+        string cap = Section(ini, "[TextureOverride_Cap_beta]");
+        Assert.Contains("handling = skip", cap);
+        Assert.Contains("run = CustomShaderSkin_swap", cap);
+        Assert.DoesNotContain("run = CommandListDraw_swap", cap);
+        string capT = Section(ini, "[TextureOverride_Cap_beta_lod1]");
+        Assert.DoesNotContain("run = CommandListDraw_swap", capT);
+
+        // each routed section matches one vanilla draw shape and runs its own ranges' lists; the donor's
+        // ranges past the last vanilla submesh join it, and the full shape draws everything
+        string s0 = Section(ini, "[TextureOverride_Cap_beta_DrawS0]");
+        Assert.Contains("hash = bbbb2222", s0);
+        Assert.Contains("match_first_index = 0\nmatch_index_count = 60", s0);
+        Assert.Contains("run = CommandListDrawS0_swap", s0);
+        Assert.DoesNotContain("run = CommandListDrawS1_swap", s0);
+        string s1 = Section(ini, "[TextureOverride_Cap_beta_DrawS1]");
+        Assert.Contains("match_first_index = 60\nmatch_index_count = 84", s1);
+        Assert.Contains("run = CommandListDrawS1_swap\nrun = CommandListDrawS2_swap\nrun = CommandListDrawS3_swap", s1);
+        string full = Section(ini, "[TextureOverride_Cap_beta_DrawFull]");
+        Assert.Contains("match_first_index = 0\nmatch_index_count = 144", full);
+        Assert.Contains("run = CommandListDraw_swap", full);
+
+        // the anchor's tier routes on its own mesh's shapes, through the same per-range lists
+        Assert.Contains("match_index_count = 30", Section(ini, "[TextureOverride_Cap_beta_lod1_DrawS0]"));
+        Assert.Contains("match_index_count = 72", Section(ini, "[TextureOverride_Cap_beta_lod1_DrawFull]"));
+
+        // one drawindexed per per-range list, and the full list keeps all four
+        for (int di = 0; di < 4; di++)
+            Assert.Equal(1, CountOf(Section(ini, $"[CommandListDrawS{di}_swap]"), "drawindexed = "));
+        Assert.Equal(4, CountOf(Section(ini, "[CommandListDraw_swap]"), "drawindexed = "));
+
+        // a non-anchor pool part is untouched by the routing
+        Assert.DoesNotContain("[TextureOverride_Cap_alpha_DrawS0]", ini);
+    }
+
+    private static string Section(string ini, string header)
+    {
+        int start = ini.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"section missing: {header}");
+        int end = ini.IndexOf("\n[", start + header.Length, StringComparison.Ordinal);
+        return end < 0 ? ini[start..] : ini[start..end];
+    }
+
+    [Fact]
+    public void Shared_anchor_pipelines_each_keep_their_routed_draw()
+    {
+        // Two Replaces can anchor on one mesh (the pool's bone-ownership pick), and the merged capture
+        // section carried BOTH pipelines' draw lines. The routed sections owe the same: every pipeline's
+        // per-range lists run at the matched draws, and no emitted command list is left unreferenced.
+        string dumps = Path.Combine(_root, "dumps");
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "shared"), seed: 60, verts: 64, boneHashes: new uint[] { 201, 202 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "gamma"), seed: 80, verts: 64, boneHashes: new uint[] { 301, 302 });
+        string donor1 = Path.Combine(_root, "donor1");
+        string donor2 = Path.Combine(_root, "donor2");
+        SyntheticPool.WriteDonor(donor1, verts: 8, unionBones: 4, submeshes: 2);
+        SyntheticPool.WriteDonor(donor2, verts: 8, unionBones: 4, submeshes: 2);
+        var shapes = new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144);
+
+        string outDir = Path.Combine(_root, "out");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap1",
+                    Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")), new PoolPart("shared", Path.Combine(dumps, "shared")) },
+                    DonorDir = donor1,
+                    Anchor = "shared",
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111", ["shared"] = "cccc0001" },
+                    AnchorShapes = shapes,
+                },
+                new ReplacePipeline
+                {
+                    Suffix = "swap2",
+                    Parts = new[] { new PoolPart("gamma", Path.Combine(dumps, "gamma")), new PoolPart("shared", Path.Combine(dumps, "shared")) },
+                    DonorDir = donor2,
+                    Anchor = "shared",
+                    CaptureHashes = new Dictionary<string, string> { ["gamma"] = "dddd1111", ["shared"] = "cccc0001" },
+                    AnchorShapes = shapes,
+                },
+            },
+        });
+        AssertEmittedIniIsClean(outDir);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        string s0 = Section(ini, "[TextureOverride_Cap_shared_DrawS0]");
+        Assert.Contains("run = CommandListDrawS0_swap1", s0);
+        Assert.Contains("run = CommandListDrawS0_swap2", s0);
+        string full = Section(ini, "[TextureOverride_Cap_shared_DrawFull]");
+        Assert.Contains("run = CommandListDraw_swap1", full);
+        Assert.Contains("run = CommandListDraw_swap2", full);
+
+        // no emitted command list may be orphaned — an unreferenced list is a Replace that never renders
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(ini, @"\[(CommandListDraw\w*)\]"))
+            Assert.Contains($"run = {m.Groups[1].Value}", ini);
+    }
+
+    [Fact]
+    public void A_routed_hash_runs_its_scoped_retexture_after_the_draw_sections()
+    {
+        // The scoped block rebinds ps-t slots; run before the routed draw it would feed the donor's
+        // slot probe the retexture instead of the stock tags. It moves to a section sorting after the
+        // draw sections, preserving the draw-then-repaint order the inline emission had.
+        string dumps = Path.Combine(_root, "dumps");
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "beta"), seed: 60, verts: 64, boneHashes: new uint[] { 201, 202 });
+        string donor = Path.Combine(_root, "donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 4, submeshes: 2);
+        string scopedDds = Path.Combine(_root, "scoped.dds");
+        FlatDds.Write(scopedDds, (200, 100, 50, 255));
+
+        string outDir = Path.Combine(_root, "out");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")), new PoolPart("beta", Path.Combine(dumps, "beta")) },
+                    DonorDir = donor,
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111", ["beta"] = "bbbb2222" },
+                    AnchorShapes = new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144),
+                },
+            },
+            ScopedRetextures = new[]
+            {
+                new ScopedRetexEntry("skin_d", "a1b2c3d4", new[]
+                {
+                    new ScopedRetexImage(scopedDds, new[] { new ScopedAnchor("bbbb2222", "beta") }, null),
+                }),
+            },
+        });
+        AssertEmittedIniIsClean(outDir);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        Assert.DoesNotContain("Resource_RtxSave", Section(ini, "[TextureOverride_Cap_beta]"));
+        string scope = Section(ini, "[TextureOverride_Cap_beta_Scope]");
+        Assert.Contains("Resource_RtxSave", scope);
+        // name order is execution order at equal priority: draw sections precede the scope section
+        Assert.True(string.CompareOrdinal("TextureOverride_Cap_beta_DrawS0", "TextureOverride_Cap_beta_Scope") < 0);
+        Assert.True(ini.IndexOf("[TextureOverride_Cap_beta_DrawS0]", StringComparison.Ordinal)
+                    < ini.IndexOf("[TextureOverride_Cap_beta_Scope]", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Duplicate_and_empty_vanilla_shapes_route_safely()
+    {
+        // Two submeshes sharing one index range are ONE draw the runtime cannot tell apart — one
+        // section, the union of their donor ranges. A zero-index-count submesh never draws, so donor
+        // ranges folding onto it land on the last drawable shape, and a mesh with fewer than two
+        // drawable shapes does not route at all.
+        string dumps = Path.Combine(_root, "dumps");
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "beta"), seed: 60, verts: 64, boneHashes: new uint[] { 201, 202 });
+        string donor = Path.Combine(_root, "donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 4, submeshes: 4);
+
+        // duplicate shapes: submeshes 0 and 1 cover one range; donor ranges 0..3 all land in one section
+        string outA = Path.Combine(_root, "outA");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outA,
+            Pipelines = new[] { Routed("swap", dumps, donor,
+                new DrawShapeSet(new[] { new DrawShape(0, 24), new DrawShape(0, 24) }, 24)) },
+        });
+        AssertEmittedIniIsClean(outA);
+        string iniA = File.ReadAllText(Path.Combine(outA, "mod.ini"));
+        string sA = Section(iniA, "[TextureOverride_Cap_beta_DrawS0]");
+        for (int di = 0; di < 4; di++) Assert.Contains($"run = CommandListDrawS{di}_swap", sA);
+        Assert.DoesNotContain("[TextureOverride_Cap_beta_DrawS1]", iniA);
+        // the shared shape IS the whole-mesh shape; a separate full section would double-fire
+        Assert.DoesNotContain("[TextureOverride_Cap_beta_DrawFull]", iniA);
+
+        // an empty LAST submesh: ranges folding onto it retarget to the last drawable shape
+        string outB = Path.Combine(_root, "outB");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outB,
+            Pipelines = new[] { Routed("swap", dumps, donor,
+                new DrawShapeSet(new[] { new DrawShape(0, 24), new DrawShape(24, 36), new DrawShape(60, 0) }, 60)) },
+        });
+        AssertEmittedIniIsClean(outB);
+        string iniB = File.ReadAllText(Path.Combine(outB, "mod.ini"));
+        string sB1 = Section(iniB, "[TextureOverride_Cap_beta_DrawS1]");
+        for (int di = 1; di < 4; di++) Assert.Contains($"run = CommandListDrawS{di}_swap", sB1);
+        Assert.DoesNotContain("[TextureOverride_Cap_beta_DrawS2]", iniB);
+
+        // one drawable shape = no routing: the draw stays inline, no per-range lists ship
+        string outC = Path.Combine(_root, "outC");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outC,
+            Pipelines = new[] { Routed("swap", dumps, donor,
+                new DrawShapeSet(new[] { new DrawShape(0, 24), new DrawShape(24, 0) }, 24)) },
+        });
+        AssertEmittedIniIsClean(outC);
+        string iniC = File.ReadAllText(Path.Combine(outC, "mod.ini"));
+        Assert.Contains("run = CommandListDraw_swap", Section(iniC, "[TextureOverride_Cap_beta]"));
+        Assert.DoesNotContain("_DrawS", iniC);
+        Assert.DoesNotContain("[CommandListDrawS0_swap]", iniC);
+    }
+
+    [Fact]
+    public void A_twin_guarded_multi_submesh_target_keeps_the_inline_draw_and_ships_no_range_lists()
+    {
+        string dumps = Path.Combine(_root, "dumps");
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
+        SyntheticPool.WritePartDump(Path.Combine(dumps, "beta"), seed: 60, verts: 64, boneHashes: new uint[] { 201, 202 });
+        string donor = Path.Combine(_root, "donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 4, submeshes: 2);
+
+        string outDir = Path.Combine(_root, "out");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[] { Routed("swap", dumps, donor,
+                new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144)) },
+            TwinGuards = new[]
+            {
+                new TwinGuard("bbbb2222", MigotoEmitter.TwinVar("bbbb2222"), new[] { 1 },
+                    new[] { new TwinProbeTag("f9f9a9a9", MigotoEmitter.RetexTag("f9f9a9a9"), 1) }),
+            },
+        });
+        AssertEmittedIniIsClean(outDir);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains("run = CommandListDraw_swap", Section(ini, "[TextureOverride_Cap_beta]"));
+        Assert.DoesNotContain("_DrawS", ini);
+        Assert.DoesNotContain("[CommandListDrawS0_swap]", ini);
+    }
+
+    private ReplacePipeline Routed(string sfx, string dumps, string donor, DrawShapeSet shapes) => new()
+    {
+        Suffix = sfx,
+        Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")), new PoolPart("beta", Path.Combine(dumps, "beta")) },
+        DonorDir = donor,
+        CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111", ["beta"] = "bbbb2222" },
+        AnchorShapes = shapes,
+    };
+
+    [Fact]
+    public void Routed_build_emits_the_pinned_text_contract()
+    {
+        string outDir = RunRoutedBuild();
+        bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
+        string emitted = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        string goldenPath = Path.Combine(GoldenDir(), "mod_routed.ini");
+        if (regold)
+        {
+            Directory.CreateDirectory(GoldenDir());
+            File.WriteAllText(goldenPath, emitted);
+        }
+        else
+        {
+            Assert.True(File.Exists(goldenPath), $"golden asset missing: {goldenPath} (run once with REMOLD_REGOLD=1)");
+            Assert.Equal(File.ReadAllText(goldenPath), emitted);
+        }
+        Assert.False(regold, "REMOLD_REGOLD run regenerated the goldens — rerun without it to compare");
+    }
 }

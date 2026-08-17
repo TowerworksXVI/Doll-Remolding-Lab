@@ -1897,9 +1897,11 @@ public class ModBuilderTests : IDisposable
             ReplaceFile = "donor.glb", DonorTextures = textures, BakedRest = bakedRest,
         });
 
-    /// <summary>3DMigoto drops a duplicate-named section SILENTLY, so no emitted ini may carry one — and
-    /// no hash may be claimed by two TextureOverrides either, since only one of the two ever matches and
-    /// which one is not something the emission decides.</summary>
+    /// <summary>3DMigoto drops a duplicate-named section SILENTLY, so no emitted ini may carry one. On a
+    /// shared hash the runtime runs EVERY section whose draw-call match filters pass, so two sections may
+    /// share a hash only when their (match_first_index, match_index_count) tuples differ — the routed
+    /// draw's shape. Two sections on one hash with the same tuple (or both unfiltered) would both fire on
+    /// the same draws, which no emission intends.</summary>
     internal static void AssertNoDuplicateSections(string ini)
     {
         var lines = ini.Split('\n').Select(l => l.Trim()).ToList();
@@ -1911,15 +1913,33 @@ public class ModBuilderTests : IDisposable
 
         var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string section = "";
+        string? hash = null, first = null, count = null;
+        void Commit()
+        {
+            if (hash is null) return;
+            string key = $"{hash}|{first ?? "*"}|{count ?? "*"}";
+            if (owner.TryGetValue(key, out var held))
+            {
+                // A section whose name extends the other's is a deliberate same-hash companion — the
+                // name extension IS the runtime ordering mechanism (equal priority runs sections in
+                // name order), so an owner and its trailing companion legitimately share the tuple.
+                static string Stem(string s) => s.Trim('[', ']');
+                bool companions = Stem(section).StartsWith(Stem(held) + "_", StringComparison.OrdinalIgnoreCase)
+                    || Stem(held).StartsWith(Stem(section) + "_", StringComparison.OrdinalIgnoreCase);
+                if (!companions)
+                    Assert.Fail($"hash {hash} (first_index {first ?? "any"}, index_count {count ?? "any"}) "
+                        + $"is claimed by both {held} and {section}");
+            }
+            else owner[key] = section;
+        }
         foreach (var l in lines)
         {
-            if (IsSection(l)) { section = l; continue; }
-            if (!l.StartsWith("hash = ", StringComparison.Ordinal)) continue;
-            string hash = l["hash = ".Length..];
-            if (owner.TryGetValue(hash, out var held))
-                Assert.Fail($"hash {hash} is claimed by both {held} and {section}");
-            owner[hash] = section;
+            if (IsSection(l)) { Commit(); section = l; hash = first = count = null; continue; }
+            if (l.StartsWith("hash = ", StringComparison.Ordinal)) hash = l["hash = ".Length..];
+            else if (l.StartsWith("match_first_index = ", StringComparison.Ordinal)) first = l["match_first_index = ".Length..];
+            else if (l.StartsWith("match_index_count = ", StringComparison.Ordinal)) count = l["match_index_count = ".Length..];
         }
+        Commit();
     }
 
     /// <summary>Every shader and buffer the ini names has to be in the folder beside it. 3DMigoto reports a

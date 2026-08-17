@@ -46,6 +46,9 @@ GFL2 is the only game *I am aware of* with this particular combination of CPU sk
 
 If you'd like to extend this to another game, the basic technique is described in [the palette recovery guide](PALETTE_RECOVERY_GUIDE.md). Feel free to reach out with any questions.
 
+**Who are you anyway?**
+Nobody you've heard of, and nobody from any existing modding or data-mining scene. This is a throwaway Github dedicated purely to this project, to separate it from my day job. I'm just a guy who needed a side project to play around with AI on, I wanted to see more mods for GFL2, and the project succeeded further than I expected and grew somewhat out of my control. 
+
 ## The Mods
 
 **How do I install a mod?**
