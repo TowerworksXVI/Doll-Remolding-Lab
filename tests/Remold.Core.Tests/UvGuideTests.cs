@@ -206,6 +206,129 @@ public class UvGuideTests
     }
 
     [Fact]
+    public void TryRender_PlotsTheAskedChannel()
+    {
+        using var g = new TempGame();
+        // UV0 holds island A, UV1 holds island B — the effect overlay's own second layout.
+        var mesh = TriMeshWithGeometry(UvA);
+        mesh.Channels["TexCoord1"] = new[] { UvB[0].u, UvB[0].v, UvB[1].u, UvB[1].v, UvB[2].u, UvB[2].v };
+        mesh.Dims["TexCoord1"] = 2;
+
+        var path = g.At("uv1.png");
+        Assert.True(UvGuide.TryRender(mesh, 100, 100, path, "TexCoord1"));
+        Assert.True(WhiteAtUv(path, UvB[0].u, UvB[0].v));    // the second set's island
+        Assert.False(WhiteAtUv(path, UvA[0].u, UvA[0].v));   // not the first set's
+        // and a mesh without the asked channel renders nothing rather than the wrong layout
+        var bare = g.At("bare.png");
+        Assert.False(UvGuide.TryRender(TriMeshWithGeometry(UvA), 100, 100, bare, "TexCoord1"));
+        Assert.False(File.Exists(bare));
+    }
+
+    [Fact]
+    public void PlotUvGuide_ReadsTheGameMesh_WhenTheEditedGlbLacksTheChannel()
+    {
+        using var g = new TempGame();
+        // A legacy workspace edit from before higher-UV transport lacks TexCoord1, so its guide still falls
+        // back to the game mesh rather than rendering nothing.
+        var moddedGlb = g.At("part.glb");
+        MeshGltf.ExportGlb(TriMeshWithGeometry(UvA), moddedGlb);
+        UnityMesh Vanilla(string name, string addr)
+        {
+            var mesh = TriMeshWithGeometry(UvA);
+            mesh.Channels["TexCoord1"] = new[] { UvB[0].u, UvB[0].v, UvB[1].u, UvB[1].v, UvB[2].u, UvB[2].v };
+            mesh.Dims["TexCoord1"] = 2;
+            return mesh;
+        }
+
+        var guide = g.At("uv1.uvguide.png");
+        var samplers = new List<(string, string, int, string?)> { ("part", "addr", 0, moddedGlb) };
+        var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "tex", guide, Vanilla, "TexCoord1");
+
+        Assert.Null(problem);
+        Assert.True(WhiteAtUv(guide, UvB[0].u, UvB[0].v));   // the game mesh's UV1 layout
+    }
+
+    [Fact]
+    public void PlotUvGuide_ReadsUv1FromTheEditedMeshWhenItRodeTheTransport()
+    {
+        using var g = new TempGame();
+        var edited = TriMeshWithGeometry(UvA);
+        edited.Channels["TexCoord1"] = new[]
+        {
+            UvB[0].u, UvB[0].v, UvB[1].u, UvB[1].v, UvB[2].u, UvB[2].v,
+        };
+        edited.Dims["TexCoord1"] = 2;
+        var moddedGlb = g.At("part-with-uv1.glb");
+        MeshGltf.ExportGlb(edited, moddedGlb);
+        bool vanillaAsked = false;
+
+        var guide = g.At("edited-uv1.uvguide.png");
+        var problem = AssetExporter.PlotUvGuide(
+            new List<(string, string, int, string?)> { ("part", "addr", 0, moddedGlb) },
+            100, 100, "tex", guide,
+            (_, _) => { vanillaAsked = true; return TriMeshWithGeometry(UvA); }, "TexCoord1");
+
+        Assert.Null(problem);
+        Assert.False(vanillaAsked);
+        Assert.True(WhiteAtUv(guide, UvB[0].u, UvB[0].v));
+        Assert.False(WhiteAtUv(guide, UvA[0].u, UvA[0].v));
+    }
+
+    [Fact]
+    public void PlotUvGuide_NamesAMissingSecondUvSetInsteadOfClaimingAReadFailure()
+    {
+        using var g = new TempGame();
+        var guide = g.At("missing-uv1.png");
+        var samplers = new List<(string, string, int, string?)> { ("part", "addr", 0, null) };
+
+        var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "effect.png", guide,
+            (_, _) => TriMeshWithGeometry(UvA), "TexCoord1");
+
+        Assert.Equal("The mesh that samples effect.png has no second UV set, so no UV1 guide can be drawn.",
+            problem);
+        Assert.DoesNotContain("Rescan", problem);
+        Assert.False(File.Exists(guide));
+    }
+
+    [Fact]
+    public void PlotUvGuide_NamesAMissingUvLayoutInsteadOfClaimingAReadFailure()
+    {
+        using var g = new TempGame();
+        var guide = g.At("missing-uv0.png");
+        var samplers = new List<(string, string, int, string?)> { ("part", "addr", 0, null) };
+        var mesh = TriMeshWithGeometry(UvA);
+        mesh.Channels.Remove("TexCoord0");
+        mesh.Dims.Remove("TexCoord0");
+
+        var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "base.png", guide,
+            (_, _) => mesh);
+
+        Assert.Equal("The mesh that samples base.png has no UV layout, so no UV guide can be drawn.",
+            problem);
+        Assert.DoesNotContain("Rescan", problem);
+        Assert.False(File.Exists(guide));
+    }
+
+    [Fact]
+    public void PlotUvGuide_RefusesAnUnreadableEditedMeshInsteadOfShowingTheOriginalUv0()
+    {
+        using var g = new TempGame();
+        string edited = g.At("broken.glb");
+        File.WriteAllText(edited, "not a glb");
+        bool originalAsked = false;
+        var guide = g.At("wrong-layout.png");
+        var samplers = new List<(string, string, int, string?)> { ("part", "addr", 0, edited) };
+
+        var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "base.png", guide,
+            (_, _) => { originalAsked = true; return TriMeshWithGeometry(UvB); });
+
+        Assert.Equal("Couldn't read this edit's mesh, so no UV guide was drawn. "
+            + "Send it back from Blender again, or use Revert mesh.", problem);
+        Assert.False(originalAsked);
+        Assert.False(File.Exists(guide));
+    }
+
+    [Fact]
     public void PlotUvGuide_RebuildsFresh_ReplacingTheStaleVanillaGuide()
     {
         using var g = new TempGame();

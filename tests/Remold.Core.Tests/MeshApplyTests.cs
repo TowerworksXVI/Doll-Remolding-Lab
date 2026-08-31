@@ -154,7 +154,7 @@ public class MeshApplyTests
 
         var ex = Assert.Throws<System.InvalidOperationException>(
             () => MeshApply.BuildSkinned(orig, glb, new uint[] { 5, 7 }));
-        Assert.Contains("invalid skin weights", ex.Message);
+        Assert.Contains("incorrect vertex weights", ex.Message);
     }
 
     [Fact]
@@ -284,7 +284,7 @@ public class MeshApplyTests
             JointWeights = new float[] { float.NaN, 0, 0, 0 },
         };
         var ex = Assert.Throws<System.InvalidOperationException>(() => MeshApply.BuildSkinned(Orig(), glb, new uint[] { 5 }));
-        Assert.Contains("invalid skin weights", ex.Message);
+        Assert.Contains("incorrect vertex weights", ex.Message);
     }
 
     [Fact]
@@ -474,6 +474,218 @@ public class MeshApplyTests
         Assert.Throws<System.InvalidOperationException>(
             () => MeshApply.ConformChannels(LayoutSlots(normalDim: 4), 1, built, orig));
     }
+
+    // ---- Nearest fill: coincident seam twins tie-broken by the transported channels ----------------
+    // A UV seam / hard edge splits one position into several vertices whose absent legacy channels or Color
+    // differ. The fill must copy from the twin the payload vertex actually derives
+    // from — the one agreeing on the transported channels — not from whichever twin the scan met first.
+
+    /// <summary>Orig with two coincident vertices at the origin: twin 0 and twin 1 differ in TexCoord0,
+    /// Normal and TexCoord1; a third vertex sits far away so the scan has a non-tied entry too.</summary>
+    private static UnityMesh SeamTwinsOrig() => new()
+    {
+        Name = "twins",
+        VertexCount = 3,
+        Channels = new Dictionary<string, float[]>
+        {
+            ["Vertex"] = new float[] { 0, 0, 0, 0, 0, 0, 10, 0, 0 },
+            ["Normal"] = new float[] { 0, 1, 0, 1, 0, 0, 0, 1, 0 },
+            ["TexCoord0"] = new float[] { 0, 0, 0.5f, 0.5f, 0.7f, 0.7f },
+            ["TexCoord1"] = new float[] { 0.1f, 0.1f, 0.9f, 0.9f, 0.3f, 0.3f },
+        },
+        Dims = new Dictionary<string, int> { ["Vertex"] = 3, ["Normal"] = 3, ["TexCoord0"] = 2, ["TexCoord1"] = 2 },
+        Submeshes = new List<int[]> { new[] { 0, 1, 2 } },
+    };
+
+    [Fact]
+    public void Fill_PicksTheSeamTwin_WhoseTexCoord0MatchesThePayload()
+    {
+        // The payload vertex sits ON both twins but carries twin 1's TexCoord0, so the TexCoord1 fill must
+        // take twin 1's value — the lowest-index twin would silently hand it twin 0's.
+        var glb = MeshApply.Payload.Geometry(Mesh(1,
+            new Dictionary<string, float[]>
+            {
+                ["Vertex"] = new float[] { 0, 0, 0 },
+                ["TexCoord0"] = new float[] { 0.5f, 0.5f },
+            },
+            new Dictionary<string, int> { ["Vertex"] = 3, ["TexCoord0"] = 2 },
+            new List<int[]> { new[] { 0 } }));
+
+        var built = MeshApply.BuildGeometry(SeamTwinsOrig(), glb);
+
+        Assert.Equal(new float[] { 0.9f, 0.9f }, built.Arrays["TexCoord1"]);
+    }
+
+    [Fact]
+    public void Fill_TieBreaksByNormal_WhenTexCoord0DoesNotSeparateTheTwins()
+    {
+        // Twins split for a hard edge can share TexCoord0; the payload's transported Normal then decides.
+        var orig = SeamTwinsOrig();
+        orig.Channels["TexCoord0"] = new float[] { 0.5f, 0.5f, 0.5f, 0.5f, 0.7f, 0.7f };
+        var glb = MeshApply.Payload.Geometry(Mesh(1,
+            new Dictionary<string, float[]>
+            {
+                ["Vertex"] = new float[] { 0, 0, 0 },
+                ["TexCoord0"] = new float[] { 0.5f, 0.5f },
+                ["Normal"] = new float[] { 1, 0, 0 },   // twin 1's frame
+            },
+            new Dictionary<string, int> { ["Vertex"] = 3, ["TexCoord0"] = 2, ["Normal"] = 3 },
+            new List<int[]> { new[] { 0 } }));
+
+        var built = MeshApply.BuildGeometry(orig, glb);
+
+        Assert.Equal(new float[] { 0.9f, 0.9f }, built.Arrays["TexCoord1"]);
+    }
+
+    [Fact]
+    public void Fill_SkinnedRoute_TieBreaksTheSameWay()
+    {
+        // The skinned compile shares the fill; the seam-twin choice must not depend on the route taken.
+        var orig = SeamTwinsOrig();
+        orig.Channels["BlendWeight"] = new float[] { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        orig.Channels["BlendIndices"] = new float[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        orig.Dims["BlendWeight"] = 4; orig.Dims["BlendIndices"] = 4;
+        var glb = new MeshApply.Payload
+        {
+            Mesh = Mesh(1,
+                new Dictionary<string, float[]>
+                {
+                    ["Vertex"] = new float[] { 0, 0, 0 },
+                    ["TexCoord0"] = new float[] { 0.5f, 0.5f },
+                },
+                new Dictionary<string, int> { ["Vertex"] = 3, ["TexCoord0"] = 2 },
+                new List<int[]> { new[] { 0 } }),
+            SkinJointHashes = new uint[] { 5 },
+            JointIndices = new[] { 0, 0, 0, 0 },
+            JointWeights = new float[] { 1, 0, 0, 0 },
+        };
+
+        var built = MeshApply.BuildSkinned(orig, glb, new uint[] { 5 });
+
+        Assert.Equal(new float[] { 0.9f, 0.9f }, built.Arrays["TexCoord1"]);
+    }
+
+    [Fact]
+    public void UntouchedPayloadWithoutUv1_ByteRestoresCoincidentTwinsSplitOnlyByUv1()
+    {
+        // Both twins are identical in every transported channel. Nearest fill therefore selects twin 0 for
+        // both and provisionally gives vertex 1 the wrong UV1; because the payload did not carry UV1, that
+        // refill is outside the identity question and the original per-index bytes must win afterward.
+        var orig = Mesh(3,
+            new Dictionary<string, float[]>
+            {
+                ["Vertex"] = new float[] { 0, 0, 0,  0, 0, 0,  10, 0, 0 },
+                ["Normal"] = new float[] { 0, 1, 0,  0, 1, 0,  0, 1, 0 },
+                ["TexCoord0"] = new float[] { 0.5f, 0.5f,  0.5f, 0.5f,  0.7f, 0.7f },
+                ["TexCoord1"] = new float[] { 0.1f, 0.1f,  0.9f, 0.9f,  0.3f, 0.3f },
+            },
+            new Dictionary<string, int>
+            {
+                ["Vertex"] = 3, ["Normal"] = 3, ["TexCoord0"] = 2, ["TexCoord1"] = 2,
+            },
+            new List<int[]> { new[] { 0, 1, 2 } });
+        var returned = Mesh(3,
+            new Dictionary<string, float[]>
+            {
+                ["Vertex"] = (float[])orig.Channels["Vertex"].Clone(),
+                ["Normal"] = (float[])orig.Channels["Normal"].Clone(),
+                ["TexCoord0"] = (float[])orig.Channels["TexCoord0"].Clone(),
+            },
+            new Dictionary<string, int> { ["Vertex"] = 3, ["Normal"] = 3, ["TexCoord0"] = 2 },
+            new List<int[]> { new[] { 0, 1, 2 } });
+
+        var built = MeshApply.BuildGeometry(orig, MeshApply.Payload.Geometry(returned));
+
+        Assert.True(built.IdentityRestored);
+        Assert.Equal(orig.Channels["TexCoord1"], built.Arrays["TexCoord1"]);
+    }
+
+    [Fact]
+    public void UntouchedPayloadWithHigherUv_ByteRestoresTheOriginal()
+    {
+        var orig = EditableUvMesh();
+        var returned = EditableUvMesh();
+        returned.Channels.Remove("Color");
+        returned.Dims.Remove("Color");
+
+        var built = MeshApply.BuildGeometry(orig, MeshApply.Payload.Geometry(returned));
+
+        Assert.True(built.IdentityRestored);
+        Assert.Equal(orig.Channels["TexCoord1"], built.Arrays["TexCoord1"]);
+        Assert.Equal(orig.Channels["Vertex"], built.Arrays["Vertex"]);
+        Assert.Equal(orig.Channels["Normal"], built.Arrays["Normal"]);
+        Assert.Equal(orig.Channels["TexCoord0"], built.Arrays["TexCoord0"]);
+    }
+
+    [Fact]
+    public void TransportedUv1_WinsOverNearestFill_AndDoesNotRebakeColor()
+    {
+        var orig = EditableUvMesh();
+        var returned = EditableUvMesh();
+        var editedUv1 = new float[] { 20, 30,  40, 30,  20, 50 };
+        returned.Channels["TexCoord1"] = editedUv1;
+        returned.Channels.Remove("Color");
+        returned.Dims.Remove("Color");
+
+        var built = MeshApply.BuildGeometry(orig, MeshApply.Payload.Geometry(returned));
+
+        Assert.False(built.IdentityRestored);
+        Assert.Same(editedUv1, built.Arrays["TexCoord1"]);
+        Assert.Equal(orig.Channels["Color"], built.Arrays["Color"]);
+        Assert.Equal(orig.Channels["Tangent"], built.Arrays["Tangent"]);
+        Assert.Empty(built.Warnings);
+    }
+
+    [Fact]
+    public void AddedVertex_KeepsItsReturnedUv1_WhileColorStillRefillsFromNearestOriginal()
+    {
+        var orig = EditableUvMesh();
+        var returned = new UnityMesh
+        {
+            Name = "coat",
+            VertexCount = 4,
+            Channels = new Dictionary<string, float[]>
+            {
+                ["Vertex"] = new float[] { 0, 0, 0,  1, 0, 0,  0, 1, 0,  1.1f, 0, 0 },
+                ["Normal"] = new float[] { 0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1 },
+                ["Tangent"] = new float[] { 1, 0, 0, 1,  1, 0, 0, 1,  1, 0, 0, 1,  1, 0, 0, 1 },
+                ["TexCoord0"] = new float[] { 0, 0,  1, 0,  0, 1,  1.1f, 0 },
+                ["TexCoord1"] = new float[] { 2, 3,  4, 3,  2, 5,  99, 101 },
+            },
+            Dims = new Dictionary<string, int>
+            {
+                ["Vertex"] = 3, ["Normal"] = 3, ["Tangent"] = 4,
+                ["TexCoord0"] = 2, ["TexCoord1"] = 2,
+            },
+            Submeshes = new List<int[]> { new[] { 0, 1, 2,  1, 3, 2 } },
+        };
+
+        var built = MeshApply.BuildGeometry(orig, MeshApply.Payload.Geometry(returned));
+
+        Assert.Equal(new float[] { 2, 3,  4, 3,  2, 5,  99, 101 }, built.Arrays["TexCoord1"]);
+        Assert.Equal(orig.Channels["Color"][7], built.Arrays["Color"][15]);
+    }
+
+    private static UnityMesh EditableUvMesh() => new()
+    {
+        Name = "coat",
+        VertexCount = 3,
+        Channels = new Dictionary<string, float[]>
+        {
+            ["Vertex"] = new float[] { 0, 0, 0,  1, 0, 0,  0, 1, 0 },
+            ["Normal"] = new float[] { 0, 0, 1,  0, 0, 1,  0, 0, 1 },
+            ["Tangent"] = new float[] { 1, 0, 0, 1,  1, 0, 0, 1,  1, 0, 0, 1 },
+            ["Color"] = new float[] { 0.6f, 0.4f, 0.5f, 0.2f,  0.7f, 0.3f, 0.5f, 0.8f,  0.5f, 0.6f, 0.4f, 0.3f },
+            ["TexCoord0"] = new float[] { 0, 0,  1, 0,  0, 1 },
+            ["TexCoord1"] = new float[] { 2, 3,  4, 3,  2, 5 },
+        },
+        Dims = new Dictionary<string, int>
+        {
+            ["Vertex"] = 3, ["Normal"] = 3, ["Tangent"] = 4, ["Color"] = 4,
+            ["TexCoord0"] = 2, ["TexCoord1"] = 2,
+        },
+        Submeshes = new List<int[]> { new[] { 0, 1, 2 } },
+    };
 
     // ---- Position-stride guard: Vertex is NEVER packed, so a stored Vertex dim ≠ 3 is refused loudly
     // rather than silently mis-strided by the nearest-neighbour / AABB / position math. ----

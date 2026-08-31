@@ -2,3 +2,9 @@
 # emitter writes them). No EOL conversion — an autocrlf rewrite on checkout would silently break
 # the byte-for-byte golden comparison.
 tests/Remold.Core.Tests/Migoto/golden/** -text
+
+# The pinned Build/project fixtures are the same kind of contract, and one of them
+# (legacy_build_v1.json) is compared as text against a freshly serialized snapshot. Its committed
+# bytes are LF, and the snapshot is written with an LF newline on every platform, so the comparison
+# no longer answers to whatever core.autocrlf a checkout was made under.
+tests/Remold.Core.Tests/Project/golden/*.json -text

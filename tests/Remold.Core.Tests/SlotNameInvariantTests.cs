@@ -14,11 +14,10 @@ using Xunit;
 namespace Remold.Core.Tests;
 
 /// <summary>
-/// THE invariant on the smr/static route: a Mesh target's object name is the RENDERER SLOT's name, and the
-/// part's workspace glb carries the mesh under that same name. Enemy and prop prefabs point renderer slots
-/// at mesh objects whose own <c>m_Name</c> is unrelated to the slot — and can point several slots at ONE
-/// object — so nothing derivable from the asset name reaches the part the workbench, the roster and the
-/// build all speak of. The path id, never the name, is what selects the object.
+/// THE invariant on the smr/static route: a part is named by its RENDERER SLOT, and the object it draws is
+/// selected by path id. Enemy and prop prefabs point renderer slots at mesh objects whose own
+/// <c>m_Name</c> is unrelated to the slot — and can point several slots at ONE object — so nothing
+/// derivable from the asset name reaches the part the workbench, the roster and the build all speak of.
 /// </summary>
 public class SlotNameInvariantTests
 {
@@ -27,145 +26,95 @@ public class SlotNameInvariantTests
 
     /// <summary>A game dir holding ONE mesh bundle whose sole mesh carries <paramref name="meshName"/> at
     /// path id 1 — the object an smr/static slot references directly.</summary>
-    private static GameVfs MeshVfs(TempGame g, string meshName)
+    private static GameVfs MeshVfs(TempGame g, string meshName) => MeshVfs(g, meshName, out _);
+
+    /// <summary>The same, plus <paramref name="meshPathId"/>. With <paramref name="decoy"/> the bundle ships
+    /// a SECOND mesh of that name first, so the id names one of two same-named objects rather than the only
+    /// one there is.</summary>
+    private static GameVfs MeshVfs(TempGame g, string meshName, out long meshPathId, bool decoy = false)
     {
         var abw = g.At("AssetBundles_Windows");
         Directory.CreateDirectory(abw);
         var phys = new string('c', 32);
-        SyntheticBundle.BuildOneMesh(Path.Combine(abw, phys + ".bundle"), meshName,
-            new float[] { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, new[] { 0, 1, 2 }, bundleName: Logical);
+        meshPathId = SyntheticBundle.BuildOneMesh(Path.Combine(abw, phys + ".bundle"), meshName,
+            new float[] { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, new[] { 0, 1, 2 }, bundleName: Logical,
+            // four vertices against the real mesh's three: whichever object the export read is readable off
+            // the glb it wrote
+            sameNamedFirst: decoy
+                ? (new float[] { 0, 0, 0, 2, 0, 0, 0, 2, 0, 2, 2, 0 }, new[] { 0, 1, 2, 2, 1, 3 })
+                : null);
         return TestVfs.Create(g.Root, Array.Empty<(string, string)>(), null, (Logical, phys));
     }
 
-    /// <summary>An smr-backed part: no recipe address, identity is bundle + path id, and the token is the
-    /// one the workbench tree derives from the slot name.</summary>
-    private static RecipePart Smr(string slotName) =>
-        new(SubjectModelBuilder.SlotTokens(new[] { slotName }, Prop.MeshPrefix)(slotName),
-            slotName, "", Array.Empty<RecipeTierSlot>(), Logical, 1);
-
-    private static ExportReport Export(TempGame g, GameVfs vfs, RecipePart recipe, string modRoot)
-    {
-        var scope = SubjectScope.Build(vfs.Catalog, vfs.TryDeobfuscateLogical, Prop);
-        return AssetExporter.ExportRecipePart(g.Root, vfs, scope, Prop, "Crate", recipe,
-            Path.Combine(modRoot, Materializer.SubjectFolder("Crate", Prop.Stem)), sharedRoot: modRoot);
-    }
-
-    // ---- the staged record -----------------------------------------------------------------------------
-
+    /// <summary>A released project whose mesh target names a divergent slot, re-anchored against a roster
+    /// that answers for that slot. The failure this closes: a join made on the mesh ASSET name finds
+    /// nothing for a part whose object is called something else, and the change is lost — silently, or as
+    /// a refusal to convert a project that is perfectly sound.</summary>
     [Fact]
-    public void A_divergent_slot_stages_its_SLOT_name_not_the_mesh_asset_name()
+    public void A_divergent_slot_re_anchors_by_its_slot_name_and_path_id()
     {
         const string slot = "PROP_Shellcase_LOD0";
         using var g = new TempGame();
         var vfs = MeshVfs(g, "Plane001");            // the object's own name says nothing about the slot
-        var modRoot = Path.Combine(g.Root, "mod");
-
-        var report = Export(g, vfs, Smr(slot), modRoot);
-
-        var mesh = Assert.Single(report.Files, f => f.Kind == "mesh");
-        Assert.True(mesh.Ok, mesh.Note);
-        Assert.Equal(slot, mesh.AssetName);
-        Assert.Equal(1L, mesh.PathId);               // the path id is what read it
-    }
-
-    [Fact]
-    public void The_workspace_glb_carries_the_part_under_the_slot_name()
-    {
-        // Blender's collections, the send-back's part match and the map-origin record all join on the name
-        // inside the glb; a glb named after the mesh asset would take every divergent part out of a
-        // combined send.
-        const string slot = "PROP_Shellcase_LOD0";
-        using var g = new TempGame();
-        var vfs = MeshVfs(g, "Plane001");
-        var modRoot = Path.Combine(g.Root, "mod");
-
-        var report = Export(g, vfs, Smr(slot), modRoot);
-
-        var glb = Assert.Single(report.Files, f => f.Kind == "mesh").Path;
-        Assert.Equal(new[] { slot }, MeshGltf.MeshNames(glb).ToArray());
-    }
-
-    // ---- the open path ---------------------------------------------------------------------------------
-
-    [Fact]
-    public void The_part_token_round_trips_through_the_ledger()
-    {
-        // The failure this closes: the token the workbench clicked with derives from the SLOT name, so a
-        // target recorded under the mesh asset's name resolves to another token (or none) and the
-        // materialize reports "no mesh for '<part>' in the export" over a mesh that exported cleanly.
-        const string slot = "PROP_Shellcase_LOD0";
-        using var g = new TempGame();
-        var vfs = MeshVfs(g, "Plane001");
-        var modRoot = Path.Combine(g.Root, "mod");
-        var recipe = Smr(slot);
-        var project = new ModProject { RootDir = modRoot };
-
-        ProjectBuilder.AddExport(project, Export(g, vfs, recipe, modRoot), modRoot, "Crate", Prop.Stem);
-
-        Assert.Equal("Shellcase", recipe.Token);
-        Assert.True(Materializer.IsPartMaterialized(project, "Crate", Prop.Stem, Prop.MeshPrefix, recipe.Token));
-        var target = Assert.Single(Materializer.PartTargets(project, "Crate", Prop.Stem, Prop.MeshPrefix, recipe.Token));
-        Assert.Equal(slot, target.ObjectName);
-    }
-
-    [Fact]
-    public void Two_slots_on_one_mesh_object_record_two_targets_under_their_own_names()
-    {
-        // A prefab may point several renderer slots at ONE mesh object. Each is its own part with its own
-        // workspace file and its own edit, so keying the target on the path id alone would leave the second
-        // one with nothing staged under its name.
-        using var g = new TempGame();
-        var vfs = MeshVfs(g, "dz_005_mesh");
-        var modRoot = Path.Combine(g.Root, "mod");
-        var first = Smr("PROP_Grenade1_LOD0");
-        var second = Smr("PROP_Grenade2_LOD0");
-        var project = new ModProject { RootDir = modRoot };
-
-        ProjectBuilder.AddExport(project, Export(g, vfs, first, modRoot), modRoot, "Crate", Prop.Stem);
-        ProjectBuilder.AddExport(project, Export(g, vfs, second, modRoot), modRoot, "Crate", Prop.Stem);
-
-        Assert.Equal(new[] { "Grenade1", "Grenade2" }, new[] { first.Token, second.Token });
-        var meshes = project.Targets.Where(t => t.AssetType == "Mesh").ToList();
-        Assert.Equal(new[] { "PROP_Grenade1_LOD0", "PROP_Grenade2_LOD0" },
-            meshes.Select(t => t.ObjectName).ToArray());
-        Assert.All(meshes, t => Assert.Equal(1L, t.PathId));   // one object, two parts
-        foreach (var part in new[] { first, second })
-            Assert.Single(Materializer.PartTargets(project, "Crate", Prop.Stem, Prop.MeshPrefix, part.Token));
-    }
-
-    // ---- the build's own roster join -------------------------------------------------------------------
-
-    [Fact]
-    public void A_replace_on_a_divergent_part_derives_instead_of_throwing()
-    {
-        // VerbDerivation keys the live roster by SubjectPart.SlotName and the edited target by its object
-        // name. Under the old staging those disagreed on a divergent part, so its Replace died at build with
-        // "edited mesh '<name>' is not in … roster" even after the open was fixed.
-        const string slot = "PROP_Shellcase_LOD0";
-        using var g = new TempGame();
-        var vfs = MeshVfs(g, "Plane001");
-        var modRoot = Path.Combine(g.Root, "mod");
-        var recipe = Smr(slot);
+        string modRoot = Path.Combine(g.Root, "mod");
+        Directory.CreateDirectory(Path.Combine(modRoot, "meshes"));
+        File.WriteAllText(Path.Combine(modRoot, "meshes", "shellcase.glb"), "an authored donor");
+        File.WriteAllText(Path.Combine(modRoot, "meshes", "shellcase.orig.glb"), "the original");
         var project = new ModProject { RootDir = modRoot };
         project.Selection.Add(new SelectionEntry { Character = "Crate", Outfit = Prop.Stem });
-        ProjectBuilder.AddExport(project, Export(g, vfs, recipe, modRoot), modRoot, "Crate", Prop.Stem);
-        // the workspace glb no longer matches its originals/ copy — an edited part, i.e. a Replace
-        var edited = project.Targets.Single(t => t.AssetType == "Mesh");
-        File.WriteAllText(Path.Combine(modRoot, edited.ReplaceFile), "an authored donor");
-
+        project.Targets.Add(new ProjectTarget
+        {
+            AssetType = "Mesh", ObjectName = slot, Bundle = Logical, PathId = 1,
+            SubjectCharacter = "Crate", SubjectOutfit = Prop.Stem,
+            ReplaceFile = "meshes/shellcase.glb", OriginalFile = "meshes/shellcase.orig.glb",
+        });
         var model = new SubjectModel("Crate", Prop.Stem, SubjectSource.Prefab, new[]
         {
-            new SubjectPart(recipe.Token, slot, "", Array.Empty<SubjectMaterial>(),
-                MeshBundle: Logical, MeshPathId: 1),
+            new SubjectPart("Shellcase", slot, "", Array.Empty<SubjectMaterial>(),
+                RendererBundle: Logical, RendererPathId: 9, MeshBundle: Logical, MeshPathId: 1),
         }, Skeleton: null, Problems: Array.Empty<string>());
-        var warnings = new List<string>();
+        var resolver = new LegacyProjectResolver(new Remold.Core.Migoto.BuildEnv(
+            (c, s) => c == "Crate" && s == Prop.Stem ? model : null,
+            _ => null, vfs.TryDeobfuscateLogical, "26109", null));
 
-        var edits = VerbDerivation.DeriveAll(project, (c, s) => model, warnings);
+        var adapted = LegacyProjectAdapter.Adapt(project, resolver.ResolvePart, resolver.RosterSlots);
 
-        var e = Assert.Single(edits);
-        Assert.Equal(EditVerbs.Replace, e.Verb);
-        Assert.Equal(slot, e.Mesh);
-        Assert.Equal(1L, e.PathId);
-        Assert.Empty(warnings);
+        Assert.True(adapted.Report.CanSave,
+            string.Join("; ", adapted.Report.Items.Where(i => i.BlocksSave).Select(i => i.Detail)));
+        var edit = Assert.Single(adapted.Project.EditDefinitions, e => e.Kind == EditDefinitionKind.Content);
+        Assert.Equal(slot, edit.Target.RendererSlot);
+        var geometry = Assert.Single(adapted.Project.TargetSlots,
+            s => s.Input == TargetInputKind.Geometry && s.Domain == TargetSlotDomain.Game);
+        Assert.Equal(1L, geometry.Mesh!.PathId);     // the path id, never the name, is what selects it
+        Assert.Equal(slot, geometry.Part.RendererSlot);
+    }
+
+    /// <summary>The other half, on the route that opens a part for editing: the glb a Blender open writes
+    /// names its mesh by the RENDERER SLOT, not by the asset's own <c>m_Name</c>. Everything downstream
+    /// joins on that name — the Blender collection the modder edits, the send-back's per-part match, the
+    /// RMO source record — so a glb naming the asset instead would come back matching no part of the
+    /// project. The read that produced it is selected by PATH ID: a second mesh of the same name at another
+    /// id is what a name-only lookup takes, and it is not the object the renderer pinned.</summary>
+    [Fact]
+    public void An_opened_parts_glb_carries_the_slot_name_and_the_mesh_the_path_id_names()
+    {
+        const string slot = "PROP_Shellcase_LOD0";
+        using var g = new TempGame();
+        var vfs = MeshVfs(g, "Plane001", out long pathId, decoy: true);
+        string glb = g.At(Path.Combine("run", "parts", "shellcase.glb"));
+        Directory.CreateDirectory(Path.GetDirectoryName(glb)!);
+
+        var done = AssetExporter.BuildRiggedGlbs(g.Root, vfs, Prop, "Crate",
+            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            {
+                ("Shellcase", Logical, slot, glb, null, pathId, null),
+            },
+            g.At(Path.Combine("run", "textures")));
+
+        Assert.Equal(new[] { "Shellcase" }, done.ToArray());
+        Assert.Equal(new[] { slot }, MeshGltf.MeshNames(glb).ToArray());
+        // three vertices is the mesh at the recorded path id; the same-named decoy at path id 1 has four
+        var primitive = SharpGLTF.Schema2.ModelRoot.Load(glb).LogicalMeshes.Single().Primitives.Single();
+        Assert.Equal(3, primitive.GetVertexAccessor("POSITION").Count);
     }
 }

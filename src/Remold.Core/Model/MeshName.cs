@@ -40,13 +40,6 @@ public static partial class MeshName
         return m.Success ? m.Groups[1].Value.ToLowerInvariant() : "base";
     }
 
-    /// <summary>Whether the name's LOD tier is one the PC client never renders (<c>lodm*</c>). Every walk
-    /// over a part's tiers skips these: an override on a draw that never happens does nothing, and a hide
-    /// covering one costs a section for nothing. Reads through <see cref="Lod"/> because the marker is
-    /// commonly INFIXED (<c>…_P1_body1_lodm0_Dorm</c>), which a suffix test misses.</summary>
-    public static bool IsUnrenderedTier(string meshName) =>
-        Lod(meshName).StartsWith("lodm", System.StringComparison.Ordinal);
-
     /// <summary>The part token: the name minus the outfit prefix and the LOD <em>token</em>, KEEPING any
     /// variant suffix after it. The LOD marker is commonly infixed, not a tail
     /// (<c>cloth1_lod0_Fight</c>, <c>P1_body1_lodm0_Dorm</c>), where <c>_Fight</c>/<c>_Dorm</c> are

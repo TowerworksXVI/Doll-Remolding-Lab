@@ -80,18 +80,37 @@ public class SharingSeedTests : IDisposable
     }
 
     [Fact]
-    public void The_fingerprint_moves_when_the_internal_id_behind_a_bundle_does()
+    public void The_fingerprint_ignores_the_internal_id_behind_a_bundle()
     {
-        // The two bundle namespaces are independent, so a bundle that re-minted in either one moves the
-        // fingerprint. Content rewritten in place under names that both survive is the read record's
-        // question, not this one.
+        // An internalId is minted by the packer — for a single-file bundle it IS the physical content hash
+        // of the file — so every one of them re-mints when the game is repacked, with nothing about the
+        // subject having changed. A fingerprint that joined to them would die on every patch. Whether the
+        // CONTENT behind the bundle moved is the read record's question, not this one.
         var address = GameVfs.PrefabAddress("Character/Player", "VesnaSSR01");
         CatalogIndex WithInternalId(string internalId) => CatalogIndex.ForTest(
             new[] { (address, "prefab.bundle") },
             new[] { (address, new[] { "prefab.bundle" }) },
             new[] { ("prefab.bundle", internalId) });
-        Assert.NotEqual(SubjectFingerprint.For(WithInternalId("aaaa.bundle"), Outfit("VesnaSSR01")),
+        Assert.Equal(SubjectFingerprint.For(WithInternalId("aaaa.bundle"), Outfit("VesnaSSR01")),
             SubjectFingerprint.For(WithInternalId("bbbb.bundle"), Outfit("VesnaSSR01")));
+    }
+
+    [Fact]
+    public void The_fingerprint_reads_the_scope_as_a_set()
+    {
+        // Membership is the catalog fact; the ORDER of a dependency array is the packer's, and reordering
+        // it is packaging churn like a re-mint. So the same bundles listed the other way round are the
+        // same scope, while a bundle arriving or leaving is not.
+        // the hit bundle leads the scope either way, so the two dependencies BEHIND it are what carries
+        // the order difference
+        string forward = SubjectFingerprint.For(
+            Catalog(new[] { "prefab.bundle", "mat.bundle", "extra.bundle" }), Outfit("VesnaSSR01"));
+        string swapped = SubjectFingerprint.For(
+            Catalog(new[] { "prefab.bundle", "extra.bundle", "mat.bundle" }), Outfit("VesnaSSR01"));
+        Assert.Equal(forward, swapped);
+        // …and a bundle leaving the closure is not a reordering
+        Assert.NotEqual(forward, SubjectFingerprint.For(
+            Catalog(new[] { "prefab.bundle", "mat.bundle" }), Outfit("VesnaSSR01")));
     }
 
     // ---- the read record --------------------------------------------------------------------------
@@ -109,19 +128,35 @@ public class SharingSeedTests : IDisposable
         id => files.FirstOrDefault(f => f.InternalId == id).ContentHash;
 
     [Fact]
-    public void The_read_record_is_one_triple_per_bundle_and_current_in_the_world_it_was_taken_in()
+    public void The_read_record_is_one_content_pair_per_bundle_and_current_in_the_world_it_was_taken_in()
     {
         var catalog = ReadCatalog();
         var content = Content(("v-1", "vhash"), ("k-1", "khash"));
         string reads = BundleReads.Of(catalog, content, new[] { "vmesh.bundle", "kmesh.bundle" });
 
-        // bundle key, internalId key, content-hash key — per bundle, and nothing but hex
-        Assert.Equal(2 * 3 * 16, reads.Length);
+        // logical bundle key, content-hash key — per bundle, and nothing but hex. The internalId is NOT
+        // among them: it is minted by the packer, so keying on it would invalidate every row of a repack.
+        Assert.Equal(2 * 2 * 16, reads.Length);
         Assert.Matches("^[0-9A-F]+$", reads);
         Assert.True(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, content), reads));
-        // a bundle read twice is one triple: the record is over the SET the measurement depended on
-        Assert.Equal(3 * 16,
+        // a bundle read twice is one pair: the record is over the SET the measurement depended on
+        Assert.Equal(2 * 16,
             BundleReads.Of(catalog, content, new[] { "vmesh.bundle", "vmesh.bundle" }).Length);
+    }
+
+    [Fact]
+    public void A_bundle_that_only_re_minted_is_still_current()
+    {
+        // The repack, in the smallest shape that shows it: the same logical bundle, the same content, a
+        // brand-new internalId (a single-file bundle's internalId IS its physical filename, so a repack
+        // re-mints every one of them). The row that read it must survive, or a patch that moved nothing
+        // costs the whole population a re-measure.
+        string reads = BundleReads.Of(ReadCatalog("v-1", "k-1"),
+            Content(("v-1", "vhash"), ("k-1", "khash")), new[] { "vmesh.bundle", "kmesh.bundle" });
+
+        Assert.True(BundleReads.StillCurrent(
+            BundleReads.CurrentKeys(ReadCatalog("v-2", "k-2"),
+                Content(("v-2", "vhash"), ("k-2", "khash"))), reads));
     }
 
     [Fact]
@@ -145,14 +180,15 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void A_read_record_in_any_other_key_shape_reads_as_moved()
     {
-        // A record that is not a whole number of triples was written by something else, and nothing can be
+        // A record that is not a whole number of pairs was written by something else, and nothing can be
         // said about which keys are which inside it — so the row measures again rather than being trusted.
+        // The shape used here is the schema-6 one this code replaced: bundle, internalId, content hash.
         var catalog = ReadCatalog();
         var keys = BundleReads.CurrentKeys(catalog, Content(("v-1", "vhash")));
-        string nameAndInternalIdOnly = NameKey.Of("vmesh.bundle") + NameKey.Of("v-1");
+        string oldTripleShape = NameKey.Of("vmesh.bundle") + NameKey.Of("v-1") + NameKey.Of("vhash");
 
-        Assert.Equal(32, nameAndInternalIdOnly.Length);
-        Assert.False(BundleReads.StillCurrent(keys, nameAndInternalIdOnly));
+        Assert.Equal(48, oldTripleShape.Length);
+        Assert.False(BundleReads.StillCurrent(keys, oldTripleShape));
         // an empty record records no bundles at all, which is current by definition
         Assert.True(BundleReads.StillCurrent(keys, ""));
     }
@@ -173,6 +209,12 @@ public class SharingSeedTests : IDisposable
             BundleReads.Of(catalog, unlocated, new[] { "stranger.bundle" })));
         // and the file arriving is a move like any other
         Assert.False(BundleReads.StillCurrent(BundleReads.CurrentKeys(catalog, located),
+            BundleReads.Of(catalog, unlocated, new[] { "vmesh.bundle" })));
+        // so is the bundle LEAVING the catalog, even though no content hash was resolvable on either
+        // side: the two absences are deliberately different keys, or a departure could read as current
+        var without = CatalogIndex.ForTest(new[] { ("Assets/X/b.mesh", "kmesh.bundle") }, null,
+            new[] { ("kmesh.bundle", "k-1") });
+        Assert.False(BundleReads.StillCurrent(BundleReads.CurrentKeys(without, unlocated),
             BundleReads.Of(catalog, unlocated, new[] { "vmesh.bundle" })));
     }
 
@@ -247,6 +289,23 @@ public class SharingSeedTests : IDisposable
         Assert.Equal(BundleReads.Of(catalog, Content(), new[] { "stranger.bundle" }), reads);
     }
 
+    [Fact]
+    public void The_absent_catalog_marker_is_the_key_every_persisted_row_already_carries()
+    {
+        // A VALUE pin, not a behaviour one. The marker is a constant this code writes into every row that
+        // recorded a bundle the catalog does not name — the shipped seed's rows included — so its spelling
+        // in the source is a persisted-file contract: move it by one byte and every such row stops matching
+        // and the whole population re-measures, silently. The expectation is computed outside this code
+        // (SHA-256 of the marker's UTF-8 bytes, first 64 bits, hex) rather than read back off the constant.
+        var catalog = ReadCatalog();
+        string reads = BundleReads.Of(catalog, Content(), new[] { "stranger.bundle" });
+
+        Assert.Equal(32, reads.Length);                          // bundle key, then the marker
+        Assert.Equal("3E4ED681F925E599", reads.Substring(16));
+        // …and it is still not the OTHER absence — a bundle the catalog names whose hash would not mint
+        Assert.NotEqual(NameKey.Of(""), reads.Substring(16));
+    }
+
     // ---- adoption ---------------------------------------------------------------------------------
 
     private static SharingPopulation OneSubject() => SharingPopulation.Of(new[]
@@ -261,6 +320,15 @@ public class SharingSeedTests : IDisposable
         new Dictionary<string, int[]> { ["aaaaaaaa"] = new[] { 0 } },
         new Dictionary<int, string[]>());
 
+    private static void SaveCompleteLocal(string path, string catalogVersion)
+    {
+        Measured(catalogVersion).Save(path);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var row in json["Outfits"]!.AsArray())
+            row!["R"] = "00112233445566778899aabbccddeeff";
+        File.WriteAllText(path, json.ToJsonString());
+    }
+
     [Fact]
     public void With_nothing_cached_the_seed_becomes_the_base()
     {
@@ -269,6 +337,79 @@ public class SharingSeedTests : IDisposable
         Assert.True(found.FromSeed);
         Assert.True(found.Index!.Covers("Vesna", "VesnaSSR01"));
         Assert.Equal("25180", found.Index.CatalogVersion);
+    }
+
+    [Fact]
+    public void Newest_complete_prior_local_cache_is_selected_before_the_seed()
+    {
+        string current = At("sharing_25200.json");
+        string prior = At("sharing_25180.json");
+        string seed = At("seed.json");
+        SaveCompleteLocal(prior, "25180");
+        MainWindowViewModel.WriteSharingInstallContext(prior, "install-A");
+        Measured("25000").Save(seed);
+
+        var found = MainWindowViewModel.LoadSharingBase(current, seed, "25200", OneSubject(),
+            installIdentity: "install-A");
+
+        Assert.False(found.FromSeed);
+        Assert.Equal("25180", found.Index!.CatalogVersion);
+    }
+
+    [Fact]
+    public void Wrong_schema_prior_local_cache_is_rejected_in_favor_of_the_seed()
+    {
+        string current = At("sharing_25200.json");
+        string prior = At("sharing_25180.json");
+        string seed = At("seed.json");
+        SaveCompleteLocal(prior, "25180");
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(prior))!;
+        json["SchemaVersion"] = SharingIndex.SchemaVersion - 1;
+        File.WriteAllText(prior, json.ToJsonString());
+        MainWindowViewModel.WriteSharingInstallContext(prior, "install-A");
+        Measured("25000").Save(seed);
+
+        var found = MainWindowViewModel.LoadSharingBase(current, seed, "25200", OneSubject(),
+            installIdentity: "install-A");
+
+        Assert.True(found.FromSeed);
+        Assert.Equal("25000", found.Index!.CatalogVersion);
+    }
+
+    [Fact]
+    public void Seed_load_logs_schema_acceptance_and_row_join_counts()
+    {
+        string seed = At("logged-seed.json");
+        Measured("25180").Save(seed);
+        var lines = new List<(string Context, string Detail)>();
+
+        var found = MainWindowViewModel.LoadSharingBase(At("absent-cache.json"), seed, "25180",
+            OneSubject(), (context, detail) => lines.Add((context, detail)));
+
+        Assert.True(found.FromSeed);
+        var line = Assert.Single(lines);
+        Assert.Equal("Asset sharing seed", line.Context);
+        Assert.Contains($"schema {SharingIndex.SchemaVersion} accepted", line.Detail);
+        Assert.Contains("rows loaded 1, joined 1, dropped 0", line.Detail);
+    }
+
+    [Fact]
+    public void Seed_load_logs_schema_refusal_and_dropped_row_counts()
+    {
+        string seed = At("refused-seed.json");
+        Measured("25180").Save(seed);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(seed))!;
+        json["SchemaVersion"] = SharingIndex.SchemaVersion - 1;
+        File.WriteAllText(seed, json.ToJsonString());
+        var lines = new List<(string Context, string Detail)>();
+
+        var found = MainWindowViewModel.LoadSharingBase(At("absent-cache-2.json"), seed, "25180",
+            OneSubject(), (context, detail) => lines.Add((context, detail)));
+
+        Assert.Null(found.Index);
+        var line = Assert.Single(lines);
+        Assert.Contains($"schema {SharingIndex.SchemaVersion - 1} refused", line.Detail);
+        Assert.Contains("rows loaded 1, joined 0, dropped 1", line.Detail);
     }
 
     [Fact]
@@ -330,16 +471,185 @@ public class SharingSeedTests : IDisposable
 
     // ---- the shipped file -------------------------------------------------------------------------
 
+    /// <summary>The committed seed is a real minted artifact (see
+    /// <see cref="Remold.Core.LabPaths.SharingSeedFile"/> for the procedure) and every install adopts it as
+    /// its base. This is the re-mint tripwire in its armed state: a schema bump lands, this fails on the
+    /// stale number the file still states, and the release step is minting a fresh pair — never teaching
+    /// the loader the old schema.</summary>
     [Fact]
-    public void The_shipped_seed_is_current_schema_and_carries_rows()
+    public void The_shipped_seed_is_the_current_schema_and_becomes_the_base()
     {
         var seed = System.Text.Json.Nodes.JsonNode.Parse(
             File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "data", "sharing_seed.json")))!;
-        // The twin of the writer-side pin in SharingIndexTests: the shipped artifact and the code that
-        // writes it must agree, or the seed is refused at load on every install.
-        Assert.Equal(6, seed["SchemaVersion"]!.GetValue<int>());
+        Assert.Equal(SharingIndex.SchemaVersion, seed["SchemaVersion"]!.GetValue<int>());
         Assert.NotEmpty(seed["CatalogVersion"]!.GetValue<string>());
         Assert.NotEmpty(seed["Outfits"]!.AsArray());
+        // …and the app's own route over it: a fresh install joins the seed to its roster and starts from
+        // it instead of measuring the whole population. The subject is a REAL measured pair — the join is
+        // by name key, so only a pair the live roster actually holds can vouch that the artifact joins.
+        var sharkry = SharingPopulation.Of(new[]
+        {
+            new Character(1, "Sharkry", "SR", 10, 1099,
+                new List<Remold.Core.Model.Outfit> { new(10, "SharkrySR01", OutfitKind.Base) }),
+        });
+        var found = MainWindowViewModel.LoadSharingBase(At("cache.json"),
+            Path.Combine(AppContext.BaseDirectory, "data", "sharing_seed.json"),
+            seed["CatalogVersion"]!.GetValue<string>(), sharkry);
+        Assert.True(found.FromSeed);
+        Assert.True(found.Index!.Covers("Sharkry", "SharkrySR01"));
+    }
+
+    [Fact]
+    public void The_shipped_observation_memo_matches_the_current_measurement_schema()
+    {
+        // The seed's other half, minted from the same pass. BOTH numbers are pinned: the memo's own shape,
+        // and the sharing schema its VALUES were computed under — a bump to either fails here until the
+        // pair is re-minted together. A full store, never entry-less: the memo is what spares a fresh
+        // install the reads behind any row a game update invalidates.
+        var memo = System.Text.Json.Nodes.JsonNode.Parse(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "data", "asset_hashes_seed.json")))!;
+        Assert.Equal(AssetHashMemo.SchemaVersion, memo["SchemaVersion"]!.GetValue<int>());
+        Assert.Equal(SharingIndex.SchemaVersion, memo["SharingSchemaVersion"]!.GetValue<int>());
+        Assert.NotEmpty(memo["Entries"]!.AsObject());
+    }
+
+    // ---- the release pack's guard on the pair ------------------------------------------------------
+
+    /// <summary>The publish layout the pack reads and the app reads back: the pair under <c>data\</c>.
+    /// The seed is written by the real writer at whatever schema it currently produces; the memo is
+    /// hand-stated so a schema can be moved one number at a time.</summary>
+    private string ShippedFolder(string name, int? memoSchema = null, int? memoSharingSchema = null,
+        string? rawSeed = null, string? rawMemo = null)
+    {
+        string dir = At(name);
+        Directory.CreateDirectory(Path.Combine(dir, "data"));
+        string seed = Path.Combine(dir, "data", "sharing_seed.json");
+        if (rawSeed is null)
+        {
+            Measured("25180").Save(seed);
+            // FromMeasurements deliberately writes a non-reusable empty R; a shipped pair comes from a
+            // real pass, whose writer uses the same row shape with a nonempty read record.
+            var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(seed))!;
+            foreach (var row in json["Outfits"]!.AsArray()) row!["R"] = "0011223344556677";
+            File.WriteAllText(seed, json.ToJsonString());
+        }
+        else File.WriteAllText(seed, rawSeed);
+        File.WriteAllText(Path.Combine(dir, "data", "asset_hashes_seed.json"), rawMemo
+            ?? $"{{\"SchemaVersion\":{memoSchema ?? 1},"
+            + $"\"SharingSchemaVersion\":{memoSharingSchema ?? SharingIndex.SchemaVersion},"
+            + "\"Entries\":{\"0011223344556677\":\"89abcdef\"}}");
+        return dir;
+    }
+
+    private static void RemoveSeedRowField(string dir, string field)
+    {
+        string path = Path.Combine(dir, "data", "sharing_seed.json");
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        json["Outfits"]!.AsArray()[0]!.AsObject().Remove(field);
+        File.WriteAllText(path, json.ToJsonString());
+    }
+
+    [Fact]
+    public void The_pack_refuses_a_seed_the_app_would_refuse_at_load()
+    {
+        // The gap this closes: a seed one schema behind is refused SILENTLY at load — the install just
+        // measures the whole population, which is indistinguishable from a fresh one — so every gate in
+        // the release flow stays green while the release ships a file no install reads.
+        string stale = ShippedFolder("stale", rawSeed:
+            "{\"SchemaVersion\":6,\"CatalogVersion\":\"26109\",\"Outfits\":[],\"Failed\":[]}");
+        var refusal = ShippedMeasurement.Refusal(stale);
+
+        Assert.NotNull(refusal);
+        Assert.Contains("sharing_seed.json", refusal!);
+        Assert.Contains("SchemaVersion 6", refusal);
+
+        // …and the same folder with a seed this build writes itself packs
+        Assert.Null(ShippedMeasurement.Refusal(ShippedFolder("current")));
+    }
+
+    [Fact]
+    public void The_pack_refuses_a_memo_from_before_a_sharing_schema_bump_or_of_another_shape()
+    {
+        // Half a current pair is still refused: the memo's values are only as good as the measurement
+        // rules that produced them, and a memo whose own shape moved is not readable entry by entry.
+        var bumped = ShippedMeasurement.Refusal(
+            ShippedFolder("bumped", memoSharingSchema: SharingIndex.SchemaVersion - 1));
+        Assert.NotNull(bumped);
+        Assert.Contains("asset_hashes_seed.json", bumped!);
+
+        var reshaped = ShippedMeasurement.Refusal(ShippedFolder("reshaped", memoSchema: 99));
+        Assert.NotNull(reshaped);
+        Assert.Contains("asset_hashes_seed.json", reshaped!);
+
+        // a memo that predates the coupling states no such number at all, and is refused on that
+        string old = At("old");
+        Directory.CreateDirectory(Path.Combine(old, "data"));
+        Measured("25180").Save(Path.Combine(old, "data", "sharing_seed.json"));
+        File.WriteAllText(Path.Combine(old, "data", "asset_hashes_seed.json"),
+            "{\"SchemaVersion\":1,\"Entries\":{}}");
+        Assert.NotNull(ShippedMeasurement.Refusal(old));
+
+        // and a missing half is not a pass either
+        string half = At("half");
+        Directory.CreateDirectory(Path.Combine(half, "data"));
+        Measured("25180").Save(Path.Combine(half, "data", "sharing_seed.json"));
+        Assert.NotNull(ShippedMeasurement.Refusal(half));
+    }
+
+    [Fact]
+    public void The_pack_refuses_a_schema_valid_seed_with_zero_rows()
+    {
+        string dir = ShippedFolder("zero-rows", rawSeed:
+            $"{{\"SchemaVersion\":{SharingIndex.SchemaVersion},\"CatalogVersion\":\"26109\","
+            + "\"Outfits\":[],\"Failed\":[]}");
+
+        var refusal = ShippedMeasurement.Refusal(dir);
+
+        Assert.NotNull(refusal);
+        Assert.Contains("no outfit measurements", refusal!);
+    }
+
+    [Theory]
+    [InlineData("R")]
+    [InlineData("A")]
+    public void The_pack_refuses_a_schema_valid_seed_row_missing_a_writer_field(string field)
+    {
+        string dir = ShippedFolder("missing-" + field);
+        RemoveSeedRowField(dir, field);
+
+        var refusal = ShippedMeasurement.Refusal(dir);
+
+        Assert.NotNull(refusal);
+        Assert.Contains(field, refusal!);
+    }
+
+    [Fact]
+    public void The_pack_refuses_a_schema_valid_empty_asset_hash_memo()
+    {
+        string dir = ShippedFolder("empty-memo", rawMemo:
+            $"{{\"SchemaVersion\":{AssetHashMemo.SchemaVersion},"
+            + $"\"SharingSchemaVersion\":{SharingIndex.SchemaVersion},\"Entries\":{{}}}}");
+
+        var refusal = ShippedMeasurement.Refusal(dir);
+
+        Assert.NotNull(refusal);
+        Assert.Contains("no measured asset hashes", refusal!);
+    }
+
+    [Fact]
+    public void The_pack_accepts_a_well_formed_measurement_pair()
+    {
+        Assert.Null(ShippedMeasurement.Refusal(ShippedFolder("well-formed")));
+    }
+
+    /// <summary>The committed pair, through the pack's own guard: a release packed from this tree carries
+    /// a measurement every install reads. Beside
+    /// <see cref="The_shipped_seed_is_the_current_schema_and_becomes_the_base"/>, this is the tripwire's
+    /// pack-side half — a schema bump fails it until the pair is re-minted.</summary>
+    [Fact]
+    public void The_pack_accepts_the_committed_pair()
+    {
+        Assert.Null(ShippedMeasurement.Refusal(AppContext.BaseDirectory));
     }
 
     [Fact]
@@ -380,31 +690,15 @@ public class SharingSeedTests : IDisposable
 
     [Fact]
     public void Nothing_running_shows_no_line() =>
-        Assert.Equal("", MainWindowViewModel.BackgroundWorkLine(null, prewarming: false));
+        Assert.Equal("", MainWindowViewModel.BackgroundWorkLine(null));
 
     [Fact]
     public void The_floor_pass_and_the_delta_read_differently()
     {
-        Assert.Equal("Measuring asset sharing… 3/506",
-            MainWindowViewModel.BackgroundWorkLine(new SharingProgress(3, 506, Delta: false), false));
-        Assert.Equal("Updating asset sharing… 1/4",
-            MainWindowViewModel.BackgroundWorkLine(new SharingProgress(1, 4, Delta: true), false));
-    }
-
-    [Fact]
-    public void Speculative_preparation_gets_the_line_when_no_pass_is_running()
-    {
-        Assert.Equal("Preparing outfits…", MainWindowViewModel.BackgroundWorkLine(null, prewarming: true));
-        // one line: the measurement is the one a build waits on, so it comes first
-        Assert.Equal("Measuring asset sharing… 0/2",
-            MainWindowViewModel.BackgroundWorkLine(new SharingProgress(0, 2, Delta: false), prewarming: true));
-    }
-
-    [Fact]
-    public void An_explicit_action_waiting_on_speculative_work_names_the_same_noun_the_cell_does()
-    {
-        Assert.Equal("Finishing outfit preparation…", MainWindowViewModel.PrewarmWaitLine(cancelling: false));
-        Assert.Equal("Stopping outfit preparation…", MainWindowViewModel.PrewarmWaitLine(cancelling: true));
+        Assert.Equal("Checking assets… 3/506",
+            MainWindowViewModel.BackgroundWorkLine(new SharingProgress(3, 506, Delta: false)));
+        Assert.Equal("Updating assets… 1/4",
+            MainWindowViewModel.BackgroundWorkLine(new SharingProgress(1, 4, Delta: true)));
     }
 
     // ---- the cell's endings -----------------------------------------------------------------------
@@ -413,11 +707,10 @@ public class SharingSeedTests : IDisposable
     public void A_running_pass_carries_the_cells_line_and_says_what_it_is_for()
     {
         var facet = MainWindowViewModel.BackgroundFacet(
-            new SharingProgress(12, 38, Delta: true), prewarming: false, sharingFailed: false);
-        // the same rule the Build footer streams while it waits — one wording for one piece of work
-        Assert.Equal(MainWindowViewModel.BackgroundWorkLine(new SharingProgress(12, 38, Delta: true), false),
+            new SharingProgress(12, 38, Delta: true), sharingFailed: false);
+        Assert.Equal(MainWindowViewModel.BackgroundWorkLine(new SharingProgress(12, 38, Delta: true)),
             facet.Text);
-        Assert.Equal("Updating asset sharing… 12/38", facet.Text);
+        Assert.Equal("Updating assets… 12/38", facet.Text);
         Assert.Equal("", facet.Glyph);
         Assert.Equal(MainWindowViewModel.SharingCellTip, facet.Detail);
     }
@@ -425,20 +718,62 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void A_failed_pass_ends_on_the_cell_rather_than_in_silence()
     {
-        var facet = MainWindowViewModel.BackgroundFacet(null, prewarming: false, sharingFailed: true);
+        var facet = MainWindowViewModel.BackgroundFacet(null, sharingFailed: true);
         Assert.Equal("⚠", facet.Glyph);
-        Assert.Equal("Asset sharing unmeasured", facet.Text);
-        Assert.Equal("Edits ship unscoped. Rescan game files to retry.", facet.Detail);
+        Assert.Equal("Shared assets not checked", facet.Text);
+        Assert.Equal("Edits may also change other outfits that share the same textures or meshes. "
+            + "Use Tools · Rescan game files to try again.", facet.Detail);
+    }
+
+    // ---- what a width-capped cell's tooltip carries -----------------------------------------------
+    //
+    // Route: StatusFacet.Tip is what MainWindow.axaml's three capped cells — background-work, notice and
+    // launch — bind their ToolTip.Tip to. A capped label ellipsizes from the end, so the tooltip is where
+    // the whole label has to survive.
+
+    [Fact]
+    public void A_capped_cells_tooltip_leads_with_the_whole_label()
+    {
+        // Deliberately not app sentences: the rule under test is the composition, not any one string.
+        Assert.Equal("Label\nDetail sentence.", StatusFacet.Warn("Label", "Detail sentence.").Tip);
+    }
+
+    [Fact]
+    public void A_facet_with_only_one_half_tips_with_that_half()
+    {
+        Assert.Equal("Label", StatusFacet.Loading("Label").Tip);
+        Assert.Equal("Detail sentence.", new StatusFacet("", StatusFacet.Ok, "", "Detail sentence.").Tip);
+        Assert.Equal("", StatusFacet.None.Tip);
+    }
+
+    /// <summary>The counts are the only live thing on the background-work line, and the 180px cap eats
+    /// exactly them. They survive in the tooltip, above the sentence saying what the pass is for.</summary>
+    [Fact]
+    public void The_running_lines_counts_survive_in_the_tooltip()
+    {
+        var progress = new SharingProgress(12, 38, Delta: true);
+        var facet = MainWindowViewModel.BackgroundFacet(progress, sharingFailed: false);
+        Assert.Equal(MainWindowViewModel.BackgroundWorkLine(progress) + "\n"
+            + MainWindowViewModel.SharingCellTip, facet.Tip);
+        Assert.Contains("12/38", facet.Tip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_failed_passs_tooltip_carries_its_label_and_its_remedy()
+    {
+        var facet = MainWindowViewModel.BackgroundFacet(null, sharingFailed: true);
+        Assert.Equal(MainWindowViewModel.SharingUnmeasured + "\n"
+            + MainWindowViewModel.SharingUnmeasuredDetail, facet.Tip);
     }
 
     [Fact]
     public void A_pass_that_ends_with_nothing_wrong_leaves_the_cell_blank()
     {
         Assert.Equal(StatusFacet.None.Text,
-            MainWindowViewModel.BackgroundFacet(null, prewarming: false, sharingFailed: false).Text);
+            MainWindowViewModel.BackgroundFacet(null, sharingFailed: false).Text);
         // and a new pass over the failure's ground outranks it: work in flight is the newer answer
-        Assert.Equal("Measuring asset sharing… 0/9", MainWindowViewModel.BackgroundFacet(
-            new SharingProgress(0, 9, Delta: false), prewarming: false, sharingFailed: true).Text);
+        Assert.Equal("Checking assets… 0/9", MainWindowViewModel.BackgroundFacet(
+            new SharingProgress(0, 9, Delta: false), sharingFailed: true).Text);
     }
 
     // ---- what a completed pass writes back --------------------------------------------------------
@@ -491,6 +826,43 @@ public class SharingSeedTests : IDisposable
         Assert.True(MainWindowViewModel.ShouldWriteSharingCache(seed, adopted, cts.Token));
         cts.Cancel();
         Assert.False(MainWindowViewModel.ShouldWriteSharingCache(seed, adopted, cts.Token));
+    }
+
+    /// <summary>The pass publishes a PAIR — this install's index and the observation memo beside it — and
+    /// one read of the token decides both. Read twice, a cancellation landing between the two writes
+    /// publishes one file and not the other, into a folder the rescan that cancelled the pass may have just
+    /// swept. The decision is a value, so the halves cannot disagree.</summary>
+    [Fact]
+    public void The_two_files_a_pass_publishes_are_decided_together()
+    {
+        var seed = Measured("25180");
+        var adopted = new MainWindowViewModel.SharingBase(seed, FromSeed: true);   // the always-write case
+        using var cts = new CancellationTokenSource();
+
+        var live = MainWindowViewModel.SharingPublishes(seed, adopted, cts.Token);
+        Assert.True(live.Cache);
+        Assert.True(live.Memo);
+
+        cts.Cancel();
+        var cancelled = MainWindowViewModel.SharingPublishes(seed, adopted, cts.Token);
+        Assert.False(cancelled.Cache);
+        Assert.False(cancelled.Memo);
+        // and the decision, once taken, is a value: cancelling afterwards cannot half-apply it
+        Assert.True(live.Cache && live.Memo);
+    }
+
+    [Fact]
+    public void A_pass_that_wrote_no_new_rows_still_publishes_its_memo()
+    {
+        // The two are not the same question. The index is not rewritten when its rows are what the file
+        // already says — but the memo may have learned bundle content the index's unchanged rows never
+        // needed, and withholding it would make the next pass re-read exactly that.
+        var cached = Measured("25180");
+        var publish = MainWindowViewModel.SharingPublishes(
+            cached, new MainWindowViewModel.SharingBase(cached, FromSeed: false), default);
+
+        Assert.False(publish.Cache);
+        Assert.True(publish.Memo);
     }
 
     [Fact]
@@ -555,8 +927,8 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void A_search_that_matched_nothing_says_so()
     {
-        Assert.Equal("No match for \"zzz\".", MainWindowViewModel.NoMatchLine("zzz", shown: 0));
-        Assert.Equal("No match for \"zzz\".", MainWindowViewModel.NoMatchLine("  zzz  ", shown: 0));
+        Assert.Equal("No match for 'zzz'.", MainWindowViewModel.NoMatchLine("zzz", shown: 0));
+        Assert.Equal("No match for 'zzz'.", MainWindowViewModel.NoMatchLine("  zzz  ", shown: 0));
         Assert.Equal("", MainWindowViewModel.NoMatchLine("zzz", shown: 3));
         // an empty list with nothing searched is the tab's own empty state, not a dead-ended search
         Assert.Equal("", MainWindowViewModel.NoMatchLine("", shown: 0));

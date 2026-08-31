@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Remold.Core.Model;
 using Remold.Core.Tables;
@@ -14,6 +15,30 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class DisplayNamesTests
 {
+    private static GameDatabase SnapshotDatabase(TempGame g)
+    {
+        g.WriteTable("GunCharacterData", TempGame.TableBytes(new[]
+        {
+            TempGame.GunCharRowLoc(42, "Vesna", "VesnaSSR", 1071, 107199, nameTextId: 5001),
+        }));
+        g.WriteIntlTable("ClothesData", TempGame.TableBytes(new[]
+        {
+            TempGame.ClothesRow(1071, "VesnaSSR01", "VesnaSSR0101", nameTextId: 5002),
+        }));
+        g.WriteTable("BattleSummonedData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        g.WriteTable("EnemyData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        g.WriteTable("GunWeaponData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        g.WriteIntlTable("WeaponSkinData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        g.WriteIntlTable("WeaponModSkinData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        string root = g.WriteTable("LangPackageTableEnusData", TempGame.TableBytes(new[]
+        {
+            TempGame.LangRow(5001, "Mirel"),
+            TempGame.LangRow(5002, "Plum Fizz"),
+            TempGame.LangRow(9999, "Not referenced by a roster table"),
+        }));
+        return GameDatabase.FromGameDir(root);
+    }
+
     // Vesna has a localized character name and one named outfit; an enemy stem has no ClothesData row.
     private static (GameDatabase Db, DisplayNames Names) Build(TempGame g, string locale = "Enus")
     {
@@ -44,6 +69,54 @@ public class DisplayNamesTests
         using var g = new TempGame();
         var (_, names) = Build(g);
         Assert.Equal("Mirel", names.Character(1071));
+    }
+
+    [Fact]
+    public void Roster_display_name_snapshot_serves_equivalent_compact_labels()
+    {
+        using var g = new TempGame();
+        var db = SnapshotDatabase(g);
+        string snapshot = Path.Combine(Path.GetDirectoryName(db.TablePath("LangPackageTableEnusData"))!,
+            "display-names.bin");
+
+        var cold = LocalizationDb.LoadRosterCached(db, snapshot, out bool coldHit);
+        var warm = LocalizationDb.LoadRosterCached(db, snapshot, out bool warmHit);
+        var coldNames = DisplayNames.Build(db, cold);
+        var warmNames = DisplayNames.Build(db, warm);
+
+        Assert.False(coldHit);
+        Assert.True(warmHit);
+        Assert.Equal(2, warm.Count);
+        Assert.Null(warm.Text(9999));
+        Assert.Equal(coldNames.Character(1071), warmNames.Character(1071));
+        Assert.Equal(coldNames.Outfit("VesnaSSR0101"), warmNames.Outfit("VesnaSSR0101"));
+    }
+
+    [Theory]
+    [InlineData("LangPackageTableEnusData")]
+    [InlineData("ClothesData")]
+    [InlineData("GunCharacterData")]
+    [InlineData("BattleSummonedData")]
+    [InlineData("EnemyData")]
+    [InlineData("GunWeaponData")]
+    [InlineData("WeaponSkinData")]
+    [InlineData("WeaponModSkinData")]
+    public void Roster_display_name_snapshot_invalidates_on_any_contributing_table_identity(string table)
+    {
+        using var g = new TempGame();
+        var db = SnapshotDatabase(g);
+        string snapshot = Path.Combine(Path.GetDirectoryName(db.TablePath("LangPackageTableEnusData"))!,
+            "display-names-identity.bin");
+        LocalizationDb.LoadRosterCached(db, snapshot, out bool firstHit);
+        string changed = db.TablePath(table);
+        File.SetLastWriteTimeUtc(changed, File.GetLastWriteTimeUtc(changed).AddSeconds(5));
+
+        LocalizationDb.LoadRosterCached(db, snapshot, out bool changedHit);
+        LocalizationDb.LoadRosterCached(db, snapshot, out bool replacedHit);
+
+        Assert.False(firstHit);
+        Assert.False(changedHit);
+        Assert.True(replacedHit);
     }
 
     [Fact]

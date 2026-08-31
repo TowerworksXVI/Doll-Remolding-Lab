@@ -30,6 +30,7 @@ internal static class Program
         {
             // Two copies over one settings file and one mod library would overwrite each other's writes.
             if (!owned) { App.SecondInstance = true; }
+            else AppLog.BeginLaunch();   // the log reads as THIS run even when nothing gets reported
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
         catch (Exception ex)

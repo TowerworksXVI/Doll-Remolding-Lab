@@ -4,7 +4,14 @@ using System.Text.Json.Serialization;
 
 namespace Remold.Core.Project;
 
-/// <summary>The per-mesh verbs of the derived edit list.</summary>
+// The vocabulary a change is described in: what a change DOES to a part, and what one submesh's map slots
+// ask for. Every type in this file is SHARED, not legacy — the runtime compiler's own work items are
+// written in these words (Migoto.BuildWorkItem holds SubmeshTextures, SlotOrigin, CarriedRamp,
+// RmoAlphaAnswer and an EditVerbs string), and a schema-1 manifest happens to use the same ones, which is
+// what lets the conversion read one without translating. The file keeps the name of the entry type it used
+// to hold: that was the released build's derived edit list, and it is gone.
+
+/// <summary>The verbs a change can carry.</summary>
 public static class EditVerbs
 {
     /// <summary>Swap the mesh for an authored donor, which may ride any bones of the outfit — the build
@@ -14,81 +21,14 @@ public static class EditVerbs
     public const string Hide = "hide";
     /// <summary>Keep the mesh, override its textures at its own draws (mesh-scoped binds).</summary>
     public const string Retexture = "retexture";
+    /// <summary>Keep the mesh and every picture on it, and shade a material of it with a toon ramp the mod
+    /// carries. It exists so a pick on a part with no other change has a change row, a tick and a toggle
+    /// key of its own, keyed exactly as every other row is.</summary>
+    public const string Ramp = "ramp";
 
-    /// <summary>There is no "leave" verb: an untouched mesh has no <see cref="MeshEdit"/> entry at all, so
-    /// the edit list only ever holds work to do.</summary>
-    public static bool IsValid(string? verb) => verb is Replace or Hide or Retexture;
-}
-
-/// <summary>
-/// One entry of the build's <b>derived edit list</b>. NEVER persisted or authored:
-/// <see cref="Workbench.VerbDerivation"/> rebuilds the list in memory each build, so the verbs can't
-/// drift from what the workbench shows. Identity is (<see cref="Character"/>, <see cref="Outfit"/>,
-/// <see cref="Mesh"/>); a mesh with no entry is untouched. All file paths are workspace-relative.
-/// </summary>
-public sealed class MeshEdit
-{
-    [JsonPropertyName("character")] public string Character { get; set; } = "";
-    /// <summary>The outfit stem — matches <see cref="SelectionEntry.Outfit"/>.</summary>
-    [JsonPropertyName("outfit")] public string Outfit { get; set; } = "";
-    /// <summary>The roster part's renderer slot name (its representative <c>_lod0</c> slot). LOD-tier
-    /// fan-out is NOT stored here — the build enumerates tiers from the live recipe, so this can't go
-    /// stale against a game update.</summary>
-    [JsonPropertyName("mesh")] public string Mesh { get; set; } = "";
-    /// <summary>Exact selector for smr-backed meshes (same-named copies per bundle); null on
-    /// recipe-backed meshes, where the name selects.</summary>
-    [JsonPropertyName("path_id")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? PathId { get; set; }
-
-    /// <summary>One of <see cref="EditVerbs"/>.</summary>
-    [JsonPropertyName("verb")] public string Verb { get; set; } = "";
-
-    /// <summary>Replace only — the authored donor glb, weighted to the outfit's reference armature. Null
-    /// is allowed by the data layer (verb picked, donor not yet imported) and refused loudly at
-    /// build.</summary>
-    [JsonPropertyName("donor_file")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? DonorFile { get; set; }
-
-    /// <summary>Replace: per-donor-submesh texture set. Retexture: per-VANILLA-submesh. A submesh with no
-    /// entry INHERITS every slot: they are left alone and the part's own stock maps keep drawing there.
-    /// On an entry, what a slot without a file does is its <see cref="SlotOrigin"/>'s to say.</summary>
-    [JsonPropertyName("textures")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public List<SubmeshTextures>? Textures { get; set; }
-
-    /// <summary>Replace only — explicit anchor pool-part name overriding the build's derived pick.</summary>
-    [JsonPropertyName("anchor_override")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? AnchorOverride { get; set; }
-
-    /// <summary>Replace only — the target's recorded scene-rest uprighting (see
-    /// <see cref="Mesh.RestBake"/>). The workspace donor is in scene-rest space; the build un-bakes it
-    /// by this before compiling the game-space payload. Null = nothing baked.</summary>
-    [JsonPropertyName("baked_rest")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public List<float>? BakedRest { get; set; }
-
-    /// <summary>Whether this entry is for the given subject, case-insensitive — the same comparison as
-    /// <see cref="ModProject.HasSubject"/>.</summary>
-    public bool IsForSubject(string character, string stem) =>
-        string.Equals(Character, character, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(Outfit, stem, StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>Every workspace file this edit references — what the build existence-checks before
-    /// emitting.</summary>
-    public IEnumerable<string> ReferencedFiles()
-    {
-        if (DonorFile is not null) yield return DonorFile;
-        if (Textures is not null)
-            foreach (var t in Textures)
-            {
-                if (t.Albedo is not null) yield return t.Albedo;
-                if (t.Normal is not null) yield return t.Normal;
-                if (t.Rmo is not null) yield return t.Rmo;
-            }
-    }
+    /// <summary>There is no "leave" verb: an untouched part carries no change at all, so a change list only
+    /// ever holds work to do.</summary>
+    public static bool IsValid(string? verb) => verb is Replace or Hide or Retexture or Ramp;
 }
 
 /// <summary>What one map slot of one submesh asks the build for. A slot naming a file is
@@ -124,6 +64,25 @@ public sealed class SubmeshTextures
     [JsonPropertyName("rmo")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Rmo { get; set; }
+    /// <summary>The toon ramp, as a <c>.dds</c> in the game's own float format. It is the one slot with no
+    /// PNG anywhere in its path: the values ARE the shading curve, so nothing quantises or re-encodes it.
+    /// Absent on every project that predates ramps, which reads as "keep the one the game bound".</summary>
+    [JsonPropertyName("ramp")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Ramp { get; set; }
+
+    /// <summary>The effect overlay (<c>_BlendTex</c>): the hair specular band, the face blush tint. A
+    /// game-domain picture like the three above it; absent on every row that predates the slot.</summary>
+    [JsonPropertyName("blend")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Blend { get; set; }
+
+    /// <summary>Ordinary texture bindings whose shader property has no fixed field above. Property is the
+    /// binding identity; file/origin retain the same ask contract as the fixed picture fields. Optional and
+    /// absent on every older row.</summary>
+    [JsonPropertyName("textures")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<PropertyTextureBinding>? Textures { get; set; }
 
     [JsonPropertyName("albedo_origin")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -134,6 +93,55 @@ public sealed class SubmeshTextures
     [JsonPropertyName("rmo_origin")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public SlotOrigin RmoOrigin { get; set; }
+    [JsonPropertyName("ramp_origin")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public SlotOrigin RampOrigin { get; set; }
+    [JsonPropertyName("blend_origin")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public SlotOrigin BlendOrigin { get; set; }
+
+    /// <summary>Set when the ramp slot's file was CARRIED rather than chosen: the conversion followed this
+    /// row's own map references back to the game material the donor geometry was shaded by and took its
+    /// ramp, and this names that texture. Absent on a ramp the modder picked, and on every row that names
+    /// no ramp at all — so its presence is what tells a carried pick from a chosen one, and its contents
+    /// are what a repair record states the pick stood in for.
+    ///
+    /// <para>Write it through <see cref="SetRamp"/> only: a file with no origin recorded beside it would
+    /// read back as a decision nobody made.</para></summary>
+    [JsonPropertyName("ramp_carried")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CarriedRamp? RampCarried { get; set; }
+
+    /// <summary>This row's ramp was carried by the conversion, not picked by the modder.</summary>
+    [JsonIgnore] public bool RampIsCarried => Ramp is not null && RampCarried is not null;
+
+    /// <summary>What this submesh's authored RMO alpha is for, once asked. Null = never asked, which is
+    /// every row that predates the question and every row no ambiguous image ever landed on. The intake
+    /// honours it on every later pass, so the modder answers once per submesh rather than per drop.</summary>
+    [JsonPropertyName("rmo_alpha")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RmoAlphaAnswer? RmoAlpha { get; set; }
+
+    /// <summary>THE write route for the ramp slot, so no flow can leave the file and its provenance
+    /// disagreeing. <paramref name="projectRelativeDds"/> null clears the slot back to "nothing picked";
+    /// <paramref name="carried"/> non-null marks the pick as one the conversion made and names the game
+    /// texture it stood in for.</summary>
+    public void SetRamp(string? projectRelativeDds, CarriedRamp? carried = null)
+    {
+        Ramp = projectRelativeDds;
+        RampOrigin = projectRelativeDds is null ? SlotOrigin.None : SlotOrigin.Authored;
+        RampCarried = projectRelativeDds is null ? null : carried;
+    }
+
+    /// <summary>Record the ramp opt-out: the part keeps whatever ramp the game already binds there, and the
+    /// conversion leaves this row alone from now on. Not the same as an empty slot, which the conversion is
+    /// still free to fill.</summary>
+    public void KeepOwnRamp()
+    {
+        Ramp = null;
+        RampOrigin = SlotOrigin.VanillaOwn;
+        RampCarried = null;
+    }
 
     /// <summary>What the albedo slot asks for. A named file settles it, so a writer that only assigns
     /// paths (a retexture, a map-card pick) needs no origin of its own.</summary>
@@ -142,6 +150,10 @@ public sealed class SubmeshTextures
     [JsonIgnore] public SlotOrigin NormalAsk => Ask(Normal, NormalOrigin);
     /// <inheritdoc cref="AlbedoAsk"/>
     [JsonIgnore] public SlotOrigin RmoAsk => Ask(Rmo, RmoOrigin);
+    /// <inheritdoc cref="AlbedoAsk"/>
+    [JsonIgnore] public SlotOrigin RampAsk => Ask(Ramp, RampOrigin);
+    /// <inheritdoc cref="AlbedoAsk"/>
+    [JsonIgnore] public SlotOrigin BlendAsk => Ask(Blend, BlendOrigin);
 
     /// <summary><see cref="SlotOrigin.Authored"/> means a file, both ways: the two cannot be recorded in
     /// disagreement, so nothing downstream has to handle an authored slot with nothing to bind.</summary>
@@ -149,6 +161,54 @@ public sealed class SubmeshTextures
         file is not null ? SlotOrigin.Authored
         : recorded == SlotOrigin.Authored ? SlotOrigin.None
         : recorded;
+}
+
+/// <summary>One property-keyed ordinary picture in a build texture row.</summary>
+public sealed class PropertyTextureBinding
+{
+    [JsonPropertyName("shader_property")] public string ShaderProperty { get; set; } = "";
+    [JsonPropertyName("file")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? File { get; set; }
+    [JsonPropertyName("origin")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public SlotOrigin Origin { get; set; }
+
+    [JsonIgnore] public SlotOrigin Ask => File is not null ? SlotOrigin.Authored
+        : Origin == SlotOrigin.Authored ? SlotOrigin.None : Origin;
+}
+
+/// <summary>What the emissive mask of an authored RMO is, once the modder has said. Persisted BY NAME, so
+/// the members can be reordered without rewriting manifests.
+///
+/// <para>Only ever recorded for the one shape that is genuinely ambiguous — an authored alpha that is
+/// constant pure white, which reads equally as "I painted no mask" and as "everything here glows". Absent
+/// is not a third answer: it means nothing ambiguous has arrived on this row.</para></summary>
+[JsonConverter(typeof(JsonStringEnumConverter<RmoAlphaAnswer>))]
+public enum RmoAlphaAnswer
+{
+    /// <summary>Take the mask off the part's own stock RMO, discarding the authored alpha.</summary>
+    Rebuild,
+    /// <summary>Ship the alpha as authored.</summary>
+    ShipAsAuthored,
+}
+
+/// <summary>The game texture a CARRIED ramp stands in for, by the identity the game holds it under.
+/// Recorded rather than re-derived because the references it was read off can move afterwards — a map card
+/// re-authored over the link the ramp was found through leaves the geometry, and its shading, exactly as
+/// they were.</summary>
+public sealed class CarriedRamp
+{
+    [JsonPropertyName("bundle")] public string Bundle { get; set; } = "";
+    /// <summary>The Texture2D's own asset name — a label, not a selector: every ramp in a ramp library is
+    /// called the same thing.</summary>
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    /// <summary>WHICH texture of that bundle, the way <see cref="ProjectTarget.PathId"/> selects a mesh.
+    /// Null on a record written before ramps were selected this way — those fall back to the name, which is
+    /// the identity they were carried under.</summary>
+    [JsonPropertyName("path_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? PathId { get; set; }
 }
 
 /// <summary>The one place that decides which origins are an ask, so the intake, the build and the

@@ -1,6 +1,12 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Text.Json.Nodes;
+using Remold.Core.Bundles;
+using Remold.Core.Model;
 using Remold.Core.Tests.Support;
 using Remold.Core.Workbench;
 using Xunit;
@@ -15,6 +21,16 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class RosterSnapshotTests
 {
+    private static CatalogIndex CatalogFor(Outfit outfit, params string[] bundles)
+    {
+        string address = GameVfs.PrefabAddress("Character/Player", outfit.Stem);
+        return CatalogIndex.ForTest(new[] { (address, bundles[0]) },
+            new[] { (address, bundles) }, bundles.Select(bundle => (bundle, bundle + ".id")));
+    }
+
+    private static Func<string, string?> Content(string suffix = "A") =>
+        internalId => internalId + "-" + suffix;
+
     private static Dictionary<long, List<string>> SampleRoster() => new()
     {
         [1071] = new() { "body", "hair", "face" },
@@ -32,6 +48,76 @@ public class RosterSnapshotTests
         Assert.NotNull(back);
         Assert.Equal(new[] { "body", "hair", "face" }, back![1071]);
         Assert.Equal(new[] { "body" }, back[1081]);
+    }
+
+    [Fact]
+    public void Per_outfit_row_survives_a_catalog_version_change_when_shape_and_bundle_content_stand()
+    {
+        using var g = new TempGame();
+        var outfit = new Outfit(1071, "VesnaSSR01", OutfitKind.Base);
+        var catalog = CatalogFor(outfit, "prefab.bundle", "material.bundle");
+        var row = RosterSnapshot.CreateRow(catalog, Content(), outfit,
+            new[] { "prefab.bundle", "material.bundle" }, new[] { "body", "hair" });
+        RosterSnapshot.SaveRows(g.At("roster_24535.json"), "24535", new[] { row });
+
+        var reused = RosterSnapshot.LoadReusable(g.At("roster_24600.json"), catalog, Content(),
+            new[] { outfit });
+
+        var back = Assert.Single(reused).Value;
+        Assert.True(back.Confirmed);
+        Assert.Equal(new[] { "body", "hair" }, back.Parts);
+    }
+
+    [Fact]
+    public void Per_outfit_row_invalidates_when_catalog_shape_or_read_bundle_content_moves()
+    {
+        using var g = new TempGame();
+        var outfit = new Outfit(1071, "VesnaSSR01", OutfitKind.Base);
+        var original = CatalogFor(outfit, "prefab.bundle", "material.bundle");
+        var row = RosterSnapshot.CreateRow(original, Content(), outfit,
+            new[] { "prefab.bundle", "material.bundle" }, new[] { "body" });
+        RosterSnapshot.SaveRows(g.At("roster_24535.json"), "24535", new[] { row });
+        var movedShape = CatalogFor(outfit, "prefab.bundle", "material.bundle", "extra.bundle");
+
+        Assert.Empty(RosterSnapshot.LoadReusable(g.At("roster_24600.json"), movedShape, Content(),
+            new[] { outfit }));
+        Assert.Empty(RosterSnapshot.LoadReusable(g.At("roster_24600.json"), original, Content("B"),
+            new[] { outfit }));
+    }
+
+    [Fact]
+    public void Per_outfit_snapshot_preserves_a_cleanly_dropped_row_explicitly()
+    {
+        using var g = new TempGame();
+        var outfit = new Outfit(1071, "VesnaSSR01", OutfitKind.Base);
+        var catalog = CatalogFor(outfit, "prefab.bundle");
+        var row = RosterSnapshot.CreateRow(catalog, Content(), outfit,
+            new[] { "prefab.bundle" }, parts: null);
+        RosterSnapshot.SaveRows(g.At("roster_24535.json"), "24535", new[] { row });
+
+        var back = Assert.Single(RosterSnapshot.LoadReusable(g.At("roster_24600.json"), catalog,
+            Content(), new[] { outfit })).Value;
+
+        Assert.False(back.Confirmed);
+        Assert.Null(back.Parts);
+    }
+
+    [Fact]
+    public void Roster_fill_cache_single_flights_reads_and_stays_within_its_byte_budget()
+    {
+        int loads = 0;
+        var cache = new RosterFillCache(_ =>
+        {
+            Interlocked.Increment(ref loads);
+            Thread.SpinWait(100_000);
+            return new byte[6];
+        }, byteBudget: 8);
+
+        Parallel.For(0, 16, _ => Assert.Equal(6, cache.Read("shared")!.Length));
+        cache.Read("second");
+
+        Assert.Equal(2, loads);
+        Assert.True(cache.CachedBytes <= cache.ByteBudget);
     }
 
     [Fact]

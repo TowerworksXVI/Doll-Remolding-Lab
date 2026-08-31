@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
+using Remold.Core.Project;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -92,8 +93,9 @@ public class MigotoEmitterGoldenTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(RunFullBuild(), "mod.ini"));
         string list = ini[ini.IndexOf("[CommandListDraw_swap]", StringComparison.Ordinal)..];
 
-        // everything past the probe's last line is binds and draws, in submesh order
-        const string probeEnd = "$zz_slot_r = 6\nendif\n";
+        // everything past the probe's last line is binds and draws, in submesh order. The probe sweeps the
+        // shipped catalog's registers, so its last line is asked for rather than written down here.
+        string probeEnd = $"$zz_slot_r = {ShaderSlotPlan.Shipped.StockMaps[^1]}\nendif\n";
         var chunks = list[(list.IndexOf(probeEnd, StringComparison.Ordinal) + probeEnd.Length)..]
             .Split("drawindexed = ");
         // chunks[0] is submesh 0's binds; every later chunk opens with the previous draw's arguments
@@ -133,7 +135,7 @@ public class MigotoEmitterGoldenTests : IDisposable
             OutDir = outDir,
             ToggleKey = "F6",
             HideHashes = new[] { "cccc3333", "dddd4444" },
-            HideKeys = new Dictionary<string, string> { ["dddd4444"] = "F9" },
+            HideKeys = new Dictionary<string, IReadOnlyList<KeyRef>> { ["dddd4444"] = new KeyRef[] { "F9" } },
             Pipelines = new[]
             {
                 new ReplacePipeline
@@ -175,22 +177,28 @@ public class MigotoEmitterGoldenTests : IDisposable
     {
         var ini = File.ReadAllText(Path.Combine(RunKeyedBuild(), "mod.ini"));
 
-        // every keyed variable starts at 1: a keyed mod behaves as an unkeyed one until a key is pressed
+        // every key launches at position 0, where nothing is switched yet: the mod's own key on, and each
+        // group at the position its content answers, so a keyed mod behaves as an unkeyed one until a key
+        // is pressed
         foreach (var (v, k) in new[] { ("zz_key_f6", "F6"), ("zz_key_f8", "F8"), ("zz_key_f9", "F9") })
         {
-            Assert.Contains($"global ${v} = 1", ini);
-            // the Key section binds and runs; the flip lives in the command list it runs, because an
+            Assert.Contains($"global ${v} = 0", ini);
+            // the Key section binds and runs; the step lives in the command list it runs, because an
             // assignment inside a [Key…] section is dropped when 3DMigoto parses it as a KeyOverride
             Assert.Contains($"[Key_{v}]\nkey = no_modifiers {k}\nrun = CommandListKey_{v}\n\n", ini);
-            Assert.Contains($"[CommandListKey_{v}]\n${v} = 1 - ${v}\n", ini);
         }
+        // every key steps its cycle and wraps, the mod's own included — its cycle is two positions long,
+        // so the step IS the flip, written the one way every key is written
+        foreach (var v in new[] { "zz_key_f6", "zz_key_f8", "zz_key_f9" })
+            Assert.Contains($"[CommandListKey_{v}]\n${v} = ${v} + 1\nif ${v} == 2\n${v} = 0\nendif\n",
+                ini);
         // a toggle is per-session: nothing carries a press into the next launch
         Assert.DoesNotContain("persist", ini);
         // tier 1 outside, tier 2 inside — either one switches the Replace off
-        Assert.Contains("if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nhandling = skip\n", ini);
+        Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nhandling = skip\n", ini);
         // an unkeyed hide still gates on the mod's key alone
-        Assert.Contains("hash = cccc3333\nmatch_priority = 0\nif $zz_key_f6 == 1\nhandling = skip\nendif\n", ini);
-        Assert.Contains("hash = dddd4444\nmatch_priority = 0\nif $zz_key_f6 == 1\nif $zz_key_f9 == 1\nhandling = skip\nendif\nendif\n", ini);
+        Assert.Contains("hash = cccc3333\nmatch_priority = 0\nif $zz_key_f6 == 0\nhandling = skip\nendif\n", ini);
+        Assert.Contains("hash = dddd4444\nmatch_priority = 0\nif $zz_key_f6 == 0\nif $zz_key_f9 == 0\nhandling = skip\nendif\nendif\n", ini);
         // captures are NOT gated: a pipeline switched back on mid-frame must have posed data to recover from
         Assert.Contains("hash = aaaa1111\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\n", ini);
     }

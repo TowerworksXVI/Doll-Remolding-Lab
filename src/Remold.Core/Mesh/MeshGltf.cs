@@ -13,7 +13,7 @@ namespace Remold.Core.Mesh;
 
 /// <summary>
 /// Reads/writes a decoded <see cref="UnityMesh"/> as a Blender-facing <c>.glb</c>: geometry
-/// (POSITION/NORMAL/TANGENT/TEXCOORD_0 + per-submesh indices) plus the named, posed armature and
+/// (POSITION/NORMAL/TANGENT/a consecutive TEXCOORD_0..N prefix + per-submesh indices) plus the named, posed armature and
 /// JOINTS/WEIGHTS. Every glb here is glTF right-handed space, converted from Unity's left-handed space
 /// via <see cref="AxisConvention"/>; the flip is applied on export and un-applied on import, never crossed.
 /// The outline channel (Unity vertex COLOR) is computed, not transported — it is re-baked at package time
@@ -21,6 +21,84 @@ namespace Remold.Core.Mesh;
 /// </summary>
 public static class MeshGltf
 {
+    /// <summary>Content-key version of the shared-armature combined GLB writer.</summary>
+    public const string CombinedWriterSpec = "combined-rigged-writer-v1";
+
+    internal const int MaxTexCoordSets = 8;
+
+    /// <summary>How many UV sets can ride Blender transport without renumbering: the consecutive prefix
+    /// beginning at UV0 whose game channels each carry at least the two components glTF transports.</summary>
+    internal static int TransportedTexCoordCount(UnityMesh mesh)
+    {
+        int count = 0;
+        for (; count < MaxTexCoordSets; count++)
+        {
+            string channel = $"TexCoord{count}";
+            if (!mesh.Has(channel) || !mesh.Dims.TryGetValue(channel, out int dim) || dim < 2) break;
+        }
+        return count;
+    }
+
+    /// <summary>The transported UV-prefix count for one named mesh in an already parsed GLB.</summary>
+    public static int TransportedTexCoordCount(ParsedGlb glb, string? meshName) =>
+        TransportedTexCoordCount(ImportPayload(glb, meshName).Mesh);
+
+    /// <summary>User-facing notices for game UV channels outside the transportable prefix. Every present
+    /// channel that will stay game-authored is named; later channels never compact around a missing or undersized
+    /// predecessor.</summary>
+    public static IReadOnlyList<string> TexCoordTransportWarnings(UnityMesh mesh, string part)
+    {
+        int prefix = TransportedTexCoordCount(mesh);
+        if (prefix == MaxTexCoordSets) return Array.Empty<string>();
+
+        string blocker = $"TexCoord{prefix}";
+        bool missing = !mesh.Has(blocker);
+        int blockerDim = mesh.Dims.GetValueOrDefault(blocker);
+        var layers = new List<string>();
+        for (int i = prefix; i < MaxTexCoordSets; i++)
+        {
+            string channel = $"TexCoord{i}";
+            if (!mesh.Has(channel)) continue;
+            layers.Add($"UV{i}");
+        }
+        if (layers.Count == 0) return Array.Empty<string>();
+        string named = layers.Count == 1
+            ? layers[0]
+            : layers.Count == 2
+                ? $"{layers[0]} and {layers[1]}"
+                : string.Join(", ", layers.Take(layers.Count - 1)) + $", and {layers[^1]}";
+        string reason = missing
+            ? $"UV{prefix} is missing"
+            : $"UV{prefix} has {blockerDim} {(blockerDim == 1 ? "value" : "values")} per vertex instead of at least two";
+        return new[]
+        {
+            $"{part}: {named} cannot be edited in Blender because {reason}. The game values will be kept.",
+        };
+    }
+
+    /// <summary>Named notices for Blender-created UV layers that the per-part game baseline does not carry,
+    /// and for supported baseline layers Blender deleted and the return will restore. The caller reports
+    /// these even when that is the return's only difference.</summary>
+    public static IReadOnlyList<string> ReturnedTexCoordWarnings(ParsedGlb returned, string meshName,
+        int allowed)
+    {
+        // A negative count is the return preparation's explicit no-filtering degradation for an unreadable
+        // prepared workspace. It has already emitted the named reason, so there is no contract to compare.
+        if (allowed < 0) return Array.Empty<string>();
+        allowed = Math.Min(allowed, MaxTexCoordSets);
+        var sent = ImportPayload(returned, meshName).Mesh;
+        var warnings = new List<string>();
+        for (int i = 0; i < allowed; i++)
+            if (!sent.Has($"TexCoord{i}"))
+                warnings.Add($"Restored UV{i} on {meshName} from the part's game mesh because that UV "
+                    + "layer was deleted in Blender.");
+        for (int i = allowed; i < MaxTexCoordSets; i++)
+            if (sent.Has($"TexCoord{i}"))
+                warnings.Add($"Ignored UV{i} on {meshName} because that UV layer is not supported by "
+                    + "the part's game mesh.");
+        return warnings;
+    }
+
     /// <summary>Write a Blender-facing glb (axis-converted). Given base-color/normal PNGs, a preview PBR
     /// material referencing them is embedded — round-trip safe, since <see cref="ImportGlb"/> ignores
     /// materials. <paramref name="uprighting"/> bakes a prefab body's scene-rest rotation into the geometry
@@ -28,25 +106,32 @@ public static class MeshGltf
     /// <param name="authoredSources">The subset of the embedded PNG paths that are the MODDER's own authored
     /// maps rather than stock ones, so the record beside the glb tells the two apart. See
     /// <see cref="PreviewImageSet"/>.</param>
+    /// <param name="onUnreadableMap">handed the path of every map that would not decode (see
+    /// <see cref="PreviewImageSet"/>).</param>
     /// <inheritdoc cref="ExportGlb(UnityMesh, string, string?, string?, IReadOnlyList{ValueTuple{string?, string?, string?}}?, Matrix4x4?)"/>
     public static void ExportGlb(UnityMesh mesh, string outPath, string? baseColorPng = null, string? normalPng = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh = null, Matrix4x4? uprighting = null,
-        IReadOnlySet<string>? authoredSources = null) =>
+        IReadOnlySet<string>? authoredSources = null, Action<string>? onUnreadableMap = null,
+        IReadOnlyList<TextureTransportSource>? textureTransport = null,
+        PreviewBlobMemo? previewMemo = null) =>
         Write(uprighting is { } g ? RestBake.Apply(mesh, g) : mesh, outPath, baseColorPng, normalPng, perSubmesh,
-            authoredSources);
+            authoredSources, onUnreadableMap, textureTransport, previewMemo);
 
     private static void Write(UnityMesh mesh, string outPath,
         string? baseColorPng = null, string? normalPng = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh = null,
-        IReadOnlySet<string>? authoredSources = null)
+        IReadOnlySet<string>? authoredSources = null, Action<string>? onUnreadableMap = null,
+        IReadOnlyList<TextureTransportSource>? textureTransport = null,
+        PreviewBlobMemo? previewMemo = null)
     {
+        previewMemo ??= new PreviewBlobMemo();
         var model = ModelRoot.CreateModel();
         var glMesh = model.CreateMesh(mesh.Name);
 
         // A preview PBR material so the part shows textured in Blender — an approximation, not the in-game
         // toon/uber shader. A per-submesh assignment overrides the single material where given. One image
         // cache spans every material, so a shared texture embeds ONCE.
-        var imgCache = new PreviewImageSet(authoredSources);
+        var imgCache = new PreviewImageSet(authoredSources, onUnreadableMap, previewMemo);
         Material? material = baseColorPng is not null || normalPng is not null
             ? BuildPreviewMaterial(model, mesh.Name, baseColorPng, normalPng, imageCache: imgCache)
             : null;
@@ -60,7 +145,7 @@ public static class MeshGltf
         var tangents = mesh.Has("Tangent")
             ? SanitizeTangents(Map4(mesh, "Tangent", AxisConvention.Tangent), normals)
             : null;
-        var uv0 = Uv0(mesh);
+        var uvs = TransportUvs(mesh);
 
         // ONE shared vertex pool for the whole mesh: build the attribute accessors once, then point every
         // submesh's primitive at them (only the index buffer differs). SharpGLTF's WithVertexAccessor mints
@@ -76,7 +161,8 @@ public static class MeshGltf
                 prim.WithVertexAccessor("POSITION", positions);
                 if (normals is not null) prim.WithVertexAccessor("NORMAL", normals);
                 if (tangents is not null) prim.WithVertexAccessor("TANGENT", tangents);
-                if (uv0 is not null) prim.WithVertexAccessor("TEXCOORD_0", uv0);
+                for (int i = 0; i < uvs.Count; i++)
+                    prim.WithVertexAccessor($"TEXCOORD_{i}", uvs[i]);
                 shared = prim;
             }
             else
@@ -94,7 +180,8 @@ public static class MeshGltf
         scene.CreateNode(mesh.Name).WithMesh(glMesh);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         model.SaveGLB(outPath);
-        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes);
+        var transport = GltfTextureTransport.Write(outPath, textureTransport, onUnreadableMap, previewMemo);
+        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport);
     }
 
     /// <summary>
@@ -117,13 +204,18 @@ public static class MeshGltf
     /// sees covers the whole outfit rather than the one part they opened (see <see cref="ExtraBone"/>).</param>
     /// <param name="log">where an extra bone this export had to refuse is named (see
     /// <see cref="AddExtraBones"/>); null drops those lines.</param>
+    /// <param name="onUnreadableMap">handed the path of every map that would not decode (see
+    /// <see cref="PreviewImageSet"/>).</param>
     public static void ExportRiggedGlb(UnityMesh mesh, MeshSkin skin, Func<uint, string?> resolveBone,
         string outPath, string? baseColorPng = null, string? normalPng = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh = null,
         IReadOnlyList<string>? scenePaths = null, Matrix4x4? uprighting = null,
         IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null,
-        IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null)
+        IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null,
+        Action<string>? onUnreadableMap = null, IReadOnlyList<TextureTransportSource>? textureTransport = null,
+        PreviewBlobMemo? previewMemo = null)
     {
+        previewMemo ??= new PreviewBlobMemo();
         // Uprighting is the ONLY placement this export applies, and it moves geometry and joints together.
         // A part whose prefab mounts it by an unbakeable offset gets no placement at all: its bytes have to
         // stay raw bind space for the compile to round-trip, so mesh and armature sit together at the part's
@@ -136,7 +228,7 @@ public static class MeshGltf
         var glSkin = BindSkin(model, mesh.Name + "_skin", jointNodes, armature);
 
         var (joints, weights) = SkinAttributes(mesh);
-        var imgCache = new PreviewImageSet();
+        var imgCache = new PreviewImageSet(onUnreadable: onUnreadableMap, previewMemo: previewMemo);
         Material? material = baseColorPng is not null || normalPng is not null
             ? BuildPreviewMaterial(model, mesh.Name, baseColorPng, normalPng, imageCache: imgCache)
             : null;
@@ -145,7 +237,8 @@ public static class MeshGltf
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         model.SaveGLB(outPath);
-        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes);
+        var transport = GltfTextureTransport.Write(outPath, textureTransport, onUnreadableMap, previewMemo);
+        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport);
     }
 
     /// <summary>One part to combine into a multi-mesh rigged glb: its mesh, skin, optional preview maps,
@@ -166,7 +259,8 @@ public static class MeshGltf
         IReadOnlyList<string?>? ScenePaths = null, Matrix4x4? Uprighting = null,
         IReadOnlyDictionary<string, Matrix4x4>? ConnectorRests = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? PerSubmesh = null,
-        IReadOnlyList<Matrix4x4>? ContextPose = null);
+        IReadOnlyList<Matrix4x4>? ContextPose = null,
+        IReadOnlyList<TextureTransportSource>? TextureTransport = null);
 
     /// <summary>One bone of the SUBJECT that the exported geometry does not pose: its bone-name hash, the
     /// '/'-joined path it hangs on, and its rest world in Unity space — already composed with whatever
@@ -209,9 +303,13 @@ public static class MeshGltf
     /// of the outfit's skeleton (see <see cref="ExtraBone"/>).</param>
     /// <param name="log">where an extra bone this export had to refuse is named (see
     /// <see cref="AddExtraBones"/>); null drops those lines.</param>
+    /// <param name="onUnreadableMap">handed the path of every map that would not decode (see
+    /// <see cref="PreviewImageSet"/>).</param>
     public static void ExportCombinedRiggedGlb(IReadOnlyList<RiggedPart> parts, Func<uint, string?> resolveBone,
-        string outPath, IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null)
+        string outPath, IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null,
+        Action<string>? onUnreadableMap = null, PreviewBlobMemo? previewMemo = null)
     {
+        previewMemo ??= new PreviewBlobMemo();
         var model = ModelRoot.CreateModel();
         var scene = model.UseScene("scene");
 
@@ -238,7 +336,10 @@ public static class MeshGltf
         var glSkin = BindSkin(model, "combined_skin", unionBones.Select(p => nodeOf[p]).ToList(), armature);
 
         // 3. each part: own mesh, JOINTS remapped local→combined, bound to the shared skin
-        var imgCache = new PreviewImageSet();   // dedup an image shared across parts
+        // Dedup an image shared across parts. No authored marking: the send back for a part is classified
+        // against that part's OWN prepared glb's record, never this file's, so a mark written here would be
+        // read by nothing.
+        var imgCache = new PreviewImageSet(onUnreadable: onUnreadableMap, previewMemo: previewMemo);
         for (int pi = 0; pi < parts.Count; pi++)
         {
             var part = parts[pi];
@@ -257,7 +358,10 @@ public static class MeshGltf
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         model.SaveGLB(outPath);
-        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes);
+        var transport = GltfTextureTransport.Write(outPath,
+            parts.SelectMany(part => part.TextureTransport ?? Array.Empty<TextureTransportSource>()),
+            onUnreadableMap, previewMemo);
+        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport);
     }
 
     /// <summary>
@@ -285,27 +389,70 @@ public static class MeshGltf
     /// <see cref="ReadSubmeshMaps(ParsedGlb, string?, string?)"/>: the stock maps re-embedded here are the
     /// ones that record settles, so a send arriving under a name of its own resolves none without it. Null
     /// reads the record beside <paramref name="source"/> itself.</para>
+    ///
+    /// <para><paramref name="refitTo"/> REFITS the armature: the source's joints are reduced to the ones its
+    /// geometry actually rides, and the joints that file offers are appended after them as a zero-weighted
+    /// tail. It is what a session's prepare passes when the source is an EDIT: a workspace glb froze whatever
+    /// armature its last send carried — a stale tail, or a whole outfit's union armature if that send came
+    /// from a combined session — and the file the modder opens has to offer THIS run's bones instead. The
+    /// modder's own paint is what survives the reduction, so a bone they genuinely weight rides through even
+    /// when no part of the offer names it. Null leaves the source's joint list exactly as it stands, which is
+    /// what every send-back re-split wants. A refit file carrying no skin is a rigid part with no armature to
+    /// offer and refits nothing; a refit file that DOES pose, against a source that carries no skin at all,
+    /// is refused — the part is posed and what came back is not.</para>
+    ///
+    /// <para><paramref name="afterSourceRead"/> is invoked at the last moment a failure could still be
+    /// <paramref name="source"/>'s own: its geometry, skin and bone hashes are read and accepted, and
+    /// everything past it — the map record beside <paramref name="recordGlb"/>, the write of
+    /// <paramref name="outPath"/> — is about files this call was pointed AT. A caller that answers "the
+    /// source could not be read" reads it to keep that answer off a full disk and a damaged record.</para>
     /// </summary>
     public static MeshApply.Payload ReexportPartGlb(string sourcePath, string? meshName, string outPath,
         Action<string>? beforeWrite = null, string? recordGlb = null,
-        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null) =>
+        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null,
+        ParsedGlb? refitTo = null, Action? afterSourceRead = null,
+        IReadOnlyList<TextureTransportOverride>? authoredTextures = null,
+        ParsedGlb? geometryBaseline = null, PreviewBlobMemo? previewMemo = null) =>
         // Lenient: the source is a Blender send-back (see LoadModel).
-        ReexportPartGlb(ParsedGlb.Open(sourcePath), meshName, outPath, beforeWrite, recordGlb, authoredMaps);
+        ReexportPartGlb(ParsedGlb.Open(sourcePath), meshName, outPath, beforeWrite, recordGlb, authoredMaps,
+            refitTo, afterSourceRead, authoredTextures, geometryBaseline, previewMemo);
 
-    /// <inheritdoc cref="ReexportPartGlb(string, string?, string, Action{string}?, string?, IReadOnlyList{ValueTuple{string?, string?, string?}}?)"/>
+    /// <inheritdoc cref="ReexportPartGlb(string, string?, string, Action{string}?, string?, IReadOnlyList{ValueTuple{string?, string?, string?}}?, ParsedGlb?, Action?)"/>
     public static MeshApply.Payload ReexportPartGlb(ParsedGlb source, string? meshName, string outPath,
         Action<string>? beforeWrite = null, string? recordGlb = null,
-        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null)
+        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null,
+        ParsedGlb? refitTo = null, Action? afterSourceRead = null,
+        IReadOnlyList<TextureTransportOverride>? authoredTextures = null,
+        ParsedGlb? geometryBaseline = null, PreviewBlobMemo? previewMemo = null)
     {
+        previewMemo ??= new PreviewBlobMemo();
         var model = source.Model;
         var record = recordGlb ?? source.Path;
+        // Read BEFORE the source's own payload: a refit file that will not answer is not the source's fault,
+        // and a caller classifying failures by afterSourceRead must not be handed this one as the source's.
+        // (In production the refit file is the run's own rigged build of the very part named here, so a miss
+        // is unreachable — the bare branch's re-split of that same file would already have refused it.)
+        var offered = refitTo is null ? null : OfferedJoints(refitTo, meshName);
+        var contract = geometryBaseline ?? refitTo;
+        var baselineMesh = contract is null ? null : ImportCorePayload(contract.Model, meshName).Mesh;
         var payload = ImportCorePayload(model, meshName);
+        if (baselineMesh is not null) MeshApply.ConformTransportUvs(baselineMesh, payload.Mesh);
         var authoredSources = AuthoredSources(authoredMaps);
         if (!payload.HasSkin)
         {
+            // A part the offer poses, standing on geometry that came back with no armature at all. The
+            // combined route refuses the same file by name (its union armature has nothing to join it by),
+            // and a lone open that accepted it would hand Blender an unrigged part under a posed part's name.
+            if (offered is not null)
+                throw new InvalidOperationException(
+                    $"'{payload.Mesh.Name}' carries no armature, but the part it stands for is posed by "
+                    + "one. Send it again with its skinned mesh, armature and all.");
+            afterSourceRead?.Invoke();
+            var unriggedTextureTransport = WorkspaceTextureTransport(record, meshName, authoredMaps, authoredTextures);
             var maps = WorkspaceSubmeshMaps(ReadSubmeshMaps(model, record, meshName, source.Stock), authoredMaps);
             beforeWrite?.Invoke(outPath);
-            ExportGlb(payload.Mesh, outPath, perSubmesh: maps, authoredSources: authoredSources);
+            ExportGlb(payload.Mesh, outPath, perSubmesh: maps, authoredSources: authoredSources,
+                textureTransport: unriggedTextureTransport);
             return payload;
         }
 
@@ -329,32 +476,44 @@ public static class MeshGltf
         // here and survive as plain armature nodes. A non-zero weight on one is work we cannot ship —
         // refuse loudly rather than discard it.
         var srcHashes = payload.SkinJointHashes!;
-        var oldToNew = new int[jointNodes.Count];
-        var keep = new List<int>();
-        for (int i = 0; i < jointNodes.Count; i++)
-        {
-            if (srcHashes[i] != 0) { oldToNew[i] = keep.Count; keep.Add(i); }
-            else oldToNew[i] = -1;
-        }
-        if (keep.Count == 0)
+        var hashed = new List<int>();
+        for (int i = 0; i < jointNodes.Count; i++) if (srcHashes[i] != 0) hashed.Add(i);
+        if (hashed.Count == 0)
             throw new InvalidOperationException(
-                $"none of \"{payload.Mesh.Name}\"'s skin joints carry a bone hash in their names - "
+                $"none of the skin joints on '{payload.Mesh.Name}' carry a bone hash in their names - "
                 + "the armature doesn't look like one this app exported, so the edit can't be read back");
-        if (keep.Count < jointNodes.Count)
+        if (hashed.Count < jointNodes.Count)
         {
             var offenders = new SortedSet<string>(StringComparer.Ordinal);
             for (int k = 0; k < payload.JointIndices!.Length; k++)
-                if (payload.JointWeights![k] != 0 && oldToNew[payload.JointIndices[k]] < 0)
+                if (payload.JointWeights![k] != 0 && srcHashes[payload.JointIndices[k]] == 0)
                     offenders.Add(jointNodes[payload.JointIndices[k]].Name ?? "(unnamed)");
             if (offenders.Count > 0)
                 throw new InvalidOperationException(
-                    $"\"{payload.Mesh.Name}\" carries weights on {string.Join(", ", offenders)} - "
-                    + "not game bones, so those weights can't ship. Move them onto the session "
-                    + "armature's own bones (or delete those vertex groups) and send again.");
+                    $"'{payload.Mesh.Name}' has weights on {string.Join(", ", offenders)}, which "
+                    + "are not the game's bones. Move those weights onto the armature this session "
+                    + "opened (or delete those vertex groups) and send again.");
         }
 
-        static string NodeKey(Node n) =>
-            string.IsNullOrEmpty(n.Name) ? $"node{n.LogicalIndex}" : n.Name.Replace('/', '_');
+        // A REFIT keeps only the joints the geometry RIDES. Everything else the source carried — the tail
+        // its last send froze, another part's bones if that send came out of a combined session — is
+        // dropped here and re-offered below from the file that says what THIS run poses. The modder's own
+        // paint decides: a bone they weighted survives whether or not the offer names it.
+        var keep = hashed;
+        if (offered is not null)
+        {
+            var rides = new bool[jointNodes.Count];
+            for (int k = 0; k < payload.JointIndices!.Length; k++)
+                if (payload.JointWeights![k] != 0) rides[payload.JointIndices[k]] = true;
+            keep = hashed.Where(i => rides[i]).ToList();
+            if (keep.Count == 0)
+                throw new InvalidOperationException(
+                    $"'{payload.Mesh.Name}' came back with no vertex weighted to any bone, so there is "
+                    + "nothing to stand it on. Paint it onto the session armature's bones and send again.");
+        }
+        var oldToNew = new int[jointNodes.Count];
+        Array.Fill(oldToNew, -1);
+        for (int k = 0; k < keep.Count; k++) oldToNew[keep[k]] = k;
 
         // Every joint's ancestor chain (below the wrapper) becomes a path; every node on it — connectors
         // too — records its ACTUAL world from the source, so nothing snaps back to the origin. Those worlds
@@ -364,24 +523,34 @@ public static class MeshGltf
         var paths = new string[keep.Count];
         for (int ki = 0; ki < keep.Count; ki++)
         {
-            var chain = new List<Node>();
-            for (var n = jointNodes[keep[ki]]; n is not null && !wrapper.Contains(n); n = n.VisualParent) chain.Add(n);
-            chain.Reverse();
-            string path = "";
-            foreach (var n in chain)
+            paths[ki] = ChainPath(jointNodes[keep[ki]], wrapper, worldOf);
+            RegisterPrefixes(paths[ki], order, seen);
+            hashOf.TryAdd(paths[ki], srcHashes[keep[ki]]);
+        }
+        // The offer, appended AFTER every joint the geometry rides, so those joints keep their indices and
+        // this is a tail in the same sense AddExtraBones writes one. Matched BY HASH, never by path: the
+        // source's node names came back through Blender and need not spell the path this run's build spells
+        // for the same bone. A path a source joint already owns is left to it — one node, one joint.
+        var tail = new List<string>();
+        if (offered is not null)
+        {
+            var have = new HashSet<uint>(keep.Select(i => srcHashes[i]));
+            foreach (var (path, hash) in offered.Joints)
             {
-                path = path.Length == 0 ? NodeKey(n) : path + "/" + NodeKey(n);
-                if (seen.Add(path)) order.Add(path);
-                worldOf.TryAdd(path, n.WorldMatrix);
+                if (hashOf.ContainsKey(path) || !have.Add(hash)) continue;
+                RegisterPrefixes(path, order, seen);
+                foreach (var prefix in Prefixes(path))
+                    if (offered.Worlds.TryGetValue(prefix, out var w)) worldOf.TryAdd(prefix, w);
+                hashOf[path] = hash;
+                tail.Add(path);
             }
-            paths[ki] = path;
-            hashOf.TryAdd(path, srcHashes[keep[ki]]);
         }
 
         var outModel = ModelRoot.CreateModel();
         var scene = outModel.UseScene("scene");
         var (nodeOf, armature) = BuildNodeTree(scene, worldOf, hashOf, order);
-        var glSkin = BindSkin(outModel, payload.Mesh.Name + "_skin", paths.Select(p => nodeOf[p]).ToList(), armature);
+        var glSkin = BindSkin(outModel, payload.Mesh.Name + "_skin",
+            paths.Concat(tail).Select(p => nodeOf[p]).ToList(), armature);
 
         int n4 = payload.VertexCount;
         var joints = new ushort[n4 * 4];
@@ -397,10 +566,14 @@ public static class MeshGltf
             weights[v] = new Vector4(payload.JointWeights![v * 4], payload.JointWeights[v * 4 + 1],
                                      payload.JointWeights[v * 4 + 2], payload.JointWeights[v * 4 + 3]);
         }
+        // Everything the SOURCE could refuse is behind us; the record read and the write below answer for
+        // the files this call was pointed at.
+        afterSourceRead?.Invoke();
+        var textureTransport = WorkspaceTextureTransport(record, meshName, authoredMaps, authoredTextures);
         // The part's own preview materials + map sidecar, rebuilt over the maps it came back on, so a re-open
         // ALONE opens textured and its next send-back classifies those maps against the same record the
         // session's own read used.
-        var imgCache = new PreviewImageSet(authoredSources);
+        var imgCache = new PreviewImageSet(authoredSources, previewMemo: previewMemo);
         var submeshMats = BuildSubmeshMaterials(outModel, payload.Mesh.Name, payload.Mesh.Submeshes.Count,
             WorkspaceSubmeshMaps(ReadSubmeshMaps(model, record, meshName, source.Stock), authoredMaps), imgCache);
         AddSkinnedMeshNode(outModel, scene, payload.Mesh, joints, weights, glSkin, material: null, submeshMats);
@@ -408,8 +581,117 @@ public static class MeshGltf
         beforeWrite?.Invoke(outPath);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         outModel.SaveGLB(outPath);
-        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes);
+        var transport = GltfTextureTransport.Write(outPath, textureTransport, previewMemo: previewMemo);
+        PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport);
         return payload;
+    }
+
+    /// <summary>Rebuild the outbound property inventory over the modder's authored pictures. The sidecar's
+    /// stock resource and owner stay authoritative; an override changes only the pixels and origin.</summary>
+    private static IReadOnlyList<TextureTransportSource> WorkspaceTextureTransport(string recordGlb,
+        string? meshName, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? legacyAuthored,
+        IReadOnlyList<TextureTransportOverride>? authored)
+    {
+        var rows = PreviewMaps.ReadTransportBindings(recordGlb)
+            .Where(binding => meshName is null || string.Equals(binding.Mesh, meshName, StringComparison.Ordinal))
+            .ToList();
+        if (rows.Count == 0) return Array.Empty<TextureTransportSource>();
+        return rows.Select(binding =>
+        {
+            string? replacement = authored?.FirstOrDefault(candidate =>
+                candidate.MaterialIndex == binding.MaterialIndex
+                && string.Equals(candidate.ShaderProperty, binding.ShaderProperty, StringComparison.Ordinal)).Png;
+            replacement ??= authored?.FirstOrDefault(candidate =>
+                candidate.MaterialIndex == binding.MaterialIndex && candidate.ShaderProperty.Length == 0
+                && candidate.Kind == binding.Kind).Png;
+            if (replacement is null && legacyAuthored is not null
+                && binding.MaterialIndex >= 0 && binding.MaterialIndex < legacyAuthored.Count)
+            {
+                var fixedMaps = legacyAuthored[binding.MaterialIndex];
+                replacement = binding.Kind switch
+                {
+                    MapKind.BaseColor => fixedMaps.Base,
+                    MapKind.Normal => fixedMaps.Normal,
+                    MapKind.Rmo => fixedMaps.Rmo,
+                    _ => null,
+                };
+            }
+            return new TextureTransportSource(binding.Mesh, binding.MaterialIndex, binding.PrimitiveIndex,
+                binding.ShaderProperty, binding.Kind, replacement ?? binding.Source, binding.Stock.Name,
+                binding.Stock.Bundle, binding.Stock.PathId, binding.Srgb,
+                replacement is null ? binding.Origin : MapOrigin.Authored, binding.Parameters, binding.TexCoord);
+        }).ToList();
+    }
+
+    /// <summary>The bones one already-parsed rigged glb OFFERS for a part: every skin joint of that mesh
+    /// whose name carries a bone hash, as the node path it sits at, paired with the glTF-space world of
+    /// every node on its ancestor chain (connectors included, so nothing an append brings in snaps back to
+    /// the origin). Null when the file carries no such mesh, no skin, or no hash-named joint — a rigid part
+    /// offers no armature, and there is nothing to refit onto.</summary>
+    private static ArmatureOffer? OfferedJoints(ParsedGlb glb, string? meshName)
+    {
+        var model = glb.Model;
+        var glMesh = meshName is null
+            ? model.LogicalMeshes.FirstOrDefault()
+            : model.LogicalMeshes.FirstOrDefault(m => m.Name == meshName);
+        if (glMesh is null) return null;
+        var skin = FindSkin(model, glMesh);
+        if (skin is null) return null;
+        var hashes = ReadJointHashes(skin);
+        var jointNodes = Enumerable.Range(0, skin.JointsCount).Select(i => skin.Joints[i]).ToList();
+        // The armature WRAPPER is excluded exactly as the re-split excludes it, so the two files' paths for
+        // one bone are spelled the same way whenever their node names are.
+        var jointSet = new HashSet<Node>(jointNodes);
+        var wrapper = new HashSet<Node>();
+        for (var s = skin.Skeleton; s is not null; s = s.VisualParent)
+            if (!jointSet.Contains(s)) wrapper.Add(s);
+
+        var joints = new List<(string Path, uint Hash)>();
+        var worlds = new Dictionary<string, Matrix4x4>(StringComparer.Ordinal);
+        for (int i = 0; i < jointNodes.Count && i < hashes.Length; i++)
+            if (hashes[i] != 0) joints.Add((ChainPath(jointNodes[i], wrapper, worlds), hashes[i]));
+        return joints.Count == 0 ? null : new ArmatureOffer(joints, worlds);
+    }
+
+    /// <summary>What <see cref="OfferedJoints"/> hands the refit: the offered joints in the offer file's own
+    /// order, and the world of every node their chains pass through, keyed by path.</summary>
+    private sealed record ArmatureOffer(IReadOnlyList<(string Path, uint Hash)> Joints,
+        IReadOnlyDictionary<string, Matrix4x4> Worlds);
+
+    /// <summary>The '/'-joined path one joint node sits at, walking up to (not through) the armature
+    /// wrapper, recording every node on the way at its own glTF-space world. FIRST world wins, the union
+    /// rule every other accumulator here follows.</summary>
+    private static string ChainPath(Node joint, HashSet<Node> wrapper, Dictionary<string, Matrix4x4> worlds)
+    {
+        var chain = new List<Node>();
+        for (var n = joint; n is not null && !wrapper.Contains(n); n = n.VisualParent) chain.Add(n);
+        chain.Reverse();
+        string path = "";
+        foreach (var n in chain)
+        {
+            path = path.Length == 0 ? NodeKey(n) : path + "/" + NodeKey(n);
+            worlds.TryAdd(path, n.WorldMatrix);
+        }
+        return path;
+    }
+
+    /// <summary>A node's path segment: its own name with '/' folded away, since '/' is what separates
+    /// segments, or a positional stand-in for an unnamed node.</summary>
+    private static string NodeKey(Node n) =>
+        string.IsNullOrEmpty(n.Name) ? $"node{n.LogicalIndex}" : n.Name.Replace('/', '_');
+
+    /// <summary>Every '/'-prefix of a path, parents first — the order <see cref="BuildNodeTree"/> needs its
+    /// nodes registered in.</summary>
+    private static IEnumerable<string> Prefixes(string path)
+    {
+        var segs = path.Split('/');
+        for (int k = 1; k <= segs.Length; k++) yield return string.Join("/", segs.Take(k));
+    }
+
+    /// <summary>Register a path and every ancestor prefix of it in the node ordering, once each.</summary>
+    private static void RegisterPrefixes(string path, List<string> order, HashSet<string> seen)
+    {
+        foreach (var prefix in Prefixes(path)) if (seen.Add(prefix)) order.Add(prefix);
     }
 
     /// <summary>Create a skin over the given joint nodes (in joint order), deriving each inverse-bind matrix
@@ -444,7 +726,7 @@ public static class MeshGltf
         var tangents = mesh.Has("Tangent")
             ? SanitizeTangents(Map4(mesh, "Tangent", AxisConvention.Tangent), normals)
             : null;
-        var uv0 = Uv0(mesh);
+        var uvs = TransportUvs(mesh);
 
         MeshPrimitive? shared = null;
         for (int s = 0; s < mesh.Submeshes.Count; s++)
@@ -455,7 +737,8 @@ public static class MeshGltf
                 prim.WithVertexAccessor("POSITION", positions);
                 if (normals is not null) prim.WithVertexAccessor("NORMAL", normals);
                 if (tangents is not null) prim.WithVertexAccessor("TANGENT", tangents);
-                if (uv0 is not null) prim.WithVertexAccessor("TEXCOORD_0", uv0);
+                for (int i = 0; i < uvs.Count; i++)
+                    prim.WithVertexAccessor($"TEXCOORD_{i}", uvs[i]);
                 prim.SetVertexAccessor("JOINTS_0", JointAccessor(model, joints));
                 prim.WithVertexAccessor("WEIGHTS_0", weights);
                 shared = prim;
@@ -537,7 +820,7 @@ public static class MeshGltf
             if (bone.Path.Length == 0 || hashOf.ContainsKey(bone.Path)) continue;
             if (!Matrix4x4.Invert(bone.RestWorld, out _))
             {
-                log?.Invoke($"bone {bone.Path}: it has no usable rest pose, so it stays off this armature");
+                log?.Invoke($"Bone {bone.Path} is off the armature: no usable rest pose.");
                 continue;
             }
             var segs = bone.Path.Split('/');
@@ -795,7 +1078,13 @@ public static class MeshGltf
     /// submesh boundary selectable in Edit Mode — the visual aid a modder needs for the manual
     /// submesh→texture assignment that can't be auto-derived. Collapsing to one slot would hide it. The
     /// materials still share one <c>Image</c> via <paramref name="imageCache"/>, so the texture embeds
-    /// once.</para></summary>
+    /// once.</para>
+    ///
+    /// <para>A submesh whose maps are ALL absent still gets its named material, carrying no texture. Material
+    /// identity is the submesh boundary itself and belongs to the geometry, not to the pictures on it: a
+    /// texture that couldn't be read must cost that submesh its picture and nothing else. Dropping the
+    /// material instead collapsed every such submesh onto whatever material the writer fell back to, and the
+    /// send back then re-split the whole part onto one output position.</para></summary>
     private static Material?[]? BuildSubmeshMaterials(ModelRoot model, string meshName, int submeshCount,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh, PreviewImageSet? imageCache)
     {
@@ -804,12 +1093,24 @@ public static class MeshGltf
         for (int s = 0; s < submeshCount; s++)
         {
             var key = s < perSubmesh.Count ? perSubmesh[s] : default;
-            if (key.Base is null && key.Normal is null && key.Rmo is null) continue;   // no maps for this submesh
-            mats[s] = BuildPreviewMaterial(model, meshName, key.Base, key.Normal, key.Rmo, $"gf2_submesh{s}", imageCache);
+            mats[s] = BuildPreviewMaterial(model, meshName, key.Base, key.Normal, key.Rmo,
+                SubmeshMaterialName(s), imageCache);
             if (Embeddable(key.Rmo)) imageCache?.UsedRmo(meshName, s, key.Rmo!);
+            // What THIS submesh was given, slot by slot: the answer that tells its own map from a sibling
+            // submesh's on the way back. Recorded from the same paths the materials above were built over.
+            imageCache?.UsedStock(meshName, s, MapKind.BaseColor, key.Base);
+            imageCache?.UsedStock(meshName, s, MapKind.Normal, key.Normal);
+            imageCache?.UsedStock(meshName, s, MapKind.Rmo, key.Rmo);
         }
         return mats;
     }
+
+    /// <summary>What THIS app names the material of one exported submesh. A round trip that leaves the slot
+    /// list alone brings this name back, so it is also the name a replacement's submesh is presented and
+    /// recorded under when nothing else says otherwise — see
+    /// <see cref="Project.AuthoredDonorRows.MaterialNames"/>, which re-derives that list from the
+    /// replacement's own submesh layout.</summary>
+    public static string SubmeshMaterialName(int submesh) => $"gf2_submesh{submesh}";
 
     /// <summary>A metallic-roughness PBR material over the part's base color (<c>_d</c>/<c>_da</c>, sRGB),
     /// normal (<c>_n</c>) and RMO. Images are embedded into the glb — a snapshot of the current PNGs.
@@ -817,7 +1118,17 @@ public static class MeshGltf
     /// <para>The RMO travels as a standard glTF ORM texture: ONE image on both the metallic-roughness and
     /// the occlusion channel, its channels permuted into glTF's order by <see cref="PreviewMaps"/>. glTF
     /// multiplies each factor by its texture channel, so a material carrying an RMO leaves the metallic and
-    /// roughness factors at their 1.0 default — the matte stand-in factors would zero the map.</para></summary>
+    /// roughness factors at their 1.0 default — the matte stand-in factors would zero the map.</para>
+    ///
+    /// <para>The base colour alone selects one of three alpha classes. When at least 0.1% of the image remains
+    /// alpha 16..239 after a 5x5 erosion it declares BLEND (see <see cref="BlendMidAlphaCoreFraction"/>);
+    /// otherwise at least 0.1% below half declares MASK at <see cref="PreviewMaps.GltfAlphaCutoff"/>; everything
+    /// else is OPAQUE. The
+    /// game's opaque alpha ceiling is 254, so merely being short of 255 is not transparency and endpoint-only
+    /// maps remain OPAQUE. BLEND is safe for this double-sided preview only with the Blender bridge's
+    /// post-import setup: it disables transparency overlap and remaps 254 to 1.0 without changing image
+    /// pixels. An RMO's alpha is the emissive mask and a packed normal's is the X component, so neither may
+    /// decide coverage.</para></summary>
     private static Material BuildPreviewMaterial(ModelRoot model, string owner, string? baseColorPng,
         string? normalPng, string? rmoPng = null, string name = "gf2_preview", PreviewImageSet? imageCache = null)
     {
@@ -825,29 +1136,69 @@ public static class MeshGltf
         material.WithPBRMetallicRoughness();
         material.DoubleSided = true;
         var mr = material.FindChannel("MetallicRoughness");
-        bool hasRmo = Embeddable(rmoPng);
-        if (!hasRmo)
+        // Exported PNGs are top-down and the glb's UVs are glTF-convention, so a base map embeds with its
+        // rows as they are.
+        if (Embeddable(baseColorPng)
+            && UseImage(model, baseColorPng!, MapKind.BaseColor, owner, imageCache)
+                is ({ } baseImage, var alpha))
+        {
+            material.FindChannel("BaseColor")?.SetTexture(0, baseImage);
+            if (alpha.MidCore5Fraction >= BlendMidAlphaCoreFraction)
+            {
+                material.Alpha = AlphaMode.BLEND;
+            }
+            else if (alpha.FractionBelowHalf >= CutoutFraction)
+            {
+                material.Alpha = AlphaMode.MASK;
+                material.AlphaCutoff = PreviewMaps.GltfAlphaCutoff;
+            }
+        }
+        // The `_n` is a PACKED GFL2 normal (X in alpha, Y in green, R filler, B mirrors G) — NOT the RGB
+        // tangent normal glTF expects. Unpacked for the preview only; the exported `_n` PNG is untouched.
+        if (Embeddable(normalPng)
+            && UseImage(model, normalPng!, MapKind.Normal, owner, imageCache).Image is { } normalImage)
+            material.FindChannel("Normal")?.SetTexture(0, normalImage);
+        // A map that would not decode leaves this material with no RMO, which is the same material an absent
+        // one gives: the matte stand-in factors, not a metallic-roughness channel bound to nothing.
+        var orm = Embeddable(rmoPng) ? UseImage(model, rmoPng!, MapKind.Rmo, owner, imageCache).Image : null;
+        if (orm is null)
         {
             // matte, non-metallic — a flat stand-in for the toon shader (default metallic=1 reads as shiny)
             mr?.SetFactor("MetallicFactor", 0f);
             mr?.SetFactor("RoughnessFactor", 1f);
         }
-        // Exported PNGs are top-down and the glb's UVs are glTF-convention, so a base map embeds with its
-        // rows as they are.
-        if (Embeddable(baseColorPng))
-            material.FindChannel("BaseColor")?.SetTexture(0, UseImage(model, baseColorPng!, MapKind.BaseColor, owner, imageCache));
-        // The `_n` is a PACKED GFL2 normal (X in alpha, Y in green, R filler, B mirrors G) — NOT the RGB
-        // tangent normal glTF expects. Unpacked for the preview only; the exported `_n` PNG is untouched.
-        if (Embeddable(normalPng))
-            material.FindChannel("Normal")?.SetTexture(0, UseImage(model, normalPng!, MapKind.Normal, owner, imageCache));
-        if (hasRmo)
+        else
         {
-            var orm = UseImage(model, rmoPng!, MapKind.Rmo, owner, imageCache);
             mr?.SetTexture(0, orm);
             material.FindChannel("Occlusion")?.SetTexture(0, orm);
         }
         return material;
     }
+
+    /// <summary>The lowest alpha admitted to the BLEND measurement. Values 1..15 are near-cut endpoint
+    /// noise, not evidence of a graded area.</summary>
+    internal const byte BlendMidAlphaMin = 16;
+
+    /// <summary>The highest alpha admitted to the BLEND measurement. The 240..254 near-ceiling band is
+    /// deliberately not coverage: this prevents opaque endpoint noise from selecting BLEND. Consequently a
+    /// veil living entirely in 240..254 classifies OPAQUE, the provisional classifier's recorded blind spot.</summary>
+    internal const byte BlendMidAlphaMax = 239;
+
+    /// <summary>How much of a base colour's full area must survive the 5x5 mid-alpha erosion before the
+    /// material declares BLEND. Kept beside <see cref="CutoutFraction"/> and the band bounds as the single
+    /// authority for the preview material's non-opaque class boundaries.</summary>
+    private const double BlendMidAlphaCoreFraction = 0.001;
+
+    /// <summary>How much of a base colour has to fall under <see cref="PreviewMaps.GltfAlphaCutoff"/> before
+    /// the material declares MASK. Every sampled game texture whose only sub-opaque pixels are BC-compression
+    /// quantization measures exactly 0.0% — the noise class sits at zero, so ANY positive threshold separates
+    /// it, and the size of the margin is decided by the failure asymmetry rather than by the separation. A
+    /// missed genuine cutout renders a solid sheet, which is the defect class this rule exists to remove; a
+    /// false MASK on a near-opaque map only clips pixels already drawn at under half opacity, which is
+    /// visually negligible. So the margin is set low enough to catch a cutout that is SMALL against its
+    /// sheet: a 200×200 half-cut lace region on a 2048×2048 atlas is 0.48% of the pixels — a shape, and one
+    /// that a one-percent threshold read as noise.</summary>
+    private const double CutoutFraction = 0.001;
 
     /// <summary>Whether a map path is one the export can embed. The single answer, so what the sidecar
     /// records for a submesh cannot differ from what its material got.</summary>
@@ -859,59 +1210,115 @@ public static class MeshGltf
     /// it.</summary>
     private sealed class PreviewImageSet
     {
-        private readonly Dictionary<(string, MapKind), (GltfImage Image, string Hash)> _cache = new();
+        private readonly Dictionary<(string, MapKind),
+            (GltfImage Image, string Hash, PreviewMaps.AlphaCoverage Alpha)> _cache = new();
         private readonly List<PreviewMaps.Entry> _entries = new();
         private readonly List<PreviewMaps.SubmeshSource> _submeshes = new();
+        private readonly List<PreviewMaps.SlotSource> _slots = new();
+        private readonly HashSet<string> _unreadable = new(StringComparer.OrdinalIgnoreCase);
         private readonly IReadOnlySet<string>? _authored;
+        private readonly Action<string>? _onUnreadable;
+        private readonly PreviewBlobMemo _previewMemo;
 
         /// <param name="authoredSources">The embedded PNG paths that are the modder's OWN authored maps. Their
         /// entries are recorded under <see cref="MapOrigin.Authored"/>, which classifies nothing on the way
         /// back: an image reproducing one of these IS authored work, and reading it as stock would drop it.
         /// The entry still earns its place in the record — it is what keeps a part whose every map is authored
         /// from writing no record at all, and the record is where the submesh RMO sources live.</param>
-        public PreviewImageSet(IReadOnlySet<string>? authoredSources = null) => _authored = authoredSources;
+        /// <param name="onUnreadable">Handed the path of every map that would not decode, once. The caller is
+        /// what knows where the file came from and can act on it — this codec knows only that the picture is
+        /// not a picture.</param>
+        public PreviewImageSet(IReadOnlySet<string>? authoredSources = null, Action<string>? onUnreadable = null,
+            PreviewBlobMemo? previewMemo = null)
+        {
+            _authored = authoredSources;
+            _onUnreadable = onUnreadable;
+            _previewMemo = previewMemo ?? new PreviewBlobMemo();
+        }
 
         private MapOrigin OriginOf(string pngPath) =>
             _authored?.Contains(pngPath) == true ? MapOrigin.Authored : MapOrigin.Vanilla;
 
         public IReadOnlyList<PreviewMaps.Entry> Entries => _entries;
         public IReadOnlyList<PreviewMaps.SubmeshSource> Submeshes => _submeshes;
+        public IReadOnlyList<PreviewMaps.SlotSource> Slots => _slots;
+
+        /// <summary>Note which STOCK image one primitive's material was built over in one slot, so a return
+        /// can tell that primitive's own map from a sibling primitive's (see
+        /// <see cref="PreviewMaps.SlotSource"/>). Records nothing — which reads as "no stock map belongs
+        /// here" — for a slot with no map, a map that would not decode, or a map of the MODDER's own: an
+        /// authored file is not one of the part's stock images, and a stock map arriving over it is an
+        /// ask.</summary>
+        public void UsedStock(string meshName, int submesh, MapKind kind, string? pngPath)
+        {
+            if (pngPath is null || OriginOf(pngPath) != MapOrigin.Vanilla) return;
+            if (!_cache.TryGetValue((pngPath, kind), out var hit)) return;
+            _slots.Add(new PreviewMaps.SlotSource(meshName, submesh, kind, hit.Hash));
+        }
 
         /// <summary>Note which stock RMO a submesh's material was built over, so the intake reads the alpha
-        /// off the map this export actually embedded there.</summary>
-        public void UsedRmo(string meshName, int submesh, string rmoPng) =>
+        /// off the map this export actually embedded there. A map that would not decode records nothing: the
+        /// export did not embed it, and a recorded source no material carries would hand an authored RMO an
+        /// alpha channel out of a file that cannot be read.</summary>
+        public void UsedRmo(string meshName, int submesh, string rmoPng)
+        {
+            if (_unreadable.Contains(rmoPng)) return;
             _submeshes.Add(new PreviewMaps.SubmeshSource(meshName, submesh, rmoPng));
+        }
 
         /// <summary>Embed (or reuse) one image and record it for <paramref name="owner"/>. A cache hit still
         /// records: the image embeds once, but each owning mesh that binds it needs its own entry, or a map
-        /// two parts share reads as belonging to only the first.</summary>
-        public GltfImage Use(ModelRoot model, string pngPath, MapKind kind, string owner)
+        /// two parts share reads as belonging to only the first. The alpha-class answers are cached with the
+        /// image, so a map several submeshes bind is measured once.
+        ///
+        /// <para>A picture that will not decode gives a null image and nothing else: no embed, no record
+        /// entry, and the material keeps its own identity carrying no texture on that slot. The failure costs
+        /// exactly this map — a session must not die over one bad file, and this is the seam every export
+        /// route embeds through, so all of them get the same answer. The path is handed to
+        /// <c>onUnreadable</c> once per set, however many materials bind it.</para></summary>
+        public (GltfImage? Image, PreviewMaps.AlphaCoverage Alpha) Use(
+            ModelRoot model, string pngPath, MapKind kind, string owner)
         {
             if (_cache.TryGetValue((pngPath, kind), out var hit))
             {
                 _entries.Add(new PreviewMaps.Entry(hit.Hash, pngPath, kind, OriginOf(pngPath), owner));
-                return hit.Image;
+                return (hit.Image, hit.Alpha);
             }
-            var bytes = PreviewMaps.ToPreview(pngPath, kind);
-            var image = model.UseImageWithContent(new SharpGLTF.Memory.MemoryImage(bytes));
+            if (_unreadable.Contains(pngPath)) return (null, default);
+            PreviewBlobMemo.Blob blob;
+            try { blob = _previewMemo.Get(pngPath, kind); }
+            catch (Exception e) when (e is not OutOfMemoryException and not OperationCanceledException)
+            {
+                _unreadable.Add(pngPath);
+                _onUnreadable?.Invoke(pngPath);
+                return (null, default);
+            }
+            var image = model.UseImageWithContent(new SharpGLTF.Memory.MemoryImage(blob.Bytes));
             image.Name = PreviewMaps.ImageName(pngPath, kind);
-            var hash = PreviewMaps.Hash(bytes);
-            _entries.Add(new PreviewMaps.Entry(hash, pngPath, kind, OriginOf(pngPath), owner));
-            _cache[(pngPath, kind)] = (image, hash);
-            return image;
+            _entries.Add(new PreviewMaps.Entry(blob.Hash, pngPath, kind, OriginOf(pngPath), owner));
+            _cache[(pngPath, kind)] = (image, blob.Hash, blob.Alpha);
+            return (image, blob.Alpha);
         }
     }
 
     /// <summary>Build (or reuse, via <paramref name="cache"/>) the embedded preview <see cref="Image"/> for a
-    /// PNG path. Caching by (path, kind) hands the SAME <c>Image</c> node to every material, so a shared
-    /// texture embeds once. Without a cache the image is embedded unrecorded.</summary>
-    private static GltfImage UseImage(ModelRoot model, string pngPath, MapKind kind, string owner,
-        PreviewImageSet? cache)
+    /// PNG path, and return its alpha-class measurements. Caching
+    /// by (path, kind) hands the SAME <c>Image</c> node to every material, so a shared texture embeds once.
+    /// Without a cache the image is embedded unrecorded. Null image ⇒ the file would not decode; that slot
+    /// carries no texture (see <see cref="PreviewImageSet.Use"/>).</summary>
+    private static (GltfImage? Image, PreviewMaps.AlphaCoverage Alpha) UseImage(
+        ModelRoot model, string pngPath, MapKind kind,
+        string owner, PreviewImageSet? cache)
     {
         if (cache is not null) return cache.Use(model, pngPath, kind, owner);
-        var image = model.UseImageWithContent(new SharpGLTF.Memory.MemoryImage(PreviewMaps.ToPreview(pngPath, kind)));
+        byte[] bytes;
+        PreviewMaps.AlphaCoverage alpha;
+        try { bytes = PreviewMaps.ToPreviewWithAlphaCoverage(pngPath, kind, out alpha); }
+        catch (Exception e) when (e is not OutOfMemoryException and not OperationCanceledException)
+        { return (null, default); }
+        var image = model.UseImageWithContent(new SharpGLTF.Memory.MemoryImage(bytes));
         image.Name = PreviewMaps.ImageName(pngPath, kind);
-        return image;
+        return (image, alpha);
     }
 
     /// <summary>Force each normal to unit length (glTF requirement); a near-zero normal falls back to
@@ -976,15 +1383,24 @@ public static class MeshGltf
     private static IReadOnlyList<Vector4> Map4(UnityMesh m, string ch, System.Func<Vector4, Vector4>? f) =>
         f is null ? m.AsVector4(ch) : m.AsVector4(ch).Select(f).ToArray();
 
-    /// <summary>UV0 in glTF convention, or null when the mesh carries none. A <see cref="UnityMesh"/> always
-    /// holds Unity-convention UVs; the V flip lives here alone, so every writer takes TEXCOORD_0 from
-    /// here.</summary>
-    private static IReadOnlyList<Vector2>? Uv0(UnityMesh m) =>
-        m.Has("TexCoord0") ? m.AsVector2("TexCoord0").Select(AxisConvention.TexCoord).ToArray() : null;
+    /// <summary>The consecutive UV prefix with at least two components in glTF convention. A <see cref="UnityMesh"/>
+    /// always holds Unity-convention UVs; the V flip lives here alone, so every writer takes every
+    /// TEXCOORD_n from here. Gaps and wider game channels stop the prefix rather than renumbering later
+    /// channels. Wider channels are intentionally read at their own stride and transported as XY.</summary>
+    private static IReadOnlyList<IReadOnlyList<Vector2>> TransportUvs(UnityMesh m)
+    {
+        var sets = new List<IReadOnlyList<Vector2>>();
+        for (int i = 0; i < TransportedTexCoordCount(m); i++)
+        {
+            string channel = $"TexCoord{i}";
+            sets.Add(m.AsVector2(channel).Select(AxisConvention.TexCoord).ToArray());
+        }
+        return sets;
+    }
 
     /// <summary>
     /// Reads a (Blender-edited) <c>.glb</c> back into a <see cref="UnityMesh"/> in Unity space — the exact
-    /// inverse of <see cref="ExportGlb"/>. Geometry channels only (Vertex/Normal/Tangent/TexCoord0); the
+    /// inverse of <see cref="ExportGlb"/>. Geometry channels only (Vertex/Normal/Tangent/TexCoord0..7); the
     /// skin is read by <see cref="ImportPayload"/>. Primitives sharing one vertex pool are read once with
     /// absolute indices; primitives Blender split per material into separate pools are concatenated with
     /// running index offsets. <paramref name="meshName"/> selects one mesh out of a multi-mesh glb and
@@ -1021,14 +1437,16 @@ public static class MeshGltf
     /// classifies every returned map as authored. Null reads the record beside the glb being read.</para>
     /// </summary>
     public static IReadOnlyList<IncomingMaps> ReadSubmeshMaps(string path, string? meshName = null,
-        string? recordGlb = null) =>
+        string? recordGlb = null, Action<string>? report = null) =>
         ReadSubmeshMaps(ModelRoot.Load(path, new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip }),
-            recordGlb ?? path, meshName, new PreviewMaps.StockPixels());
+            recordGlb ?? path, meshName, new PreviewMaps.StockPixels(), GltfTextureTransport.Read(path), report,
+            reportUnkeyed: true);
 
     /// <inheritdoc cref="ReadSubmeshMaps(string, string?, string?)"/>
     public static IReadOnlyList<IncomingMaps> ReadSubmeshMaps(ParsedGlb glb, string? meshName = null,
-        string? recordGlb = null) =>
-        ReadSubmeshMaps(glb.Model, recordGlb ?? glb.Path, meshName, glb.Stock);
+        string? recordGlb = null, Action<string>? report = null, bool reportUnkeyed = true) =>
+        ReadSubmeshMaps(glb.Model, recordGlb ?? glb.Path, meshName, glb.Stock,
+            glb.Transport, report, reportUnkeyed);
 
     /// <summary>The read over an ALREADY-loaded model, for a caller that has one. The IMAGES come from the
     /// model; the RECORD they are classified against is the sidecar beside <paramref name="recordGlb"/>, which
@@ -1037,7 +1455,8 @@ public static class MeshGltf
     /// their recorded stock maps, so a slot the hash cannot settle is decoded against candidates the part
     /// before it may already have measured.</summary>
     private static IReadOnlyList<IncomingMaps> ReadSubmeshMaps(ModelRoot model, string recordGlb, string? meshName,
-        PreviewMaps.StockPixels stock)
+        PreviewMaps.StockPixels stock, TextureTransportRead? transport = null, Action<string>? report = null,
+        bool reportUnkeyed = true)
     {
         var glMesh = meshName is null
             ? model.LogicalMeshes.FirstOrDefault()
@@ -1046,14 +1465,95 @@ public static class MeshGltf
 
         var sidecar = PreviewMaps.ReadSidecar(recordGlb);
         var owner = glMesh.Name ?? "";
+        // What each of this part's slots was exported over, so a stock map coming back on a slot it never sat
+        // on reads as the deliberate link it is — inside one part as much as across two. Null where the record
+        // cannot say, which leaves every slot on the whole-record answer (see PreviewMaps.ReadSlotStock).
+        var slotStock = PreviewMaps.ReadSlotStock(recordGlb, owner);
+        var sessionOutbound = PreviewMaps.ReadTransportBindings(recordGlb);
+        var outbound = sessionOutbound
+            .Where(binding => string.Equals(binding.Mesh, owner, StringComparison.Ordinal)).ToList();
+        var returned = new Dictionary<(int Material, int? Primitive, string Property), TextureTransportImage>();
+        if (transport is not null)
+        {
+            if (reportUnkeyed)
+                foreach (string image in transport.UnkeyedImages)
+                    report?.Invoke($"Ignored {image} from Blender: it isn't linked to a texture slot.");
+            var outboundKeys = outbound.Select(Key).ToHashSet();
+            foreach (var binding in transport.Bindings.Where(binding =>
+                         string.Equals(binding.Mesh, owner, StringComparison.Ordinal)))
+            {
+                var key = (binding.MaterialIndex, binding.PrimitiveIndex, binding.ShaderProperty);
+                if (!outboundKeys.Contains(key))
+                {
+                    report?.Invoke($"Ignored {binding.ImageName} "
+                        + $"({Textures.TextureMap.PropertyLabel(binding.ShaderProperty)}) from Blender: "
+                        + "that texture slot wasn't in the file this session opened.");
+                    continue;
+                }
+                if (!returned.TryAdd(key, binding))
+                    report?.Invoke($"Ignored a duplicate {binding.ImageName} from Blender: its texture "
+                        + "slot already has an image.");
+            }
+        }
+
+        // The outbound record selects the protocol. If Blender removes every tagged node, that is an exact
+        // answer of "no returned bindings", not permission to reinterpret an unkeyed standard channel as one
+        // of them. Legacy glbs have no outbound bindings and continue through the fixed-channel path below.
+        bool keyed = sessionOutbound.Count > 0;
+        var resolvedByPrimitive = new Dictionary<int, List<IncomingTexture>>();
+        if (keyed)
+        {
+            foreach (var binding in outbound)
+            {
+                var key = Key(binding);
+                returned.TryGetValue(key, out var image);
+                var resolved = PreviewMaps.ResolveTransport(image.Png, binding);
+                if (binding.PrimitiveIndex is not { } primitive)
+                {
+                    if (resolved.Origin == MapOrigin.Authored)
+                        report?.Invoke(
+                            $"Ignored {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} from "
+                            + $"Blender: material {binding.MaterialIndex + 1} is not on any submesh.");
+                    continue;
+                }
+                if (!resolvedByPrimitive.TryGetValue(primitive, out var list))
+                    resolvedByPrimitive[primitive] = list = new List<IncomingTexture>();
+                list.Add(new IncomingTexture(binding.MaterialIndex, binding.PrimitiveIndex,
+                    binding.ShaderProperty, binding.Kind, resolved, image.ImageName));
+            }
+        }
+
         var maps = new List<IncomingMaps>(glMesh.Primitives.Count);
-        foreach (var prim in glMesh.Primitives)
-            maps.Add(new IncomingMaps(
-                PreviewMaps.Resolve(ChannelImage(prim.Material, "BaseColor"), MapKind.BaseColor, sidecar, owner, stock),
-                PreviewMaps.Resolve(ChannelImage(prim.Material, "Normal"), MapKind.Normal, sidecar, owner, stock),
-                PreviewMaps.Resolve(OrmImage(prim.Material), MapKind.Rmo, sidecar, owner, stock),
-                prim.Material?.Name ?? ""));
+        for (int p = 0; p < glMesh.Primitives.Count; p++)
+        {
+            var prim = glMesh.Primitives[p];
+            resolvedByPrimitive.TryGetValue(p, out var exact);
+            maps.Add(keyed
+                ? new IncomingMaps(Exact(MapKind.BaseColor), Exact(MapKind.Normal), Exact(MapKind.Rmo),
+                    prim.Material?.Name ?? "", exact, ExactName(MapKind.BaseColor), ExactName(MapKind.Normal),
+                    ExactName(MapKind.Rmo))
+                : new IncomingMaps(
+                    PreviewMaps.Resolve(ChannelImage(prim.Material, "BaseColor"), MapKind.BaseColor, sidecar, owner,
+                        stock, Expected(p, MapKind.BaseColor)),
+                    PreviewMaps.Resolve(ChannelImage(prim.Material, "Normal"), MapKind.Normal, sidecar, owner,
+                        stock, Expected(p, MapKind.Normal)),
+                    PreviewMaps.Resolve(OrmImage(prim.Material), MapKind.Rmo, sidecar, owner, stock,
+                        Expected(p, MapKind.Rmo)),
+                    prim.Material?.Name ?? "", BaseColorName: ChannelImageName(prim.Material, "BaseColor"),
+                    NormalName: ChannelImageName(prim.Material, "Normal"), RmoName: OrmImageName(prim.Material)));
+
+            ResolvedMap Exact(MapKind kind) => exact?.FirstOrDefault(item => item.Kind == kind).Map ?? default;
+            string? ExactName(MapKind kind) => exact?.FirstOrDefault(item => item.Kind == kind).ImageName;
+        }
         return maps;
+
+        static (int Material, int? Primitive, string Property) Key(PreviewMaps.TransportBinding binding) =>
+            (binding.MaterialIndex, binding.PrimitiveIndex, binding.ShaderProperty);
+
+        PreviewMaps.SlotStock? Expected(int primitive, MapKind kind) =>
+            slotStock is null
+                ? null
+                : new PreviewMaps.SlotStock(slotStock.GetValueOrDefault((primitive, kind)));
     }
 
     /// <summary>The map paths a re-split re-embeds per submesh, in primitive order — what makes the part open
@@ -1080,7 +1580,7 @@ public static class MeshGltf
     /// <summary>Every path in <paramref name="authored"/>, as the set the record write asks whether a source it
     /// embedded is the modder's own. Null where nothing is authored, which is what the plain stock export
     /// passes.</summary>
-    private static IReadOnlySet<string>? AuthoredSources(
+    internal static IReadOnlySet<string>? AuthoredSources(
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authored)
     {
         if (authored is null) return null;
@@ -1096,12 +1596,18 @@ public static class MeshGltf
     private static byte[]? OrmImage(Material? material) =>
         ChannelImage(material, "MetallicRoughness") ?? ChannelImage(material, "Occlusion");
 
+    private static string? OrmImageName(Material? material) =>
+        ChannelImageName(material, "MetallicRoughness") ?? ChannelImageName(material, "Occlusion");
+
     /// <summary>The encoded bytes behind one material channel's texture, or null when absent.</summary>
     private static byte[]? ChannelImage(Material? material, string channel)
     {
         var img = material?.FindChannel(channel)?.Texture?.PrimaryImage?.Content;
         return img is { IsValid: true } c ? c.Content.ToArray() : null;
     }
+
+    private static string? ChannelImageName(Material? material, string channel) =>
+        material?.FindChannel(channel)?.Texture?.PrimaryImage?.Name;
 
     /// <summary>
     /// Read a mesh AND its skin (JOINTS_0/WEIGHTS_0 + each joint's bone hash) into a
@@ -1132,7 +1638,24 @@ public static class MeshGltf
     /// </summary>
     public sealed class ParsedGlb
     {
-        private ParsedGlb(ModelRoot model, string path) { Model = model; Path = path; }
+        private readonly Lazy<TextureTransportRead> _transport;
+        // The parse snapshot, held only until the transport read consumes it — the factory nulls the
+        // field, so an instance that never asks for its transport is the only one still holding the
+        // bytes, and only for its own (method-scoped) lifetime.
+        private byte[]? _snapshot;
+
+        private ParsedGlb(ModelRoot model, string path, byte[] snapshot)
+        {
+            Model = model;
+            Path = path;
+            _snapshot = snapshot;
+            _transport = new Lazy<TextureTransportRead>(() =>
+            {
+                byte[] bytes = _snapshot!;
+                _snapshot = null;
+                return GltfTextureTransport.Read(bytes);
+            });
+        }
 
         internal ModelRoot Model { get; }
 
@@ -1143,13 +1666,21 @@ public static class MeshGltf
         /// does. Parses a byte SNAPSHOT rather than the file: a send file is Blender's to rewrite at any
         /// moment, and a parse that held it open for its own duration would fail the very Send that
         /// announces the next edit.</summary>
-        public static ParsedGlb Open(string path) => new(ModelRoot.ReadGLB(
-            new MemoryStream(File.ReadAllBytes(path)),
-            new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip }), path);
+        public static ParsedGlb Open(string path)
+        {
+            byte[] snapshot = File.ReadAllBytes(path);
+            return new ParsedGlb(ModelRoot.ReadGLB(new MemoryStream(snapshot),
+                new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip }), path, snapshot);
+        }
 
         /// <summary>The mesh names this glb carries — what tells a part that came back from a part that was
         /// only context.</summary>
         public IReadOnlyList<string> MeshNames => Model.LogicalMeshes.Select(m => m.Name ?? "").ToList();
+
+        /// <summary>Images no exact transport binding owns, for one session-level diagnostic.</summary>
+        public IReadOnlyList<string> UnkeyedTextureImages => Transport.UnkeyedImages;
+
+        internal TextureTransportRead Transport => _transport.Value;
 
         /// <summary>What the map reads off this file have already measured about the recorded stock maps.
         /// One session's parts are classified against one set of stock maps, so the measurement is shared
@@ -1228,8 +1759,8 @@ public static class MeshGltf
                   + "empty exports only a transform node")
             : model.LogicalMeshes.FirstOrDefault(m => m.Name == meshName)
               ?? throw new InvalidOperationException(
-                  $"mesh \"{meshName}\" not found in the glb (it has: " +
-                  $"{string.Join(", ", model.LogicalMeshes.Select(m => $"\"{m.Name}\""))}). " +
+                  $"mesh '{meshName}' not found in the glb (it has: " +
+                  $"{string.Join(", ", model.LogicalMeshes.Select(m => $"'{m.Name}'"))}). " +
                   "Was the object renamed in Blender?");
         var prims = glMesh.Primitives.ToList();
 
@@ -1283,8 +1814,9 @@ public static class MeshGltf
 
         var dims = new Dictionary<string, int>
         {
-            ["Vertex"] = 3, ["Normal"] = 3, ["Tangent"] = 4, ["TexCoord0"] = 2,
+            ["Vertex"] = 3, ["Normal"] = 3, ["Tangent"] = 4,
         };
+        for (int i = 0; i < MaxTexCoordSets; i++) dims[$"TexCoord{i}"] = 2;
         var mesh = new UnityMesh
         {
             Name = glMesh.Name ?? meshName ?? "",
@@ -1339,23 +1871,29 @@ public static class MeshGltf
     }
 
     /// <summary>
-    /// Does a node that instances <paramref name="meshName"/> (or the first mesh) carry a non-identity WORLD
-    /// transform? <see cref="ImportGlb"/> reads POSITION straight from the accessor and ignores node
-    /// transforms, so an Object-mode move would silently vanish on send-back. The send path uses this to
-    /// WARN; it does not apply the transform. Tolerant of the ~1e-6 noise glTF round-trips leave in an
-    /// "identity" matrix.
+    /// Does a node that instances <paramref name="meshName"/> carry a non-identity WORLD transform — or,
+    /// with no name, does ANY mesh in the file? <see cref="ImportGlb"/> reads POSITION straight from the
+    /// accessor and ignores node transforms, so an Object-mode move would silently vanish on send-back.
+    /// The send path uses this to WARN; it does not apply the transform. Tolerant of the ~1e-6 noise glTF
+    /// round-trips leave in an "identity" matrix.
     /// </summary>
-    public static bool HasNonIdentityNodeTransform(string path, string? meshName = null)
+    public static bool HasNonIdentityNodeTransform(string path, string? meshName = null) =>
+        meshName is null
+            ? MeshesWithNodeTransform(path).Count > 0
+            : MeshesWithNodeTransform(path).Contains(meshName, StringComparer.Ordinal);
+
+    /// <summary>The names of the meshes in <paramref name="path"/> whose instancing node carries a
+    /// transform the geometry read ignores. A whole-file answer, so a send carrying several parts can name
+    /// the ones actually affected rather than reporting on the first mesh it happens to hold.</summary>
+    public static IReadOnlyList<string> MeshesWithNodeTransform(string path)
     {
         var model = ModelRoot.Load(path);
-        var mesh = meshName is null
-            ? model.LogicalMeshes.FirstOrDefault()
-            : model.LogicalMeshes.FirstOrDefault(m => m.Name == meshName);
-        if (mesh is null) return false;
+        var moved = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var node in model.LogicalNodes)
-            if (node.Mesh == mesh && !IsNearIdentity(node.WorldMatrix))
-                return true;
-        return false;
+            if (node.Mesh is { } mesh && !IsNearIdentity(node.WorldMatrix) && seen.Add(mesh.Name ?? ""))
+                moved.Add(mesh.Name ?? "");
+        return moved;
     }
 
     private static bool IsNearIdentity(Matrix4x4 m)
@@ -1369,7 +1907,7 @@ public static class MeshGltf
     }
 
     /// <summary>Read one primitive's geometry channels into flattened Unity-space arrays: axis convention
-    /// undone on the directional channels, V flip undone on UV0. Every import route lands here, so this is
+    /// undone on the directional channels, V flip undone on every UV set. Every import route lands here, so this is
     /// the only place a glb's UVs cross back into Unity convention.</summary>
     private static Dictionary<string, float[]> ReadPrimChannels(MeshPrimitive prim)
     {
@@ -1384,8 +1922,11 @@ public static class MeshGltf
         var tan = prim.GetVertexAccessor("TANGENT")?.AsVector4Array();
         if (tan is not null) ch["Tangent"] = Flatten4(tan.Select(AxisConvention.Tangent));
 
-        var uv0 = prim.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array();
-        if (uv0 is not null) ch["TexCoord0"] = Flatten2(uv0.Select(AxisConvention.TexCoord));
+        for (int i = 0; i < MaxTexCoordSets; i++)
+        {
+            var uv = prim.GetVertexAccessor($"TEXCOORD_{i}")?.AsVector2Array();
+            if (uv is not null) ch[$"TexCoord{i}"] = Flatten2(uv.Select(AxisConvention.TexCoord));
+        }
 
         return ch;
     }

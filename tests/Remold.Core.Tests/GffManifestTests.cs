@@ -79,4 +79,56 @@ public class GffManifestTests
         var ex = Assert.Throws<InvalidDataException>(() => GffManifest.Read(path));
         Assert.Contains("outside the file's stub region", ex.Message);
     }
+
+    [Fact]
+    public void Snapshot_serves_byte_equivalent_lookups_and_invalidates_on_length_or_mtime_change()
+    {
+        using var t = new TempGame();
+        string source = Build(t,
+            (NameA, FakeGff.Stub(PhysA, 0, 0, 1)),
+            (NameB, FakeGff.Stub(PhysB, 4096, 777, 2)));
+        string snapshot = t.At("gff.snapshot");
+        DateTime sourceStamp = File.GetLastWriteTimeUtc(source);
+
+        var parsed = GffManifest.LoadCached(source, snapshot, out bool firstHit);
+        var cached = GffManifest.LoadCached(source, snapshot, out bool secondHit);
+
+        Assert.False(firstHit);
+        Assert.True(secondHit);
+        AssertEquivalent(parsed, cached);
+        Assert.Equal(new[] { PhysA, PhysB }, cached.PhysicalHashes);
+
+        // Length is one third of the key. A valid trailing byte leaves the source structurally readable,
+        // but the old snapshot must not answer for it.
+        using (var append = new FileStream(source, FileMode.Append, FileAccess.Write, FileShare.Read))
+            append.WriteByte(0);
+        File.SetLastWriteTimeUtc(source, sourceStamp);   // isolate the length half of the invalidation
+        var longer = GffManifest.LoadCached(source, snapshot, out bool lengthHit);
+        Assert.False(lengthHit);
+        AssertEquivalent(parsed, longer);
+
+        // With the new length now snapshotted, mtime alone is the remaining invalidation half.
+        File.SetLastWriteTimeUtc(source, sourceStamp.AddMinutes(2));
+        var restamped = GffManifest.LoadCached(source, snapshot, out bool mtimeHit);
+        Assert.False(mtimeHit);
+        AssertEquivalent(parsed, restamped);
+
+        static void AssertEquivalent(GffManifest expected, GffManifest actual)
+        {
+            Assert.Equal(expected.EntryCount, actual.EntryCount);
+            Assert.Equal(expected.Names, actual.Names);
+            Assert.Equal(expected.PhysicalHashes, actual.PhysicalHashes);
+            foreach (string name in expected.Names)
+            {
+                var left = expected.Locate(name);
+                var right = actual.Locate(name);
+                Assert.Equal(left.Position, right.Position);
+                Assert.Equal(left.Stub.PhysHash, right.Stub.PhysHash);
+                Assert.Equal(left.Stub.Offset, right.Stub.Offset);
+                Assert.Equal(left.Stub.Size, right.Stub.Size);
+                Assert.Equal(left.Stub.SubHash, right.Stub.SubHash);
+                Assert.Equal(right.Stub, actual.ReadStubAt(right.Position));
+            }
+        }
+    }
 }

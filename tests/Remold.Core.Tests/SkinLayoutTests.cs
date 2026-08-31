@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using Remold.Core.Bundles;
@@ -142,7 +142,7 @@ public class SkinLayoutTests : IDisposable
         Assert.False(SkinLayout.Recoverable(field));
         Assert.False(SkinLayout.Widen(field));
         Assert.Throws<InvalidDataException>(() => SkinLayout.Canonical(field));
-        Assert.Equal("it carries a skin stream recovery can't read",
+        Assert.Equal("its skin weights are stored in a shape this app can't read",
             StreamDump.UnrecoverableSkinReason(field));
     }
 

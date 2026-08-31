@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
-using Remold.App.ViewModels.Workbench;
+using Remold.App.ViewModels.EditPage;
 using Remold.Core.Workbench;
 using Xunit;
 

@@ -5,11 +5,10 @@ Launched with the mesh to edit:
     blender --python remold_bridge.py -- <mesh.glb> <send_dir>
 
 It imports the mesh, sets up a clean viewport, and registers a **"Doll Remolding Lab"** panel in
-the N-panel sidebar (press N) with **Check mesh** and **Send to Lab** buttons. The modder edits,
-optionally runs Check, and clicks Send — the app's file watcher picks up the exported `.glb` (+ a
-`.gf2send.json` write-complete sidecar). The panel reports the scene it is looking at and a live
-status line. A first Send just goes; a Send that would replace an existing edit asks first, and
-every successful Send confirms with a popup.
+the N-panel sidebar (press N) with the live edit destinations, session notices, **Check Mesh**, and
+**Send to Lab**. The modder edits, optionally runs Check, and clicks Send — the app's file watcher
+picks up the exported `.glb` (+ a `.gf2send.json` write-complete sidecar). A first Send just goes; a
+Send that would replace an existing edit asks first, and every successful Send confirms with a popup.
 
 The scene is laid out so that attribution is visible in the outliner and survives a save:
 
@@ -34,8 +33,8 @@ character with the rest of the outfit visible around the edit. Which of those me
 write is the app's call, read from a `<glb stem>.gf2session.json` file beside the glb: the named part
 gets a part collection under `Mod`, and every other mesh lands in `Reference` as context. Without that
 file every mesh is a part, which is what the headless round trip and a hand-opened glb want. The file
-also says which parts already hold an edit in the app, so the Send confirmation can say what a send
-would replace.
+also carries each writable part's live edit inventory and default destination, so the panel and Send
+confirmation reflect the app's current state.
 
 Deleting a part's mesh is how a part is hidden in the built mod. The send never infers that from an
 absent mesh — under the one-part-per-session layout most of the outfit is absent by design — so an
@@ -45,15 +44,16 @@ emptying it is the only way to hide that part: the send then carries no mesh at 
 the mod still ships from its own files. Emptying everything in a session that names NO part is an
 empty deliverable instead, and blocks.
 
-Before an export, a sanity pass runs (also on demand via **Check mesh**): it BLOCKS the Send on
+Before an export, a sanity pass runs (also on demand via **Check Mesh**): it BLOCKS the Send on
 problems that would break the deliverable — a mesh with no part, a part holding more than one mesh, a
 part collection excluded from the view layer or squatted out of its own name, vertices no skeleton
 weight can reach, or a weighted scene with no armature — and WARNS (without blocking) on likely
-mistakes: an Object-mode scale, a reordered material slot, or a renamed/removed bone. Everything but
-the weight solve is cheap enough to drive the panel's live status line. On Send, any unweighted
-vertices are bone-heat filled from the skeleton (authored weights are always preserved); the app then
-compiles the authored skin onto the target. A part the app declares unskinned — a static prop, which
-ships no weights and opens with no armature — is outside all of that.
+mistakes: an Object-mode transform on a mesh with no skeleton, a mirrored scale, a reordered
+material slot, or a renamed/removed bone. Everything but the weight solve is cheap enough to drive
+the panel's live status line. On Send, any unweighted vertices are bone-heat filled from the skeleton
+(authored weights are always preserved); the app then compiles the authored skin onto the target. A
+part the app declares unskinned — a static prop, which ships no weights and opens with no armature —
+is outside all of that.
 
 The modder never touches glTF export settings: Send always exports with tangents, skinning, and
 normals ON. The outline channel is NOT carried through Blender — it is re-baked at package time
@@ -70,6 +70,10 @@ import os
 import json
 import re
 import time
+import struct
+import tempfile
+import hashlib
+import textwrap
 
 
 # ---------------------------------------------------------------- collections carry the part
@@ -85,30 +89,349 @@ ARMATURE_COLLECTION = "Armature"
 PART_MARKER = "gf2_part"
 
 # The app's description of the session, written beside the glb it launches on: which mesh this session
-# may write back, and which parts already hold an edit. Absent = every mesh in the glb is a part.
+# may write back, plus the live edit inventory and defaults. Absent = every mesh in the glb is a part.
 SESSION_SUFFIX = ".gf2session.json"
 
 # Where the session description is kept once read, so the Send confirmation can reach it after a save.
 SESSION_KEY = "gf2_session"
 
-# The parts this session has already sent. The app's description is a launch-time snapshot, so this is what
-# lets a second Send warn about the part the first one wrote.
-SENT_KEY = "gf2_sent"
+# The target selection captured by the last completed Blender export. It remains pending until the app
+# acknowledges that return by advancing the session revision. This is deliberately not evidence that an
+# edit holds mesh work: only the acknowledged live session inventory carries that fact.
+SEND_SNAPSHOT_KEY = "gf2_send_snapshot"
 
-# Panel rows whose text is the same every time they appear.
-REFERENCE_NOTE = "Reference never ships."
+# Enum identifier for the row's synthetic final choice. Existing edit identifiers are opaque app tokens.
+NEW_EDIT_TARGET = "__gf2_new_edit__"
+
+# Blender's dynamic EnumProperty callback does not retain its strings. Keep every tuple (and therefore all
+# of its strings) referenced for as long as the corresponding CollectionProperty rows exist.
+_TARGET_ITEM_REFS = {}
+_TARGET_FALLBACK_ITEMS = ((NEW_EDIT_TARGET, "New Edit", ""),)
+
+# Session refresh is timer-driven, not panel-draw-driven. The timer stats the sidecar cheaply and only
+# opens it after the path or nanosecond mtime changes.
+_SESSION_REFRESH_INTERVAL = 1.0
+_SESSION_FILE_STATE = {"path": None, "mtime": None}
+
+# Panel text used when a scene read itself fails. Session-file read failures are different: those retain the
+# last readable scene snapshot without showing a false empty session.
 UNREADABLE = "⚠ Scene state unreadable"
+
+# Blender-only preview structure applied after the standard glTF import. Core glTF has no material
+# setting for transparency overlap and cannot represent the Map Range node, so every import rebuilds
+# this small graph over the original, untouched base-colour image.
+ALPHA_REMAP_NODE = "GF2 Alpha 254 Ceiling"
+ALPHA_REMAP_TAG = "gf2_alpha_254_remap"
+ALPHA_OPAQUE_CEILING = 254.0 / 255.0
+
+# Exact shader-property transport. The glTF carrier is deliberately independent of Blender's Principled
+# graph: every binding is an ordinary glTF image plus this top-level extras row, including properties for
+# which the game shader has no honest static PBR equivalent.
+TEXTURE_TRANSPORT_EXTRAS = "gf2_texture_transport"
+TEXTURE_TRANSPORT_NODE = "gf2_texture_binding"
+TEXTURE_TRANSPORT_UV_NODE = "gf2_texture_tex_coord"
+
+
+def _gf2_glb_read(path):
+    """Return (json object, BIN bytes) for one glTF 2.0 binary."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) < 20 or struct.unpack_from("<II", raw, 0) != (0x46546C67, 2):
+        raise RuntimeError("GF2: texture transport requires a glTF 2.0 binary file.")
+    offset = 12
+    root = None
+    binary = b""
+    while offset + 8 <= len(raw):
+        length, kind = struct.unpack_from("<II", raw, offset)
+        offset += 8
+        payload = raw[offset:offset + length]
+        if len(payload) != length:
+            raise RuntimeError("GF2: the GLB texture-transport chunk is truncated.")
+        if kind == 0x4E4F534A:
+            root = json.loads(payload.rstrip(b" \0").decode("utf-8"))
+        elif kind == 0x004E4942:
+            binary = payload
+        offset += length
+    if root is None:
+        raise RuntimeError("GF2: the GLB has no JSON chunk.")
+    return root, binary
+
+
+def _gf2_glb_write(path, root, binary):
+    json_bytes = json.dumps(root, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    json_bytes += b" " * ((-len(json_bytes)) % 4)
+    binary = bytes(binary)
+    binary += b"\0" * ((-len(binary)) % 4)
+    total = 12 + 8 + len(json_bytes) + (8 + len(binary) if binary else 0)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<III", 0x46546C67, 2, total))
+        f.write(struct.pack("<II", len(json_bytes), 0x4E4F534A))
+        f.write(json_bytes)
+        if binary:
+            f.write(struct.pack("<II", len(binary), 0x004E4942))
+            f.write(binary)
+
+
+def _gf2_image_bytes(root, binary, image_index):
+    image = root.get("images", [])[image_index]
+    view = root.get("bufferViews", [])[image["bufferView"]]
+    if view.get("buffer", 0) != 0:
+        raise RuntimeError("GF2: a texture-transport image is not in GLB buffer 0.")
+    start = view.get("byteOffset", 0)
+    return binary[start:start + view["byteLength"]]
+
+
+def _gf2_read_texture_transport(path):
+    """Read carrier rows with their embedded PNG bytes. No extras means the legacy empty answer."""
+    root, binary = _gf2_glb_read(path)
+    carrier = root.get("extras", {}).get(TEXTURE_TRANSPORT_EXTRAS, {})
+    if carrier.get("version") != 1:
+        return []
+    result = []
+    for row in carrier.get("bindings", []):
+        try:
+            copied = json.loads(json.dumps(row))
+            copied["png"] = _gf2_image_bytes(root, binary, row["image"])
+            copied["image_name"] = root.get("images", [])[row["image"]].get(
+                "name", "GF2 texture")
+            result.append(copied)
+        except (KeyError, IndexError, TypeError):
+            print("GF2: ignored a malformed texture-transport binding in the opened GLB.")
+    return result
+
+
+def _gf2_append_texture_transport(path, rows):
+    """Append Blender images to a freshly exported GLB and stamp the exact property rows."""
+    if not rows:
+        return
+    root, old_binary = _gf2_glb_read(path)
+    binary = bytearray(old_binary)
+    images = root.setdefault("images", [])
+    views = root.setdefault("bufferViews", [])
+    buffers = root.setdefault("buffers", [{}])
+    if not buffers:
+        buffers.append({})
+    carrier_rows = []
+    for row in rows:
+        png = row.pop("png")
+        while len(binary) % 4:
+            binary.append(0)
+        start = len(binary)
+        binary.extend(png)
+        view = len(views)
+        views.append({"buffer": 0, "byteOffset": start, "byteLength": len(png)})
+        image = len(images)
+        images.append({"name": row.pop("image_name", "GF2 texture"), "mimeType": "image/png",
+                       "bufferView": view})
+        row["image"] = image
+        row["outbound_hash"] = hashlib.sha256(png).hexdigest()
+        carrier_rows.append(row)
+    buffers[0]["byteLength"] = len(binary)
+    extras = root.get("extras")
+    if not isinstance(extras, dict):
+        extras = {}
+        root["extras"] = extras
+    extras[TEXTURE_TRANSPORT_EXTRAS] = {
+        "version": 1, "bindings": carrier_rows,
+    }
+    _gf2_glb_write(path, root, binary)
+
+
+def _gf2_material_for_binding(mesh, row):
+    """The projected primitive material, or a new unprojected slot for surplus inventory."""
+    owner = row.get("owner", {})
+    slot = owner.get("primitive")
+    if not isinstance(slot, int):
+        slot = owner.get("material", 0)
+    while len(mesh.data.materials) <= slot:
+        material = bpy.data.materials.new(name=f"GF2 material {len(mesh.data.materials) + 1}")
+        material.use_nodes = True
+        mesh.data.materials.append(material)
+    material = mesh.data.materials[slot]
+    if material is None:
+        material = bpy.data.materials.new(name=f"GF2 material {slot + 1}")
+        material.use_nodes = True
+        mesh.data.materials[slot] = material
+    material.use_nodes = True
+    return material
+
+
+def _gf2_replace_link(tree, output, input_socket):
+    for link in list(input_socket.links):
+        tree.links.remove(link)
+    tree.links.new(output, input_socket)
+
+
+def _gf2_connect_static_semantic(material, image_node, semantic):
+    """Connect only semantics a static Principled graph represents honestly."""
+    tree = material.node_tree
+    principled = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+    if principled is None:
+        return
+    if semantic == "baseColor":
+        if principled.inputs.get("Base Color"):
+            _gf2_replace_link(tree, image_node.outputs["Color"], principled.inputs["Base Color"])
+        if principled.inputs.get("Alpha"):
+            _gf2_replace_link(tree, image_node.outputs["Alpha"], principled.inputs["Alpha"])
+    elif semantic == "normal" and principled.inputs.get("Normal"):
+        normal = tree.nodes.new("ShaderNodeNormalMap")
+        normal.name = "GF2 packed normal preview"
+        tree.links.new(image_node.outputs["Color"], normal.inputs["Color"])
+        _gf2_replace_link(tree, normal.outputs["Normal"], principled.inputs["Normal"])
+    elif semantic == "rmo":
+        try:
+            separate = tree.nodes.new("ShaderNodeSeparateColor")
+            red, green, blue = "Red", "Green", "Blue"
+        except RuntimeError:
+            separate = tree.nodes.new("ShaderNodeSeparateRGB")
+            red, green, blue = "R", "G", "B"
+        separate.name = "GF2 ORM preview"
+        tree.links.new(image_node.outputs["Color"], separate.inputs[0])
+        if principled.inputs.get("Roughness"):
+            _gf2_replace_link(tree, separate.outputs[green], principled.inputs["Roughness"])
+        if principled.inputs.get("Metallic"):
+            _gf2_replace_link(tree, separate.outputs[blue], principled.inputs["Metallic"])
+
+
+def _gf2_uv_layer_name(mesh, tex_coord):
+    """The imported layer at one glTF TEXCOORD index, without assuming Blender's display name."""
+    if type(tex_coord) is not int or tex_coord < 0:
+        return None
+    layers = getattr(getattr(mesh, "data", None), "uv_layers", None)
+    if layers is None or tex_coord >= len(layers):
+        return None
+    name = getattr(layers[tex_coord], "name", None)
+    return name if isinstance(name, str) and name else None
+
+
+def _gf2_pin_texture_coordinate(mesh, material, image_node, tex_coord):
+    """Pin a tagged image to its explicitly carried glTF TEXCOORD set. No output shading link is added."""
+    layer_name = _gf2_uv_layer_name(mesh, tex_coord)
+    if layer_name is None:
+        print(f"GF2: could not pin {getattr(image_node, 'name', 'a texture')} to TEXCOORD_{tex_coord}; "
+              "the required UV layer is absent.")
+        return False
+    tree = material.node_tree
+    uv_map = next((node for node in tree.nodes
+                   if getattr(node, "bl_idname", "") == "ShaderNodeUVMap"
+                   and node.get(TEXTURE_TRANSPORT_UV_NODE) == tex_coord), None)
+    if uv_map is None:
+        uv_map = tree.nodes.new("ShaderNodeUVMap")
+        uv_map.name = f"GF2 UV{tex_coord}"
+        uv_map.label = f"GF2: TEXCOORD_{tex_coord}"
+        uv_map[TEXTURE_TRANSPORT_UV_NODE] = tex_coord
+    uv_map.uv_map = layer_name
+    vector = image_node.inputs.get("Vector")
+    uv = uv_map.outputs.get("UV")
+    if vector is None or uv is None:
+        return False
+    _gf2_replace_link(tree, uv, vector)
+    return True
+
+
+def _gf2_install_texture_transport(glb_path, imported_meshes):
+    """Materialize every carrier row as a tagged Blender image node."""
+    rows = _gf2_read_texture_transport(glb_path)
+    by_name = {mesh.name: mesh for mesh in imported_meshes}
+    installed = 0
+    for row in rows:
+        owner = row.get("owner", {})
+        mesh = by_name.get(owner.get("mesh"))
+        if mesh is None:
+            continue
+        png = row.pop("png")
+        image_name = row.pop("image_name", "GF2 texture")
+        handle, temp_path = tempfile.mkstemp(suffix=".png")
+        os.close(handle)
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(png)
+            image = bpy.data.images.load(temp_path, check_existing=False)
+            image.name = image_name
+            image.pack()
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        try:
+            image.colorspace_settings.name = "sRGB" if row.get("srgb") is True else "Non-Color"
+        except (TypeError, ValueError):
+            pass
+        material = _gf2_material_for_binding(mesh, row)
+        node = material.node_tree.nodes.new("ShaderNodeTexImage")
+        node.image = image
+        node.name = "GF2 " + row.get("property", "texture")
+        node.label = row.get("property", "texture")
+        node[TEXTURE_TRANSPORT_NODE] = json.dumps(row, separators=(",", ":"))
+        if "texCoord" in row:
+            _gf2_pin_texture_coordinate(mesh, material, node, row.get("texCoord"))
+        _gf2_connect_static_semantic(material, node, row.get("semantic"))
+        installed += 1
+    return installed
+
+
+def _gf2_image_png(image):
+    """Save one Blender image as PNG bytes without changing the image's lasting file path."""
+    handle, temp_path = tempfile.mkstemp(suffix=".png")
+    os.close(handle)
+    old_path = getattr(image, "filepath_raw", "")
+    old_format = getattr(image, "file_format", "PNG")
+    try:
+        image.filepath_raw = temp_path
+        image.file_format = "PNG"
+        image.save()
+        with open(temp_path, "rb") as f:
+            return f.read()
+    finally:
+        image.filepath_raw = old_path
+        image.file_format = old_format
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def _gf2_collect_texture_transport(meshes):
+    """Read exact-property tags only from materials owned by shipping meshes."""
+    rows = []
+    seen = set()
+    for mesh in meshes:
+        for material in mesh.data.materials:
+            tree = getattr(material, "node_tree", None) if material is not None else None
+            if tree is None:
+                continue
+            for node in tree.nodes:
+                raw = node.get(TEXTURE_TRANSPORT_NODE) if hasattr(node, "get") else None
+                image = getattr(node, "image", None)
+                if not isinstance(raw, str) or image is None:
+                    continue
+                try:
+                    row = json.loads(raw)
+                    owner = row.get("owner", {})
+                    key = (owner.get("mesh"), owner.get("material"), owner.get("primitive"),
+                           row.get("property"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    row["png"] = _gf2_image_png(image)
+                    row["image_name"] = image.name
+                    rows.append(row)
+                except (TypeError, ValueError, OSError) as error:
+                    print(f"GF2: could not carry {getattr(node, 'name', 'a texture')} back: {error}")
+    return rows
 
 # The two empty-scope refusals, shared by the checks and the send choke point so a scene the send
 # would refuse never reads as ready. Nothing attributed is a layout mistake; every part deliberately
 # emptied is a Hide with nothing left to send alongside it.
-NO_PART_MESH = ("No mesh in a part collection, so a send would carry no geometry. Move the parts "
-                f"into their collections under {MOD_COLLECTION}.")
-EVERY_PART_EMPTY = "Every part is empty, so a send would carry no geometry. Keep one part's mesh."
+NO_PART_MESH = (f"There are no part collections under {MOD_COLLECTION}, so a send carries nothing. "
+                "Re-open the part from Doll Remolding Lab to recreate the part collections.")
+EVERY_PART_EMPTY = ("Every part collection is empty, so a send carries nothing. Move a mesh into "
+                    "at least one part collection.")
 
 
 def _ensure_collection(name, parent):
-    """The `name` child of `parent`, created and linked when it isn't there yet.
+    """The `name` child of `parent`, created and linked when it is not there yet.
 
     `bpy.data.collections.new` resolves a name already taken ANYWHERE in the file by appending
     `.001` rather than failing, which for a part collection means the part ships under a name the
@@ -133,7 +456,7 @@ def _move_to_collection(obj, coll):
 
 
 def _layer_collection_for(coll):
-    """The view layer's entry for `coll`, or None when the layer doesn't carry it. An EXCLUDED
+    """The view layer's entry for `coll`, or None when the layer does not carry it. An EXCLUDED
     collection still has an entry (with `exclude` set), which is how exclusion is detected."""
     def find(layer_coll):
         if layer_coll.collection is coll:
@@ -158,7 +481,7 @@ def _is_excluded(coll):
 
 def _activate_collection(coll):
     """Point the view layer's active collection at `coll`, so geometry the modder adds is linked
-    there. Advisory: when it can't be set, new geometry lands at the scene root, which the
+    there. Advisory: when it cannot be set, new geometry lands at the scene root, which the
     attribution checks report rather than ship."""
     try:
         hit = _layer_collection_for(coll)
@@ -244,26 +567,22 @@ def gf2_emptied_parts():
     return [p.name for p in gf2_part_collections() if not _part_meshes(p)]
 
 
-def gf2_overwrite_warning(names):
-    """What a send would replace, or None when it replaces nothing. Only a part the app already holds
-    an edit for can lose work to a send; a first send has nothing to say."""
-    if not names:
+def gf2_emptied_part_line(name):
+    """The Check Mesh remedy for one part collection with no geometry."""
+    return (f"{gf2_label(name)} is emptied and sends as a hide. To keep the part, move a mesh back "
+            "into the collection.")
+
+
+def gf2_emptied_part_confirm_line(name):
+    """The terse confirmation and post-send line for an emptied part."""
+    return f"{gf2_label(name)} is emptied and sends as a hide."
+
+
+def gf2_overwrite_warning(edit_labels):
+    """The confirmation lead for selected edits that currently hold authored mesh work."""
+    if not edit_labels:
         return None
-    labels = ", ".join(gf2_label(n) for n in names)
-    return (f"{labels} already carries an edit. Sending replaces it." if len(names) == 1
-            else f"{labels} already carry edits. Sending replaces them.")
-
-
-def gf2_edited_shipping_parts(session, shipping_part_names, sent=()):
-    """The parts this send would overwrite that already hold an edit. Scoped to what actually ships: an
-    emptied part's file is never written, so it has nothing to lose.
-
-    The app's session description is a snapshot taken when Blender opened, so on its own it would leave a
-    second send in the same session silent about the part the first one wrote. `sent` closes that: a part
-    this session has already sent carries an edit now, whatever the app knew at launch."""
-    edited = {p.get("name") for p in (session.get("parts") or []) if p.get("edited")}
-    edited.update(sent)
-    return [n for n in shipping_part_names if n in edited]
+    return "Sending replaces the mesh work stored in " + ", ".join(edit_labels) + "."
 
 
 def gf2_emptying_is_a_hide(session):
@@ -313,16 +632,52 @@ def read_session(glb_path):
     return got
 
 
-def _store_session(session):
+def _read_live_session(glb_path):
+    """Read one complete session document, or None while the file is absent or unreadable.
+
+    Unlike ``read_session``, this helper has no broadening fallback. Panel refresh and Send use it after a
+    scene snapshot exists, so a transient app-side atomic replacement must retain that snapshot rather than
+    briefly turn every mesh into a writable part.
+    """
+    if not glb_path:
+        return None
     try:
-        bpy.context.scene[SESSION_KEY] = json.dumps(session)
+        with open(session_path(glb_path), "r", encoding="utf-8") as f:
+            got = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(got, dict):
+        return None
+    got.setdefault("part", None)
+    got.setdefault("parts", [])
+    return got
+
+
+def gf2_session_revision(session):
+    """The non-negative integer revision of a session, with legacy documents at revision zero."""
+    revision = (session or {}).get("revision", 0)
+    return revision if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0 else 0
+
+
+def gf2_newer_session(current, incoming):
+    """The incoming document only when a readable monotonic revision advances the scene snapshot."""
+    if not isinstance(incoming, dict):
+        return None
+    return incoming if gf2_session_revision(incoming) > gf2_session_revision(current) else None
+
+
+def _store_session(session, scene=None):
+    try:
+        target_scene = scene if scene is not None else bpy.context.scene
+        target_scene[SESSION_KEY] = json.dumps(session)
     except Exception as e:
         print(f"GF2: could not record the session description: {e}")
 
 
-def load_session():
+def load_session(scene=None):
     """The session description recorded at import. Empty when the scene never carried one."""
-    raw = bpy.context.scene.get(SESSION_KEY)
+    target_scene = scene if scene is not None else bpy.context.scene
+    raw = target_scene.get(SESSION_KEY)
     if not raw:
         return {"part": None, "parts": []}
     try:
@@ -331,30 +686,9 @@ def load_session():
         return {"part": None, "parts": []}
 
 
-def gf2_sent_parts():
-    """The parts THIS session has already sent. Kept on the scene so it survives a save, and so the Send
-    confirmation describes what is true now rather than what the app knew when Blender opened."""
-    raw = bpy.context.scene.get(SENT_KEY)
-    if not raw:
-        return []
-    try:
-        got = json.loads(raw)
-    except Exception:
-        return []
-    return [n for n in got if isinstance(n, str)] if isinstance(got, list) else []
-
-
-def _record_sent(names):
-    """Add the parts a completed send wrote to the in-session sent list."""
-    try:
-        bpy.context.scene[SENT_KEY] = json.dumps(sorted(set(gf2_sent_parts()) | set(names)))
-    except Exception as e:
-        print(f"GF2: could not record what this send wrote: {e}")
-
-
 def gf2_session_parts(session, mesh_names):
     """Which of the imported meshes get a part collection: the one the app named, or all of them when
-    it named none, minus any the app declared unwritable. A name the glb doesn't carry yields nothing,
+    it named none, minus any the app declared unwritable. A name the glb does not carry yields nothing,
     so the attribution checks report an empty `Mod` rather than the session quietly widening to the
     whole outfit. A part entry with no `writable` key is writable: a hand-opened glb has no session
     description at all, and every mesh in it is a part."""
@@ -367,7 +701,7 @@ def gf2_session_parts(session, mesh_names):
 
 
 def gf2_claimed_meshes(session, mesh_names):
-    """Which mesh stands in for a declared writable part the glb doesn't carry, as
+    """Which mesh stands in for a declared writable part the glb does not carry, as
     ``{mesh name: part name}``. An edited part's workspace glb holds the modder's mesh under the
     modder's own name, so at re-open the name the app declared matches nothing. When exactly one
     declared writable part is missing from the glb and exactly one mesh matches no declared part,
@@ -400,6 +734,314 @@ def gf2_unskinned_parts(session):
             if isinstance(p, dict) and p.get("unskinned") is True and isinstance(p.get("name"), str)}
 
 
+def _session_part_entry(session, name):
+    return next((p for p in (session or {}).get("parts") or []
+                 if isinstance(p, dict) and p.get("name") == name), {})
+
+
+def _target_state_map(rows):
+    """Plain ``{part: {target, new_name}}`` state from row dictionaries or Blender rows."""
+    if isinstance(rows, dict):
+        return rows
+    result = {}
+    for row in rows or ():
+        if isinstance(row, dict):
+            part = row.get("part") or row.get("part_name")
+            target = row.get("target")
+            new_name = row.get("new_name", "")
+        else:
+            part = getattr(row, "part_name", "")
+            target = getattr(row, "target", "")
+            new_name = getattr(row, "new_name", "")
+        if isinstance(part, str) and part:
+            result[part] = {"target": target, "new_name": new_name}
+    return result
+
+
+def _session_edit_rows(part):
+    """The valid inventory rows for one session part, preserving the app's order."""
+    rows, seen = [], set()
+    for edit in part.get("edits") or []:
+        if not isinstance(edit, dict):
+            continue
+        edit_id = edit.get("id")
+        if not isinstance(edit_id, str) or not edit_id or edit_id in seen:
+            continue
+        label = edit.get("label")
+        rows.append({"id": edit_id,
+                     "label": label if isinstance(label, str) and label else edit_id,
+                     "holdsAuthoredMesh": edit.get("holdsAuthoredMesh") is True})
+        seen.add(edit_id)
+    opened = part.get("editId")
+    # A legacy or partially written contract can name the opened edit without inventory. Keeping a
+    # synthetic choice is the only way to honor the stated opened-from default without inventing a New.
+    if isinstance(opened, str) and opened and opened not in seen:
+        rows.append({"id": opened, "label": opened,
+                     "holdsAuthoredMesh": part.get("edited") is True})
+    return rows
+
+
+def _snapshot_minted_edit(part, part_name, snapshot):
+    """The inventory edit minted for one snapshotted New target, or None until it is unambiguous."""
+    sent = ((snapshot or {}).get("targets") or {}).get(part_name)
+    if not isinstance(sent, dict) or not isinstance(sent.get("new"), str):
+        return None
+    known = set(((snapshot or {}).get("knownEditIds") or {}).get(part_name) or ())
+    new_edits = [edit for edit in _session_edit_rows(part) if edit["id"] not in known]
+    match_name = ((snapshot or {}).get("newMatches") or {}).get(part_name)
+    matches = [edit for edit in new_edits
+               if isinstance(match_name, str) and edit["label"] == match_name]
+    if matches:
+        return matches[0]
+    return new_edits[0] if not match_name and len(new_edits) == 1 else None
+
+
+def gf2_target_row_specs(session, part_names=None, previous=None, acknowledged_snapshot=None):
+    """Build stable, plain target-row specifications from a session document.
+
+    ``previous`` preserves panel choices across a live revision refresh. An acknowledged existing-id
+    target never displaces that live choice; acknowledgement only promotes a sent New target to the newly
+    added inventory edit whose label matches the sent name (or the prior default for a blank name).
+    """
+    session = session or {}
+    if part_names is None:
+        named = session.get("part")
+        if isinstance(named, str) and named:
+            part_names = [named]
+        else:
+            part_names = [p.get("name") for p in session.get("parts") or []
+                          if isinstance(p, dict) and isinstance(p.get("name"), str)
+                          and p.get("name") and p.get("writable") is not False]
+    previous = _target_state_map(previous)
+    acknowledged = (acknowledged_snapshot or {}).get("targets") or {}
+    specs = []
+    for name in part_names or ():
+        if not isinstance(name, str) or not name:
+            continue
+        part = _session_part_entry(session, name)
+        if part.get("writable") is False:
+            continue
+        edits = _session_edit_rows(part)
+        edit_ids = {edit["id"] for edit in edits}
+        default_name = part.get("defaultEditName")
+        default_name = default_name if isinstance(default_name, str) else ""
+        target = None
+        new_name = default_name
+
+        sent_target = acknowledged.get(name)
+        if isinstance(sent_target, dict) and isinstance(sent_target.get("new"), str):
+            # Promote ONLY a row whose edit actually minted; a part whose send landed nothing
+            # keeps whatever its row says now, exactly like an existing-id target does.
+            minted = _snapshot_minted_edit(part, name, acknowledged_snapshot)
+            if minted is not None:
+                new_name = sent_target["new"]
+                target = minted["id"]
+
+        if target is None:
+            old = previous.get(name) or {}
+            old_target = old.get("target")
+            if old_target == NEW_EDIT_TARGET:
+                target = NEW_EDIT_TARGET
+                old_name = old.get("new_name")
+                new_name = old_name if isinstance(old_name, str) else default_name
+            elif isinstance(old_target, str) and old_target in edit_ids:
+                target = old_target
+            else:
+                opened = part.get("editId")
+                target = opened if isinstance(opened, str) and opened in edit_ids else NEW_EDIT_TARGET
+
+        specs.append({"part": name, "label": gf2_label(name), "edits": edits,
+                      "target": target, "new_name": new_name})
+    return specs
+
+
+def gf2_edit_targets(rows):
+    """Serialize row selections to the sidecar's existing-id/new-edit union."""
+    result = {}
+    for part, state in _target_state_map(rows).items():
+        target = state.get("target")
+        if target == NEW_EDIT_TARGET:
+            name = state.get("new_name")
+            result[part] = {"new": name if isinstance(name, str) else ""}
+        elif isinstance(target, str) and target:
+            result[part] = target
+    return result
+
+
+def gf2_default_edit_targets(session, part_names=None):
+    """The initial selections for a headless Send, where no Blender CollectionProperty exists."""
+    return gf2_edit_targets(gf2_target_row_specs(session, part_names))
+
+
+def gf2_send_target_map(session, rows=(), part_names=None):
+    """Capture one Send's target map. A run with no session inventory emits no target stamps."""
+    parts = (session or {}).get("parts")
+    if not isinstance(parts, list) or not parts:
+        return {}
+    targets = gf2_edit_targets(rows)
+    return targets or gf2_default_edit_targets(session, part_names)
+
+
+def gf2_selected_mesh_edit_labels(session, edit_targets):
+    """Labels of selected existing edits whose live inventory says authored mesh work is present."""
+    selected = []
+    seen_ids = set()
+    for part in (session or {}).get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        name = part.get("name")
+        edit_id = edit_targets.get(name) if isinstance(edit_targets, dict) else None
+        if not isinstance(edit_id, str) or edit_id in seen_ids:
+            continue
+        edit = next((row for row in _session_edit_rows(part) if row["id"] == edit_id), None)
+        if edit is not None and edit["holdsAuthoredMesh"]:
+            selected.append((edit_id, gf2_label(name), edit["label"]))
+            seen_ids.add(edit_id)
+    label_counts = {}
+    for _edit_id, _part_label, edit_label in selected:
+        label_counts[edit_label] = label_counts.get(edit_label, 0) + 1
+    return [(f"{part_label} — {edit_label}" if label_counts[edit_label] > 1 else edit_label)
+            for _edit_id, part_label, edit_label in selected]
+
+
+def gf2_send_snapshot(session, edit_targets):
+    """Capture the pre-send target state that may be promoted after a revision acknowledgment."""
+    known, matches = {}, {}
+    for part in (session or {}).get("parts") or []:
+        if not isinstance(part, dict) or not isinstance(part.get("name"), str):
+            continue
+        name = part["name"]
+        known[name] = [edit["id"] for edit in _session_edit_rows(part)]
+        target = edit_targets.get(name)
+        if isinstance(target, dict) and isinstance(target.get("new"), str):
+            requested = target["new"]
+            default = part.get("defaultEditName")
+            matches[name] = requested if requested != "" else (default if isinstance(default, str) else "")
+    return {"revision": gf2_session_revision(session), "targets": edit_targets,
+            "newMatches": matches, "knownEditIds": known}
+
+
+def gf2_send_sidecar(hidden_parts, edit_targets, session):
+    """The write-complete sidecar document, pure so the target union is testable without Blender."""
+    parts = (session or {}).get("parts")
+    targets = dict(edit_targets) if isinstance(parts, list) and parts else {}
+    return {"source": "blender-send", "hiddenParts": list(hidden_parts), "editIds": targets}
+
+
+def _gf2_target_items(row, context):
+    return _TARGET_ITEM_REFS.get(getattr(row, "part_name", ""), _TARGET_FALLBACK_ITEMS)
+
+
+def _scene_target_states(scene):
+    return _target_state_map(getattr(scene, "gf2_target_rows", ()))
+
+
+def _rebuild_target_rows(scene, session, previous=None, acknowledged_snapshot=None):
+    """Replace the scene's persistent target rows and their Python-held EnumProperty item tuples."""
+    rows = getattr(scene, "gf2_target_rows", None)
+    if rows is None:
+        return []
+    part_names = [part.name for part in gf2_part_collections()]
+    specs = gf2_target_row_specs(session, part_names, previous, acknowledged_snapshot)
+    rows.clear()
+    _TARGET_ITEM_REFS.clear()
+    for spec in specs:
+        items = tuple([(edit["id"], edit["label"], "") for edit in spec["edits"]]
+                      + [(NEW_EDIT_TARGET, "New Edit", "")])
+        _TARGET_ITEM_REFS[spec["part"]] = items
+        row = rows.add()
+        row.part_name = spec["part"]
+        row.part_label = spec["label"]
+        row.new_name = spec["new_name"]
+        row.target = spec["target"]
+    return specs
+
+
+def _load_send_snapshot(scene=None):
+    scene = scene if scene is not None else bpy.context.scene
+    raw = scene.get(SEND_SNAPSHOT_KEY)
+    if not raw:
+        return None
+    try:
+        got = json.loads(raw)
+    except Exception:
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def _store_send_snapshot(snapshot, scene=None):
+    try:
+        target_scene = scene if scene is not None else bpy.context.scene
+        target_scene[SEND_SNAPSHOT_KEY] = json.dumps(snapshot)
+    except Exception as e:
+        print(f"GF2: could not record the pending Send snapshot: {e}")
+
+
+def _refresh_session_snapshot(scene=None, glb_path=None):
+    """Adopt a higher readable revision and consume a pending Send it acknowledges.
+
+    Acknowledgement is PER PART inside the row rebuild: a New target whose minted edit appears in
+    the adopted inventory promotes its row, and a part whose send landed nothing (an unchanged
+    part on an all-parts send) keeps its row as it was. The session file belongs to this run
+    alone, so any revision past the snapshot's means the app processed that send — the snapshot
+    is consumed either way rather than lingering on parts that will never mint."""
+    scene = scene if scene is not None else bpy.context.scene
+    path = glb_path if glb_path is not None else (getattr(scene, "gf2_glb_path", "") or "")
+    incoming = _read_live_session(path)
+    current = load_session(scene)
+    adopted = gf2_newer_session(current, incoming)
+    if adopted is None:
+        return current
+    incoming = adopted
+    previous = _scene_target_states(scene)
+    pending = _load_send_snapshot(scene)
+    acknowledged = (pending if pending is not None
+                    and gf2_session_revision(incoming) > gf2_session_revision(pending) else None)
+    _store_session(incoming, scene)
+    _rebuild_target_rows(scene, incoming, previous, acknowledged)
+    if acknowledged is not None:
+        try:
+            del scene[SEND_SNAPSHOT_KEY]
+        except Exception:
+            pass
+    return incoming
+
+
+def _session_file_mtime(glb_path):
+    if not glb_path:
+        return None
+    try:
+        return os.stat(session_path(glb_path)).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _prime_session_refresh(glb_path):
+    """Record the current sidecar signature without opening it."""
+    _SESSION_FILE_STATE["path"] = glb_path or ""
+    _SESSION_FILE_STATE["mtime"] = _session_file_mtime(glb_path)
+
+
+def _session_refresh_tick():
+    """Periodically adopt a changed session file without doing any work from panel draw."""
+    try:
+        scene = bpy.context.scene
+        path = getattr(scene, "gf2_glb_path", "") or ""
+        mtime = _session_file_mtime(path)
+        changed = path != _SESSION_FILE_STATE["path"] or mtime != _SESSION_FILE_STATE["mtime"]
+        if changed:
+            _SESSION_FILE_STATE["path"] = path
+            _SESSION_FILE_STATE["mtime"] = mtime
+            if mtime is not None:
+                before = gf2_session_revision(load_session(scene))
+                after = gf2_session_revision(_refresh_session_snapshot(scene, path))
+                if after != before:
+                    _tag_sidebar_redraw()
+    except Exception as e:
+        print(f"GF2: session refresh timer failed: {e}")
+    return _SESSION_REFRESH_INTERVAL
+
+
 def _is_unskinned(obj, unskinned):
     """Whether this object ships as one of the declared unskinned parts. The exemption belongs to the
     PART, and a part is a collection — so the collection the object ships in is what answers, never the
@@ -411,6 +1053,11 @@ def _is_unskinned(obj, unskinned):
     return part is not None and (part.name in unskinned or _base_name(part.name) in unskinned)
 
 
+def gf2_part_viewport_visible(session, part_name):
+    """The app's initial viewport choice for a declared part. Missing metadata remains visible."""
+    return _session_part_entry(session or {}, part_name).get("viewportVisible") is not False
+
+
 def gf2_build_collections(meshes, armature, session=None):
     """Lay out the scene so each part's attribution is a collection: one collection per part under
     `Mod`, the armature in its own, and a `Reference` collection holding the rest of the outfit and
@@ -418,7 +1065,7 @@ def gf2_build_collections(meshes, armature, session=None):
 
     The active collection is left on the single part when the session has one and on `Mod` when it
     has several, so geometry the modder adds lands attributed where that is unambiguous and
-    unattributed — never MIS-attributed — where it isn't."""
+    unattributed — never MIS-attributed — where it is not."""
     scene_root = bpy.context.scene.collection
     mod = _ensure_collection(MOD_COLLECTION, scene_root)
     reference = _ensure_collection(REFERENCE_COLLECTION, scene_root)
@@ -430,20 +1077,169 @@ def gf2_build_collections(meshes, armature, session=None):
         part_name = claims.get(mo.name) or (mo.name if mo.name in writable else None)
         if part_name is None:
             _move_to_collection(mo, reference)   # context: never shipped
-            _set_hidden(mo, True)                # hidden by default. Unhide in the outliner to edit against.
-            continue
-        if part_name != mo.name:
-            print(f"GF2: '{mo.name}' opened as part '{part_name}'")
-        part = _ensure_collection(part_name, mod)
-        part[PART_MARKER] = part_name   # the marker carries the part's contract name; a rename is detectable
-        _move_to_collection(mo, part)
-        parts.append(part)
+            contract_name = mo.name
+        else:
+            contract_name = part_name
+            if part_name != mo.name:
+                print(f"GF2: '{mo.name}' opened as part '{part_name}'")
+            part = _ensure_collection(part_name, mod)
+            part[PART_MARKER] = part_name   # marker carries the contract name; a rename is detectable
+            _move_to_collection(mo, part)
+            parts.append(part)
+        if not gf2_part_viewport_visible(session or {}, contract_name):
+            _set_hidden(mo, True)
     if armature is not None:
         _move_to_collection(armature, _ensure_collection(ARMATURE_COLLECTION, mod))
     _activate_collection(parts[0] if len(parts) == 1 else mod)
 
 
 # ---------------------------------------------------------------- core import/export
+
+def _data_identity(value):
+    """Stable identity for a Blender datablock, with a plain-object fallback for unit fixtures."""
+    pointer = getattr(value, "as_pointer", None)
+    return pointer() if callable(pointer) else id(value)
+
+
+def _gf2_new_objects(objects, object_type, pre_existing_names):
+    """Derive an import's still-live objects from the current Blender collection.
+
+    Callers invoke this again after cleanup rather than retaining bpy wrappers for objects cleanup may
+    remove: reading any property from such a wrapper raises ``ReferenceError``.
+    """
+    return [obj for obj in objects if obj.type == object_type and obj.name not in pre_existing_names]
+
+
+def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_materials=()):
+    """Apply the EEVEE preview contract to BLENDED materials owned by this import only.
+
+    ``imported_objects`` and ``pre_existing_materials`` are explicit parameters so this helper never
+    scans or mutates the wider scene. A material already present before the glTF operator is excluded
+    even if an imported object happens to reference it. For each remaining BLENDED material, keep the
+    blended render method, keep both sides visible, disable same-material transparency overlap where
+    this Blender exposes the setting, and map texture alpha 0..254/255 to Principled alpha 0..1.
+
+    The standard glTF importer connects the base-colour image's Alpha directly to Principled Alpha when
+    the writer invariants documented at the shape check hold. A material with another graph still gets
+    the render/overlap/culling settings above, but its graph is left untouched and the degradation is
+    reported. A tagged node makes the graph operation idempotent even when its display name is occupied.
+    """
+    excluded = {_data_identity(material) for material in pre_existing_materials}
+    seen = set()
+    blended = []
+    for obj in imported_objects:
+        data = getattr(obj, "data", None)
+        for material in (getattr(data, "materials", None) or ()):
+            if material is None:
+                continue
+            identity = _data_identity(material)
+            if identity in excluded or identity in seen:
+                continue
+            seen.add(identity)
+            method = getattr(material, "surface_render_method", None)
+            is_blended = (method == "BLENDED" if method is not None
+                          else getattr(material, "blend_method", None) == "BLEND")
+            if is_blended:
+                blended.append(material)
+
+    missing_overlap = []
+    missing_alpha_link = []
+    remapped = 0
+    for material in blended:
+        method = getattr(material, "surface_render_method", None)
+        if method is not None:
+            material.surface_render_method = "BLENDED"
+        else:
+            material.blend_method = "BLEND"
+        if hasattr(material, "use_backface_culling"):
+            material.use_backface_culling = False
+        if hasattr(material, "use_transparency_overlap"):
+            material.use_transparency_overlap = False
+        elif hasattr(material, "show_transparent_back"):
+            material.show_transparent_back = False
+        else:
+            missing_overlap.append(material.name)
+
+        tree = getattr(material, "node_tree", None)
+        if tree is None:
+            missing_alpha_link.append(material.name)
+            continue
+        principled = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+        alpha_input = principled.inputs.get("Alpha") if principled is not None else None
+        if alpha_input is None or not alpha_input.links:
+            missing_alpha_link.append(material.name)
+            continue
+
+        alpha_link = alpha_input.links[0]
+        remap = next((node for node in tree.nodes
+                      if node.bl_idname == "ShaderNodeMapRange"
+                      and bool(node.get(ALPHA_REMAP_TAG, False))), None)
+        if remap is None:
+            named = tree.nodes.get(ALPHA_REMAP_NODE)
+            # Name-only fallback migrates graphs written by the untagged bridge version, but only when that
+            # node is already the Principled Alpha feed. An unrelated same-named Map Range is a squatter.
+            remap = (named if named is not None and named.bl_idname == "ShaderNodeMapRange"
+                     and alpha_link.from_node == named else None)
+        if remap is not None and alpha_link.from_node == remap:
+            value_input = remap.inputs.get("Value")
+            source = (value_input.links[0].from_socket
+                      if value_input is not None and value_input.links else None)
+        # Remold's writer emits no COLOR_0 and leaves baseColorFactor.a at 1. Either invariant changing makes
+        # Blender insert a Math node here; only the standard direct Image Alpha shape is safe to rewrite.
+        elif alpha_link.from_node.type == "TEX_IMAGE" and alpha_link.from_socket.name == "Alpha":
+            source = alpha_link.from_socket
+        else:
+            source = None
+        if (source is not None
+                and (source.node.type != "TEX_IMAGE" or source.name != "Alpha")):
+            source = None
+        if source is None:
+            missing_alpha_link.append(material.name)
+            continue
+
+        if remap is None:
+            remap = tree.nodes.new("ShaderNodeMapRange")
+            remap.name = ALPHA_REMAP_NODE
+            remap.label = "GF2: 0..254 -> 0..1"
+            remap.location = ((source.node.location.x + principled.location.x) / 2,
+                              (source.node.location.y + principled.location.y) / 2 - 180)
+        remap[ALPHA_REMAP_TAG] = True
+        remap.clamp = True
+        remap.inputs["From Min"].default_value = 0.0
+        remap.inputs["From Max"].default_value = ALPHA_OPAQUE_CEILING
+        remap.inputs["To Min"].default_value = 0.0
+        remap.inputs["To Max"].default_value = 1.0
+
+        value_input = remap.inputs["Value"]
+        for link in list(value_input.links):
+            if link.from_socket != source:
+                tree.links.remove(link)
+        if not value_input.links:
+            tree.links.new(source, value_input)
+        for link in list(alpha_input.links):
+            if link.from_node != remap:
+                tree.links.remove(link)
+        if not alpha_input.links:
+            tree.links.new(remap.outputs["Result"], alpha_input)
+        remapped += 1
+
+    warnings = []
+    if missing_overlap:
+        warnings.append("The running Blender version exposes no transparency-overlap setting for: "
+                        + ", ".join(sorted(missing_overlap)) + ".")
+    if missing_alpha_link:
+        warnings.append("The alpha-254 preview remap could not be installed on: "
+                        + ", ".join(sorted(missing_alpha_link)) + ".")
+    for warning in warnings:
+        print("GF2: " + warning)
+    if warnings:
+        _popup("Alpha Preview Warnings", ["⚠ " + warning for warning in warnings], 'INFO')
+    return {
+        "blended": len(blended),
+        "remapped": remapped,
+        "missing_overlap": tuple(missing_overlap),
+        "missing_alpha_link": tuple(missing_alpha_link),
+    }
 
 def gf2_import(glb_path):
     """Import an exported mesh .glb and set up a clean, edit-ready viewport.
@@ -459,6 +1255,7 @@ def gf2_import(glb_path):
     # the meshes and the armature is simply scenery.
     pre_existing_meshes = {o.name for o in bpy.data.objects if o.type == "MESH"}
     pre_existing_arms = {o.name for o in bpy.data.objects if o.type == "ARMATURE"}
+    pre_existing_materials = tuple(bpy.data.materials)
 
     # FORTUNE points each bone's tip at its child = a readable connected skeleton (re-export keys
     # off the bone hash in the node name, not orientation, so this is display-only and safe).
@@ -466,6 +1263,12 @@ def gf2_import(glb_path):
         bpy.ops.import_scene.gltf(filepath=glb_path, bone_heuristic="FORTUNE")
     except TypeError:
         bpy.ops.import_scene.gltf(filepath=glb_path)
+
+    # The glTF operator has finished and these are exactly its meshes. Apply Blender-only BLEND
+    # mitigation now, before any layout work, excluding every material the user's scene already owned.
+    imported_meshes = _gf2_new_objects(bpy.data.objects, "MESH", pre_existing_meshes)
+    _gf2_install_texture_transport(glb_path, imported_meshes)
+    gf2_prepare_imported_alpha_materials(imported_meshes, pre_existing_materials)
 
     # drop Blender's startup objects + the importer's placeholder junk so only the character shows
     for nm in ("Cube", "Camera", "Light"):
@@ -481,9 +1284,10 @@ def gf2_import(glb_path):
         elif (o.type == "EMPTY" and o.name not in pre_existing_empties and not o.children):
             bpy.data.objects.remove(o, do_unlink=True)
 
-    meshes = [o for o in bpy.data.objects if o.type == "MESH" and o.name not in pre_existing_meshes]
-    arms = [o for o in bpy.data.objects
-            if o.type == "ARMATURE" and o.name not in pre_existing_arms]
+    # Re-derive from Blender's live collection after cleanup. `imported_meshes` may contain the importer's
+    # Icosphere placeholder, whose bpy wrapper became invalid when it was removed above.
+    meshes = _gf2_new_objects(bpy.data.objects, "MESH", pre_existing_meshes)
+    arms = _gf2_new_objects(bpy.data.objects, "ARMATURE", pre_existing_arms)
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
     except Exception:
@@ -499,15 +1303,23 @@ def gf2_import(glb_path):
     session = read_session(glb_path)
     _store_session(session)
     gf2_build_collections(meshes, arms[0] if arms else None, session)
-    # Select the session's own part(s) only, after attribution: Reference context imports hidden,
-    # and the initial framing should centre on what this session edits.
+    _rebuild_target_rows(bpy.context.scene, session)
+    # Select only visible session parts after attribution. Reference context stays visible unless the
+    # session explicitly hides it, while framing remains centred on what this session edits.
     names = [m.name for m in meshes]
     own = set(gf2_session_parts(session, names)) | set(gf2_claimed_meshes(session, names))
     shipping = [mo for mo in meshes if mo.name in own]
-    for mo in shipping:
+    visible_shipping = [mo for mo in shipping if not _hide_state(mo)]
+    for mo in visible_shipping:
         mo.select_set(True)
-    if shipping:
-        bpy.context.view_layer.objects.active = shipping[0]
+    if visible_shipping:
+        bpy.context.view_layer.objects.active = visible_shipping[0]
+    else:
+        visible = next((mo for mo in meshes if not _hide_state(mo)), None)
+        if visible is not None:
+            bpy.context.view_layer.objects.active = visible
+        elif arms:
+            bpy.context.view_layer.objects.active = arms[0]
     _snapshot_baseline(meshes, _session_armature())
     return meshes, arms
 
@@ -530,9 +1342,8 @@ def _demote_non_game_bones(arm_obj):
             b.use_deform = False
 
 
-def _setup_viewport_ui():
-    """Open the N-panel sidebar on the GF2 tab and frame the mesh, so the Send button is visible and
-    the model is on-screen the moment Blender opens (the modder shouldn't have to hunt for either)."""
+def _activate_sidebar_category():
+    """Open the sidebar, select the Lab category where supported, and tag the affected area."""
     screen = getattr(bpy.context, "screen", None)
     if screen is None:
         return
@@ -540,20 +1351,42 @@ def _setup_viewport_ui():
         if area.type != "VIEW_3D":
             continue
         space = area.spaces.active
-        space.show_region_ui = True        # open the N-panel sidebar (otherwise it's hidden)
+        space.show_region_ui = True
         for region in area.regions:
             if region.type == "UI":
                 try:
-                    region.active_panel_category = "Doll Remolding Lab"   # land on our tab, not "Item"
-                except Exception:
-                    pass
+                    region.active_panel_category = "Doll Remolding Lab"
+                except Exception as e:
+                    print(f"GF2: Lab sidebar category activation is unavailable: {e}")
+        area.tag_redraw()
+        break
+
+
+def _retry_sidebar_category():
+    _activate_sidebar_category()
+    return None
+
+
+def _setup_viewport_ui():
+    """Open the sidebar on the Lab category and frame the mesh after Blender startup settles."""
+    _activate_sidebar_category()
+    screen = getattr(bpy.context, "screen", None)
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        for region in area.regions:
             if region.type == "WINDOW":
                 try:
                     with bpy.context.temp_override(area=area, region=region):
-                        bpy.ops.view3d.view_selected()                # frame the imported mesh
+                        bpy.ops.view3d.view_selected()
                 except Exception:
                     pass
         break
+    # Category assignment during registration/import can be overwritten by the next UI rebuild. Retry once
+    # on Blender's next tick after the tagged redraw; no polling or private UI API is involved.
+    bpy.app.timers.register(_retry_sidebar_category, first_interval=0.0)
 
 
 def _vertex_total_weight(obj, vi):
@@ -601,13 +1434,13 @@ def _solve_missing_weights(obj, armature):
             # ARMATURE_AUTO = bone-heat: recompute vertex groups on the duplicate from the skeleton
             bpy.ops.object.parent_set(type="ARMATURE_AUTO")
         except RuntimeError:
-            return missing, solved     # bone-heat couldn't solve this mesh — all missing count as unfillable
+            return missing, solved     # bone heat could not solve this mesh — all missing count as unfillable
         for vg_dup in dup.vertex_groups:
             for vi in missing:
                 try:
                     w = vg_dup.weight(vi)
                 except RuntimeError:
-                    continue           # this vertex isn't in this group
+                    continue           # this vertex is not in this group
                 if w > 0.0:
                     solved.setdefault(vi, []).append((vg_dup.name, w))
     finally:
@@ -622,7 +1455,7 @@ def gf2_fill_missing_weights(mesh_objs, armature, unskinned=()):
     touching the weights of vertices that are already skinned (preserve-then-fill). The bone-heat runs on
     a throwaway duplicate (see _solve_missing_weights) so a wild result can never overwrite good authored
     weights — we copy solved weights back ONLY for the previously-unweighted vertices. Vertices bone-heat
-    still can't solve stay unweighted; they are flagged rather than shipped as a guess. Returns
+    still cannot solve stay unweighted; they are flagged rather than shipped as a guess. Returns
     (filled, still_unweighted) vertex counts summed across parts.
 
     `unskinned` names the parts the app declared unskinned (see gf2_unskinned_parts); they ship without
@@ -682,7 +1515,7 @@ def _apply_export_names(mesh_objs):
     passes over EVERY mesh data block, parking them all on a throwaway name first: Blender resolves a
     name collision by appending `.001` rather than failing, so a direct rename would quietly mis-name
     a mesh whenever two blocks swap names. A non-shipping block whose own name is wanted by a part
-    stays parked for the duration; it isn't in the export."""
+    stays parked for the duration; it is not in the export."""
     saved = [(me, me.name) for me in bpy.data.meshes]
     wanted = {}
     for o in mesh_objs:
@@ -729,7 +1562,7 @@ def _set_hidden(obj, hidden):
 
 
 def _set_selected(obj, selected):
-    """Select or deselect, tolerating an object the view layer doesn't carry. Swallowing that failure
+    """Select or deselect, tolerating an object the view layer does not carry. Swallowing that failure
     is what lets the named refusal below report every unselectable object at once, instead of Blender
     aborting the send on the first one with a raw message."""
     try:
@@ -745,7 +1578,7 @@ def _is_selected(obj):
         return False
 
 
-def gf2_send(out_dir, glb_path):
+def gf2_send(out_dir, glb_path, edit_targets=None):
     """Export the edited mesh(es) back to the watched folder with the loader's required
     settings, plus a write-complete sidecar. Returns the written .glb path.
 
@@ -760,10 +1593,16 @@ def gf2_send(out_dir, glb_path):
     always preserved); the skin ALWAYS rides along (export_skins) — the app compiles the authored weights
     onto the target, never re-derives them."""
     os.makedirs(out_dir, exist_ok=True)
-    session = load_session()
-    # The app names the send file through the session when it must differ from the opened glb's own —
-    # a combined session's send must never land on the app-published combined glb. No declared name means
-    # the opened name, which for a part's own workspace glb is the overwrite-in-place contract.
+    captured_targets = dict(edit_targets) if isinstance(edit_targets, dict) else None
+    # Send always asks the app-owned file first. A missing/truncated read keeps the scene snapshot; only a
+    # higher complete revision is adopted and allowed to rebuild the target rows.
+    session = _refresh_session_snapshot(bpy.context.scene, glb_path)
+    part_names = [part.name for part in gf2_part_collections()]
+    if captured_targets is None:
+        captured_targets = gf2_send_target_map(session, part_names=part_names)
+    # App-created sessions name a distinct return file: Blender's raw export is external input until the app
+    # validates and normalizes it, so it must never land directly on a canonical workspace glb. Falling back
+    # to the opened name keeps hand-written and older session files compatible.
     send_name = session.get("sendAs")
     if not isinstance(send_name, str) or not send_name:
         send_name = os.path.basename(glb_path)
@@ -793,26 +1632,29 @@ def gf2_send(out_dir, glb_path):
                            + ". The mesh would ship as a part the app has no target for.")
     filled, still = gf2_fill_missing_weights(mesh_objs, session_arm, gf2_unskinned_parts(session))
     if filled or still:
-        print(f"GF2: auto-filled {filled} vertex(es) from the skeleton"
+        print(f"GF2: auto-filled {filled} {'vertex' if filled == 1 else 'vertices'} from the skeleton"
               + (f"; {still} still have no weight (they will be flagged)" if still else ""))
 
     # The export scope: the part collections' meshes plus the session armature, regardless of focus.
     shipping = mesh_objs + arms
+    texture_transport = _gf2_collect_texture_transport(mesh_objs)
 
     want = dict(
         filepath=out_glb, export_format="GLB",
         export_tangents=True,        # mikktspace tangents (Blender leaves these OFF by default)
         export_normals=True,
+        export_texcoords=True,       # every UV layer rides as TEXCOORD_0..N in Blender layer order
         export_skins=True,           # authored weights ride along; the app compiles them onto the target
-        export_image_format="AUTO",  # keep each image's own format. an untouched texture is identified by its
-                                     #   texture by its CONTENT, so a re-encode (which a user preference
-                                     #   or a future default could otherwise impose) would read as an
-                                     #   edit and ship a redundant copy of a stock map.
+        export_extras=True,          # keep object/material extras; exact node identity is re-stamped below
+        export_image_format="AUTO",  # keep each image's own format. an untouched texture is identified
+                                     #   by its CONTENT, so a re-encode (which a user preference or a
+                                     #   future default could otherwise impose) would read as an edit
+                                     #   and ship a redundant copy of a stock map.
         export_apply=True,           # bake modifiers (Mirror/Subsurf/etc.) into the mesh — OFF by
                                      #   default, so without this a modifier silently vanishes on Send.
                                      #   Safe for rigged parts: the glTF exporter exempts the Armature
                                      #   modifier (skinning still ships as JOINTS/WEIGHTS, not a baked
-                                     #   pose). Its other caveat, shape keys, isn't in our pipeline.
+                                     #   pose). Its other caveat, shape keys, is not in our pipeline.
         use_selection=True,
     )
     valid = {p.identifier for p in bpy.ops.export_scene.gltf.get_rna_type().properties}
@@ -839,8 +1681,8 @@ def gf2_send(out_dir, glb_path):
         # dropped from a use_selection export without a word. Say so instead of sending a short mesh.
         missed = [o.name for o in shipping if not _is_selected(o)]
         if missed:
-            raise RuntimeError("GF2: these objects can't be selected for export, so a send would drop "
-                               f"them: {', '.join(missed)}. Re-enable their collections in the outliner.")
+            raise RuntimeError("GF2: Send cannot select the following objects for export: "
+                               f"{', '.join(missed)}. Re-enable the named collections in the outliner.")
         saved_names = _apply_export_names(mesh_objs)
         bpy.ops.export_scene.gltf(**opts)
     finally:
@@ -851,67 +1693,94 @@ def gf2_send(out_dir, glb_path):
         for o, was_hidden in hidden:
             _set_hidden(o, was_hidden)
 
+    # Blender does not export node custom properties. Re-append the exact property records and current
+    # image pixels after its geometry writer has produced the valid GLB.
+    _gf2_append_texture_transport(out_glb, texture_transport)
+
     # Tripwire: a skinned scene must never send a skinless glb — that failure is silent otherwise.
     # Structural check on the written bytes, so an export-option or Blender behavior drift is caught
     # HERE with a plain message instead of surfacing as a refusal downstream.
     if arms and any(o.vertex_groups for o in mesh_objs):
         with open(out_glb, "rb") as f:
             if b"JOINTS_0" not in f.read():
-                raise RuntimeError("GF2: the export dropped the skin (no JOINTS_0 in the sent glb). "
-                                   "Weights would be lost. Report this.")
+                raise RuntimeError("GF2: the export dropped the skin because JOINTS_0 is absent from "
+                                   "the sent GLB. Sending would lose weights. Report the export failure.")
 
     # Blender computes tangents per mesh and gives up on the WHOLE mesh when any face is an n-gon,
-    # logging it only to a console the modder can't see. The app derives its own in that case, so the
+    # logging it only to a console the modder cannot see. The app derives its own in that case, so the
     # send stands, but the surface detail is no longer the one authored here. A Hide carries no mesh, so
     # there is no tangent to miss.
     if mesh_objs:
         with open(out_glb, "rb") as f:
             if b"TANGENT" not in f.read():
-                print("GF2: no tangents in the sent glb. Triangulate the mesh (Ctrl+T in Edit mode) to "
+                print("GF2: no tangents in the sent GLB. Triangulate the mesh (Ctrl+T in Edit Mode) to "
                       "keep the authored surface detail.")
-                _popup("Sent without tangents",
-                       ["⚠ Blender couldn't compute tangents for this mesh.",
-                        "Normal-map detail may shift.",
-                        "Triangulate the mesh (Ctrl+T in Edit mode), then Send again."], 'INFO')
+                _popup("Sent Without Tangents",
+                       ["⚠ Blender could not compute tangents for the sent mesh.",
+                        "Normal map detail may shift.",
+                        "Triangulate the mesh (Ctrl+T in Edit Mode), then Send again."], 'INFO')
 
-    # An option this Blender's glTF exporter doesn't carry was filtered out of the export above. The mesh
+    # An option this Blender's glTF exporter does not carry was filtered out of the export above. The mesh
     # still ships; what it ships WITHOUT is only knowable here, so it is said where the send is read rather
     # than on a console the modder never opens.
     if dropped:
         line = gf2_dropped_options_line(dropped)
         print("GF2: " + line)
-        _popup("Sent with warnings", ["⚠ " + line], 'INFO')
+        _popup("Sent With Warnings", ["⚠ " + line], 'INFO')
 
     # The sidecar is the write-complete sentinel (written last) that the watcher fires on, and it
     # carries the one intent the glb cannot express: which parts were emptied. An absent mesh is never
     # that signal — every part outside this session is absent by design — so `hiddenParts` is the only
     # thing that hides a part, and a part listed there keeps its workspace file untouched.
+    # `editIds` is the target selection for every writable part, emptied ones included: a Hide is an edit
+    # like any other and lands on the row's existing or new destination.
+    sidecar = gf2_send_sidecar(emptied, captured_targets, session)
     with open(os.path.splitext(out_glb)[0] + ".gf2send.json", "w", encoding="utf-8") as f:
-        json.dump({"source": "blender-send", "hiddenParts": emptied}, f)
-    # Those parts now hold an edit, whatever the app knew when Blender opened, so the next Send in this
-    # session says so before it replaces them.
-    _record_sent(p.name for p in gf2_part_collections() if _part_meshes(p))
+        json.dump(sidecar, f)
+    # Export completion alone is not proof of intake. Retain the pre-send target snapshot until a higher
+    # live revision acknowledges it; only that contract may say an edit now holds authored mesh work.
+    _store_send_snapshot(gf2_send_snapshot(session, sidecar["editIds"]))
     print(f"GF2: sent -> {out_glb}")
     return out_glb
 
 
 def gf2_dropped_options_line(dropped):
-    """The one wording for glTF export options the running Blender doesn't have. The send still stands —
+    """The one wording for glTF export options the running Blender does not have. The send still stands —
     this names what it went out without, so an option lost to a version difference is visible."""
-    return "Export options this Blender doesn't support: " + ", ".join(sorted(dropped)) + "."
+    return "The running Blender version does not support these export options: " \
+        + ", ".join(sorted(dropped)) + "."
 
 
 # ---------------------------------------------------------------- pre-send sanity checks
 
+def _object_transform(mo):
+    """One mesh object's Object-mode transform, in the three parts the pre-send check compares: the
+    location and scale the N panel shows, and the rotation as a quaternion so the comparison holds
+    whatever rotation mode the object is in."""
+    return {
+        "location": list(mo.location),
+        "rotation": list(mo.matrix_basis.to_quaternion()),
+        "scale": list(mo.scale),
+    }
+
+
 def _snapshot_baseline(meshes, armature):
-    """Record the as-imported skeleton, material-slot layout and object scale so the pre-send check can
-    tell what the modder CHANGED — a renamed bone or reordered slot silently breaks the compile,
-    and scale is baselined against import rather than a bare identity."""
+    """Record the as-imported skeleton, material-slot layout and object transform so the pre-send check
+    can tell what the modder CHANGED — a renamed bone or reordered slot silently breaks the compile,
+    and a transform is baselined against import rather than a bare identity (an unskinned part arrives
+    carrying the one its glb node holds)."""
+    placed = {mo.name: _object_transform(mo) for mo in meshes}
     base = {
         "bones": sorted(b.name for b in armature.data.bones) if armature else [],
-        "slots": {mo.name: [ms.material.name if ms.material else "" for ms in mo.material_slots] for mo in meshes},
-        "scale": {mo.name: list(mo.scale) for mo in meshes},
+        "slots": {
+            mo.name: [ms.material.name if ms.material else "" for ms in mo.material_slots]
+            for mo in meshes
+        },
     }
+    # One map per component, keeping the shape `scale` has always had: a baseline written before the
+    # move and rotate were recorded simply has no map for them, which is what leaves them uncompared.
+    for key in ("location", "rotation", "scale"):
+        base[key] = {name: values[key] for name, values in placed.items()}
     try:
         bpy.context.scene["gf2_baseline"] = json.dumps(base)
     except Exception as e:
@@ -926,6 +1795,47 @@ def _load_baseline():
         return json.loads(raw)
     except Exception:
         return {}
+
+
+def _transform_differs(before, after):
+    """Whether two recorded transform components disagree beyond float noise. A component the baseline
+    does not carry, or one recorded in a different shape, is not comparable — and something that cannot
+    be compared must never produce a warning."""
+    if before is None or after is None or len(before) != len(after):
+        return False
+    return any(abs(after[i] - before[i]) > 1e-3 for i in range(len(before)))
+
+
+def gf2_transform_warning(name, before, after, skinned):
+    """The one wording for an Object-mode transform that will not arrive the way the viewport shows it.
+
+    A SKINNED mesh's object transform is baked into the exported vertex positions once, and its glb node
+    is written at identity, so a moved, rotated or scaled part arrives placed as it looks here. The
+    exception is a negative scale: the geometry mirrors, the triangle winding does not, and the mesh
+    renders inside-out. An UNSKINNED mesh keeps its local positions and carries the transform on its glb
+    node instead, and the app reads positions only — so that transform is dropped.
+
+    `before` is the as-imported baseline and `after` the object now, each a map of "location",
+    "rotation" and "scale" to lists of floats. A component the baseline does not carry is not compared.
+    Returns a (severity, message) pair or None."""
+    if not skinned:
+        if any(_transform_differs(before.get(k), after.get(k))
+               for k in ("location", "rotation", "scale")):
+            return ("SOFT", f"'{name}' has no skeleton. Object Mode position, rotation, and scale are "
+                            "dropped on Send. Apply the transform (Ctrl+A in Object Mode), or edit "
+                            "the geometry in Edit Mode.")
+        return None
+    was, now = before.get("scale"), after.get("scale")
+    if was is not None and now is not None and _mirrored(now) and not _mirrored(was):
+        return ("SOFT", f"'{name}' has a negative Object Mode scale. The mesh ships mirrored without "
+                        "flipped faces and renders inside-out.")
+    return None
+
+
+def _mirrored(scale):
+    """Whether a scale flips handedness: the product of its axes is what says so, however many of them
+    are negative."""
+    return scale[0] * scale[1] * scale[2] < 0
 
 
 def _attribution_issues(mesh_objs):
@@ -947,45 +1857,46 @@ def _attribution_issues(mesh_objs):
             if not _in_tree(o, ref):
                 issues.append(("HARD", f"'{o.name}' is outside {MOD_COLLECTION}"
                                        + (f" and {REFERENCE_COLLECTION}" if ref is not None else "")
-                                       + ". It will not ship. Move it into a part collection to ship it"
-                                       + (f", or into {REFERENCE_COLLECTION} to leave it out."
+                                       + ", so the object will not be sent. Move the object into a part "
+                                         "collection to include the object"
+                                       + (f", or into {REFERENCE_COLLECTION} to exclude the object."
                                           if ref is not None else ".")))
             continue                     # Reference is scenery: no part to attribute, nothing to check
         part = _part_of(o)
         if part is None:
             issues.append(("HARD", f"'{o.name}' is in {MOD_COLLECTION} but not in a part collection. "
-                                   + (f"Move it into one of: {choices}." if choices else
-                                      f"Create a part collection under {MOD_COLLECTION} and move it in.")))
+                                   + (f"Move the object into one of: {choices}." if choices else
+                                      f"Create a part collection under {MOD_COLLECTION} and move "
+                                      "the object.")))
         elif _base_name(o.name) != part.name and _base_name(o.name) in part_names:
-            issues.append(("SOFT", f"The {gf2_label(o.name)} mesh sits in {gf2_label(part.name)}, so it "
-                                   f"ships as {gf2_label(part.name)}."))
+            issues.append(("SOFT", f"The {gf2_label(o.name)} mesh is in the {gf2_label(part.name)} "
+                                   f"collection and is sent as {gf2_label(part.name)}. Move it into "
+                                   f"{gf2_label(o.name)} if that is a mistake."))
     for part in parts:
         if _is_excluded(part):
-            issues.append(("HARD", f"'{part.name}' is excluded from the view layer, so its meshes "
-                                   "can't be exported. Re-enable it in the outliner."))
+            issues.append(("HARD", f"'{part.name}' is excluded from the view layer. The part meshes "
+                                   "cannot be sent. Re-enable the collection in the outliner."))
         wanted = part.get(PART_MARKER)
         if isinstance(wanted, str) and part.name != wanted:
             if _base_name(part.name) == wanted:
-                issues.append(("HARD", f"'{part.name}' took a name suffix because another collection "
-                                       f"already holds '{wanted}'. Its mesh would ship as a part the app "
-                                       f"has no target for. Rename or delete the other '{wanted}' "
-                                       "collection, then re-import."))
+                issues.append(("HARD", f"Another collection is already named '{wanted}', forcing the "
+                                       f"part collection to use '{part.name}', which cannot be sent. "
+                                       f"Rename or delete the other '{wanted}' collection, then re-import."))
             else:
-                issues.append(("HARD", f"'{part.name}' was renamed from '{wanted}'. Its mesh would ship "
-                                       f"as a part the app has no target for. Rename the collection "
-                                       f"back to '{wanted}'."))
+                issues.append(("HARD", f"The '{wanted}' collection was renamed to '{part.name}' and "
+                                       f"cannot be sent. Rename the collection back to '{wanted}'."))
         held = _part_meshes(part)
         if len(held) > 1:
-            issues.append(("HARD", f"{gf2_label(part.name)} holds {len(held)} meshes: "
-                                   f"{', '.join(gf2_label(o.name) for o in held)}. A part ships as "
-                                   "one. Join them (select both, Ctrl+J), or move the extra into "
-                                   f"{REFERENCE_COLLECTION}."))
+            issues.append(("HARD", f"The {gf2_label(part.name)} collection holds {len(held)} meshes: "
+                                   f"{', '.join(gf2_label(o.name) for o in held)}. A part sends as one "
+                                   "mesh. Join the meshes (select them, then Ctrl+J), or move the "
+                                   f"extras into {REFERENCE_COLLECTION}."))
     return issues
 
 
 def gf2_cheap_checks(mesh_objs, armature):
     """The subset of the pre-send pass that reads only object- and collection-level state:
-    attribution, an empty export scope, armature presence, Object-mode scale, material-slot layout,
+    attribution, an empty export scope, armature presence, Object-mode transform, material-slot layout,
     bone set. Same (severity, message) shape as gf2_run_checks, and cheap enough to run on every
     depsgraph update — nothing here duplicates geometry or walks vertices. Pure — never mutates the
     scene.
@@ -999,7 +1910,7 @@ def gf2_cheap_checks(mesh_objs, armature):
     # SOFT — an emptied part collection hides that part in the built mod. Deliberate is the whole
     # point, so it is stated before a Send rather than discovered in the deliverable.
     for name in gf2_emptied_parts():
-        issues.append(("SOFT", f"{gf2_label(name)} is empty. Sending hides it in the mod."))
+        issues.append(("SOFT", gf2_emptied_part_line(name)))
     # HARD — nothing in a part collection is no deliverable at all; the send refuses rather than write
     # it. The gate matches the send's, so a scene the send would refuse never reads as ready here — which
     # includes the one case where an empty scope is fine: a named-part session whose part was emptied on
@@ -1009,38 +1920,42 @@ def gf2_cheap_checks(mesh_objs, armature):
     # HARD — a weighted scene with no session armature exports skinless; that payload is refused.
     weighted = [o for o in shipping if o.vertex_groups]
     if weighted and armature is None:
-        issues.append(("HARD", f"{len(weighted)} weighted part(s) but no armature in {MOD_COLLECTION}. "
-                               f"The skin would be dropped on export. Keep the skeleton in "
-                               f"{MOD_COLLECTION}/{ARMATURE_COLLECTION}."))
+        issues.append(("HARD", f"{len(weighted)} weighted part{'' if len(weighted) == 1 else 's'} but "
+                               f"no armature in {MOD_COLLECTION}, so Send would lose the skin. "
+                               f"Keep the skeleton in {MOD_COLLECTION}/{ARMATURE_COLLECTION}."))
     base = _load_baseline()
-    # SOFT — Object-mode scale doubles onto the skinning (a move/rotate is warned separately).
+    # SOFT — the export bakes a skinned mesh's object transform into its vertices once, so only a
+    # mirroring scale is worth saying; an unskinned mesh carries its transform on the glb node, which
+    # the app does not read, so the whole of it is dropped.
+    unskinned = gf2_unskinned_parts(load_session())
     for mo in shipping:
-        ref = (base.get("scale") or {}).get(mo.name) or [1.0, 1.0, 1.0]
-        sc = list(mo.scale)
-        if any(abs(sc[i] - ref[i]) > 1e-3 for i in range(3)):
-            issues.append(("SOFT", f"'{mo.name}' has an Object-mode scale of "
-                                   f"({sc[0]:.3f}, {sc[1]:.3f}, {sc[2]:.3f}). Scale in Edit mode instead."))
+        before = {k: (base.get(k) or {}).get(mo.name) for k in ("location", "rotation", "scale")}
+        issue = gf2_transform_warning(mo.name, before, _object_transform(mo),
+                                      not _is_unskinned(mo, unskinned))
+        if issue is not None:
+            issues.append(issue)
     # SOFT — each submesh keeps the material it was imported with; a reorder/count change moves them.
     for mo in shipping:
         old = (base.get("slots") or {}).get(mo.name)
         cur = [ms.material.name if ms.material else "" for ms in mo.material_slots]
         if old is not None and cur != old:
-            issues.append(("SOFT", f"'{mo.name}' material slots changed since import. Reordering them "
-                                   "changes which material each face range uses."))
+            issues.append(("SOFT", f"'{mo.name}' material slots changed since import, so face ranges "
+                                   "may now use different materials. Restore the imported slot order "
+                                   "if the change was not intended."))
     # SOFT — re-export keys off bone names; a renamed/removed bone breaks the weight compile.
     if base.get("bones") and armature is not None:
         cur_bones = set(b.name for b in armature.data.bones)
         gone = [b for b in base["bones"] if b not in cur_bones]
         if gone:
-            issues.append(("SOFT", f"{len(gone)} imported bone(s) renamed or removed "
-                                   f"(e.g. '{gone[0]}'). Re-export keys off bone names. Keep the "
-                                   "skeleton as imported."))
+            issues.append(("SOFT", f"{len(gone)} imported bone{'' if len(gone) == 1 else 's'} renamed "
+                                   f"or removed (for example, '{gone[0]}'). Weights on those bones are lost "
+                                   "on Send. Rename the bones, or undo the change."))
     return issues
 
 
 def gf2_run_checks(mesh_objs, armature):
     """Pre-send sanity pass. Returns a list of (severity, message) with severity in {"HARD","SOFT"}:
-    HARD is what will be REJECTED downstream (surfaced here first so the modder isn't bounced after a
+    HARD is what will be REJECTED downstream (surfaced here first so the modder is not bounced after a
     round-trip); SOFT is a likely-mistake warning that still exports.
 
     The full pass = the cheap checks (pure) plus the unweighted-vertex count, which bone-heats a
@@ -1056,9 +1971,9 @@ def gf2_run_checks(mesh_objs, armature):
         total = sum(n for _, n in unsolvable)
         named = ", ".join(f"'{n}'" for n, _ in unsolvable)
         lead = next((i for i, (sev, _) in enumerate(issues) if sev != "HARD"), len(issues))
-        issues.insert(lead, ("HARD", f"{total} vertex(es) in {named} have no weight and can't be "
-                                     "filled from the skeleton. They will be rejected. Weight-paint "
-                                     "or delete those verts."))
+        issues.insert(lead, ("HARD", f"{total} {'vertex has' if total == 1 else 'vertices have'} no "
+                                     f"weight in {named} and cannot be filled from the skeleton, so "
+                                     "Send is blocked. Weight-paint or delete the affected vertices."))
     return issues
 
 
@@ -1080,26 +1995,59 @@ def _popup(title, lines, icon):
 # ---------------------------------------------------------------- scene state (what the panel reports)
 
 def gf2_status_line(issues):
-    """The status line for a list of (severity, message): clean, or the tally of what bit. The glyph
-    carries the severity, so the text after it counts and never restates it."""
+    """The exact live status for a list of blocking and warning check results."""
     hard = sum(1 for sev, _ in issues if sev == "HARD")
     soft = len(issues) - hard
     if not hard and not soft:
-        return "✓ Ready to send"
+        return "Ready to send"
     bits = []
     if hard:
-        bits.append(f"✗ {hard} blocking")
+        bits.append(f"{hard} blocking issue" + ("" if hard == 1 else "s"))
     if soft:
-        bits.append(f"⚠ {soft} warning" + ("" if soft == 1 else "s"))
-    return " · ".join(bits)
+        bits.append(f"{soft} warning" + ("" if soft == 1 else "s"))
+    return " · ".join(bits) + " — click Check Mesh for details"
+
+
+_LABELS_CACHE = {"raw": None, "labels": {}}
+
+
+def _session_labels():
+    """Part name (lower-cased) -> the app's own short token, off the scene's stored session. Cached per
+    raw session string, so a panel redraw costs one dictionary lookup and a session rewrite re-reads."""
+    try:
+        raw = (bpy.context.scene or {}).get(SESSION_KEY)
+    except Exception:
+        return {}
+    if raw == _LABELS_CACHE["raw"]:
+        return _LABELS_CACHE["labels"]
+    labels = {}
+    try:
+        doc = json.loads(raw) if raw else {}
+        for p in (doc.get("parts") or []) if isinstance(doc, dict) else []:
+            if not isinstance(p, dict):
+                continue
+            name, label = p.get("name"), p.get("label")
+            if isinstance(name, str) and name and isinstance(label, str) and label:
+                labels[name.lower()] = label
+    except Exception:
+        labels = {}
+    _LABELS_CACHE["raw"] = raw
+    _LABELS_CACHE["labels"] = labels
+    return labels
 
 
 def gf2_label(name):
-    """A part or object name cut down to what tells it apart. Game asset names run to 40 characters of
-    shared prefix and suffix, which buries the one token that differs in a message the modder has to
-    read at a glance: `c_KarstSSR0101_slg_P1_cloth2_lod0` -> `cloth2`. A name the MODDER chose carries
-    no such structure, so it is left exactly as they wrote it."""
+    """What the panel and its messages call a part. The app names each part's own short token in the
+    session document (`cloth2`, `P3_body_fight`), and that token IS the label whenever the session
+    carries it — a name's structure is never re-derived where its owner already said what it means.
+    Only a scene with no session (a hand-opened glb) falls back to the structural cut: game asset
+    names run to 40 characters of shared prefix and suffix, which buries the one token that differs,
+    `c_KarstSSR0101_slg_P1_cloth2_lod0` -> `cloth2`. A name the MODDER chose carries no such
+    structure, so it is left exactly as they wrote it."""
     stem = _base_name(name)
+    label = _session_labels().get(stem.lower())
+    if label:
+        return label
     if not stem.startswith("c_"):
         return name
     for tail in ("_lod0", "_lod1", "_lodm0"):
@@ -1109,49 +2057,12 @@ def gf2_label(name):
     return stem.rsplit("_", 1)[-1] or name
 
 
-def gf2_subject_label(glb_path):
-    """The subject a session is editing. The app lays a workspace out as `<subject>/meshes/<part>.glb`,
-    so the folder holding `meshes` is the subject-level name the bridge is handed; anything else falls
-    back to the file's own stem."""
-    if not glb_path:
-        return ""
-    mesh_dir = os.path.dirname(os.path.normpath(glb_path))
-    parent, leaf = os.path.split(mesh_dir)
-    if leaf.lower() == "meshes" and os.path.basename(parent):
-        return os.path.basename(parent)
-    return os.path.splitext(os.path.basename(glb_path))[0]
-
-
-def gf2_short_part_names(names):
-    """Object names trimmed of the prefix they all share, cut back to an underscore so a label never
-    starts mid-token. Fewer than two names leaves no shared prefix to measure, so those stay whole."""
-    names = list(names)
-    if len(names) < 2:
-        return names
-    cut = os.path.commonprefix(names).rfind("_") + 1
-    return [n[cut:] if len(n) > cut else n for n in names]
-
-
-def gf2_subject_line(subject, parts):
-    """`<subject> · <part>, <part>` — either half alone when the other isn't derivable."""
-    return " · ".join(b for b in (subject, ", ".join(parts)) if b)
-
-
-def gf2_collections_line(mod_count, reference_count, attributed):
-    """`Mod 3 · Reference 1`. A scene with no `Mod` collection has no attribution to break down, and a
-    breakdown would report zero against every mesh in it, so it gets a bare count instead. That count
-    is display only: with no `Mod` nothing ships and the checks block the Send."""
-    if not attributed:
-        return f"{mod_count} object" + ("" if mod_count == 1 else "s")
-    return f"Mod {mod_count} · Reference {reference_count}"
-
-
 def gf2_scope_lines(n_objects, n_verts, bakes_modifiers):
     """What the next Send carries, stated before it acts: a stray import reads as an unexpected count
     here rather than as an unexpected mesh in the built mod. Reference is not mentioned: it never
     ships, and a count of what is NOT sent is noise on every send."""
     head = (f"{n_objects} object" + ("" if n_objects == 1 else "s")
-            + f" · {n_verts:,} vert" + ("" if n_verts == 1 else "s"))
+            + f" · {n_verts:,} " + ("vertex" if n_verts == 1 else "vertices"))
     lines = [head]
     if bakes_modifiers:
         lines.append("Modifiers are baked on Send.")
@@ -1168,15 +2079,6 @@ def _reference_meshes():
     return [] if ref is None else [o for o in ref.all_objects if o.type == "MESH"]
 
 
-def _part_names():
-    """The part labels for the subject line. The marked part collections ARE the part attribution, and
-    one currently holding no mesh is not something the session is editing. Without `Mod` there is no
-    attribution to read, so the object names are all the scene offers."""
-    if _mod_root() is None:
-        return gf2_short_part_names([o.name for o in _scene_meshes()])
-    return [c.name for c in gf2_part_collections() if _part_meshes(c)]
-
-
 def _bakes_modifiers(obj):
     """True when the export would bake a modifier into this mesh. The Armature modifier is exempt (the
     skin ships as weights, not a baked pose), and so is one switched off in the viewport — the exporter
@@ -1184,12 +2086,14 @@ def _bakes_modifiers(obj):
     return any(m.type != "ARMATURE" and m.show_viewport for m in obj.modifiers)
 
 
-def _send_overwrite_warning():
-    """The pre-send overwrite line, or None. Which parts already hold an edit comes from the app's session
-    description plus whatever this session has already sent, scoped to the part collections this send
-    actually writes."""
-    shipping = [p.name for p in gf2_part_collections() if _part_meshes(p)]
-    return gf2_overwrite_warning(gf2_edited_shipping_parts(load_session(), shipping, gf2_sent_parts()))
+def _send_overwrite_warning(session=None, edit_targets=None):
+    """The live-inventory confirmation lead for the currently selected existing targets."""
+    session = load_session() if session is None else session
+    if edit_targets is None:
+        part_names = [part.name for part in gf2_part_collections()]
+        edit_targets = gf2_send_target_map(
+            session, getattr(bpy.context.scene, "gf2_target_rows", ()), part_names)
+    return gf2_overwrite_warning(gf2_selected_mesh_edit_labels(session, edit_targets))
 
 
 def _send_scope_lines():
@@ -1201,21 +2105,37 @@ def _send_scope_lines():
                            any(_bakes_modifiers(o) for o in shipping))
 
 
-def _panel_lines(scene):
-    """The panel's state rows. Never raises: a scene the reader can't make sense of must not take the
-    Send button down with it."""
+def gf2_session_notices(session):
+    """Non-empty notice sentences from a forward-compatible session document."""
+    return [notice.strip() for notice in (session or {}).get("notices") or []
+            if isinstance(notice, str) and notice.strip()]
+
+
+def gf2_panel_wrap_width(region_width, ui_scale=1.0):
+    """Label characters that fit one sidebar row, from the region's pixel width and the UI scale
+    (~8 px per character at scale 1). Unknown or degenerate inputs fall back to the narrow-sidebar
+    default rather than guessing wide."""
     try:
-        subject = gf2_subject_label(getattr(scene, "gf2_glb_path", "") or "")
-        attributed = _mod_root() is not None
-        count = len(gf2_shipping_meshes()) if attributed else len(_scene_meshes())
-        rows = [gf2_subject_line(subject, _part_names()),
-                gf2_collections_line(count, len(_reference_meshes()), attributed)]
-        if _reference_root() is not None:
-            rows.append(REFERENCE_NOTE)
-        return [r for r in rows if r]
-    except Exception as e:
-        print(f"GF2: panel state read failed: {e}")
-        return [UNREADABLE]
+        width = float(region_width)
+        scale = float(ui_scale) if ui_scale else 1.0
+    except (TypeError, ValueError):
+        return 48
+    if width <= 0 or scale <= 0:
+        return 48
+    return max(16, int(width / (8.0 * scale)))
+
+
+def gf2_wrapped_lines(text, width=48, lead=""):
+    """Clipped-sidebar-safe label rows: the lead on the first wrapped line, matching indentation
+    after. Blender labels never wrap on their own — they ellipsize mid-sentence."""
+    wrapped = textwrap.wrap(text, width=max(12, width - len(lead)), break_long_words=False,
+                            break_on_hyphens=False) or [""]
+    return [lead + wrapped[0]] + [" " * len(lead) + line for line in wrapped[1:]]
+
+
+def gf2_wrapped_notice_lines(notice, width=48):
+    """A notice block row set: warning prefix on the first line."""
+    return gf2_wrapped_lines(notice, width, "⚠ ")
 
 
 # ---------------------------------------------------------------- live status
@@ -1240,8 +2160,7 @@ def _tag_sidebar_redraw():
 
 def _refresh_live_status():
     """Recompute the status line from the cheap checks and return it. Never raises: this runs from a
-    handler (which Blender drops on an exception) and from draw, and a stale ✓ would misreport a
-    scene that has since gone dirty."""
+    handler (which Blender drops on an exception), and a stale ✓ would misreport a dirty scene."""
     try:
         text = gf2_status_line(gf2_cheap_checks(_scene_meshes(), _session_armature()))
     except Exception as e:
@@ -1285,13 +2204,28 @@ def _register_live_status():
         if getattr(h, "__name__", "") == _gf2_depsgraph_update.__name__:
             bpy.app.handlers.depsgraph_update_post.remove(h)
     bpy.app.handlers.depsgraph_update_post.append(_gf2_depsgraph_update)
+    _refresh_live_status()
+
+
+def _register_session_refresh(glb_path):
+    _prime_session_refresh(glb_path)
+    if not bpy.app.timers.is_registered(_session_refresh_tick):
+        bpy.app.timers.register(_session_refresh_tick, first_interval=_SESSION_REFRESH_INTERVAL)
 
 
 # ---------------------------------------------------------------- UI (panel + operator)
 
 def _register_ui(glb_path, send_dir):
-    bpy.types.Scene.gf2_send_dir = bpy.props.StringProperty(name="Send dir", default=send_dir or "")
-    bpy.types.Scene.gf2_glb_path = bpy.props.StringProperty(name="Source glb", default=glb_path or "")
+    class GF2_PG_target_row(bpy.types.PropertyGroup):
+        part_name: bpy.props.StringProperty(name="Part")
+        part_label: bpy.props.StringProperty(name="Part Label")
+        target: bpy.props.EnumProperty(name="Edit", items=_gf2_target_items)
+        new_name: bpy.props.StringProperty(name="Name")
+
+    bpy.utils.register_class(GF2_PG_target_row)
+    bpy.types.Scene.gf2_target_rows = bpy.props.CollectionProperty(type=GF2_PG_target_row)
+    bpy.types.Scene.gf2_send_dir = bpy.props.StringProperty(name="Send Directory", default=send_dir or "")
+    bpy.types.Scene.gf2_glb_path = bpy.props.StringProperty(name="Source GLB", default=glb_path or "")
 
     def _scene_meshes_arm():
         # Every mesh in the scene (the attribution checks need the ones outside Mod too) paired with
@@ -1306,7 +2240,7 @@ def _register_ui(glb_path, send_dir):
 
     class GF2_OT_check(bpy.types.Operator):
         bl_idname = "gf2.check_mesh"
-        bl_label = "Check mesh"
+        bl_label = "Check Mesh"
         bl_description = "Run the pre-send checks without exporting"
 
         def execute(self, ctx):
@@ -1314,14 +2248,14 @@ def _register_ui(glb_path, send_dir):
             issues = gf2_run_checks(meshes, arm)
             if not issues:
                 self.report({'INFO'}, "Ready to send")
-                _popup("Check", ["✓ Ready to send"], 'CHECKMARK')
+                _popup("Check Mesh", ["Ready to send."], 'CHECKMARK')
                 return {'FINISHED'}
             lines = []
             for sev, msg in issues:
                 print(f"GF2 {'BLOCK' if sev == 'HARD' else 'warn'}: {msg}")
                 lines.append(("✗ " if sev == "HARD" else "⚠ ") + msg)
             hard = sum(1 for sev, _ in issues if sev == "HARD")
-            _popup("Check", lines, 'ERROR' if hard else 'INFO')
+            _popup("Check Mesh", lines, 'ERROR' if hard else 'INFO')
             # The popup IS the surface. An {'ERROR'} report draws its own popup on top of it, so the
             # modder gets two overlapping boxes, the top one only pointing at the one it covers.
             self.report({'WARNING'}, gf2_status_line(issues))
@@ -1330,28 +2264,37 @@ def _register_ui(glb_path, send_dir):
     class GF2_OT_send(bpy.types.Operator):
         bl_idname = "gf2.send_to_lab"
         bl_label = "Send to Lab"
-        bl_description = "Export the edit back to Doll Remolding Lab"
+        bl_description = "Export the edited parts back to Doll Remolding Lab"
 
         _soft = None
         _scope = None
         _overwrite = None
+        _emptied = None
+        _targets = None
 
         def _gate(self, ctx):
             """Run the full pre-send pass and keep its warnings for the send. Returns a result set when
             the Send must not proceed, None when it may."""
+            session = _refresh_session_snapshot(ctx.scene)
+            part_names = [part.name for part in gf2_part_collections()]
+            self._targets = gf2_send_target_map(
+                session, getattr(ctx.scene, "gf2_target_rows", ()), part_names)
             if not ctx.scene.gf2_send_dir:
-                self.report({'ERROR'}, "No send folder set")
+                self.report({'ERROR'}, "No send directory is set.")
                 return {'CANCELLED'}
             meshes, arm = _scene_meshes_arm()
             issues = gf2_run_checks(meshes, arm)
             hard = [m for sev, m in issues if sev == "HARD"]
-            self._soft = [m for sev, m in issues if sev == "SOFT"]
+            self._emptied = gf2_emptied_parts()
+            emptied_lines = {gf2_emptied_part_line(name) for name in self._emptied}
+            self._soft = [m for sev, m in issues if sev == "SOFT" and m not in emptied_lines]
             for m in self._soft:
                 print(f"GF2 warn: {m}")
             if hard:
                 for m in hard:
                     print(f"GF2 BLOCK: {m}")
-                _popup("Send blocked", ["✗ " + m for m in hard] + ["", "Fix these, then Send again."], 'ERROR')
+                _popup("Send Blocked", ["✗ " + m for m in hard]
+                       + ["", "Fix these, then Send again."], 'ERROR')
                 # WARNING, not ERROR: an ERROR report opens a second popup over the one just shown.
                 self.report({'WARNING'}, f"Send blocked. {len(hard)} to fix.")
                 return {'CANCELLED'}
@@ -1363,7 +2306,7 @@ def _register_ui(glb_path, send_dir):
             blocked = self._gate(ctx)
             if blocked is not None:
                 return blocked
-            self._overwrite = _send_overwrite_warning()
+            self._overwrite = _send_overwrite_warning(load_session(ctx.scene), self._targets)
             # The confirm step exists to protect work that already exists, so it appears only when this
             # send would replace an edit. A first send just goes; either way the export confirms itself.
             if not self._overwrite:
@@ -1376,10 +2319,12 @@ def _register_ui(glb_path, send_dir):
             # the soft warnings and the scope give the decision its context.
             col = self.layout.column(align=True)
             if self._overwrite:
-                col.label(text="⚠ " + self._overwrite)
+                col.label(text=self._overwrite)
             for m in (self._soft or ()):
                 col.label(text="⚠ " + m)
-            if self._overwrite or self._soft:
+            for name in (self._emptied or ()):
+                col.label(text=gf2_emptied_part_confirm_line(name))
+            if self._overwrite or self._soft or self._emptied:
                 col.separator()
             for ln in (self._scope or ()):
                 col.label(text=ln)
@@ -1390,15 +2335,18 @@ def _register_ui(glb_path, send_dir):
                 if blocked is not None:
                     return blocked
             s = ctx.scene
-            out = gf2_send(s.gf2_send_dir, s.gf2_glb_path)
+            out = gf2_send(s.gf2_send_dir, s.gf2_glb_path, self._targets)
             soft = self._soft
+            sent_line = f"Sent: {os.path.basename(out)}"
+            emptied = [gf2_emptied_part_confirm_line(name) for name in (self._emptied or ())]
             if soft:
-                _popup("Sent with warnings", ["⚠ " + m for m in soft], 'INFO')
+                _popup("Sent With Warnings", ["⚠ " + m for m in soft] + emptied
+                       + ["", sent_line], 'INFO')
                 self.report({'WARNING'}, f"Sent with {len(soft)} warning(s). See the console.")
             else:
                 # The status-bar report alone is easy to miss: confirm the export where the modder is looking.
-                _popup("Sent", [f"✓ {os.path.basename(out)} · back in the Lab"], 'INFO')
-                self.report({'INFO'}, f"Sent: {os.path.basename(out)}")
+                _popup("Sent", emptied + ([""] if emptied else []) + [sent_line], 'INFO')
+                self.report({'INFO'}, sent_line)
             return {'FINISHED'}
 
     class GF2_PT_panel(bpy.types.Panel):
@@ -1409,21 +2357,51 @@ def _register_ui(glb_path, send_dir):
 
         def draw(self, ctx):
             col = self.layout.column()
-            rows = _panel_lines(ctx.scene)
-            for ln in rows:
-                col.label(text=ln)
-            col.separator()
+            has_reference_meshes = False
+            wrap = gf2_panel_wrap_width(
+                getattr(getattr(ctx, "region", None), "width", 0),
+                getattr(getattr(bpy.context.preferences, "system", None), "ui_scale", 1.0))
+            try:
+                session = load_session(ctx.scene)
+                notices = gf2_session_notices(session)
+                if notices:
+                    notice_box = col.box()
+                    for index, notice in enumerate(notices):
+                        if index:
+                            notice_box.separator()
+                        for line in gf2_wrapped_notice_lines(notice, wrap):
+                            notice_box.label(text=line)
+                for target in ctx.scene.gf2_target_rows:
+                    target_box = col.box()
+                    row = target_box.row(align=True)
+                    row.label(text=target.part_label)
+                    row.prop(target, "target", text="")
+                    if target.target == NEW_EDIT_TARGET:
+                        target_box.prop(target, "new_name", text="Name")
+                has_reference_meshes = bool(_reference_meshes())
+            except Exception as e:
+                print(f"GF2: panel state read failed: {e}")
+                col.label(text=UNREADABLE)
             col.operator("gf2.check_mesh", icon="CHECKMARK")
             col.operator("gf2.send_to_lab", icon="EXPORT")
-            # A scene the reader couldn't make sense of has already said so in the rows above, and the
-            # live pass reads the same scene: saying it twice adds nothing.
-            if rows != [UNREADABLE]:
-                col.label(text=_LIVE["text"] or _refresh_live_status())
+            for line in gf2_wrapped_lines(_LIVE["text"] or "Checking mesh…", wrap):
+                col.label(text=line)
+            tips = col.box()
+            tip_lines = ["An unchanged part sends nothing.",
+                         "Deleting all of a part's geometry sends it as a hide."]
+            if has_reference_meshes:
+                tip_lines.append("Reference parts are shown for context and are not sent.")
+            tip_lines.append("The skeleton is hidden by default — unhide it to weight paint.")
+            for tip in tip_lines:
+                for line in gf2_wrapped_lines(tip, wrap):
+                    tips.label(text=line)
 
     bpy.utils.register_class(GF2_OT_check)
     bpy.utils.register_class(GF2_OT_send)
     bpy.utils.register_class(GF2_PT_panel)
+    _rebuild_target_rows(bpy.context.scene, load_session(), _scene_target_states(bpy.context.scene))
     _register_live_status()
+    _register_session_refresh(glb_path)
 
 
 # ---------------------------------------------------------------- entry point

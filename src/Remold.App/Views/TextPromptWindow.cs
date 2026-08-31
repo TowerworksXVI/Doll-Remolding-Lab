@@ -54,6 +54,6 @@ public sealed class TextPromptWindow : Window
     /// <paramref name="watermark"/> and <paramref name="confirmLabel"/> so a reused prompt doesn't mislabel
     /// its field or its accept button.</summary>
     public static Task<string?> Show(Window owner, string title, string prompt, string initial = "",
-        string watermark = "mod name", string confirmLabel = "Create") =>
+        string watermark = "Mod name", string confirmLabel = "Create") =>
         new TextPromptWindow(title, prompt, initial, watermark, confirmLabel).ShowDialog<string?>(owner);
 }

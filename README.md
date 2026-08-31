@@ -21,18 +21,19 @@ Check the outfits you want to edit, or check a character to take all of theirs a
 The workbench, for one outfit or weapon at a time.
 
 - **Replace a mesh.** Open a part in Blender to edit just that part. The armature carries every usable bone, so weighting isn't limited to the bones the part started with. Open it **with References** to bring in the rest of the outfit around it on the same armature. Only the opened part is writable; everything else comes in as reference scenery. Click **Send to Lab** in Blender's sidebar and the edit lands back in the app.
+- **Edit multiple meshes at once.** "Open all parts in Blender" on an outfit lets you edit several meshes together, and sends all changed ones back to the app as their own edits.
 - **Hide a mesh.** Delete a part's mesh in Blender and send it, or just hide it from the app. The built mod stops the game from drawing that part.
-- **Retexture.** Drop a PNG onto a texture slot, or open the slot in an image editor and save. Base colour, normal and RMO maps are handled per submesh. Textures authored on a donor mesh in Blender's shader editor are picked up too.
+- **Retexture.** Drop a PNG onto a texture slot, find via Browse, or open the slot in an image editor and save. All available texture maps are handled per material. Textures authored on a donor mesh in Blender's shader editor are picked up too.
 
-Every edit is a plain file in the mod project folder and can be reverted one file at a time.
+Every edit is a plain file in the mod project folder. Each part may have any number of distinct edits, manageable separately.
 
 ### 3. Build
 
-The change list is generated from the Edit pane: one row per Replace, Hide or Retexture. Uncheck a row to leave it out of this build.
+The change list is generated from the Edit pane: any of your edits can be included in the mod. By default, the first edit for each part will always show in game.
 
-Each row can be given a **toggle key**, and the whole mod can have one of its own. Build writes the mod folder plus a `.zip` for sharing.
+Any number of **toggle keys** may also be set up, as well as a mod-wide on/off key. Each key may control the state of any number of edits. Drag edits between key states / the Always panel to decide when they show.
 
-Press the "Build" button, and the Lab will assemble a working 3DMigoto mod for you.
+Press the "Build" button, and the Lab will assemble a working 3DMigoto mod for you. Build writes the mod folder plus a `.zip` for sharing.
 
 ### Install and Launch
 
@@ -62,23 +63,22 @@ Extract over the existing folder.
 
 There is no separate addon to install. It will appear within the Blender windows opened by the app.
 
-Opening a part launches Blender with the part already imported, on its own or with the rest of the outfit around it. The scene comes organized (`Mod` for what ships, `Reference` for scenery that never does), with all supported bones, and a **Doll Remolding Lab** panel in the sidebar carrying **Check mesh** and **Send to Lab**. Check mesh blocks a Send on problems that would break the mod and warns on likely mistakes. Send to Lab always exports with the right glTF settings, so the export dialog is never your problem.
+Opening a part launches Blender with the part already imported, on its own or with the rest of the outfit around it. The scene comes organized (`Mod` for what ships, `Reference` for scenery that never does), with all supported bones on an armature that starts hidden. A **Doll Remolding Lab** panel will appear in the sidebar with a dropdown for where your changes go, and two buttons, **Check mesh** and **Send to Lab**. Check mesh blocks a Send on problems that would break the mod and warns on likely mistakes. Send to Lab always exports with the right glTF settings, so the export dialog is never your problem.
 
 ## Toggle keys
 
 A toggle key is set in the Build pane and written into the mod's `mod.ini` as a standard 3DMigoto `key =` binding. Modifiers are allowed (`F6`, `CTRL SHIFT H`).
 
-- Toggles start ON. A freshly installed mod is fully visible, and a key press lasts until the game closes.
-- Each keyed change picks its starting state and what its off state shows: the character's original part, or nothing.
-- Two changes on the same key toggle together. The change list marks the shared key.
-- **F10** is 3DMigoto's own reload key: it reloads all installed mods without restarting the game.
+- Any number can be set up as **key groups** in the application's Build pane. Any number of different states can be created, each with their own edits.
+- Pressing the key toggles through each configured state in turn.
+- **F10** is 3DMigoto's own reload key: it reloads all installed mods without restarting the game. **F6** toggles all mods on/off on many loaders.
 
 ## Known limits
 
 - **One mod per outfit at a time.** Two mods that change the same meshes fight over the draw, and the app doesn't pick a winner. Install reports overlaps between mods it built, by folder name, so the choice is yours.
 - **Mods are built against the current game version.** A game update that changes a character's meshes can break a built mod. Rebuild after an update.
 - **Not every part can be mesh-replaced.** Faces refuse a Replace (they are driven by the game's expression system), and so do meshes that swing on the game's spring bones (charms and some weapon parts). The Edit pane says why on the part. Hide and Retexture still work on them.
-- Texture slots other than base colour, normal and RMO are not emitted yet. An edit on one is reported at build time rather than silently dropped.
+- Some multi-material parts cannot yet have shaders applied; there is no way to determine which material the change should apply to.
 
 ## The technique
 

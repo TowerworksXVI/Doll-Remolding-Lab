@@ -1,8 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
+using Remold.Core.Skeleton;
 
 namespace Remold.Core.Migoto;
 
@@ -92,7 +94,29 @@ public static class PoolDerive
         /// every pool bone alike would be treating them as owned. Empty on a derive that formed no
         /// group.</summary>
         public IReadOnlyDictionary<uint, long> GroupCovered { get; init; } = new Dictionary<uint, long>();
+
+        /// <summary>Weighted tier rows that no eligible pool part can add to the union. Classified once
+        /// here and carried to the emitter, which must consume this exact verdict rather than infer it
+        /// again from a narrower view of the outfit.</summary>
+        public IReadOnlyList<TierBoneVerdict> TierBoneVerdicts { get; init; } = Array.Empty<TierBoneVerdict>();
     }
+
+    /// <summary>Why a weighted tier row may use the emitter's write-nothing scatter sentinel.</summary>
+    public enum TierBoneClass
+    {
+        /// <summary>The tier belongs to a pool mate, whose original tier draw remains visible.</summary>
+        MateTier,
+        /// <summary>No readable sibling lod0 poses the bone; the tier alone re-weights that geometry.</summary>
+        Lod1Only,
+        /// <summary>One or more readable sibling lod0 parts pose the bone; their merged geometry is lost.</summary>
+        Merged,
+    }
+
+    /// <summary>One authoritative weighted-row verdict. <paramref name="AffectedPart"/> is the Replace
+    /// target, <paramref name="TierPart"/> the pool part whose <paramref name="Tier"/> asks for the row,
+    /// and <paramref name="OwningParts"/> the readable sibling lod0 parts that table a MERGED bone.</summary>
+    public sealed record TierBoneVerdict(string AffectedPart, string TierPart, string Tier, uint Bone,
+        TierBoneClass Classification, IReadOnlyList<string> OwningParts);
 
     /// <summary>The outfit's one coverage group: the parts whose draws, between them, keep every
     /// <see cref="GroupBones"/> bone posed in every (wardrobe variant, scene context) state the target
@@ -162,18 +186,19 @@ public static class PoolDerive
             bool isTarget = string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase);
             if (!isTarget && partsPoolAlone)
                 excluded.Add(new MissingPart(p.Mesh,
-                    "its subject's parts draw independently, so only a Replace on that part itself pools it",
+                    "this item's parts draw independently, so only a mesh edit on that part itself "
+                    + "can use it",
                     p.BoneHashes));
             else if (!isTarget && p.Narrow)
                 excluded.Add(new MissingPart(p.Mesh,
-                    "it stores one influence per vertex, so only a Replace on that part itself pools it",
+                    "it stores one influence per vertex, so only a mesh edit on that part itself can use it",
                     p.BoneHashes));
             else if (!isTarget && !p.Presence.Covers(targetPresence))
                 excluded.Add(new MissingPart(p.Mesh, NotCoDrawn(p.Presence, targetPresence), p.BoneHashes));
             else if (!isTarget && !p.CastsShadows)
                 excluded.Add(new MissingPart(p.Mesh,
                     "it casts no shadow, so the game stops drawing it the moment it leaves the camera, "
-                    + "and only a Replace on that part itself pools it",
+                    + "and only a mesh edit on that part itself can use it",
                     p.BoneHashes));
             else if (!isTarget && p.Visibility != Model.VisibilityOverride.None)
                 excluded.Add(new MissingPart(p.Mesh, WithheldByGame(p.Visibility), p.BoneHashes));
@@ -337,16 +362,16 @@ public static class PoolDerive
     static string WithheldByGame(Model.VisibilityOverride why) => why switch
     {
         Model.VisibilityOverride.CoatList =>
-            "the dorm dresses it on and off separately from the scene, so only a Replace on that part "
-            + "itself pools it",
+            "the dorm dresses it on and off separately from the scene, so only a mesh edit on that "
+            + "part itself can use it",
         Model.VisibilityOverride.DormHidden =>
-            "the game hides it in the dorm whatever its name says, so only a Replace on that part itself "
-            + "pools it",
+            "the game hides it in the dorm whatever its name says, so only a mesh edit on that part "
+            + "itself can use it",
         Model.VisibilityOverride.LobbyHidden =>
-            "the game hides it on the crew deck whatever its name says, so only a Replace on that part "
-            + "itself pools it",
+            "the game hides it on the crew deck whatever its name says, so only a mesh edit on that "
+            + "part itself can use it",
         Model.VisibilityOverride.TimelineNamed =>
-            "a dorm scene can hide or reveal it mid-pose, so only a Replace on that part itself pools it",
+            "a dorm scene can hide or reveal it mid-pose, so only a mesh edit on that part itself can use it",
         // Every mechanism gets a sentence that names it, so a refusal teaches which data said so. A new
         // member falling through to a catch-all would inherit the timeline wording and misname its cause,
         // which is worse than failing here — this is called only after a mechanism already fired.
@@ -394,7 +419,7 @@ public static class PoolDerive
         string? replacedPart = null, IReadOnlyList<VariantGroup>? groups = null)
     {
         if (donor.JointIndices is null || donor.JointWeights is null || donor.SkinJointHashes is null)
-            throw new InvalidDataException(
+            throw new AuthoredRefusalException(
                 "the donor carries no skin. Weight it to the outfit's reference armature in Blender first");
 
         // the bone hashes the donor actually rides (nonzero-weight influences only)
@@ -404,7 +429,8 @@ public static class PoolDerive
                 used.Add(donor.SkinJointHashes[donor.JointIndices[i]]);
         used.Remove(0);   // 0 = unrecoverable hash (MeshApply.Payload contract) — never an owner key
         if (used.Count == 0)
-            throw new InvalidDataException("the donor's skin uses no recognizable bones (all hashes unrecoverable)");
+            throw new AuthoredRefusalException(
+                "the new mesh's weights name no bone this item has");
 
         var pool = new List<string>();
         var pooled = new List<PartBones>();
@@ -442,14 +468,16 @@ public static class PoolDerive
             // a held-back part with an unknown bone table can't be ruled out, so it is always named
             var blame = (missingParts ?? Array.Empty<MissingPart>())
                 .Where(m => m.BoneHashes is not { } b || orphans.Any(b.Contains)).ToList();
-            throw new InvalidDataException(blame.Count == 0
-                ? $"the donor rides {orphans.Count} bone(s) owned by no part of this outfit " +
-                  $"(first: 0x{orphans[0]:x8}). It was weighted against a different armature; " +
-                  "re-export this outfit's reference and re-weight"
-                : $"the donor rides {orphans.Count} bone(s) owned by no pooled part of this outfit " +
-                  $"(first: 0x{orphans[0]:x8}). Left out of the pool: " +
-                  string.Join("; ", blame.Select(m => $"'{m.Mesh}' · {m.Why}")) +
-                  ". Re-weight the donor onto the pooled parts, or drop this Replace");
+            throw BuildLogDiagnostics.Attach(new InvalidDataException(blame.Count == 0
+                ? $"the new mesh uses {orphans.Count} bone(s) that no part of this item has. It was "
+                  + "weighted against a different armature. Open this item in Blender again and "
+                  + "re-weight the mesh"
+                : $"the new mesh uses {orphans.Count} bone(s) that no part this mod can build with has. "
+                  + "Left out: "
+                  + string.Join("; ", blame.Select(m => $"'{m.Mesh}' · {m.Why}"))
+                  + ". Re-weight the mesh onto the parts that are in, or remove this mesh edit"),
+                $"Orphan-bone refusal: {orphans.Count} bone(s) owned by no part, first "
+                + $"0x{orphans[0]:x8}.");
         }
 
         // Owning a bone is TABLING it; posing it is carrying weight on it, and a part may table the whole
@@ -481,25 +509,26 @@ public static class PoolDerive
             // watch animate sends them re-weighting away from a hole the build made.
             var couldPose = (missingParts ?? Array.Empty<MissingPart>())
                 .Where(m => m.BoneHashes is not { } b || b.Contains(unposed[0])).ToList();
-            throw new InvalidDataException(
-                $"the donor rides {unposed.Count} bone(s) that no pooled part of this outfit poses " +
-                $"(first: 0x{unposed[0]:x8}, carried at zero weight by " +
-                string.Join(", ", tablers.Select(m => $"'{m}'")) + ")" +
-                (couldPose.Count == 0
-                    ? ". Re-weight the donor onto the bones this outfit moves"
-                    : ". Left out of the pool: " +
-                      string.Join("; ", couldPose.Select(m => $"'{m.Mesh}' · {m.Why}")) +
-                      ". Re-weight the donor onto the bones the pooled parts move, or drop this Replace"));
+            throw BuildLogDiagnostics.Attach(new InvalidDataException(
+                $"the new mesh uses {unposed.Count} bone(s) that no part of this item moves. They are "
+                + "named by " + string.Join(", ", tablers.Select(m => $"'{m}'")) + " but never moved"
+                + (couldPose.Count == 0
+                    ? ". Re-weight the mesh onto the bones this item moves"
+                    : ". Left out: "
+                      + string.Join("; ", couldPose.Select(m => $"'{m.Mesh}' · {m.Why}"))
+                      + ". Re-weight the mesh onto the bones those parts move, or remove this mesh edit")),
+                $"Unposed-bone refusal: {unposed.Count} bone(s) posed by no pooled part, first "
+                + $"0x{unposed[0]:x8}.");
         }
 
         // Every used bone a group certified and none of them a roster part TABLES, so no part joined the
         // pool. There is no union to compile against and no draw to host the replacement — the anchor
         // selection below would read an empty pool. Refuse in words rather than index off the end.
         if (pool.Count == 0)
-            throw new InvalidDataException(
-                "the donor rides only bones this outfit's wardrobe or scene alternatives cover, so no part " +
-                "of it joins the pool and nothing can host the replacement's draw. Re-weight the donor onto " +
-                "the bones the outfit's own parts move as well");
+            throw new AuthoredRefusalException(
+                "the new mesh uses only bones that belong to this item's other wardrobe or scene options, "
+                + "so no part of it can carry the replacement. Re-weight the mesh onto the bones this "
+                + "item's own parts move as well");
 
         string anchor;
         if (anchorOverride is not null)
@@ -559,11 +588,14 @@ public static class PoolDerive
     /// derived over, in roster order — a part that can't feed palette recovery, or that this Replace may not
     /// pool, can't carry its tier bones either.</para>
     ///
-    /// <para>Throws <see cref="InvalidDataException"/> when a missing bone has no eligible carrier, or
-    /// when covering would take the pool past <paramref name="maxParts"/>.</para>
+    /// <para>A weighted row with no eligible carrier is classified in <see cref="Result.TierBoneVerdicts"/>
+    /// for the emitter to discard. Throws <see cref="InvalidDataException"/> only when covering would take
+    /// the pool past <paramref name="maxParts"/>.</para>
     /// </summary>
     public static Result CoverTierBones(Result derived, IReadOnlyList<PartBones> rosterParts,
-        Func<string, PartTiers> tiersOf, int maxParts)
+        Func<string, PartTiers> tiersOf, int maxParts, string replacedPart,
+        IReadOnlyList<PartBones> readableRoster,
+        IReadOnlyDictionary<uint, string>? bonePaths = null)
     {
         var pooled = new HashSet<string>(derived.Pool, StringComparer.OrdinalIgnoreCase);
         var chosen = new SortedSet<int>(Enumerable.Range(0, rosterParts.Count)
@@ -571,6 +603,7 @@ public static class PoolDerive
         if (chosen.Count != derived.Pool.Count)
             throw new InvalidDataException(
                 $"the derived pool ({string.Join(", ", derived.Pool)}) doesn't match the roster it was derived over");
+        var tierBoneVerdicts = new List<TierBoneVerdict>();
 
         // Whether this part can supply the asked-for bone AT the asking tier's draw. The matching tier
         // must itself pose the bone: it is the capture a frame drawing at that LOD recovers the row
@@ -593,20 +626,38 @@ public static class PoolDerive
             var carried = new HashSet<uint>();
             foreach (int i in chosen) carried.UnionWith(rosterParts[i].BoneHashes);
 
-            var captured = new HashSet<string>(StringComparer.Ordinal);
-            foreach (int i in chosen) captured.Add(tiersOf(rosterParts[i].Mesh).Lod0Hash);
-            var tiers = new List<TierBones>();
+            var lod0Hashes = new HashSet<string>(StringComparer.Ordinal);
+            foreach (int i in chosen) lod0Hashes.Add(tiersOf(rosterParts[i].Mesh).Lod0Hash);
+            var tiers = new List<List<(PartBones Part, TierBones Tier)>>();
+            var tiersByHash = new Dictionary<string, List<(PartBones Part, TierBones Tier)>>(StringComparer.Ordinal);
             foreach (int i in chosen)
                 foreach (var t in tiersOf(rosterParts[i].Mesh).Tiers)
-                    if (captured.Add(t.CaptureHash)) tiers.Add(t);
+                {
+                    if (lod0Hashes.Contains(t.CaptureHash)) continue;
+                    if (!tiersByHash.TryGetValue(t.CaptureHash, out var askers))
+                    {
+                        askers = new List<(PartBones Part, TierBones Tier)>();
+                        tiersByHash.Add(t.CaptureHash, askers);
+                        tiers.Add(askers);
+                    }
+                    askers.Add((rosterParts[i], t));
+                }
 
             // outstanding bones, first asker first, so the refusals name the tier that needed one
+            var missingRows = new List<(PartBones Part, uint Bone, string Tier)>();
+            foreach (var askers in tiers)
+                foreach (var (tierPart, tier) in askers)
+                    foreach (uint h in tier.WeightedBones.OrderBy(x => x))
+                        if (!carried.Contains(h)) missingRows.Add((tierPart, h, tier.Mesh));
+            if (missingRows.Count == 0) break;
+
+            // Recruitment is still one question per bone. Once a carrier joins, its lod0 table adds the
+            // row to the union for every tier that asks for it. The verdict carried downstream remains
+            // per-row because every emitted tier must account for its own weighted off-union entries.
             var missing = new List<(uint Bone, string Tier)>();
             var seen = new HashSet<uint>();
-            foreach (var t in tiers)
-                foreach (uint h in t.WeightedBones.OrderBy(x => x))
-                    if (!carried.Contains(h) && seen.Add(h)) missing.Add((h, t.Mesh));
-            if (missing.Count == 0) break;
+            foreach (var row in missingRows)
+                if (seen.Add(row.Bone)) missing.Add((row.Bone, row.Tier));
 
             int best = -1, bestCovered = 0;
             for (int i = 0; i < rosterParts.Count; i++)
@@ -616,18 +667,58 @@ public static class PoolDerive
                 if (n > bestCovered) { bestCovered = n; best = i; }   // ties → earliest in roster order
             }
             if (best < 0)
-                throw new InvalidDataException(
-                    $"tier '{missing[0].Tier}' poses bone 0x{missing[0].Bone:x8} that no part of this outfit "
-                    + "can supply at this detail level. Drop this Replace");
+            {
+                foreach (var row in missingRows)
+                {
+                    TierBoneClass classification;
+                    IReadOnlyList<string> owners = Array.Empty<string>();
+                    if (!string.Equals(row.Part.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase))
+                        classification = TierBoneClass.MateTier;
+                    else
+                    {
+                        owners = readableRoster
+                            .Where(p => !string.Equals(p.Mesh, row.Part.Mesh, StringComparison.OrdinalIgnoreCase)
+                                && p.Posed.Contains(row.Bone))
+                            .Select(p => p.Mesh)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+                        classification = owners.Count > 0 ? TierBoneClass.Merged : TierBoneClass.Lod1Only;
+                    }
+                    if (!tierBoneVerdicts.Any(v => v.Bone == row.Bone
+                        && string.Equals(v.TierPart, row.Part.Mesh, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(v.Tier, row.Tier, StringComparison.OrdinalIgnoreCase)))
+                        tierBoneVerdicts.Add(new TierBoneVerdict(replacedPart, row.Part.Mesh, row.Tier, row.Bone,
+                            classification, owners));
+                }
+                break;
+            }
             if (chosen.Count >= maxParts)
-                throw new InvalidDataException(
-                    $"posing this outfit's LOD tiers needs more than {maxParts} pooled parts, the most a build "
-                    + $"can bind. Tier '{missing[0].Tier}' rigs bone 0x{missing[0].Bone:x8}, carried only by parts "
-                    + "the pool has no room for. Drop this Replace");
+            {
+                var refusalRow = missing.First(m => CanCover(rosterParts[best], m.Bone, m.Tier));
+                string bone = bonePaths is not null
+                    && bonePaths.TryGetValue(refusalRow.Bone, out var fullPath)
+                    && BoneTable.MatchingLeaf(refusalRow.Bone, fullPath) is { } leaf
+                        ? $"bone '{leaf}'"
+                        : "1 bone this install's files do not name";
+                string? suffix = bonePaths is not null
+                    && bonePaths.TryGetValue(refusalRow.Bone, out var diagnosticPath)
+                        ? BoneTable.MatchingSuffix(refusalRow.Bone, diagnosticPath)
+                        : null;
+                string diagnosticBone = suffix is not null
+                    ? $"'{suffix}' (0x{refusalRow.Bone:x8})"
+                    : $"no matching chain suffix (0x{refusalRow.Bone:x8})";
+                throw BuildLogDiagnostics.Attach(new InvalidDataException(
+                    $"This mesh edit can't be built because the item needs more than {maxParts} "
+                    + $"part{(maxParts == 1 ? "" : "s")} at this detail level. "
+                    + $"LOD '{refusalRow.Tier}' uses {bone} from '{rosterParts[best].Mesh}'. "
+                    + "Remove this mesh edit"),
+                    $"Pool-cap refusal: tier '{refusalRow.Tier}' uses {diagnosticBone} "
+                    + $"from '{rosterParts[best].Mesh}'.");
+            }
             chosen.Add(best);
         }
 
-        if (chosen.Count == derived.Pool.Count) return derived;
+        if (chosen.Count == derived.Pool.Count && tierBoneVerdicts.Count == 0) return derived;
         var pool = new List<string>();
         var counts = new Dictionary<string, int>(derived.UsedBoneCounts);
         foreach (int i in chosen)
@@ -635,6 +726,11 @@ public static class PoolDerive
             pool.Add(rosterParts[i].Mesh);
             counts.TryAdd(rosterParts[i].Mesh, 0);
         }
-        return derived with { Pool = pool, UsedBoneCounts = counts };
+        return derived with
+        {
+            Pool = pool,
+            UsedBoneCounts = counts,
+            TierBoneVerdicts = tierBoneVerdicts,
+        };
     }
 }

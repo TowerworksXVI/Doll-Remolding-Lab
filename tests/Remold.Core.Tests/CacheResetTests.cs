@@ -50,6 +50,20 @@ public class CacheResetTests
         Assert.True(Directory.Exists(cache));   // the root itself is not the app's to remove
     }
 
+    [Fact]
+    public void The_rigged_glb_tree_is_part_of_the_force_rescan_sweep()
+    {
+        using var g = new TempGame();
+        var cache = Path.Combine(g.Root, "cache");
+        var rigs = LabPaths.RiggedGlbRootIn(cache);
+        Directory.CreateDirectory(Path.Combine(rigs, "v1", "catalog", "subject"));
+        File.WriteAllText(Path.Combine(rigs, "v1", "catalog", "subject", "complete.json"), "derived");
+
+        CacheReset.ClearDerivedCaches(cache);
+
+        Assert.False(Directory.Exists(rigs));
+    }
+
     /// <summary>The launch-timing log is opt-in instrumentation, not a correctness cache: nothing re-derives
     /// it, so a sweep that took it would silently end a measurement the modder turned on.</summary>
     [Fact]
@@ -74,7 +88,10 @@ public class CacheResetTests
         var durable = new[]
         {
             LabPaths.SettingsFile, LabPaths.FirstRunAcceptanceFile, LabPaths.DefaultLibraryRoot,
-            LabPaths.SharingSeedFile, LabPaths.LaunchTimingLog,
+            // both halves of the shipped seed: the sweep clears this install's own memo, and re-minting it
+            // from the seed's is exactly what makes a force rescan cheap — sweeping the SHIPPED one would
+            // make it expensive forever
+            LabPaths.SharingSeedFile, LabPaths.AssetHashSeedFile, LabPaths.LaunchTimingLog,
         };
 
         foreach (var d in durable)

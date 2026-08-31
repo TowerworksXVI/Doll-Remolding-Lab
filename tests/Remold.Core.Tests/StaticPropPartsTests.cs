@@ -144,7 +144,7 @@ public class StaticPropPartsTests : IDisposable
     }
 
     [Fact]
-    public void Hide_and_retexture_derive_on_a_static_part()
+    public void Hide_and_retexture_convert_on_a_static_part()
     {
         using var g = new TempGame();
         var abw = g.At("AssetBundles_Windows");
@@ -170,16 +170,25 @@ public class StaticPropPartsTests : IDisposable
             ReplaceFile = "frame_d.png", SubjectCharacter = "Crate", SubjectOutfit = Stem,
         });
 
-        var warnings = new List<string>();
-        var edits = VerbDerivation.Derive(project,
-            (c, s) => c == "Crate" && s == Stem ? model : null, warnings);
+        var env = new Remold.Core.Migoto.BuildEnv((c, s) => c == "Crate" && s == Stem ? model : null,
+            _ => null, FixtureCrawl.DeobfuscateOver(abw), "26109", null);
+        var resolver = new LegacyProjectResolver(env);
 
-        Assert.Empty(warnings);
-        var hide = Assert.Single(edits, e => e.Verb == EditVerbs.Hide);
-        Assert.Equal(Lid, hide.Mesh);
-        var retexture = Assert.Single(edits, e => e.Verb == EditVerbs.Retexture);
-        Assert.Equal(Frame, retexture.Mesh);
-        Assert.Equal("frame_d.png", Assert.Single(retexture.Textures!).Albedo);
+        var adapted = LegacyProjectAdapter.Adapt(project, resolver.ResolvePart, resolver.RosterSlots);
+
+        Assert.True(adapted.Report.CanSave,
+            string.Join("; ", adapted.Report.Items.Where(i => i.BlocksSave).Select(i => i.Detail)));
+        var hide = Assert.Single(adapted.Project.EditDefinitions, e => e.Kind == EditDefinitionKind.Hide);
+        Assert.Equal(Lid, hide.Target.RendererSlot);
+        var retexture = Assert.Single(adapted.Project.EditDefinitions,
+            e => e.Kind == EditDefinitionKind.Content);
+        Assert.Equal(Frame, retexture.Target.RendererSlot);
+        var slots = adapted.Project.TargetSlots.ToDictionary(slot => slot.Id, StringComparer.Ordinal);
+        var albedo = Assert.Single(retexture.Bindings,
+            b => slots[b.SlotId].Input == TargetInputKind.BaseColor
+                && slots[b.SlotId].Domain == TargetSlotDomain.Game);
+        Assert.Equal("frame_d.png",
+            adapted.Project.ProjectAssets.Single(a => a.Id == albedo.ProjectAssetId).File);
     }
 
     [Fact]

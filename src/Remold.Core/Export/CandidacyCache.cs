@@ -192,44 +192,13 @@ internal sealed class CandidacyCache
             {
                 if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best-effort temp cleanup */ } }
             }
-            if (published) SweepStaleTemps();
+            // Temps a previous export left behind. The `finally` above clears this run's own, but a hard
+            // kill between the write and the move cannot, and the litter accumulates beside the memo
+            // forever. The sweep is name-scoped to what THIS file's publishes mint, and runs only after a
+            // successful publish — see CacheTemps.SweepMinted.
+            if (published) CacheTemps.SweepMinted(_file);
         }
         catch { /* no memo is a slower open, never a wrong one */ }
-    }
-
-    /// <summary>Temps a previous export left behind. The <c>finally</c> above clears this run's own, but a
-    /// hard kill between the write and the move cannot, and the litter accumulates beside the memo forever.
-    /// Only names this class MINTS are swept — the memo's own path, a dot, 32 hex digits, <c>.tmp</c> — so
-    /// nothing a user or another tool parked in the folder is touched, and every failure is skipped rather
-    /// than reported: a leftover temp is inert either way.
-    ///
-    /// <para>Run only after a successful publish, which is also what makes the window on a racing export
-    /// harmless: its temp is open (undeletable) while being written, and the moment between its close and
-    /// its move costs at worst that run its memo, never this one's.</para></summary>
-    private void SweepStaleTemps()
-    {
-        if (_file is null) return;
-        try
-        {
-            var dir = Path.GetDirectoryName(_file);
-            if (string.IsNullOrEmpty(dir)) return;
-            var prefix = Path.GetFileName(_file) + ".";
-            foreach (var path in Directory.EnumerateFiles(dir, prefix + "*.tmp"))
-            {
-                // The pattern is a filter, never the test: Windows matches some longer names against
-                // "*.tmp", so the name is re-checked here in full before anything is deleted.
-                var name = Path.GetFileName(path);
-                if (name.Length != prefix.Length + 32 + 4) continue;
-                if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                if (!name.EndsWith(".tmp", StringComparison.Ordinal)) continue;
-                var middle = name.AsSpan(prefix.Length, 32);
-                bool hex = true;
-                foreach (var c in middle) if (!Uri.IsHexDigit(c)) { hex = false; break; }
-                if (!hex) continue;
-                try { File.Delete(path); } catch { /* in use or gone: inert either way */ }
-            }
-        }
-        catch { /* the sweep is housekeeping; it may never cost a memo */ }
     }
 
     // ---- storage ---------------------------------------------------------------------------------------

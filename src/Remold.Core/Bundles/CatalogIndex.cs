@@ -66,6 +66,10 @@ public sealed class CatalogIndex
     public string? ResolveAddress(string address) =>
         _keyToOwner.TryGetValue(KeyForAddress(address), out var owner) ? owner : null;
 
+    /// <summary>The catalog's own address key to logical-owner rows. Internal so reuse records can compare
+    /// a persisted keyed resolution without retaining or reconstructing the game-derived address.</summary>
+    internal IReadOnlyDictionary<string, string> AddressOwners => _keyToOwner;
+
     /// <summary>The full ordered dependency list of <paramref name="address"/>'s row (owner first) — the
     /// game's load set, and the resolution scope for everything the asset references.</summary>
     public IReadOnlyList<string>? DepsForAddress(string address) =>

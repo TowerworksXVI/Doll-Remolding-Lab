@@ -10,13 +10,14 @@ using Remold.Core.Export;
 namespace Remold.Core.Project;
 
 /// <summary>
-/// A mod project — the editable, persistent working state of one mod. Serializes to a
-/// <c>mod.drlproj</c> JSON manifest at the root of the mod's working folder, which also holds the
-/// exported/edited assets and pristine <c>originals/</c>. The single-file form is reserved for the
-/// shareable build output, so a project is never one.
+/// A released (schema-1) <c>mod.drlproj</c> manifest, READ. It is the input the conversion at open reads
+/// and nothing else: no route builds from it, nothing writes it, and the app never holds one. A project
+/// that opens is an <see cref="AuthoredProject"/> — either it already was one, or
+/// <see cref="LegacyProjectAdapter"/> converted this into one, and a conversion that cannot complete
+/// refuses the open rather than leaving the released shape standing.
 ///
-/// Paths inside the file are <b>workspace-relative</b>; <see cref="RootDir"/> is set on load/save and is
-/// not serialized — use <see cref="Resolve"/> for an absolute path.
+/// Paths inside the file are <b>workspace-relative</b>; <see cref="RootDir"/> is set on load and is not
+/// serialized — use <see cref="Resolve"/> for an absolute path.
 /// </summary>
 public sealed class ModProject
 {
@@ -29,20 +30,28 @@ public sealed class ModProject
     [JsonPropertyName("authored_against")] public AuthoredAgainst? AuthoredAgainst { get; set; }
     [JsonPropertyName("selection")] public List<SelectionEntry> Selection { get; set; } = new();
     [JsonPropertyName("targets")] public List<ProjectTarget> Targets { get; set; } = new();
-    /// <summary>The meshes the workbench's Hide toggle has switched off, by subject-scoped identity.
-    /// Workbench STATE, not a verb: <see cref="Workbench.VerbDerivation"/> derives Hide verbs from it.
-    /// Mutate through <see cref="SetHidden"/> so the one-entry-per-mesh invariant holds.</summary>
+    /// <summary>The meshes the released workbench's Hide toggle had switched off, by subject-scoped
+    /// identity. The conversion reads each as a hide edit on that part. Mutate through
+    /// <see cref="SetHidden"/> so the one-entry-per-mesh invariant holds.</summary>
     [JsonPropertyName("hidden")] public List<HiddenMesh> Hidden { get; set; } = new();
-    /// <summary>The derived edits the Build pane has unticked — a <see cref="MeshEdit"/>'s subject-scoped
-    /// identity plus its verb. Build STATE, not an edit: the workbench keeps the authored change, and
-    /// <see cref="Workbench.VerbDerivation"/> drops the entry from what a build ships. Mutate through
-    /// <see cref="SetBuildExcluded"/> so the one-entry-per-(mesh, verb) invariant holds.</summary>
+    /// <summary>The changes the released Build pane had unticked — a part's subject-scoped identity plus
+    /// the verb of the change it was ticked against. The conversion keeps such an edit and gives it no
+    /// activation placement. Mutate through <see cref="SetBuildExcluded"/> so the one-entry-per-(mesh,
+    /// verb) invariant holds.</summary>
     [JsonPropertyName("build_excluded")] public List<ExcludedEdit> BuildExcluded { get; set; } = new();
-    /// <summary>The per-change toggle keys the Build pane has bound — a <see cref="MeshEdit"/>'s
-    /// subject-scoped identity plus its verb, and the key that gates it in game. Build STATE like
-    /// <see cref="BuildExcluded"/>: the workbench keeps the authored change either way. Mutate through
-    /// <see cref="SetChangeKey"/> so the one-entry-per-(mesh, verb) invariant holds.</summary>
+    /// <summary>The per-change toggle keys the released Build pane had bound — a part's subject-scoped
+    /// identity plus its verb, and the key that gates it in game. The conversion reads each into a key
+    /// group. Mutate through <see cref="SetChangeKey"/> so the one-entry-per-(mesh, verb) invariant
+    /// holds.</summary>
     [JsonPropertyName("change_keys")] public List<ChangeKey> ChangeKeys { get; set; } = new();
+    /// <summary>The toon ramps picked on materials of parts this mod does NOT replace — the one piece of
+    /// per-material state the project holds, since a ramp is the one map a material can be given without
+    /// its geometry or any of its pictures changing. Null (not an empty list) where none is picked, so a
+    /// project that has never picked one is written exactly as it was before the slot existed. Mutate
+    /// through <see cref="SetStockRamp"/> so the one-entry-per-material invariant holds.</summary>
+    [JsonPropertyName("stock_ramps")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<StockRampPick>? StockRamps { get; set; }
 
     /// <summary>Absolute path to the project folder. Set by <see cref="Load"/>/<see cref="Save"/> from the
     /// file location. Not part of the on-disk manifest.</summary>
@@ -159,6 +168,44 @@ public sealed class ModProject
     public int RemoveSubjectChangeKeys(string character, string stem) =>
         ChangeKeys.RemoveAll(k => k.IsForSubject(character, stem));
 
+    /// <summary>The ramp picked on one material of one unreplaced part, or null when it carries none.
+    /// Case-insensitive on every identity part, as everywhere else.</summary>
+    public StockRampPick? FindStockRamp(string character, string stem, string mesh, string material) =>
+        StockRamps?.Find(r => r.IsForSubject(character, stem)
+            && string.Equals(r.Mesh, mesh, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(r.Material, material, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Pick (or clear, with a null path) one material's toon ramp — the single write route that
+    /// keeps <see cref="StockRamps"/> at one entry per (mesh, material). The slot has the same two states
+    /// a replaced submesh's has: a file, or nothing at all, in which case the game's own ramp draws and the
+    /// build ships nothing for it.</summary>
+    public void SetStockRamp(string character, string stem, string mesh, string material,
+        string? projectRelativeDds)
+    {
+        var existing = FindStockRamp(character, stem, mesh, material);
+        if (projectRelativeDds is null)
+        {
+            if (existing is not null) StockRamps!.Remove(existing);
+            if (StockRamps is { Count: 0 }) StockRamps = null;   // back to the shape a project with none has
+            return;
+        }
+        if (existing is not null) { existing.Ramp = projectRelativeDds; return; }
+        (StockRamps ??= new List<StockRampPick>()).Add(new StockRampPick
+        {
+            Character = character, Outfit = stem, Mesh = mesh, Material = material,
+            Ramp = projectRelativeDds,
+        });
+    }
+
+    /// <summary>Drop every ramp pick of a removed subject, so unchecking a subject can't leave one behind
+    /// to resurface on a re-add. Returns the number dropped.</summary>
+    public int RemoveSubjectStockRamps(string character, string stem)
+    {
+        int dropped = StockRamps?.RemoveAll(r => r.IsForSubject(character, stem)) ?? 0;
+        if (StockRamps is { Count: 0 }) StockRamps = null;
+        return dropped;
+    }
+
     /// <summary>Resolve a workspace-relative path against <see cref="RootDir"/>.</summary>
     public string Resolve(string relative)
     {
@@ -205,8 +252,14 @@ public sealed class ModProject
         if (!File.Exists(file))
             throw new FileNotFoundException($"mod project not found: {file}", file);
 
+        string json = File.ReadAllText(file);
+        int schema = AuthoredProjectSerializer.ReadSchema(json);
+        if (schema != CurrentSchema)
+            throw new InvalidDataException($"ModProject.Load accepts schema {CurrentSchema} only; "
+                + "use AuthoredProjectDocument for authored projects");
+
         ModProject? proj;
-        try { proj = JsonSerializer.Deserialize<ModProject>(File.ReadAllText(file), Json); }
+        try { proj = JsonSerializer.Deserialize<ModProject>(json, Json); }
         catch (JsonException e) { throw new InvalidDataException($"mod project is not valid JSON: {file}", e); }
         if (proj is null) throw new InvalidDataException($"mod project is empty: {file}");
 
@@ -294,145 +347,33 @@ public sealed class ModProject
     /// <c>.tmp</c>/<c>.bak</c> sidecars. Excluded from <see cref="CopyTo"/>.</summary>
     private static bool IsGeneratedArtifact(string fileName) =>
         fileName.Equals(FileName + ".tmp", StringComparison.OrdinalIgnoreCase)
-        || fileName.Equals(FileName + ".bak", StringComparison.OrdinalIgnoreCase);
+        || fileName.Equals(FileName + ".bak", StringComparison.OrdinalIgnoreCase)
+        || fileName.StartsWith("~asset.", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsExternalSessionArtifact(string root, string path)
+    {
+        var rel = Path.GetRelativePath(root, path);
+        var first = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+        return first.Equals(".editor", StringComparison.OrdinalIgnoreCase)
+            || first.Equals(ProjectAssetIngress.DirectoryName, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static void CopyInputs(string src, string dest)
     {
         Directory.CreateDirectory(dest);
         foreach (var dir in Directory.GetDirectories(src, "*", SearchOption.AllDirectories))
+        {
+            if (IsExternalSessionArtifact(src, dir)) continue;
             Directory.CreateDirectory(Path.Combine(dest, Path.GetRelativePath(src, dir)));
+        }
         foreach (var file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
         {
+            if (IsExternalSessionArtifact(src, file)) continue;
             if (IsGeneratedArtifact(Path.GetFileName(file))) continue;   // save sidecars stay with the source
             File.Copy(file, Path.Combine(dest, Path.GetRelativePath(src, file)), overwrite: false);
         }
     }
 
-    /// <summary>
-    /// Has this target's replacement actually been altered, or is it still the pristine game asset? Compares
-    /// the workspace file to its <c>originals/</c> copy byte-for-byte, which the
-    /// <see cref="ProjectTarget.Edited"/> flag can't do (an edit that lands back identical reads as unedited;
-    /// a flag can be stale). A target with no original on record, and a read failure, are both treated as
-    /// edited — nothing is silently excluded.
-    /// </summary>
-    public bool IsEdited(ProjectTarget t)
-    {
-        if (t.OriginalFile is null) return true;
-        try
-        {
-            var repl = Resolve(t.ReplaceFile);
-            var orig = Resolve(t.OriginalFile);
-            var rf = new FileInfo(repl);
-            var of = new FileInfo(orig);
-            if (!rf.Exists || !of.Exists) return true;
-            // Memoize the byte-compare per (replace file, both files' mtime+length): callers re-ask per node
-            // after EVERY verb. Any real edit/revert rewrites the file and bumps its mtime, so a stamp-keyed
-            // cache self-invalidates with no event hook.
-            long rt = rf.LastWriteTimeUtc.Ticks, ot = of.LastWriteTimeUtc.Ticks;
-            if (_editedCache.TryGetValue(t.ReplaceFile, out var c)
-                && c.RLen == rf.Length && c.RTicks == rt && c.OLen == of.Length && c.OTicks == ot)
-                return c.Edited;
-            bool edited = !FilesEqual(repl, orig);
-            _editedCache[t.ReplaceFile] = (rf.Length, rt, of.Length, ot, edited);
-            return edited;
-        }
-        catch { return true; }
-    }
-
-    /// <summary>
-    /// The workspace file at <paramref name="absPath"/> was overwritten: flag its target edited and drop the
-    /// donor record. Returns the target, or null when no target owns that file.
-    ///
-    /// <para>THE file-replacement transition — every route that writes over a workspace file goes through it,
-    /// so none leaves a stale record behind. <see cref="ProjectTarget.DonorTextures"/> and
-    /// <see cref="ProjectTarget.DonorMaterials"/> describe the mesh that WAS in that file, so new bytes void
-    /// them; a send-back records its own AFTER this call, the order the call sites keep.</para>
-    /// </summary>
-    public ProjectTarget? MarkFileReplaced(string absPath)
-    {
-        var t = TargetForFile(absPath);
-        if (t is null) return null;
-        t.Edited = true;
-        t.DonorTextures = null;
-        t.DonorMaterials = null;
-        return t;
-    }
-
-    /// <summary>Flag the target owning <paramref name="absPath"/> edited and LEAVE its donor record standing.
-    /// Only for a route that could not read the file at all: records describe the bytes in it, and bytes
-    /// nothing could read are bytes nothing rewrote, so voiding them would discard a valid record over a
-    /// file that never changed. A route that read new bytes uses <see cref="MarkFileReplaced"/>.</summary>
-    public ProjectTarget? MarkFileEdited(string absPath)
-    {
-        var t = TargetForFile(absPath);
-        if (t is null) return null;
-        t.Edited = true;
-        return t;
-    }
-
-    /// <summary>The target whose replace file is <paramref name="absPath"/>, or null when none owns it.</summary>
-    private ProjectTarget? TargetForFile(string absPath)
-    {
-        if (RootDir is null) return null;
-        var rel = Path.GetRelativePath(RootDir, absPath).Replace('\\', '/');
-        return Targets.FirstOrDefault(x => string.Equals(x.ReplaceFile, rel, StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>IsEdited memo: the last byte-compare result per replace file, keyed by both files' length +
-    /// mtime. Transient and per-instance, so it never crosses mods.</summary>
-    private readonly Dictionary<string, (long RLen, long RTicks, long OLen, long OTicks, bool Edited)> _editedCache
-        = new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>True when this target's replacement file is present under <see cref="RootDir"/>. False =
-    /// <b>dangling</b>: the project was moved, or an earlier materialize stranded the file into a sibling
-    /// folder. A dangling target can't ship AND isn't a real edit, so callers surface it as its own problem
-    /// rather than the misleading "N edited + N errors" (<see cref="IsEdited"/> reads a missing original as
-    /// edited).</summary>
-    public bool IsTargetPresent(ProjectTarget t)
-    {
-        try { return RootDir is not null && File.Exists(Resolve(t.ReplaceFile)); }
-        catch { return false; }
-    }
-
-    /// <summary>The targets whose replacement file is missing under <see cref="RootDir"/> — the
-    /// stranded/moved set. Empty for a healthy project.</summary>
-    public IReadOnlyList<ProjectTarget> DanglingTargets() =>
-        Targets.Where(t => !IsTargetPresent(t)).ToList();
-
-    /// <summary>Byte-for-byte file equality, streamed, with a length short-circuit.</summary>
-    private static bool FilesEqual(string a, string b)
-    {
-        var ia = new FileInfo(a);
-        var ib = new FileInfo(b);
-        if (ia.Length != ib.Length) return false;
-
-        using var sa = File.OpenRead(a);
-        using var sb = File.OpenRead(b);
-        Span<byte> ba = stackalloc byte[8192];
-        Span<byte> bb = stackalloc byte[8192];
-        while (true)
-        {
-            int na = ReadFull(sa, ba);
-            int nb = ReadFull(sb, bb);
-            if (na != nb) return false;
-            if (na == 0) return true;
-            if (!ba[..na].SequenceEqual(bb[..nb])) return false;
-        }
-    }
-
-    /// <summary>Fill <paramref name="buf"/> as far as the stream allows (a single Read may return short even
-    /// before EOF), returning the byte count.</summary>
-    private static int ReadFull(Stream s, Span<byte> buf)
-    {
-        int total = 0;
-        while (total < buf.Length)
-        {
-            int n = s.Read(buf[total..]);
-            if (n == 0) break;
-            total += n;
-        }
-        return total;
-    }
 }
 
 /// <summary>The mod's display/identity metadata.</summary>
@@ -452,6 +393,13 @@ public sealed class ProjectInfo
     [JsonPropertyName("toggle_key")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ToggleKey { get; set; }
+
+    /// <summary>Whether the build ships the record that lets the mod folder be read back into a project
+    /// (<see cref="Migoto.RepairData"/>). True is the default and what a manifest that names it not takes,
+    /// so a project written before the option existed keeps shipping the record. False ships the mod
+    /// without it, which is the author's call to make: nothing else about the mod changes, and the folder
+    /// is then exactly as readable as one built before the record existed.</summary>
+    [JsonPropertyName("include_repair_data")] public bool IncludeRepairData { get; set; } = true;
 }
 
 /// <summary>The game build the exports were read from — for post-update staleness.</summary>
@@ -485,7 +433,7 @@ public sealed class SelectionEntry
     [JsonPropertyName("outfit")] public string Outfit { get; set; } = "";
 }
 
-/// <summary>One workbench-hidden mesh, by the same subject-scoped triple as a <see cref="MeshEdit"/>.
+/// <summary>One workbench-hidden mesh, by the same subject-scoped triple every other released row uses.
 /// <see cref="Mesh"/> is the roster mesh <c>m_Name</c> (the representative <c>_lod0</c> slot name); tier
 /// fan-out happens at build from the live recipe.</summary>
 public sealed class HiddenMesh
@@ -544,6 +492,35 @@ public sealed class ChangeKey
     [JsonPropertyName("starts_off")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool StartsOff { get; set; }
+
+    public bool IsForSubject(string character, string stem) =>
+        string.Equals(Character, character, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(Outfit, stem, StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// One toon ramp picked on a material of a part this mod does NOT mesh-replace, by the same subject-scoped
+/// identity as a <see cref="HiddenMesh"/> plus the material it belongs to.
+///
+/// <para><b>Identity is the MATERIAL, never a texture hash.</b> The runtime's texture hash reads only the
+/// head of a texture, which is far less than a ramp: two ramps drawing different curves collide on it. The
+/// subject scopes the pick (same-named assets in different bundles belong to different subjects here), the
+/// renderer slot name selects the part, and the material's own name selects within it.</para>
+///
+/// <para>The build turns this into a draw-scoped bind at the part's own draws, gated on one of the
+/// material's ordinary maps — which DO hash soundly — being sighted there.</para>
+/// </summary>
+public sealed class StockRampPick
+{
+    [JsonPropertyName("character")] public string Character { get; set; } = "";
+    [JsonPropertyName("outfit")] public string Outfit { get; set; } = "";
+    /// <summary>The part's renderer slot name, as every other subject-scoped record spells it.</summary>
+    [JsonPropertyName("mesh")] public string Mesh { get; set; } = "";
+    /// <summary>The material's <c>m_Name</c>.</summary>
+    [JsonPropertyName("material")] public string Material { get; set; } = "";
+    /// <summary>Workspace-relative path to the picked ramp — a <c>.dds</c> in the game's own float format,
+    /// shipped byte for byte. The slot's other state is having no entry here at all.</summary>
+    [JsonPropertyName("ramp")] public string Ramp { get; set; } = "";
 
     public bool IsForSubject(string character, string stem) =>
         string.Equals(Character, character, StringComparison.OrdinalIgnoreCase)

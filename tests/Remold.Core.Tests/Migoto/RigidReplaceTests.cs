@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using Remold.Core.Export;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
@@ -68,7 +69,7 @@ public class RigidReplaceTests : IDisposable
     /// its own, and gives the two base colors of their own — the shape where only the textures bound at
     /// the draw tell the two apart.</param>
     private BuildEnv MakeEnv(out string lod0Hash, out string lod1Hash, int skinWidth = 0,
-        bool implicitWeights = false, bool twin = false)
+        bool implicitWeights = false, bool twin = false, bool effect = false)
     {
         string b0 = Path.Combine(_root, "r0.bundle");
         string b1 = Path.Combine(_root, "r1.bundle");
@@ -125,6 +126,18 @@ public class RigidReplaceTests : IDisposable
             }));
             addresses["addr_panel"] = "bundle2";
         }
+        else if (effect)
+        {
+            string bt = Path.Combine(_root, "reffect.bundle");
+            SyntheticBundle.BuildOneTexture(bt, "tex_frame_effect", 8, 8, 80, 120, 200, 255,
+                colorSpace: 1);
+            bytes["bundleT"] = File.ReadAllBytes(bt);
+            frameMaterials = new[]
+            {
+                new SubjectMaterial("m_frame", 1, "cab-frame",
+                    new[] { new SubjectMap("_BlendTex", "tex_frame_effect", "bundleT") }),
+            };
+        }
         parts.Insert(0, new SubjectPart("frame", Part, "addr_frame", frameMaterials,
             SiblingTiers: new[] { new RecipeTierSlot(Tier, "addr_frame_l1") }));
 
@@ -135,7 +148,7 @@ public class RigidReplaceTests : IDisposable
             a => addresses.GetValueOrDefault(a),
             id => bytes.GetValueOrDefault(id),
             CatalogVersion: "12345",
-            AppVersion: "test-1.0");
+            AppVersion: "test-1.0").Exact();
     }
 
     private ModProject NewProject(string name = "Rigid Mod")
@@ -197,7 +210,7 @@ public class RigidReplaceTests : IDisposable
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         // the vanilla draw is suppressed and the donor drawn in its place, at BOTH shipped tiers
@@ -216,6 +229,7 @@ public class RigidReplaceTests : IDisposable
         Assert.True(File.Exists(Path.Combine(r.OutDir, "rigid_ib_crate_frame.buf")));
 
         ModBuilderTests.AssertNoDuplicateSections(ini);
+        BuildWatermarkTests.AssertStamped(r);
     }
 
     [Fact]
@@ -228,7 +242,7 @@ public class RigidReplaceTests : IDisposable
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         int frame = MigotoEmitter.RetexTag(_frameTexHash), panel = MigotoEmitter.RetexTag(_panelTexHash);
@@ -256,7 +270,7 @@ public class RigidReplaceTests : IDisposable
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         Assert.DoesNotContain("CustomShaderRecover", ini);
@@ -285,7 +299,7 @@ public class RigidReplaceTests : IDisposable
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n", ini);
@@ -317,7 +331,7 @@ public class RigidReplaceTests : IDisposable
         WriteDonorGlb();
         AddReplaceTarget(p);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         Assert.Contains($"[TextureOverride_Cap_crate_frame]\nhash = {lod0Hash}\nmatch_priority = 0\n", ini);
@@ -344,7 +358,7 @@ public class RigidReplaceTests : IDisposable
             new() { Submesh = 0, Albedo = "frame_base.png" },
         });
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         // the draw list saves the ps-t range, probes for the slot, binds the encoded map, and restores
@@ -353,6 +367,31 @@ public class RigidReplaceTests : IDisposable
         Assert.Contains("ps-t0 = Resource_Tex0", ini);
         Assert.Contains("[Resource_Tex0]\nfilename = donor_crate_frame_s0_a.dds", ini);
         ModBuilderTests.AssertNoDuplicateSections(ini);
+    }
+
+    [Fact]
+    public void An_effect_map_on_a_rigid_replacement_encodes_probes_binds_and_repairs()
+    {
+        var env = MakeEnv(out _, out _, skinWidth: 0, effect: true);
+        var project = NewProject("Rigid effect");
+        WriteDonorGlb();
+        using (var image = new Image<Rgba32>(8, 8, new Rgba32(30, 60, 90, 255)))
+            image.SaveAsPng(Path.Combine(_proj, "frame_effect.png"));
+        AddReplaceTarget(project, new List<SubmeshTextures>
+        {
+            new() { Submesh = 0, Blend = "frame_effect.png" },
+        });
+
+        var result = ReleasedBuild.Build(project, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
+        Assert.Contains($"filter_index = {MigotoEmitter.FilterBlend}", ini);
+        Assert.Contains("$zz_slot_b = -1", ini);
+        Assert.Contains("ps-t2 = Resource_Tex0", ini);
+        Assert.Single(Directory.GetFiles(result.OutDir, "donor_*_b.dds"));
+        using var repair = JsonDocument.Parse(File.ReadAllText(Path.Combine(result.OutDir, "repair.json")));
+        Assert.Equal("Authored", repair.RootElement.GetProperty("changes")[0]
+            .GetProperty("textures")[0].GetProperty("blend").GetProperty("origin").GetString());
     }
 
     [Fact]
@@ -372,7 +411,7 @@ public class RigidReplaceTests : IDisposable
             SubjectCharacter = "Vesna", SubjectOutfit = "VesnaSSR01", ReplaceFile = "donor_body.glb",
         });
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         Assert.Contains("; Pooled mesh swap", ini);
@@ -396,13 +435,14 @@ public class RigidReplaceTests : IDisposable
             new SubjectPart("body", "c_vesna01_body_lod0", "addr_body", Array.Empty<SubjectMaterial>()),
         }, Skeleton: null, Problems: Array.Empty<string>());
 
-        return rigid with
+        var mixed = rigid with
         {
             ResolveSubject = (c, s) => c == "Vesna" && s == "VesnaSSR01" ? pooledModel
                 : rigid.ResolveSubject(c, s),
             ResolveAddress = a => a == "addr_body" ? "bundleS" : rigid.ResolveAddress(a),
             Deobfuscate = id => id == "bundleS" ? skinned : rigid.Deobfuscate(id),
         };
+        return mixed.Exact();
     }
 
     // ---- a scoped retexture anchored on a rigid-replaced part ----------------------------------------
@@ -579,11 +619,11 @@ public class RigidReplaceTests : IDisposable
         AddReplaceTarget(p);
         p.SetChangeKey("Crate", "CrateMk2", Part, EditVerbs.Replace, "F8", hideWhenOff: true);
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
-        Assert.Contains("if $zz_key_f6 == 1\nhandling = skip\nendif\n"
-            + "if $zz_key_f6 == 1\nif $zz_key_f8 == 1\nrun = CommandListRigid_crate_frame\nendif\nendif\n", ini);
+        Assert.Contains("if $zz_key_f6 == 0\nhandling = skip\nendif\n"
+            + "if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CommandListRigid_crate_frame\nendif\nendif\n", ini);
         Assert.DoesNotContain("handling = skip\nrun = CommandListRigid_crate_frame", ini);
         ModBuilderTests.AssertNoDuplicateSections(ini);
     }
@@ -600,10 +640,10 @@ public class RigidReplaceTests : IDisposable
         AddReplaceTarget(p);
         p.SetChangeKey("Crate", "CrateMk2", Part, EditVerbs.Replace, "F8");
 
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
-        Assert.Contains("if $zz_key_f6 == 1\nif $zz_key_f8 == 1\n"
+        Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\n"
             + "handling = skip\nrun = CommandListRigid_crate_frame\nendif\nendif\n", ini);
     }
 
@@ -617,17 +657,48 @@ public class RigidReplaceTests : IDisposable
         AddReplaceTarget(p);
         p.Hidden.Add(new HiddenMesh { Character = "Crate", Outfit = "CrateMk2", Mesh = Part });
 
-        var warnings = new List<string>();
-        var edits = VerbDerivation.Derive(p, env.ResolveSubject, warnings);
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        // Hide wins over the edit on one mesh, so the build never sees both on it
-        Assert.Equal(new[] { EditVerbs.Hide }, edits.Select(e => e.Verb).ToArray());
-        Assert.Contains(warnings, w => w.Contains("is hidden. Its mesh edit is not in this build"));
-
-        var r = ModBuilder.Build(p, env, _out, zip: false);
+        // The hide answers the part, so the build never emits the rigid replacement's own section for it
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.Contains($"hash = {lod0Hash}", ini);
         Assert.DoesNotContain("CommandListRigid", ini);
         ModBuilderTests.AssertNoDuplicateSections(ini);
     }
+    [Fact]
+    public void The_rigid_routes_repair_record_names_its_own_buffers_and_no_union()
+    {
+        // A static draw is not posed per vertex, so it ships no skin stream and there is no bone order for
+        // one to address. What it does need read back is its channel table: the streams are sliced in the
+        // target part's own stored layout, which the new install's asset would have to be re-read to learn.
+        var env = MakeEnv(out _, out _, skinWidth: 0);
+        var p = NewProject();
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "repair.json")));
+        var change = doc.RootElement.GetProperty("changes").EnumerateArray()
+            .Single(c => c.GetProperty("verb").GetString() == "replace");
+        var geo = change.GetProperty("geometry");
+
+        Assert.Equal("rigid", change.GetProperty("route").GetString());
+        var streamFiles = geo.GetProperty("streams").EnumerateArray()
+            .ToDictionary(e => e.GetProperty("stream").GetInt32(), e => e.GetProperty("file").GetString()!);
+        foreach (var file in streamFiles.Values.Append(geo.GetProperty("index_file").GetString()!))
+            Assert.True(File.Exists(Path.Combine(r.OutDir, file)),
+                $"repair data names '{file}', which the mod does not ship");
+        // stream 0 is named by its NUMBER, not by a route word: this route ships it as rigid_vb0 where the
+        // pooled one ships it as combined_bind, and a reader joins on the channel table either way
+        Assert.Contains(0, streamFiles.Keys);
+        Assert.DoesNotContain(Mesh.SkinLayout.SkinStream, streamFiles.Keys);
+        Assert.False(geo.TryGetProperty("union", out _));
+        Assert.False(geo.TryGetProperty("pool", out _));
+        // every live channel has a buffer to be read out of
+        foreach (var c in geo.GetProperty("channels").EnumerateArray())
+            if (c.GetProperty("dimension").GetInt32() > 0)
+                Assert.Contains(c.GetProperty("stream").GetInt32(), streamFiles.Keys);
+        Assert.NotEmpty(geo.GetProperty("channels").EnumerateArray());
+    }
+
 }

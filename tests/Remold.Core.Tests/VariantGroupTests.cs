@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -7,6 +7,7 @@ using Remold.Core.Export;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 using Remold.Core.Model;
+using Remold.Core.Project;
 using Remold.Core.Tables;
 using Xunit;
 using static Remold.Core.Tests.Support.PoolFixtures;
@@ -372,7 +373,7 @@ public class VariantGroupTests
         // …and the same derive without the groups is the refusal it has always been
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), candidates, missingParts: leftOut, replacedPart: "body"));
-        Assert.Contains("no pooled part of this outfit poses", e.Message);
+        Assert.Contains("no part of this item moves", e.Message);
     }
 
     [Fact]
@@ -393,9 +394,8 @@ public class VariantGroupTests
             PoolDerive.Derive(Donor(10, 40, 42), candidates, missingParts: leftOut, replacedPart: "body",
                 groups: groups));
         // …and the wardrobe parts are no part of it: their tables settle that neither can be posing 42
-        Assert.Equal("the donor rides 1 bone(s) that no pooled part of this outfit poses "
-            + "(first: 0x0000002a, carried at zero weight by 'body'). "
-            + "Re-weight the donor onto the bones this outfit moves", e.Message);
+        Assert.Equal("the new mesh uses 1 bone(s) that no part of this item moves. They are named by "
+            + "'body' but never moved. Re-weight the mesh onto the bones this item moves", e.Message);
     }
 
     /// <summary>The corpus shape the orphan check used to turn down: the donor rides a bone ONLY the group's
@@ -423,10 +423,10 @@ public class VariantGroupTests
         // …and the same roster with no groups is the orphan refusal it has always been, word for word
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), candidates, missingParts: leftOut, replacedPart: "body"));
-        Assert.Equal("the donor rides 1 bone(s) owned by no pooled part of this outfit (first: 0x00000028). "
-            + "Left out of the pool: 'P1_dress' · it is a wardrobe option worn only some of the time; "
+        Assert.Equal("the new mesh uses 1 bone(s) that no part this mod can build with has. "
+            + "Left out: 'P1_dress' · it is a wardrobe option worn only some of the time; "
             + "'P2_dress' · it is a wardrobe option worn only some of the time. "
-            + "Re-weight the donor onto the pooled parts, or drop this Replace", e.Message);
+            + "Re-weight the mesh onto the parts that are in, or remove this mesh edit", e.Message);
     }
 
     /// <summary>A bone no group covers is still an orphan, and the exemption changes neither the count nor
@@ -448,8 +448,8 @@ public class VariantGroupTests
         // was held back that could own it, which is the foreign-armature wording.
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40, 99), candidates, replacedPart: "body", groups: groups));
-        Assert.Equal("the donor rides 1 bone(s) owned by no part of this outfit (first: 0x00000063). "
-            + "It was weighted against a different armature; re-export this outfit's reference and re-weight",
+        Assert.Equal("the new mesh uses 1 bone(s) that no part of this item has. It was weighted "
+            + "against a different armature. Open this item in Blender again and re-weight the mesh",
             e.Message);
     }
 
@@ -469,12 +469,12 @@ public class VariantGroupTests
         var groups = PoolDerive.VariantGroups(roster, Scheme, Array.Empty<PoolDerive.MissingPart>(),
             candidates, "body");
 
-        var e = Assert.Throws<InvalidDataException>(() =>
+        var e = Assert.Throws<AuthoredRefusalException>(() =>
             PoolDerive.Derive(Donor(40), candidates, missingParts: leftOut, replacedPart: "body",
                 groups: groups));
-        Assert.Equal("the donor rides only bones this outfit's wardrobe or scene alternatives cover, so no "
-            + "part of it joins the pool and nothing can host the replacement's draw. Re-weight the donor "
-            + "onto the bones the outfit's own parts move as well", e.Message);
+        Assert.Equal("the new mesh uses only bones that belong to this item's other wardrobe or scene "
+            + "options, so no part of it can carry the replacement. Re-weight the mesh onto the bones "
+            + "this item's own parts move as well", e.Message);
 
         // the control: one bone of the body's own is all it takes for the pool to form, and the covered
         // bone rides along
@@ -595,14 +595,17 @@ public class VariantGroupTests
             groups: PoolDerive.VariantGroups(roster, Scheme, Array.Empty<PoolDerive.MissingPart>(),
                 candidates, "body"));
 
-        var e = Assert.Throws<InvalidDataException>(() =>
-            PoolDerive.CoverTierBones(derived, candidates, TiersOf, MigotoEmitter.MaxPoolParts));
-        Assert.Contains("no part of this outfit can supply at this detail level", e.Message);
+        var classified = PoolDerive.CoverTierBones(derived, candidates, TiersOf,
+            MigotoEmitter.MaxPoolParts, replacedPart: "body", readableRoster: roster);
+        var verdict = Assert.Single(classified.TierBoneVerdicts);
+        Assert.Equal(PoolDerive.TierBoneClass.Merged, verdict.Classification);
+        Assert.Equal(new[] { "P1_dress", "P2_dress" }, verdict.OwningParts);
 
-        // the control: over the whole roster the dress covers it, so the refusal above is the candidacy
-        // filter's doing and nothing else
+        // the control: over the whole roster the dress covers it, so the classification above is the
+        // candidacy filter's doing and nothing else
         Assert.Equal(new[] { "body", "P1_dress" },
-            PoolDerive.CoverTierBones(derived, roster, TiersOf, MigotoEmitter.MaxPoolParts).Pool);
+            PoolDerive.CoverTierBones(derived, roster, TiersOf, MigotoEmitter.MaxPoolParts,
+                replacedPart: "body", readableRoster: roster).Pool);
     }
 
     // ---------------------------------------------------------------------------- the export offer
@@ -833,7 +836,7 @@ public class VariantGroupTests
         // …and the same derive without it is the refusal it has always been
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), candidates, missingParts: leftOut, replacedPart: "body"));
-        Assert.Contains("no pooled part of this outfit poses", e.Message);
+        Assert.Contains("no part of this item moves", e.Message);
     }
 
     [Fact]

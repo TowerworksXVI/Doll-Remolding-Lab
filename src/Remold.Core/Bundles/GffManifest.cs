@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace Remold.Core.Bundles;
 
@@ -20,7 +21,7 @@ namespace Remold.Core.Bundles;
 /// </summary>
 public sealed class GffManifest
 {
-    /// <summary>The manifest's physical filename (sans <c>.bundle</c>): <c>md5("AssetBundleFileSystem")</c>.</summary>
+    /// <summary>The manifest's physical filename (sans <c>.bundle</c>).</summary>
     public const string ManifestHash = "08dfe7d89b6fe56375d6dfec87ffcc8a";
 
     /// <summary>One 40-byte stub: which physical file holds a logical bundle and where inside it.
@@ -36,15 +37,18 @@ public sealed class GffManifest
     private const int ClusterSize = 4096;
     private const int StubSize = 40;
 
-    private readonly byte[] _bytes;
-    private readonly Dictionary<string, long> _nameToPosition;
+    private readonly Dictionary<string, Located> _byName;
+    private readonly Dictionary<long, Stub> _stubsByPosition;
     private readonly List<string> _namesInBlockOrder;
+    private readonly List<string> _physicalHashes;
 
-    private GffManifest(byte[] bytes, Dictionary<string, long> nameToPosition, List<string> namesInBlockOrder)
+    private GffManifest(Dictionary<string, Located> byName, Dictionary<long, Stub> stubsByPosition,
+        List<string> namesInBlockOrder, List<string> physicalHashes)
     {
-        _bytes = bytes;
-        _nameToPosition = nameToPosition;
+        _byName = byName;
+        _stubsByPosition = stubsByPosition;
         _namesInBlockOrder = namesInBlockOrder;
+        _physicalHashes = physicalHashes;
     }
 
     /// <summary>Header-declared entry count: the logical bundles this install's VFS addresses (the
@@ -53,6 +57,10 @@ public sealed class GffManifest
 
     /// <summary>Every stored bundle name (internalId, <c>&lt;hash&gt;.bundle</c>) in block order.</summary>
     public IReadOnlyList<string> Names => _namesInBlockOrder;
+
+    /// <summary>Every physical bundle hash addressed by at least one stub, first-seen order. Kept directly
+    /// so install completeness checks walk physical files rather than all logical entries.</summary>
+    public IReadOnlyList<string> PhysicalHashes => _physicalHashes;
 
     /// <summary>The manifest file inside <paramref name="bundleDir"/>, or null when absent.</summary>
     public static string? PathIn(string bundleDir)
@@ -84,8 +92,11 @@ public sealed class GffManifest
             throw new InvalidDataException(
                 $"{name}: implausible GFF entry count {blockCount} (max blocks {maxBlockCount}, max files {maxFileCount}) for a {bytes.Length}-byte file");
 
-        var nameToPosition = new Dictionary<string, long>((int)blockCount, StringComparer.Ordinal);
+        var byName = new Dictionary<string, Located>((int)blockCount, StringComparer.Ordinal);
+        var stubsByPosition = new Dictionary<long, Stub>((int)blockCount);
         var namesInOrder = new List<string>((int)blockCount);
+        var physicalHashes = new List<string>();
+        var seenPhysical = new HashSet<string>(StringComparer.Ordinal);
         var stubPositions = new HashSet<long>((int)blockCount);   // one stub per cluster
         for (long i = 0; i < blockCount; i++)
         {
@@ -108,12 +119,141 @@ public sealed class GffManifest
                     $"{name}: block {i}'s stub cluster {clusterIndex} is already claimed by another entry. Two names cannot share one stub");
 
             string entryName = DecodeName(bytes, stringsAt + (long)StringSlotSize * stringIndex, encBytes, name, i);
-            if (!nameToPosition.TryAdd(entryName, stubPos))
+            var stub = DecodeStub(bytes.AsSpan((int)stubPos, StubSize));
+            var located = new Located(stubPos, stub);
+            if (!byName.TryAdd(entryName, located))
                 throw new InvalidDataException($"{name}: bundle name '{entryName}' appears twice in the name table");
+            stubsByPosition.Add(stubPos, stub);
             namesInOrder.Add(entryName);
+            if (seenPhysical.Add(stub.PhysHash)) physicalHashes.Add(stub.PhysHash);
         }
 
-        return new GffManifest(bytes, nameToPosition, namesInOrder) { EntryCount = (int)blockCount };
+        return new GffManifest(byName, stubsByPosition, namesInOrder, physicalHashes)
+            { EntryCount = (int)blockCount };
+    }
+
+    // ---- compact parsed-manifest snapshot ------------------------------------------------------------
+
+    private const uint SnapshotMagic = 0x53464647;   // "GFFS"
+    private const byte SnapshotSchema = 1;
+
+    /// <summary>Load the compact parsed form when it names this exact source path, length and mtime;
+    /// otherwise run <see cref="Read"/>'s full structural validation and replace the snapshot.</summary>
+    public static GffManifest LoadCached(string path, string snapshotPath) =>
+        LoadCached(path, snapshotPath, out _);
+
+    /// <summary><see cref="LoadCached(string, string)"/> with a test/diagnostic seam naming a snapshot hit.</summary>
+    internal static GffManifest LoadCached(string path, string snapshotPath, out bool snapshotHit)
+    {
+        var source = new FileInfo(path);
+        string sourcePath = source.FullName;
+        long sourceLength = source.Length;
+        long sourceMtimeTicks = source.LastWriteTimeUtc.Ticks;
+        if (TryLoadSnapshot(snapshotPath, sourcePath, sourceLength, sourceMtimeTicks) is { } cached)
+        {
+            snapshotHit = true;
+            return cached;
+        }
+
+        snapshotHit = false;
+        var parsed = Read(path);   // the only source path: validates the complete large image before caching
+        try { parsed.SaveSnapshot(snapshotPath, sourcePath, sourceLength, sourceMtimeTicks); }
+        catch { /* regenerable cache only; the fully validated parse stands */ }
+        return parsed;
+    }
+
+    private void SaveSnapshot(string path, string sourcePath, long sourceLength, long sourceMtimeTicks)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var w = new BinaryWriter(new BufferedStream(File.Create(tmp), 1 << 20), Encoding.UTF8))
+            {
+                w.Write(SnapshotMagic); w.Write(SnapshotSchema);
+                w.Write(sourcePath); w.Write(sourceLength); w.Write(sourceMtimeTicks);
+                w.Write(EntryCount);
+                foreach (string name in _namesInBlockOrder)
+                {
+                    var located = _byName[name];
+                    w.Write(name); w.Write(located.Position);
+                    WriteHash(w, located.Stub.PhysHash);
+                    w.Write(located.Stub.Offset); w.Write(located.Stub.Size);
+                    if (located.Stub.SubHash.Length != 16)
+                        throw new InvalidDataException("a GFF stub carries no 16-byte content hash");
+                    w.Write(located.Stub.SubHash);
+                }
+                w.Write(_physicalHashes.Count);
+                foreach (string hash in _physicalHashes) WriteHash(w, hash);
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best-effort temp cleanup */ } }
+        }
+    }
+
+    private static GffManifest? TryLoadSnapshot(string path, string sourcePath, long sourceLength,
+        long sourceMtimeTicks)
+    {
+        if (!File.Exists(path)) return null;
+        try
+        {
+            using var r = new BinaryReader(new BufferedStream(File.OpenRead(path), 1 << 20), Encoding.UTF8);
+            if (r.ReadUInt32() != SnapshotMagic || r.ReadByte() != SnapshotSchema) return null;
+            if (!string.Equals(r.ReadString(), sourcePath, StringComparison.OrdinalIgnoreCase)
+                || r.ReadInt64() != sourceLength || r.ReadInt64() != sourceMtimeTicks)
+                return null;
+            int count = r.ReadInt32();
+            if (count <= 0 || count > 1_000_000) return null;
+            var byName = new Dictionary<string, Located>(count, StringComparer.Ordinal);
+            var stubsByPosition = new Dictionary<long, Stub>(count);
+            var names = new List<string>(count);
+            var derivedPhysical = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < count; i++)
+            {
+                string name = r.ReadString();
+                long position = r.ReadInt64();
+                var stub = new Stub(ReadHash(r), r.ReadUInt32(), r.ReadUInt32(), ReadExactly(r, 16));
+                var located = new Located(position, stub);
+                if (name.Length == 0 || !byName.TryAdd(name, located)
+                    || !stubsByPosition.TryAdd(position, stub)) return null;
+                names.Add(name);
+                derivedPhysical.Add(stub.PhysHash);
+            }
+            int physicalCount = r.ReadInt32();
+            if (physicalCount <= 0 || physicalCount > count) return null;
+            var physical = new List<string>(physicalCount);
+            var uniquePhysical = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < physicalCount; i++)
+            {
+                string hash = ReadHash(r);
+                if (!uniquePhysical.Add(hash)) return null;
+                physical.Add(hash);
+            }
+            if (!derivedPhysical.SetEquals(uniquePhysical) || r.BaseStream.Position != r.BaseStream.Length)
+                return null;
+            return new GffManifest(byName, stubsByPosition, names, physical) { EntryCount = count };
+        }
+        catch { return null; }
+    }
+
+    private static void WriteHash(BinaryWriter writer, string hash)
+    {
+        byte[] bytes = Convert.FromHexString(hash);
+        if (bytes.Length != 16) throw new InvalidDataException("a GFF stub carries no 16-byte physical hash");
+        writer.Write(bytes);
+    }
+
+    private static string ReadHash(BinaryReader reader) =>
+        Convert.ToHexString(ReadExactly(reader, 16)).ToLowerInvariant();
+
+    private static byte[] ReadExactly(BinaryReader reader, int count)
+    {
+        byte[] bytes = reader.ReadBytes(count);
+        if (bytes.Length != count) throw new EndOfStreamException();
+        return bytes;
     }
 
     private static string DecodeName(byte[] bytes, long slotAt, ReadOnlySpan<byte> encBytes, string file, long block)
@@ -138,9 +278,8 @@ public sealed class GffManifest
     public bool TryLocate(string internalId, out Located located)
     {
         if (!internalId.EndsWith(".bundle", StringComparison.Ordinal)) internalId += ".bundle";
-        if (_nameToPosition.TryGetValue(internalId, out var pos))
+        if (_byName.TryGetValue(internalId, out located))
         {
-            located = new Located(pos, ReadStubAt(pos));
             return true;
         }
         located = default;
@@ -158,7 +297,12 @@ public sealed class GffManifest
     /// <summary>The stub at a known byte position (its 40 bytes decoded).</summary>
     public Stub ReadStubAt(long position)
     {
-        var s = _bytes.AsSpan((int)position, StubSize);
+        if (_stubsByPosition.TryGetValue(position, out var stub)) return stub;
+        throw new ArgumentOutOfRangeException(nameof(position), "the position is not a manifest stub");
+    }
+
+    private static Stub DecodeStub(ReadOnlySpan<byte> s)
+    {
         string phys = Convert.ToHexString(s.Slice(0, 16)).ToLowerInvariant();
         uint off = BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(16, 4));
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(20, 4));

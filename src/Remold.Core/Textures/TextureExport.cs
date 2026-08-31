@@ -32,9 +32,17 @@ public static class TextureExport
     /// bundles are distinct game assets, and one texture materialized under two SUBJECTS is two files —
     /// an edit to a file is an edit to that outfit alone, which is what lets the build scope it. The
     /// SINGLE naming rule every texture producer shares. The texture name is carried on the target,
-    /// never re-parsed from this filename.</summary>
+    /// never re-parsed from this filename.
+    ///
+    /// A same-bundle/name collision uses the overload below, extending this stable name with the exact path
+    /// id only where the shorter name cannot identify one file.</summary>
     public static string BundleScopedName(string bundleId, string textureName, string subject) =>
         $"{textureName}.{SanitizeSegment(bundleId)}.{SanitizeSegment(subject)}.png";
+
+    /// <summary>The collision spelling of <see cref="BundleScopedName(string,string,string)"/>.</summary>
+    public static string BundleScopedName(string bundleId, string textureName, string subject, long pathId) =>
+        $"{textureName}.path-{pathId.ToString(System.Globalization.CultureInfo.InvariantCulture)}."
+        + $"{SanitizeSegment(bundleId)}.{SanitizeSegment(subject)}.png";
 
     private static string SanitizeSegment(string s)
     {
@@ -52,10 +60,10 @@ public static class TextureExport
     public readonly record struct TextureProbe(int Width, int Height, bool Authorable);
 
     /// <summary>Read a Texture2D's size and authorability without decoding its pixels; null when the
-    /// bundle holds no texture of that name. The one route to that answer, so the Unity format enum stays
-    /// inside Core and callers ask the question rather than the format.</summary>
-    public static TextureProbe? Probe(byte[] deobfuscatedBundle, string textureName) =>
-        new BundleReader().GetTextureMeta(deobfuscatedBundle, textureName) is { } m
+    /// bundle holds no such texture. The one route to that answer, so the Unity format enum stays inside
+    /// Core and callers ask the question rather than the format.</summary>
+    public static TextureProbe? Probe(byte[] deobfuscatedBundle, BundleReader.TextureRef which) =>
+        new BundleReader().GetTextureMeta(deobfuscatedBundle, which) is { } m
             ? new TextureProbe(m.Width, m.Height,
                 TextureCodec.IsSupported((AssetsTools.NET.Texture.TextureFormat)m.Format))
             : null;

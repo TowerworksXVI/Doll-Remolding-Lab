@@ -58,6 +58,33 @@ public sealed class BoneTable
     }
 
     /// <summary>
+    /// The first chain suffix of <paramref name="fullPath"/> whose CRC32 equals
+    /// <paramref name="hash"/>, or null when the path does not name that bone.
+    /// </summary>
+    public static string? MatchingSuffix(uint hash, string? fullPath)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return null;
+
+        var segments = fullPath.Split('/');
+        for (int i = 0; i < segments.Length; i++)
+        {
+            var suffix = string.Join("/", segments.Skip(i));
+            if (Hash(suffix) == hash) return suffix;
+        }
+        return null;
+    }
+
+    /// <summary>The leaf segment of the matching bone-path suffix, for a user-facing single-bone name.</summary>
+    public static string? MatchingLeaf(uint hash, string? fullPath)
+    {
+        var suffix = MatchingSuffix(hash, fullPath);
+        if (suffix is null) return null;
+        int separator = suffix.LastIndexOf('/');
+        string leaf = suffix[(separator + 1)..];
+        return leaf.Length > 0 ? leaf : null;
+    }
+
+    /// <summary>
     /// The hashed path of a bone: entry node down to the bone, '/'-joined, entry node included.
     /// Character rigs hang under a node named <c>root</c> (<c>root/Root_M/Spine1_M/…</c>); skinned
     /// prop/accessory rigs have no <c>root</c> wrapper and start at <c>Root_M</c>. Anchor on whichever

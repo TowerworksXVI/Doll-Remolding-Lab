@@ -515,6 +515,47 @@ public static class PoolMath
     /// part OWNS the bone else <see cref="Sentinel"/>; <see cref="Owner"/>[u] is the owning part index.</summary>
     public sealed record UnionResult(uint[] UnionHashes, uint[][] FullMaps, uint[][] ScatterMaps, int[] Owner);
 
+    /// <summary>A stable projection of a union onto the rows the shipped palettes retain.
+    /// <see cref="SourceRows"/> are the original union indices in their original order;
+    /// <see cref="OldToCompact"/> maps every original slot to its shipped slot, or -1 when pruned.</summary>
+    public sealed record UnionCompaction(UnionResult Union, int[] SourceRows, int[] OldToCompact);
+
+    /// <summary>Filter a reconciled union without changing the relative order of any surviving row. Local
+    /// maps keep their original length because they are indexed by source bone tables; a pruned local row
+    /// maps to <see cref="Sentinel"/>. Ownership remains stated in the original pool-part index space.</summary>
+    public static UnionCompaction CompactUnion(UnionResult source, IEnumerable<int> retainedRows)
+    {
+        var rows = retainedRows.Distinct().OrderBy(i => i).ToArray();
+        var oldToCompact = Enumerable.Repeat(-1, source.UnionHashes.Length).ToArray();
+        for (int i = 0; i < rows.Length; i++)
+        {
+            int old = rows[i];
+            if (old < 0 || old >= source.UnionHashes.Length)
+                throw new ArgumentOutOfRangeException(nameof(retainedRows), old,
+                    $"union row {old} is outside 0..{source.UnionHashes.Length - 1}");
+            oldToCompact[old] = i;
+        }
+
+        var fullMaps = new uint[source.FullMaps.Length][];
+        var scatterMaps = new uint[source.ScatterMaps.Length][];
+        for (int pi = 0; pi < source.FullMaps.Length; pi++)
+        {
+            fullMaps[pi] = new uint[source.FullMaps[pi].Length];
+            scatterMaps[pi] = new uint[source.ScatterMaps[pi].Length];
+            for (int li = 0; li < source.FullMaps[pi].Length; li++)
+            {
+                int compact = oldToCompact[source.FullMaps[pi][li]];
+                fullMaps[pi][li] = compact >= 0 ? (uint)compact : Sentinel;
+                scatterMaps[pi][li] = source.ScatterMaps[pi][li] != Sentinel && compact >= 0
+                    ? (uint)compact : Sentinel;
+            }
+        }
+
+        var union = new UnionResult(rows.Select(i => source.UnionHashes[i]).ToArray(), fullMaps,
+            scatterMaps, rows.Select(i => source.Owner[i]).ToArray());
+        return new UnionCompaction(union, rows, oldToCompact);
+    }
+
     /// <summary>
     /// Ownership with the pipeline's own anchor preferred: every union bone the anchor's operator recovers
     /// SOUNDLY (its conditioning verdict, not its weight) moves to the anchor; the summed-weight argmax

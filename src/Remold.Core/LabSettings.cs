@@ -56,6 +56,13 @@ public sealed class LabSettings
     /// false, which is "nothing owed" — the only correct reading of a file written before the row
     /// existed.</para></summary>
     public bool ForceRescanOwed { get; set; }
+    /// <summary>Whether a NEW mod starts out shipping the record that lets its built folder be read back
+    /// into a project. Seeds <c>ProjectInfo.IncludeRepairData</c> at creation and is read nowhere else: an
+    /// existing mod carries its own answer, and the Build pane's checkbox writes only that mod's. So this
+    /// moves with the Settings form alone, and turning it off never reaches a mod already made.
+    /// <para>ADDITIVE, and the default is TRUE: a settings.json written before the key existed has to
+    /// deserialize to shipping the record, which is what every build did when it was written.</para></summary>
+    public bool IncludeRepairData { get; set; } = true;
     /// <summary>Recent mod projects, most-recent-first.</summary>
     public List<RecentMod> RecentMods { get; set; } = new();
 

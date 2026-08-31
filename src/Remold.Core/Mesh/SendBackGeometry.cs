@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Remold.Core.Mesh;
 
 /// <summary>
-/// What a combined send-back does with one returned part.
+/// Whether one part of a combined send-back carries anything to take.
 ///
 /// <para>A send-all returns every writable part of the session whether or not the modder touched it, so
 /// "it came back" is not "it changed". Taking every returned part as an edit flags parts still carrying the
@@ -12,48 +12,6 @@ namespace Remold.Core.Mesh;
 /// </summary>
 public static class SendBackGeometry
 {
-    /// <summary>Re-split one returned part into its own workspace glb — unless there is nothing in it to
-    /// take: what came back IS what that file already holds, skin included, and the part's map slots asked
-    /// for nothing. Returns true when the file was rewritten, which is the caller's "this part carries an
-    /// edit".
-    ///
-    /// <para><paramref name="hasMapAsks"/> is the other half of the question, and only the caller can answer
-    /// it: a slot re-pointed at a sibling's map, painted, or plugged with the neutral leaves the mesh exactly
-    /// as it was, and the rewrite is what embeds that record in the workspace glb — the only copy of it that
-    /// survives a later re-open of the part on its own.</para>
-    ///
-    /// <para>Nothing is written on the "nothing to take" answer: the workspace glb keeps its bytes, so the
-    /// byte-compare against <c>originals/</c> still reads the part as untouched and the donor record still
-    /// describes what is in the file.</para>
-    ///
-    /// <para><paramref name="beforeWrite"/> is the observation point for the write itself: it fires only once
-    /// the returned part has parsed and the re-split has agreed to write, so a run that answers "nothing to
-    /// take" and a re-split that refuses both leave it silent. That is the invariant the tests hold this
-    /// method to; no production caller passes one.</para>
-    ///
-    /// <para><paramref name="recordGlb"/> names the glb the map-origin record was written beside, which is
-    /// what settles the stock maps the rewrite embeds; a combined send arrives under a name of its own, so
-    /// only the caller knows where its record sits. Null reads the record beside
-    /// <paramref name="returned"/> itself.</para>
-    ///
-    /// <para><paramref name="authoredMaps"/> is the intake's own authored files per submesh, which the rewrite
-    /// embeds over the stock maps they replace: only the caller knows where the intake put them, and without
-    /// them the part re-opens showing the game textures its edit covers.</para>
-    ///
-    /// <para><paramref name="baselineGlb"/> is what the returned part is compared AGAINST; the rewrite still
-    /// lands on <paramref name="workspaceGlb"/> either way. See <see cref="Unchanged"/> for which file
-    /// belongs there.</para>
-    /// </summary>
-    public static bool Take(MeshGltf.ParsedGlb returned, string? meshName, string workspaceGlb,
-        bool hasMapAsks, Action<string>? beforeWrite = null, string? recordGlb = null,
-        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null,
-        string? baselineGlb = null)
-    {
-        if (!hasMapAsks && Unchanged(returned, meshName, workspaceGlb, baselineGlb)) return false;
-        MeshGltf.ReexportPartGlb(returned, meshName, workspaceGlb, beforeWrite, recordGlb, authoredMaps);
-        return true;
-    }
-
     /// <summary>Whether the mesh that came back IS the one that was handed out — geometry AND skin, since a
     /// repaint that moves no vertex is still an edit and only the weights carry it.
     ///
@@ -83,6 +41,23 @@ public static class SendBackGeometry
         catch { return false; }
     }
 
+    /// <summary>The same question against a baseline the caller has ALREADY parsed. A combined send asks it
+    /// once per part against ONE handed-out file, and re-reading that file per part is the whole combined glb
+    /// — every part's geometry and every texture in it — read once for each part it carries. Both sides here
+    /// are parsed once and read many times, which is what <see cref="MeshGltf.ParsedGlb"/> exists for.
+    ///
+    /// <para>Same contract as the path form otherwise: a pair that cannot be read answers false and takes the
+    /// rewrite.</para></summary>
+    public static bool Unchanged(MeshGltf.ParsedGlb returned, string? meshName, MeshGltf.ParsedGlb baseline)
+    {
+        try
+        {
+            return SameContent(MeshGltf.ImportPayload(returned, meshName),
+                MeshGltf.ImportPayload(baseline, meshName));
+        }
+        catch { return false; }
+    }
+
     /// <summary>Whether two payloads carry the same mesh CONTENT: the same surface, the same shading data on
     /// it, and the same skin holding it to the same bones.
     ///
@@ -92,8 +67,7 @@ public static class SendBackGeometry
     /// every corner of every triangle still names the same position, normal, UV and weights. Reading the
     /// buffers side by side calls that a new mesh; reading the corners calls it what it is. The cost is that
     /// a pure re-weld or re-split — which changes no corner — is invisible here, and the part is left alone.
-    /// Bit-exact identity is <see cref="Project.ModProject.IsEdited"/>'s question, asked of the workspace glb
-    /// against its <c>originals/</c> copy.</para>
+    /// Bit-exact identity is a different question, and not the one this comparison answers.</para>
     ///
     /// <para>Corners are paired IN ORDER, so a returned file whose faces, submesh contents, or triangle
     /// windings came back reordered reads as changed and is taken. That is the safe direction — the
@@ -101,7 +75,8 @@ public static class SendBackGeometry
     /// in the order it was handed them, so an untouched part pairs cleanly. Winding is semantic here (the
     /// compile ships the index buffer), which is the other reason order must count.</para>
     ///
-    /// <para>Tangents are deliberately out: they are derived from the positions and UVs already compared, and
+    /// <para>Tangents are deliberately out: they are derived from the positions and every transported UV set
+    /// already compared, and
     /// the transport recomputes them per split copy, so comparing them would report an edit on every seam of
     /// every untouched part. Vertex Color is out for the same reason it never travels — Blender does not
     /// carry it.</para></summary>
@@ -109,8 +84,14 @@ public static class SendBackGeometry
     {
         if (a.HasSkin != b.HasSkin) return false;
         if (!a.Has("Vertex") || !b.Has("Vertex")) return false;
-        foreach (var ch in new[] { "Normal", "TexCoord0" })
-            if (a.Has(ch) != b.Has(ch)) return false;
+        if (a.Has("Normal") != b.Has("Normal")) return false;
+        // UV0 keeps the classifier's shipped symmetric presence rule. Higher sets are baseline-authoritative:
+        // every transported baseline set must come back, while a Blender-created layer beyond that prefix is
+        // ignored (and named by the return preparation) rather than making the part look edited.
+        if (a.Has("TexCoord0") != b.Has("TexCoord0")) return false;
+        int uvSets = MeshGltf.TransportedTexCoordCount(b.Mesh);
+        for (int i = 1; i < uvSets; i++)
+            if (!a.Has($"TexCoord{i}")) return false;
         if (a.Submeshes.Count != b.Submeshes.Count) return false;
         int corners = 0;
         for (int s = 0; s < a.Submeshes.Count; s++)
@@ -123,7 +104,7 @@ public static class SendBackGeometry
         if (corners == 0) return false;
 
         // an influence outside its joint list is not a skin this can compare
-        if (Reader.For(a) is not { } ra || Reader.For(b) is not { } rb) return false;
+        if (Reader.For(a, uvSets) is not { } ra || Reader.For(b, uvSets) is not { } rb) return false;
 
         Span<(uint Bone, float Weight)> wa = stackalloc (uint, float)[4];
         Span<(uint Bone, float Weight)> wb = stackalloc (uint, float)[4];
@@ -199,7 +180,9 @@ public static class SendBackGeometry
     {
         if (!SameVector(a.Pos, a.PosDim, va, b.Pos, b.PosDim, vb, 3)) return false;
         if (a.Nrm is not null && !SameNormal(a.Nrm, a.NrmDim, va, b.Nrm!, b.NrmDim, vb)) return false;
-        if (a.Uv is not null && !SameVector(a.Uv, a.UvDim, va, b.Uv!, b.UvDim, vb, 2, flat: true)) return false;
+        for (int i = 0; i < a.Uvs.Count; i++)
+            if (!SameVector(a.Uvs[i].Values, a.Uvs[i].Dim, va,
+                    b.Uvs[i].Values, b.Uvs[i].Dim, vb, 2, flat: true)) return false;
         if (a.Bones is null) return true;
         return SameSkin(wa[..Influences(a, va, wa)], wb[..Influences(b, vb, wb)]);
     }
@@ -279,13 +262,12 @@ public static class SendBackGeometry
         public required int PosDim { get; init; }
         public float[]? Nrm { get; init; }
         public int NrmDim { get; init; }
-        public float[]? Uv { get; init; }
-        public int UvDim { get; init; }
+        public required IReadOnlyList<(float[] Values, int Dim)> Uvs { get; init; }
         public uint[]? Bones { get; init; }
         public float[]? Weights { get; init; }
         public required int Count { get; init; }
 
-        public static Reader? For(MeshApply.Payload p)
+        public static Reader? For(MeshApply.Payload p, int uvSets)
         {
             uint[]? bones = null;
             if (p.HasSkin)
@@ -293,11 +275,24 @@ public static class SendBackGeometry
                 bones = BoneHashes(p);
                 if (bones is null) return null;
             }
+            int posDim = Dim(p, "Vertex", 3);
+            if (posDim < 3 || p.Channels["Vertex"].Length < p.VertexCount * posDim) return null;
+            int nrmDim = Dim(p, "Normal", 3);
+            if (p.Has("Normal") && (nrmDim < 3 || p.Channels["Normal"].Length < p.VertexCount * nrmDim))
+                return null;
+            var uvs = new List<(float[] Values, int Dim)>();
+            for (int i = 0; i < uvSets; i++)
+            {
+                string channel = $"TexCoord{i}";
+                int dim = Dim(p, channel, 2);
+                if (!p.Has(channel) || dim < 2 || p.Channels[channel].Length < p.VertexCount * dim) return null;
+                uvs.Add((p.Channels[channel], dim));
+            }
             return new Reader
             {
-                Pos = p.Channels["Vertex"], PosDim = Dim(p, "Vertex", 3),
-                Nrm = p.Has("Normal") ? p.Channels["Normal"] : null, NrmDim = Dim(p, "Normal", 3),
-                Uv = p.Has("TexCoord0") ? p.Channels["TexCoord0"] : null, UvDim = Dim(p, "TexCoord0", 2),
+                Pos = p.Channels["Vertex"], PosDim = posDim,
+                Nrm = p.Has("Normal") ? p.Channels["Normal"] : null, NrmDim = nrmDim,
+                Uvs = uvs,
                 Bones = bones, Weights = bones is null ? null : p.JointWeights,
                 Count = p.VertexCount,
             };

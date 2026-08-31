@@ -11,22 +11,22 @@
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- The About dialog reports Assembly.GetName().Version, so these are what a user quotes in a
          bug report; keep all three in step with Core's. -->
-    <Version>0.3.3</Version>
-    <AssemblyVersion>0.3.3.0</AssemblyVersion>
-    <FileVersion>0.3.3.0</FileVersion>
+    <Version>0.4.0</Version>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
+    <FileVersion>0.4.0.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets\icon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.2.3" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.3" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.2.3" Condition="'$(Configuration)' == 'Debug'" />
-    <!-- direct pin over Avalonia.Desktop's transitive 0.20.0 (GHSA-xrw6-gwf8-vvr9, NU1903 on every build);
-         0.21.3 is the first patched version on the API line Avalonia 11.2 targets -->
-    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+    <PackageReference Include="Avalonia" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" Condition="'$(Configuration)' == 'Debug'" />
+    <!-- Avalonia.BuildServices ships only a build-time telemetry task (AvaloniaStats); excluding its assets keeps the
+         build from phoning home and from writing under AppData, which a sandboxed build cannot do -->
+    <PackageReference Include="Avalonia.BuildServices" Version="11.3.2" ExcludeAssets="all" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
   </ItemGroup>
   <ItemGroup>
@@ -41,6 +41,12 @@
              CopyToOutputDirectory="PreserveNewest" />
     <!-- the shipped asset-sharing measurement (LabPaths.SharingSeedFile) -->
     <Content Include="..\..\data\sharing_seed.json" Link="data\sharing_seed.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <!-- its observation memo, minted from the same pass (LabPaths.AssetHashSeedFile) -->
+    <Content Include="..\..\data\asset_hashes_seed.json" Link="data\asset_hashes_seed.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <!-- the shipped shader slot catalog (LabPaths.ShaderSlotCatalogFile) -->
+    <Content Include="..\..\data\charps_slots.json" Link="data\charps_slots.json"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

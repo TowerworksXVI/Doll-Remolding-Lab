@@ -502,6 +502,26 @@ public class PoolMathTests
     }
 
     [Fact]
+    public void CompactUnion_RemovesAMiddleRowAndRenumbersEverySurvivingMap()
+    {
+        var source = new PoolMath.UnionResult(
+            new uint[] { 10, 20, 30 },
+            new[] { new uint[] { 0, 1, 2 }, new uint[] { 1, 2 } },
+            new[] { new uint[] { 0, PoolMath.Sentinel, 2 }, new uint[] { 1, PoolMath.Sentinel } },
+            new[] { 0, 1, 0 });
+
+        var compact = PoolMath.CompactUnion(source, new[] { 0, 2 });
+
+        Assert.Equal(new uint[] { 10, 30 }, compact.Union.UnionHashes);
+        Assert.Equal(new[] { 0, -1, 1 }, compact.OldToCompact);
+        Assert.Equal(new uint[] { 0, PoolMath.Sentinel, 1 }, compact.Union.FullMaps[0]);
+        Assert.Equal(new uint[] { PoolMath.Sentinel, 1 }, compact.Union.FullMaps[1]);
+        Assert.Equal(new uint[] { 0, PoolMath.Sentinel, 1 }, compact.Union.ScatterMaps[0]);
+        Assert.Equal(new uint[] { PoolMath.Sentinel, PoolMath.Sentinel }, compact.Union.ScatterMaps[1]);
+        Assert.Equal(new[] { 0, 0 }, compact.Union.Owner);
+    }
+
+    [Fact]
     public void PreferAnchorOwnership_VerdictBoneCountMismatch_Throws()
     {
         var bind = Bindpose();

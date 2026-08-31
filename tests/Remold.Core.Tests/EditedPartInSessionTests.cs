@@ -216,22 +216,6 @@ public class EditedPartInSessionTests
         }
     }
 
-    // ---------------------------------------------------------------- what the modder is told
-
-    [Fact]
-    public void GameFallbackNote_SaysNothingWhenEveryEditCameThrough()
-    {
-        Assert.Equal("", MainWindowViewModel.GameFallbackNote(Array.Empty<string>()));
-    }
-
-    [Fact]
-    public void GameFallbackNote_NamesEveryPartItHadToTakeFromTheGame()
-    {
-        Assert.Equal(" Couldn't read the edit for cloth1. It opened from the game.",
-            MainWindowViewModel.GameFallbackNote(new[] { "cloth1" }));
-        Assert.Equal(" Couldn't read the edits for cloth1, hair. They opened from the game.",
-            MainWindowViewModel.GameFallbackNote(new[] { "cloth1", "hair" }));
-    }
 
     // ---------------------------------------------------------------- fixtures
 

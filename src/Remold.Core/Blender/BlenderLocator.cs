@@ -54,6 +54,18 @@ public static class BlenderLocator
         return hits;
     }
 
+    /// <summary>
+    /// Registry version subkeys in the same newest-first, component-wise numeric order as the
+    /// Program Files scan. Registry enumeration order is unspecified, so selecting its first hit
+    /// without this normalization can prefer Blender 4.1 over an installed 4.3.
+    /// </summary>
+    internal static IReadOnlyList<string> RegistrySubkeysNewestFirst(IEnumerable<string> subkeys)
+    {
+        var ordered = subkeys.ToList();
+        ordered.Sort(CompareNewestFirst);
+        return ordered;
+    }
+
     /// <summary>Newest-first ordering for two <c>Blender Foundation</c> install directories, COMPONENT-WISE
     /// numeric so 4.10 sorts ahead of 4.9. A directory whose name carries no trailing version sorts after
     /// every one that does — an unversioned or beta folder is no evidence of being the newest — and equal
@@ -109,7 +121,7 @@ public static class BlenderLocator
         {
             using var key = hive.OpenSubKey(@"SOFTWARE\BlenderFoundation");
             if (key is null) continue;
-            foreach (var ver in key.GetSubKeyNames())
+            foreach (var ver in RegistrySubkeysNewestFirst(key.GetSubKeyNames()))
             {
                 using var vk = key.OpenSubKey(ver);
                 if (vk?.GetValue("InstallDir") is string inst)

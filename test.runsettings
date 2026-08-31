@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Applied to EVERY `dotnet test` run via Directory.Build.props, so a failing test always keeps
+     its name in a .trx even when it will not reproduce (the suite carries known one-off flakes).
+     Results land in out\testresults (gitignored), never under tests\. -->
+<RunSettings>
+  <RunConfiguration>
+    <ResultsDirectory>.\out\testresults</ResultsDirectory>
+  </RunConfiguration>
+  <LoggerRunSettings>
+    <Loggers>
+      <Logger friendlyName="trx" enabled="True" />
+    </Loggers>
+  </LoggerRunSettings>
+</RunSettings>

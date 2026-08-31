@@ -29,11 +29,11 @@ public sealed class KeyCaptureButton : Button
         AvaloniaProperty.Register<KeyCaptureButton, string>(nameof(EmptyLabel), "＋ key");
 
     /// <summary>What the field shows while it is armed and waiting for a key.</summary>
-    private const string CapturingLabel = "press a key";
+    private const string CapturingLabel = "Press a key";
 
     /// <summary>What the field shows after a key with no name an ini line accepts. The binding is
     /// unchanged; the field says so instead of appearing to have ignored the press.</summary>
-    internal const string UnnamedKeyLabel = "No ini name for that key.";
+    internal const string UnnamedKeyLabel = "That key can't be bound.";
 
     /// <summary>How long <see cref="UnnamedKeyLabel"/> stands before the field returns to its binding.</summary>
     private static readonly TimeSpan FlashFor = TimeSpan.FromSeconds(2);

@@ -15,6 +15,25 @@ To keep that boundary visible, the guide uses three labels:
 The examples come from one production implementation, but the rules are written so another game can
 be evaluated without inheriting its assumptions.
 
+## 0. Whether you need this at all
+
+Palette recovery is a workaround, and a heavy one. It earns its complexity only when all of the
+following hold for your target:
+
+- The game submits already-posed vertices. A game that binds its bone palette at draw time is
+  already served by conventional interposer mesh-override tooling, with none of what follows.
+- The replacement must change vertex count or topology. Texture swaps and same-count vertex edits
+  do not need a palette at all.
+- Modding must stay at the interposer: read-only against the install, nothing loaded into the game
+  process. This constraint is a risk posture, not a law of nature — it is usually chosen for
+  live-service games where account penalties are on the table.
+
+If any of the three fails, stop here and take the easier route. In particular, if your game or
+your risk tolerance permits it, replacing assets in the game's files on disk or modding at the
+game-code level each lets the engine skin replacement geometry natively, and every problem this
+guide solves disappears. Both are out of scope for this document; it exists for the case where
+they are ruled out.
+
 ## 1. The wall
 
 Some games perform linear-blend skinning before the ordinary draw. The vertex shader receives a
@@ -475,6 +494,11 @@ A reduced operator can select a per-bone subset:
 Gate the reduced rows on their left-inverse defect, not only on one synthetic pose. A truncated solve
 can reproduce one palette while failing another.
 
+**Policy:** Prune before reducing. The union palette needs runtime machinery only for rows the
+replacement's own weights reference; a pooled source that owns no used row ships no capture or
+recovery machinery at all. Take "used" conservatively — a row that any shipped mesh, tier, or
+context references survives.
+
 **Measure:** Report reduction ratios with the corpus, vertex counts, bone counts, thresholds, and
 buffer accounting that produced them. A number such as “35× smaller” is an observation, not a
 portable expectation.
@@ -493,9 +517,27 @@ Every independently rendered tier is a different source mesh with its own:
 - Bind-space evidence.
 - Draw schedule and possible constant-buffer layout.
 
+**Measure:** Do not derive the tier list from captured draws. A tier can be opt-in — loaded only
+when a scene or caller requests it — so a capture sweep shows the tiers those scenes happened to
+ask for, not what the game can ask for.
+
+**Policy:** With this method the easiest sound coverage is deliberately wide: enumerate every LOD
+mesh the game ships for the part from its own asset data and emit for all of them. A section for a
+tier that never draws in some context is inert and costs nothing; a missing tier is a replacement
+that vanishes at some distance in some scene.
+
 Cover every renderable tier required by the replacement. A tier can pose a bone absent from every
 pooled top-detail mesh; it then needs an eligible carrier that both poses the bone and has a
 corresponding tier in that context.
+
+A lower tier can also be a different authoring unit than the sum of its top-detail parts: games
+merge context-specific companion parts (footwear, accessories) into a base part's reduced tier.
+Such a tier poses bones no admissible top-detail source can ever carry — the owning companions
+exist only in their own context and may have no reduced tier of their own to draw. When no carrier
+exists, the honest options are refusing the build or an explicitly accepted, disclosed
+degradation: discard the row so the merged region deforms approximately at that tier, and warn
+once, naming the part and tier. That is an instance of the accepted-approximation rule, not an
+exception to it.
 
 Do not assume a top-detail row can stand during a lower-tier draw. Reuse is safe only when its sample,
 placement, and space conversion remain valid. Otherwise recover or tie the row in the tier's own
@@ -740,6 +782,23 @@ Validate:
 
 Reusing the game's bound shader provides its lighting environment; it does not automatically satisfy
 the shader's complete input and temporal contract.
+
+### 4.19 A multi-material host draws once per material
+
+*Typical symptom: part of the replacement renders dark, tinted, or transparent as though it wore a
+neighboring submesh's material — possibly differing per machine — while its geometry and textures
+are intact.*
+
+An engine commonly draws an N-material mesh once per material, rebinding shaders and state between
+those draws. An override matched on the mesh's content fires at every one of them: left unrouted,
+the full replacement renders under every material's state, and which result survives blending and
+depth can differ per machine with no API error.
+
+Match each original submesh draw — by its index range or another per-draw discriminator — and draw
+only the corresponding replacement region there, under that material's bound state. Keep a
+full-mesh section for hosts that also submit the whole mesh in one call. A replacement with fewer
+material regions than the host leaves the surplus material draws empty rather than redrawing
+everything under the wrong state.
 
 ## 5. Hard limits and scoped limitations
 

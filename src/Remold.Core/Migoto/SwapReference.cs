@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using Remold.Core.Bundles;
@@ -24,7 +24,8 @@ public static class SwapReference
         Func<uint, string?>? resolveBone = null, long pathId = 0)
     {
         var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, pathId)
-            ?? throw new InvalidDataException($"mesh '{meshName}' not found in bundle");
+            ?? throw new InvalidDataException(
+                $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
 
         var mesh = UnityMesh.Decode(field);
         var skin = MeshSkin.Decode(field);
@@ -44,7 +45,8 @@ public static class SwapReference
         foreach (var name in meshNames)
         {
             var field = reader.GetMeshField(deobfuscatedBundle, name)
-                ?? throw new InvalidDataException($"mesh '{name}' not found in bundle");
+                ?? throw new InvalidDataException(
+                $"the game files no longer hold the mesh '{name}'. Rescan, then build again");
             var mesh = UnityMesh.Decode(field);
             var skin = MeshSkin.Decode(field);
             if (!skin.IsSkinned) throw new InvalidOperationException($"{name}: skinless — cannot join a pooled rig");

@@ -281,6 +281,9 @@ public class SubjectArmatureTests
 
     // ---------------------------------------------------------------- the paint comes back
 
+    /// <summary>Route: PrepareChangedPart → SendBackGeometry.Unchanged against the file the launch handed
+    /// out, then — because it answers "changed" — MeshGltf.ReexportPartGlb onto the part's own workspace
+    /// glb, which is the pair the return takes for every part it publishes.</summary>
     [Fact]
     public void WeightPaintedOnASubjectBoneTheGeometryDidNotPose_ComesBackOnAResolvableJoint()
     {
@@ -299,7 +302,9 @@ public class SubjectArmatureTests
         var send = g.At("_combined.send.glb");
         MeshGltf.ExportRiggedGlb(painted, Skin(HRoot, HHip, HHead), h => Paths.GetValueOrDefault(h), send);
 
-        Assert.True(SendBackGeometry.Take(MeshGltf.ParsedGlb.Open(send), "cloth_lod0", ws, hasMapAsks: false));
+        var returned = MeshGltf.ParsedGlb.Open(send);
+        Assert.False(SendBackGeometry.Unchanged(returned, "cloth_lod0", MeshGltf.ParsedGlb.Open(ws)));
+        MeshGltf.ReexportPartGlb(returned, "cloth_lod0", ws);
 
         var payload = MeshGltf.ImportPayload(ws, lenient: true);
         int joint = Array.IndexOf(payload.SkinJointHashes!, HHead);
@@ -313,6 +318,8 @@ public class SubjectArmatureTests
         Assert.Equal(0, jr.FullyUnsafeCount);
     }
 
+    /// <summary>Route: PrepareChangedPart → SendBackGeometry.Unchanged. Answering "unchanged" is what spares
+    /// the part: the return then publishes nothing for it and never reaches the re-split at all.</summary>
     [Fact]
     public void AnUntouchedSendOfAUnionArmatureGlb_ReadsAsUnchanged()
     {
@@ -320,18 +327,18 @@ public class SubjectArmatureTests
         var ws = g.At("cloth_lod0.glb");
         MeshGltf.ExportRiggedGlb(Part("cloth_lod0", 2), Skin(HRoot, HHip), h => Paths.GetValueOrDefault(h), ws,
             extraBones: AssetExporter.ExtraBones(TwoPartSubject(), new[] { HRoot, HHip }, uprighting: null));
-        var before = File.ReadAllBytes(ws);
         // the workspace side carries a zero-weight tail joint of its own, which is what the compare has to
         // read past on BOTH sides (SendBackGeometry keys on bone hash, absent-as-zero)
         Assert.Contains(HHead, MeshGltf.ImportPayload(ws, lenient: true).SkinJointHashes!);
 
         // Blender binds every armature bone it imported, so the send comes back with the subject's bones in
-        // the skin at zero weight. Nothing was painted onto them, so nothing may be written.
-        Assert.False(SendBackGeometry.Take(ZeroWeightUnionSend(g, Part("cloth_lod0", 2)), "cloth_lod0", ws,
-            hasMapAsks: false));
-        Assert.Equal(before, File.ReadAllBytes(ws));
+        // the skin at zero weight. Nothing was painted onto them, so nothing is there to take.
+        Assert.True(SendBackGeometry.Unchanged(ZeroWeightUnionSend(g, Part("cloth_lod0", 2)), "cloth_lod0",
+            MeshGltf.ParsedGlb.Open(ws)));
     }
 
+    /// <summary>Route: PrepareChangedPart → SendBackGeometry.Unchanged, then MeshGltf.ReexportPartGlb where
+    /// it answers "changed" — over a workspace glb from before the union armature existed.</summary>
     [Fact]
     public void AWorkspaceGlbWrittenBeforeTheUnionArmature_StillTakesASendCarryingIt()
     {
@@ -339,16 +346,17 @@ public class SubjectArmatureTests
         var ws = g.At("cloth_lod0.glb");
         // the OLD shape: the part's own bones and nothing else
         MeshGltf.ExportRiggedGlb(Part("cloth_lod0", 2), Skin(HRoot, HHip), h => Paths.GetValueOrDefault(h), ws);
-        var before = File.ReadAllBytes(ws);
 
-        Assert.False(SendBackGeometry.Take(ZeroWeightUnionSend(g, Part("cloth_lod0", 2)), "cloth_lod0", ws,
-            hasMapAsks: false));
-        Assert.Equal(before, File.ReadAllBytes(ws));
+        Assert.True(SendBackGeometry.Unchanged(ZeroWeightUnionSend(g, Part("cloth_lod0", 2)), "cloth_lod0",
+            MeshGltf.ParsedGlb.Open(ws)));
 
-        // …and an edit against that same old file still writes through, union joints and all
+        // …and an edit against that same old file still reads as changed and writes through, union joints
+        // and all
         var moved = Part("cloth_lod0", 2);
         moved.Channels["Vertex"][1] += 0.25f;
-        Assert.True(SendBackGeometry.Take(ZeroWeightUnionSend(g, moved), "cloth_lod0", ws, hasMapAsks: false));
+        var send = ZeroWeightUnionSend(g, moved);
+        Assert.False(SendBackGeometry.Unchanged(send, "cloth_lod0", MeshGltf.ParsedGlb.Open(ws)));
+        MeshGltf.ReexportPartGlb(send, "cloth_lod0", ws);
         Assert.Equal(0.25f, MeshGltf.ImportGlb(ws).Channels["Vertex"][1], 4);
     }
 
@@ -808,50 +816,6 @@ public class SubjectArmatureTests
         Assert.Equal(RestUnity[HHead].X, upright.RestWorld.Translation.X, 4);   // the rotation axis is untouched
     }
 
-    // ---------------------------------------------------------------- what a lone open reads for the rig
-
-    /// <summary>The rows a lone part's rig build carries beside it: its outfit's other meshes, each for its
-    /// skeleton alone. Getting the SUBJECT filter wrong here is what would hang another outfit's bones off
-    /// this one's armature.</summary>
-    [Fact]
-    public void SkeletonOnlyParts_AreThisOutfitsOtherMeshes_WithNoGlbToWrite()
-    {
-        var project = new ModProject();
-        var opened = Target("Mesh", "cloth1_lod0", "Vesna", "VesnaSSR01");
-        var sibling = Target("Mesh", "body1_lod0", "vesna", "vesnassr01");   // the subject compares loosely
-        project.Targets.Add(opened);
-        project.Targets.Add(sibling);
-        project.Targets.Add(Target("Mesh", "otherbody_lod0", "Someone", "SomeoneSSR01"));
-        project.Targets.Add(Target("Texture2D", "cloth1_d", "Vesna", "VesnaSSR01"));
-
-        var rows = MainWindowViewModel.SkeletonOnlyParts(project, opened);
-
-        var row = Assert.Single(rows);
-        Assert.Equal(sibling.ObjectName, row.Item3);
-        Assert.Null(row.Item4);      // no GlbOut: the sibling's own workspace file is never rewritten here
-        Assert.Null(row.Item7);      // and its edit is not read — the GAME skin places its bones
-    }
-
-    [Fact]
-    public void SkeletonOnlyParts_AnUnattributedPart_OpensAlone()
-    {
-        var project = new ModProject();
-        var loose = Target("Mesh", "cloth1_lod0", character: null, outfit: null);
-        project.Targets.Add(loose);
-        project.Targets.Add(Target("Mesh", "body1_lod0", character: null, outfit: null));
-
-        Assert.Empty(MainWindowViewModel.SkeletonOnlyParts(project, loose));
-    }
-
-    private static ProjectTarget Target(string assetType, string objectName, string? character, string? outfit) =>
-        new()
-        {
-            AssetType = assetType,
-            ObjectName = objectName,
-            Bundle = objectName + ".bundle",
-            SubjectCharacter = character,
-            SubjectOutfit = outfit,
-        };
 
     // ---------------------------------------------------------- the tail offers only PAINTABLE bones
     //
@@ -1051,7 +1015,7 @@ public class SubjectArmatureTests
         };
         if (includeHair) spec.Add(("hair1", FilterHairLogical, HairSlot, null, null, 0L, null));
         AssetExporter.BuildRiggedGlbsCore(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
-            spec, g.At("textures"), null, null, null, null, roster, degraded, cache, default);
+            spec, g.At("textures"), null, null, null, roster, degraded, cache, default);
         return MeshGltf.ReadRiggedGlb(glb)!.Value.Skin.BoneHashes.ToArray();
     }
 
@@ -1665,6 +1629,80 @@ public class SubjectArmatureTests
         Assert.DoesNotContain(model.LogicalNodes, n => n.Name == NodeName(HArm));
     }
 
+    // --------------------------------------------- the shared armature offers the UNION, not one part's set
+    //
+    // A combined session ships ONE armature every part binds to, so a per-part tail is structurally
+    // impossible: the filter has to widen to the union of the included parts' valid sets. The two halves of
+    // that — it is at least each member's set, and it is still a filter — need a fixture where the members'
+    // sets are DISJOINT, which is what the two scene contexts buy: a Fight part and a Dorm part are never
+    // on screen together, so neither can vouch for the other and each certifies its own bones alone.
+
+    /// <summary>Cloth in combat, hair in the dorm, each addressing its own bundle of the filter fixture.
+    /// Neither covers the other's presence, so the cloth's valid set is its own posed bones and the hair's is
+    /// its own — disjoint past the shared root.</summary>
+    private static AssetExporter.SubjectRoster ContextSplitRoster() =>
+        new(new[]
+        {
+            new AssetExporter.RosterPart(ClothSlot, "cloth1_Fight", FilterClothLogical, 0, true,
+                VisibilityOverride.None),
+            new AssetExporter.RosterPart(HairSlot, "hair1_Dorm", FilterHairLogical, 0, true,
+                VisibilityOverride.None),
+        });
+
+    /// <summary>One COMBINED session over that fixture with BOTH parts opened from a workspace glb riding
+    /// the root alone. Reduced that far, every other bone of the subject is left to the SHARED tail — which
+    /// is the only place a union is observable, since a bone any included part still poses is that part's own
+    /// joint whatever the filter says. Returns the shared armature's joint hashes.</summary>
+    private static uint[] CombinedUnionJoints(TempGame g, GameVfs vfs, string name,
+        AssetExporter.SubjectRoster? roster)
+    {
+        Directory.CreateDirectory(g.At("meshes"));
+        var clothWs = g.At(Path.Combine("meshes", "cloth_edit.glb"));
+        var hairWs = g.At(Path.Combine("meshes", "hair_edit.glb"));
+        if (!File.Exists(clothWs))
+            MeshGltf.ExportRiggedGlb(Part(ClothSlot, 1), Skin(HRoot), h => Paths.GetValueOrDefault(h), clothWs);
+        if (!File.Exists(hairWs))
+            MeshGltf.ExportRiggedGlb(Part(HairSlot, 1), Skin(HRoot), h => Paths.GetValueOrDefault(h), hairWs);
+        var combined = g.At(Path.Combine("meshes", name + ".glb"));
+        AssetExporter.BuildRiggedGlbs(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
+            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            {
+                ("cloth1", FilterClothLogical, ClothSlot, null, null, 0L, clothWs),
+                ("hair1", FilterHairLogical, HairSlot, null, null, 0L, hairWs),
+            },
+            g.At("textures"), combinedOut: combined, roster: roster);
+        return MeshGltf.ImportPayload(combined, ClothSlot).SkinJointHashes!;
+    }
+
+    /// <summary>The shared tail carries a bone only the cloth vouches for AND a bone only the hair vouches
+    /// for, and still refuses the one nothing poses. Either member's set alone would drop half of that, and
+    /// no filter at all would keep the arm.
+    ///
+    /// <para>Route: OpenSessionBlenderAsync's combined build → AssetExporter.BuildRiggedGlbs with
+    /// combinedOut → its per-slot ValidFor union → MeshGltf.ExportCombinedRiggedGlb's appended tail.</para></summary>
+    [Fact]
+    public void ACombinedTail_IsTheUnionOfTheIncludedPartsValidSets()
+    {
+        using var g = new TempGame();
+        // the hair TABLES the arm without posing it, so the subject skeleton carries a bone no candidate can
+        // ever certify — the control that says the union is still a filter
+        var vfs = FilterBundles(g, hairTablesArm: true);
+
+        // with no roster the whole skeleton is on offer, arm included
+        Assert.Equal(new[] { HRoot, HHip, HHead, HArm }, CombinedUnionJoints(g, vfs, "unfiltered", null));
+
+        var joints = CombinedUnionJoints(g, vfs, "filtered", ContextSplitRoster());
+
+        // the hip is the combat cloth's alone, the head the dorm hair's alone, and both are offered
+        Assert.Equal(new[] { HRoot, HHip, HHead }, joints);
+
+        // …while the LONE cloth, judged by the very same roster, gets its own exact set and no more: the
+        // hair is off screen whenever the cloth is on it, so it vouches for nothing here
+        using var h = new TempGame();
+        Assert.Equal(new[] { HRoot, HHip },
+            LoneClothJoints(h, FilterBundles(h, hairTablesArm: true), ContextSplitRoster()));
+    }
+
     // -------------------------------------------------- the app's half: the rows it hands the export
     //
     // The filter is only as good as the roster the app assembles for it. Two strings that are NOT the same
@@ -1672,12 +1710,21 @@ public class SubjectArmatureTests
     // from), two forward routes to a mesh (recipe address through the catalog, or bundle + path id), and two
     // prefab flags two of the four candidacy rules read.
 
-    /// <summary>The catalog + subject model in, the roster rows out. A part neither route reaches has no mesh
-    /// to measure and stays out, which only narrows what the export offers.</summary>
+    /// <summary>The catalog + subject model in, the roster rows out — including the SMR route's two halves,
+    /// which are required together: a bundle with no path id cannot select among a bundle's same-named
+    /// copies, so such a part falls back to its recipe address like any other.
+    ///
+    /// <para>A part neither route reaches stays out, and that is not a neutral omission: it measures
+    /// nothing, so it vouches for no sibling, and every OTHER part's tail narrows by exactly what it would
+    /// have covered. (Its own tail goes the other way — an unlisted part has unknown candidacy and is
+    /// offered everything.) Which is why the resolution here has to be the build's own, half for half.</para>
+    ///
+    /// <para>Route: OpenSessionBlenderAsync → MainWindowViewModel.ExportRoster →
+    /// MainWindowViewModel.ExportRosterRows.</para></summary>
     [Fact]
     public void ExportRosterRows_ResolveEachPartsBundle_AndCarryTheFlagsCandidacyReads()
     {
-        var catalog = CatalogIndex.ForTest(new[] { ("addr_cloth", "cloth.bundle") });
+        var catalog = CatalogIndex.ForTest(new[] { ("addr_cloth", "cloth.bundle"), ("addr_belt", "belt.bundle") });
         var model = new SubjectModel("Vesna", "VesnaSSR01", SubjectSource.Prefab, new[]
         {
             // recipe-backed: the address resolves through the catalog, and no path id selects it
@@ -1686,18 +1733,26 @@ public class SubjectArmatureTests
             // smr-backed: bundle + path id, its (absent) address never consulted
             new SubjectPart("hair1", HairSlot, "", Array.Empty<SubjectMaterial>(),
                 MeshBundle: "hair.bundle", MeshPathId: 77, Visibility: VisibilityOverride.CoatList),
+            // HALF the smr route: a bundle, but no path id to select inside it — the address decides
+            new SubjectPart("belt1", "belt1_lod0", "addr_belt", Array.Empty<SubjectMaterial>(),
+                MeshBundle: "belt_smr.bundle", MeshPathId: 0),
+            // …and the same half with no address to fall back on reaches no mesh at all
+            new SubjectPart("cuff1", "cuff1_lod0", "", Array.Empty<SubjectMaterial>(),
+                MeshBundle: "cuff.bundle", MeshPathId: 0),
             // neither route reaches a mesh
             new SubjectPart("boot1", "boot1_lod0", "", Array.Empty<SubjectMaterial>()),
             // an address this catalog doesn't carry
             new SubjectPart("glove1", "glove1_lod0", "addr_missing", Array.Empty<SubjectMaterial>()),
-        }, Skeleton: null, Problems: Array.Empty<string>());
+        }, Skeleton: null, Problems: Array.Empty<string>(), PartsPoolAlone: true);
         var scheme = new[] { new PartScheme.Slot(1, new[] { new PartScheme.Variant(1, true, new[] { "cloth1" }) }) };
 
         var roster = MainWindowViewModel.ExportRosterRows(catalog, model, scheme);
 
-        // keyed by SLOT name, in model order, and the two unreachable parts left out
-        Assert.Equal(new[] { ClothSlot, HairSlot }, roster.Parts.Select(p => p.Mesh).ToArray());
+        // keyed by SLOT name, in model order, and the three unreachable parts left out
+        Assert.Equal(new[] { ClothSlot, HairSlot, "belt1_lod0" }, roster.Parts.Select(p => p.Mesh).ToArray());
         Assert.Same(scheme, roster.Scheme);
+        // the subject's own pooling rule rides along: it decides whether a sibling may vouch at all
+        Assert.True(roster.PartsPoolAlone);
 
         var cloth = roster.Parts[0];
         Assert.Equal("cloth1", cloth.Token);      // the token presence classifies from — NOT the slot name
@@ -1712,16 +1767,191 @@ public class SubjectArmatureTests
         Assert.Equal(77L, hair.PathId);
         Assert.True(hair.CastsShadows);
         Assert.Equal(VisibilityOverride.CoatList, hair.Visibility);
+
+        // the half-smr part took the ADDRESS's bundle, not the one its MeshBundle names, and no id selects
+        // it — taking the smr route on a bundle alone would read a mesh by name out of a bundle that ships
+        // same-named copies precisely because it cannot be read that way
+        var belt = roster.Parts[2];
+        Assert.Equal("belt.bundle", belt.SourceBundle);
+        Assert.Equal(0L, belt.PathId);
     }
 
-    // ---------------------------------------------------------------- the cache the armature shape invalidates
-
+    /// <summary>What a failed wardrobe-table read costs, and how long it is believed for.
+    ///
+    /// <para>Unreadable tables are the WORSE of the two answers a null scheme can carry: every modular part
+    /// classifies unknown, no sibling vouches for another, and the tail falls back to the part's own posed
+    /// bones — bones a build would have accepted paint on are simply not offered. So an open says it.</para>
+    ///
+    /// <para>And a failure that will answer the same way every time is kept rather than re-read: only a
+    /// lock earns another four-table read next open. Not-found is an IOException by inheritance and a fact
+    /// of the install by nature, which is exactly where "retry every I/O failure" gets it wrong.</para>
+    ///
+    /// <para>Route: OpenSessionBlenderAsync → MainWindowViewModel.ExportRoster → ExportScheme's memo →
+    /// the open's own status line.</para></summary>
     [Fact]
-    public void CombinedFingerprint_MovesWithTheArmatureRule()
+    public void UnreadableWardrobeTables_AreSaidOutLoud_AndReReadOnlyWhenARetryCouldDiffer()
     {
-        var fp = AssetExporter.CombinedFingerprint("cat-1",
-            new[] { ("cloth", "b1.bundle", "cloth_lod0", (string?)null) }, Array.Empty<string>());
+        Assert.Empty(MainWindowViewModel.BlenderOpenNotices(Array.Empty<string>(), false,
+            Array.Empty<string>()));
+        Assert.Contains("wardrobe tables", Assert.Single(MainWindowViewModel.BlenderOpenNotices(
+            Array.Empty<string>(), true, Array.Empty<string>())));
 
-        Assert.StartsWith("combined-v15\n", fp);
+        Assert.True(MainWindowViewModel.RetryTableRead(new IOException("the file is in use")));
+        Assert.False(MainWindowViewModel.RetryTableRead(new FileNotFoundException("no such table")));
+        Assert.False(MainWindowViewModel.RetryTableRead(new DirectoryNotFoundException("no such folder")));
+        Assert.False(MainWindowViewModel.RetryTableRead(new InvalidDataException("the table won't parse")));
+    }
+
+    /// <summary>The subject model the open holds, as the app's own rows address the filter fixture: the two
+    /// parts by recipe address, resolved through a catalog carrying exactly those two rows.
+    /// <paramref name="hairToken"/> is the string presence is classified from, which is not the slot name the
+    /// mesh is read by.</summary>
+    private static AssetExporter.SubjectRoster AppAssembledRoster(string hairToken)
+    {
+        var catalog = CatalogIndex.ForTest(new[]
+        {
+            ("addr_cloth", FilterClothLogical),
+            ("addr_hair", FilterHairLogical),
+        });
+        var model = new SubjectModel("Vesna", "VesnaSSR01", SubjectSource.Prefab, new[]
+        {
+            new SubjectPart("cloth1", ClothSlot, "addr_cloth", Array.Empty<SubjectMaterial>()),
+            new SubjectPart(hairToken, HairSlot, "addr_hair", Array.Empty<SubjectMaterial>()),
+        }, Skeleton: null, Problems: Array.Empty<string>());
+        return MainWindowViewModel.ExportRosterRows(catalog, model, scheme: null);
+    }
+
+    /// <summary>The two halves joined: rows the APP assembled off a subject model, handed to the real export,
+    /// change what the tail offers. Both models differ in ONE string — the hair's part token — and the tail
+    /// they produce differs by exactly that sibling's bone.
+    ///
+    /// <para>This is where the slot-name/token pairing earns its keep on the route rather than field by
+    /// field: the slot name is what the roster row's mesh is READ by, and the token is what presence is
+    /// classified from. Pair them the other way round and no row measures at all, so candidacy comes back
+    /// unknown and both cases offer the whole skeleton.</para>
+    ///
+    /// <para>Route: OpenSessionBlenderAsync → MainWindowViewModel.ExportRosterRows →
+    /// AssetExporter.BuildRiggedGlbs (per-part) → MeshGltf.ExportRiggedGlb's appended tail.</para></summary>
+    [Fact]
+    public void ARosterTheAppAssembles_IsWhatTheOpensTailIsFilteredBy()
+    {
+        // an unconditional sibling is on screen whenever the cloth is, so its bone is paintable
+        using var g = new TempGame();
+        var always = LoneClothJoints(g, FilterBundles(g), AppAssembledRoster("hair1"));
+        Assert.Equal(new[] { HRoot, HHip }, always.Take(2).ToArray());
+        Assert.Contains(HHead, always);
+
+        // the same subject with the hair in combat only: it can vouch for nothing, and the tail is empty
+        using var h = new TempGame();
+        Assert.Equal(new[] { HRoot, HHip },
+            LoneClothJoints(h, FilterBundles(h), AppAssembledRoster("hair1_Fight")));
+    }
+
+    /// <summary>Every rigged build the APP starts is given a roster and the candidacy memo. The two halves
+    /// above are each pinned on their own, and joining them is the one step no behavioural test in this
+    /// suite can take: the open they meet in (<c>OpenSessionBlenderAsync</c>) needs a loaded install, a
+    /// located Blender and the bridge script before it reaches either call. So the argument lists themselves
+    /// are the pin — which is exactly the regression that has already happened once, a refactor dropping the
+    /// roster from both calls with every test still green and every Blender open back on the whole
+    /// skeleton.</summary>
+    [Fact]
+    public void EveryRiggedBuildTheAppStarts_IsGivenACandidacyRosterAndTheMemo()
+    {
+        var calls = new List<(string File, string Args)>();
+        foreach (var path in Directory.EnumerateFiles(
+                     Path.Combine(SourceHygieneTests.RepoRoot(), "src", "Remold.App"), "*.cs",
+                     SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(SourceHygieneTests.RepoRoot(), path);
+            if (rel.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                || rel.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                continue;
+            foreach (var args in CallArguments(WithoutComments(File.ReadAllText(path)),
+                         "AssetExporter.BuildRiggedGlbs("))
+                calls.Add((rel, args));
+        }
+
+        // a rename that emptied this would otherwise pass in silence
+        Assert.NotEmpty(calls);
+        Assert.Empty(calls.Where(c => !c.Args.Contains("roster:", StringComparison.Ordinal))
+            .Select(c => c.File + ": a rigged build with no roster offers the whole skeleton"));
+        Assert.Empty(calls.Where(c => !c.Args.Contains("candidacyCacheFile:", StringComparison.Ordinal))
+            .Select(c => c.File + ": a rigged build with no candidacy memo re-sums every part's skin"));
+        // …and NAMING the argument is not passing one: `roster: null` reads as a roster to a text scan and
+        // offers the whole skeleton just the same, which is the regression this pin exists to catch.
+        Assert.Empty(calls
+            .Where(c => c.Args.Contains("roster: null", StringComparison.Ordinal)
+                || c.Args.Contains("roster: default", StringComparison.Ordinal))
+            .Select(c => c.File + ": a rigged build handed no roster offers the whole skeleton"));
+    }
+
+    /// <summary>The source with its comments blanked out, so a scan for a CALL cannot be answered by prose
+    /// naming one. Blanked rather than deleted: nothing here needs offsets, but keeping the length makes the
+    /// transform impossible to get subtly wrong. String and character literals are walked through intact —
+    /// a <c>//</c> inside a path literal is not a comment — and a verbatim string's only escape is
+    /// <c>""</c>.</summary>
+    private static string WithoutComments(string source)
+    {
+        var chars = source.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+        {
+            char c = chars[i];
+            // COMMENTS first: everything below is a code-state reading, and an apostrophe in prose ("the
+            // part's") is not the start of a character literal.
+            if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '/')
+            {
+                for (; i < chars.Length && chars[i] != '\n'; i++) chars[i] = ' ';
+                continue;
+            }
+            if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+            {
+                int end = source.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                end = end < 0 ? chars.Length : end + 2;
+                for (int k = i; k < end; k++) if (chars[k] != '\n') chars[k] = ' ';
+                i = end - 1;
+                continue;
+            }
+            if (c == '@' && i + 1 < chars.Length && chars[i + 1] == '"')
+            {
+                for (i += 2; i < chars.Length; i++)
+                {
+                    if (chars[i] != '"') continue;
+                    if (i + 1 < chars.Length && chars[i + 1] == '"') { i++; continue; }
+                    break;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'')
+                for (i++; i < chars.Length && chars[i] != c; i++)
+                    if (chars[i] == '\\') i++;
+        }
+        return new string(chars);
+    }
+
+    /// <summary>Every argument list following <paramref name="call"/> in <paramref name="source"/>, from the
+    /// opening parenthesis to its match. Parentheses inside string and character literals are skipped, since
+    /// an argument list here carries both.</summary>
+    private static IEnumerable<string> CallArguments(string source, string call)
+    {
+        for (int at = source.IndexOf(call, StringComparison.Ordinal); at >= 0;
+             at = source.IndexOf(call, at + 1, StringComparison.Ordinal))
+        {
+            int start = at + call.Length, depth = 1, i = start;
+            for (; i < source.Length && depth > 0; i++)
+            {
+                char c = source[i];
+                if (c == '"' || c == '\'')
+                {
+                    char quote = c;
+                    for (i++; i < source.Length && source[i] != quote; i++)
+                        if (source[i] == '\\') i++;
+                    continue;
+                }
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+            }
+            Assert.Equal(0, depth);   // an unbalanced call means this scanner, not the source, is wrong
+            yield return source[start..(i - 1)];
+        }
     }
 }

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using Remold.Core.Blender;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
 using Remold.Core.Tests.Support;
 using Xunit;
 
@@ -33,7 +34,7 @@ public class BlenderSendWatcherTests
         string? errorPath = null, errorMsg = null;
         bool editReceived = false;
         using var raised = new ManualResetEventSlim();
-        w.Error += (path, msg) => { errorPath = path; errorMsg = msg; raised.Set(); };
+        w.Error += (path, failure) => { errorPath = path; errorMsg = failure.Message; raised.Set(); };
         w.EditReceived += _ => editReceived = true;
 
         // the bridge script writes the glb first and the sidecar LAST; the watcher fires on the sidecar
@@ -92,8 +93,8 @@ public class BlenderSendWatcherTests
     [Fact]
     public void ScanExisting_AnUnreadableSendReportsAndIsStillConsumed()
     {
-        // Blender has already overwritten the workspace glb, so the failure has to be SAID; and re-reading
-        // it at every later open would fail identically, so the sidecar goes either way.
+        // The failed return has to be SAID; re-reading it at every later open would fail identically, so
+        // the sidecar goes either way while the raw glb remains available for inspection.
         using var t = new TempGame();
         var glb = t.At("body.glb");
         File.WriteAllText(glb, "not a glb at all");
@@ -113,8 +114,8 @@ public class BlenderSendWatcherTests
     [Fact]
     public void ScanExisting_StopsWhenTheIngestDisposesTheWatcher()
     {
-        // An ingest autosaves, and an autosave can move the mod folder and swap the watcher. The rest of the
-        // scan's list is in a folder that no longer exists; the replacement watcher owns what moved.
+        // The watcher's own contract, at the API: a subscriber that disposes from inside the ingest has
+        // said this folder is no longer the one being watched, and the rest of the scan's list with it.
         using var t = new TempGame();
         foreach (var name in new[] { "a_lod0", "b_lod0", "c_lod0" })
         {
@@ -249,6 +250,43 @@ public class BlenderSendWatcherTests
 
         Assert.Equal(new[] { glb }, received);
         Assert.False(File.Exists(sidecar));      // taken this time, so it is consumed
+    }
+
+    /// <summary>A mod kept INSIDE another mod — an ordinary thing to do with ordinary folders. This watcher
+    /// walks subdirectories, so the outer mod's watcher sees the inner mod's sends; taking one would hand it
+    /// to the outer mod's document, where a mint row's subject and outfit resolve just as well and the
+    /// modder's work lands in a mod they never opened. The send is left exactly where it is, sidecar and
+    /// all, and the watcher its own mod arms takes it.</summary>
+    [Fact]
+    public void ASendUnderANestedModIsLeftForThatModsOwnWatcher()
+    {
+        using var t = new TempGame();
+        string inner = t.At("inner-mod");
+        Directory.CreateDirectory(inner);
+        AuthoredProjectSerializer.Save(AuthoredProjectDocument.New().Session.Snapshot(),
+            ModProject.ManifestPathFor(inner));
+        string glb = Path.Combine(inner, "sends", "body1_lod0.glb");
+        Directory.CreateDirectory(Path.GetDirectoryName(glb)!);
+        MeshGltf.ExportGlb(Triangle("body1_lod0"), glb);
+        string sidecar = BlenderBridge.SidecarPath(glb);
+        File.WriteAllText(sidecar, "{\"source\":\"blender-send\"}");
+
+        var taken = new List<string>();
+        using (var outer = new BlenderSendWatcher(t.Root, includeSubdirectories: true))
+        {
+            outer.EditReceived += e => taken.Add(e.GlbPath);
+            outer.ScanExisting();
+        }
+
+        Assert.Empty(taken);
+        Assert.True(File.Exists(sidecar), "the outer mod's watcher consumed a send belonging to the inner one");
+
+        // …and leaving it is only the right answer because its own mod still finds it
+        using var own = new BlenderSendWatcher(inner, includeSubdirectories: true);
+        own.EditReceived += e => taken.Add(e.GlbPath);
+        own.ScanExisting();
+
+        Assert.Equal(new[] { glb }, taken);
     }
 
     private static UnityMesh Triangle(string name) => new()

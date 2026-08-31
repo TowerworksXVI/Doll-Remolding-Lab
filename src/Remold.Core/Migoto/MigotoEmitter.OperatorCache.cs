@@ -33,7 +33,7 @@ public sealed partial class MigotoEmitter
     /// Everything else the solve is parameterised by is a constant, and <see cref="AlgoVersion"/> stamps
     /// those directly — they are not this revision's job. An entry written by another revision is not this
     /// revision's answer, so it is never read.</summary>
-    const int OperatorAlgoRevision = 2;
+    const int OperatorAlgoRevision = 3;
 
     /// <summary>The identity a cached operator is valid under: the hand-bumped revision plus the VALUE of
     /// every constant the solve is parameterised by, so editing one of them retires the entries it would
@@ -49,9 +49,11 @@ public sealed partial class MigotoEmitter
     /// name is embedded in the diagnostics the payload carries. So does the pool's bind-space CONVERSION:
     /// the solve runs on the part's geometry AFTER it, so a solve from an unconverted pool is not a
     /// converted pool's answer.</summary>
-    string? OperatorCacheKey(string? opKey, string name, Matrix4x4? conversion) =>
+    string? OperatorCacheKey(string? opKey, string name, Matrix4x4? conversion,
+        IReadOnlyList<int> retainedRows) =>
         OperatorCacheDir is null || opKey is null
-            ? null : $"{AlgoVersion()}|{name}|{opKey}{ConversionTag(conversion)}";
+            ? null : $"{AlgoVersion()}|{name}|{opKey}{ConversionTag(conversion)}"
+                + $"|rows{string.Join('.', retainedRows)}";
 
     /// <summary>The conversion's nine rotation entries, or nothing at all when there is none — a part in
     /// its pool's reference space keys exactly as it does in a pool that converts nothing. A snapped
@@ -86,14 +88,15 @@ public sealed partial class MigotoEmitter
             int n = r.ReadInt32();
             var cpinv = ReadFloats(f, r);
             var weak = ReadBools(f, r);
-            var tie = ReadInts(f, r);
+            var tieFullRows = ReadInts(f, r);
             var hashes = ReadUInts(f, r);
+            var sourceRows = ReadInts(f, r);
             int dc = Count(f, r, bytesEach: 1);      // a string costs at least its own length prefix
             var diagnostics = new List<string>(dc);
             for (int i = 0; i < dc; i++) diagnostics.Add(ReadBoundedString(f, r));
             var sel = r.ReadBoolean() ? ReadUInts(f, r) : null;
             var off = r.ReadBoolean() ? ReadUInts(f, r) : null;
-            return new OperatorArt(cpinv, weak, tie, hashes, diagnostics, sel, off, n);
+            return new OperatorArt(cpinv, weak, tieFullRows, hashes, sourceRows, diagnostics, sel, off, n);
         }
         catch (Exception)
         {
@@ -144,8 +147,9 @@ public sealed partial class MigotoEmitter
                 w.Write(art.N);
                 WriteFloats(w, art.Cpinv);
                 WriteBools(w, art.Weak);
-                WriteInts(w, art.Tie);
+                WriteInts(w, art.TieFullRows);
                 WriteUInts(w, art.Hashes);
+                WriteInts(w, art.SourceRows);
                 w.Write(art.Diagnostics.Count);
                 foreach (var d in art.Diagnostics) w.Write(d);
                 w.Write(art.Sel is not null);
@@ -167,7 +171,7 @@ public sealed partial class MigotoEmitter
     }
 
     /// <summary>Payload layout tag; a change to the field list changes it, so old entries read as a miss.</summary>
-    const string CacheFormat = "remold-operator-1";
+    const string CacheFormat = "remold-operator-2";
 
     static void WriteFloats(BinaryWriter w, float[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
     static void WriteInts(BinaryWriter w, int[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }

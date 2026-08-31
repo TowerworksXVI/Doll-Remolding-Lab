@@ -110,6 +110,6 @@ public class SettingsLoaderRowTests : IDisposable
         var saved = LabSettings.Load();
         Assert.Equal(exe, saved.MigotoLoaderExe);
         Assert.Equal("towerworks", saved.Author);
-        Assert.Equal("3DMigoto · no texture hook", vm.MigotoStatus.Text);
+        Assert.Equal("3DMigoto · texture mods won't show", vm.MigotoStatus.Text);
     }
 }

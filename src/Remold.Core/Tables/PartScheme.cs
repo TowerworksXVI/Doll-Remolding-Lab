@@ -65,12 +65,20 @@ public sealed class PartScheme
 
     /// <summary>
     /// Read the four tables into one scheme. Throws <see cref="InvalidDataException"/> on any dangling
-    /// cross-reference — a slot, variant, or resource that points at a row that isn't there. The scheme
-    /// decides which parts a build may lean on, so a half-read scheme must fail here rather than let a
-    /// build proceed on a wrong one; the one tolerated gap is a variant with no resources, which
-    /// constrains nothing.
+    /// cross-reference a clothes row can REACH — a slot or variant that points at a row that isn't
+    /// there. The scheme decides which parts a build may lean on, so a half-read scheme must fail here
+    /// rather than let a build proceed on a wrong one; the one tolerated gap is a variant with no
+    /// resources, which constrains nothing.
+    ///
+    /// <para>A resource row whose variant has no <c>PartsListData</c> row is SKIPPED and reported
+    /// through <paramref name="note"/>, never thrown on: releases pre-seed an unshipped outfit's
+    /// resource rows ahead of its list/group/clothes rows (measured on catalog 26932 — 46 rows under
+    /// one slot no clothes row names), and such rows constrain nothing any build can lean on. Their
+    /// ids are not even trusted to follow the variant arithmetic; they are counted and left alone. A
+    /// reachable variant is always listed (the strict walk above), so the skip can only ever take
+    /// rows no outfit wears.</para>
     /// </summary>
-    public static PartScheme Load(GameDatabase db)
+    public static PartScheme Load(GameDatabase db, Action<string>? note = null)
     {
         var slotIdsByClothes = new Dictionary<long, List<long>>();
         foreach (var row in TableFile.ReadRows(db.TablePath("PartsTypeListData")))
@@ -88,16 +96,22 @@ public sealed class PartScheme
                 defaultByVariant[(long)vid] = (row.Num(4) ?? 0) != 0;
 
         var tokensByVariant = new Dictionary<long, List<(long Rid, string Token)>>();
+        int preSeededRows = 0;
         foreach (var row in TableFile.ReadRows(db.TablePath("PartsResourceData")))
             if (row.Num(1) is { } rid && row.Str(2) is { } token)
             {
                 long vid = (long)rid / 10;
                 if (!defaultByVariant.ContainsKey(vid))
-                    throw new InvalidDataException(
-                        $"PartsResourceData {rid} ('{token}') belongs to no PartsListData variant");
+                {
+                    preSeededRows++;
+                    continue;
+                }
                 if (!tokensByVariant.TryGetValue(vid, out var list)) tokensByVariant[vid] = list = new();
                 list.Add(((long)rid, token));
             }
+        if (preSeededRows > 0)
+            note?.Invoke($"PartsResourceData pre-seeds {preSeededRows} row(s) no PartsListData row lists "
+                         + "because they belong to an unshipped outfit. The app skips them.");
 
         var byModelConfig = new Dictionary<long, IReadOnlyList<Slot>>();
         foreach (var (cid, slotIds) in slotIdsByClothes)

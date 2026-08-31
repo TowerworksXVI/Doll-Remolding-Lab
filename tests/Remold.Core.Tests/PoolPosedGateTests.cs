@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
@@ -29,8 +29,9 @@ public class PoolPosedGateTests
             Part("cloth", new uint[] { 20, 40 }, new uint[] { 20 }),
         };
         var e = Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(Donor(10, 20, 40), roster));
-        Assert.Contains("no pooled part of this outfit poses", e.Message);
-        Assert.Contains("0x00000028", e.Message);
+        Assert.Contains("no part of this item moves", e.Message);
+        Assert.Contains(Remold.Core.Migoto.BuildLogDiagnostics.From(e),
+            d => d.Contains("0x00000028", System.StringComparison.Ordinal));
         Assert.Contains("'body'", e.Message);
         Assert.Contains("'cloth'", e.Message);
     }
@@ -74,7 +75,7 @@ public class PoolPosedGateTests
         // refusal's place: the remedies are different (re-export the reference vs re-weight onto it).
         var roster = new[] { Part("body", new uint[] { 10, 40 }, new uint[] { 10 }) };
         var e = Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(Donor(10, 999), roster));
-        Assert.Contains("owned by no part", e.Message);
+        Assert.Contains("that no part of this item has", e.Message);
     }
 
     [Fact]
@@ -104,8 +105,8 @@ public class PoolPosedGateTests
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), candidates, missingParts: excluded, replacedPart: "body"));
 
-        Assert.Contains("Left out of the pool: 'hair' · it stores one influence per vertex", e.Message);
-        Assert.Contains("or drop this Replace", e.Message);
+        Assert.Contains("Left out: 'hair' · it stores one influence per vertex", e.Message);
+        Assert.Contains("or remove this mesh edit", e.Message);
     }
 
     [Fact]
@@ -126,7 +127,7 @@ public class PoolPosedGateTests
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), candidates, missingParts: excluded, replacedPart: "body"));
 
-        Assert.Contains("Left out of the pool: 'P1_dress' · it is a wardrobe option worn only some of the time",
+        Assert.Contains("Left out: 'P1_dress' · it is a wardrobe option worn only some of the time",
             e.Message);
     }
 
@@ -141,7 +142,7 @@ public class PoolPosedGateTests
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), roster, missingParts: missing));
 
-        Assert.Contains("Left out of the pool: 'ghost' · bundle 'x' isn't in this install", e.Message);
+        Assert.Contains("Left out: 'ghost' · bundle 'x' isn't in this install", e.Message);
     }
 
     [Fact]
@@ -155,9 +156,8 @@ public class PoolPosedGateTests
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 40), roster, missingParts: missing));
 
-        Assert.Equal("the donor rides 1 bone(s) that no pooled part of this outfit poses "
-            + "(first: 0x00000028, carried at zero weight by 'body'). "
-            + "Re-weight the donor onto the bones this outfit moves", e.Message);
+        Assert.Equal("the new mesh uses 1 bone(s) that no part of this item moves. They are named by "
+            + "'body' but never moved. Re-weight the mesh onto the bones this item moves", e.Message);
     }
 
     [Fact]
@@ -167,7 +167,8 @@ public class PoolPosedGateTests
         // named bone is the lowest hash, so two runs over one roster read the same.
         var roster = new[] { Part("body", new uint[] { 10, 40, 41 }, new uint[] { 10 }) };
         var e = Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(Donor(10, 41, 40), roster));
-        Assert.Contains("rides 2 bone(s)", e.Message);
-        Assert.Contains("0x00000028", e.Message);
+        Assert.Contains("uses 2 bone(s)", e.Message);
+        Assert.Contains(Remold.Core.Migoto.BuildLogDiagnostics.From(e),
+            d => d.Contains("0x00000028", System.StringComparison.Ordinal));
     }
 }

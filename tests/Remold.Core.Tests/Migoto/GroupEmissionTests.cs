@@ -403,7 +403,7 @@ public class GroupEmissionTests : IDisposable
     /// reserved past the group region even when another part outweighs the anchor on the bone (the
     /// reservation branch survives in the emitter as a data-driven guard only).</summary>
     [Fact]
-    public void A_witness_bone_another_part_outweighs_is_still_anchor_owned_with_no_reserved_slot()
+    public void An_owner_reowned_entirely_to_the_anchor_ships_no_witness_or_recovery_source()
     {
         // alpha carries C alone and outweighs the anchor on it — under weight-argmax alone C would be
         // alpha's, and the anchor's witness recovery would need a reserved slot
@@ -448,7 +448,7 @@ public class GroupEmissionTests : IDisposable
 
         // union 2 (C, B) + alpha's LOD0 part-side witness + 1 group slot — NO slot is reserved for
         // the anchor side of either witness; both read C from the anchor-owned union row
-        Assert.Equal(4 * 64, new FileInfo(Path.Combine(outDir, "palette_seed_swap.buf")).Length);
+        Assert.Equal(3 * 64, new FileInfo(Path.Combine(outDir, "palette_seed_swap.buf")).Length);
         // …and the tier shader reads the witness bone's own union row (C is union slot 0)
         Assert.Contains("static const uint WITA=0;",
             File.ReadAllText(Path.Combine(outDir, "grpfuse_mv1_lod1_swap.hlsl")));
@@ -457,8 +457,10 @@ public class GroupEmissionTests : IDisposable
         var betaMap = File.ReadAllBytes(Path.Combine(outDir, "beta_map_swap.buf"));
         Assert.Equal(new[] { 1u, 0u }, Enumerable.Range(0, betaMap.Length / 4)
             .Select(i => BitConverter.ToUInt32(betaMap, i * 4)).ToArray());
-        var alphaMap = File.ReadAllBytes(Path.Combine(outDir, "alpha_map_swap.buf"));
-        Assert.Equal(2u, BitConverter.ToUInt32(alphaMap, 0));
+        Assert.False(File.Exists(Path.Combine(outDir, "alpha_map_swap.buf")));
+        Assert.False(File.Exists(Path.Combine(outDir, "alpha_cpinv.buf")));
+        Assert.DoesNotContain("[CustomShaderRecover_alpha_swap]",
+            File.ReadAllText(Path.Combine(outDir, "mod.ini")));
     }
 
     // ---- the presence latch ---------------------------------------------------------------------------
@@ -578,11 +580,11 @@ public class GroupEmissionTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
         // the whole chain — members included — opens behind the key
-        Assert.Contains("if $zz_key_f8 == 1\nif $zz_done_swap == 0\n", ini);
+        Assert.Contains("if $zz_key_f8 == 0\nif $zz_done_swap == 0\n", ini);
         Assert.Contains("if $zz_gate_src_mv1 == 1\nrun = CustomShaderGroup_mv1_swap\nendif\n", ini);
         // the sighting is a bare capture line, not under the key
         Assert.Contains("Resource_mv1_Posed = ref vb0\n$zz_seen_src_mv1 = 1\n", ini);
-        Assert.DoesNotContain("if $zz_key_f8 == 1\n$zz_seen_src_mv1 = 1", ini);
+        Assert.DoesNotContain("if $zz_key_f8 == 0\n$zz_seen_src_mv1 = 1", ini);
     }
 
     // ---- the capture-section merge --------------------------------------------------------------------

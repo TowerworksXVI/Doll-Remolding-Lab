@@ -16,8 +16,9 @@ namespace Remold.Core;
 /// glbs inside mod projects. DURABLE state is never named here — settings, the first-run record, project
 /// manifests, workspace glbs and textures, and the shipped sharing seed all stand.</para>
 /// <para>Every removal is per-item best-effort: a file another process holds is skipped and the sweep
-/// carries on. A cache that survives a sweep is a slower next open, never a wrong one — the fingerprint is
-/// compared, not trusted — so a partial sweep needs no rollback and reports nothing.</para>
+/// carries on. A cache that survives a sweep is a slower next open, never a wrong one — every survivor is
+/// content-keyed or fingerprint-compared before it is served, so a stale one answers for nothing — and a
+/// partial sweep therefore needs no rollback and reports nothing.</para>
 /// <para>A REPARSE POINT (junction, symlink, mount point) is never walked through: a folder inside a cache
 /// tree can point anywhere on the machine, and following one would take the sweep out of the roots named
 /// here entirely. A directory link found inside a swept tree is removed AS A LINK — the thing it points at
@@ -25,9 +26,12 @@ namespace Remold.Core;
 /// </summary>
 public static class CacheReset
 {
-    /// <summary>The combined-rig cache key's filename: the sidecar written beside
-    /// <see cref="AssetExporter.CombinedGlbName"/>, derived from that name rather than spelled again so the
-    /// sweep can never drift from what the build writes.</summary>
+    /// <summary>The combined-rig cache key's filename: the sidecar that was written beside
+    /// <see cref="AssetExporter.CombinedGlbName"/>, still derived from that name rather than spelled again.
+    ///
+    /// <para>NOTHING MINTS ONE ANY MORE — the combined-rig cache this keyed is gone, and a session builds its
+    /// composition fresh into its own run folder every time — so the sweep below is here only to clear the
+    /// sidecars earlier releases left behind in mod folders that are still on disk.</para></summary>
     public static readonly string CombinedFingerprintName =
         Path.ChangeExtension(AssetExporter.CombinedGlbName, ".fingerprint")!;
 
@@ -58,8 +62,8 @@ public static class CacheReset
                 try { File.Delete(file); removed++; }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
-                    // held open or unreadable — a surviving sidecar is compared on the next open and, if it
-                    // no longer describes the file beside it, rebuilt anyway
+                    // held open or unreadable — nothing reads one any more, so a surviving sidecar costs
+                    // the modder a few hundred bytes of disk and nothing else
                 }
             }
         }
@@ -133,7 +137,8 @@ public static class CacheReset
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
     }
 
-    /// <summary>Remove a cache tree, item by item. <see cref="Directory.Delete(string, bool)"/> gives up at
+    /// <summary>Remove a cache tree, item by item. Shared by the force-rescan sweep and bounded derived
+    /// caches when they evict one of their own entry directories. <see cref="Directory.Delete(string, bool)"/> gives up at
     /// the FIRST file it can't remove and leaves the rest of the tree standing, which is the opposite of what
     /// a sweep owes: here every item is tried on its own and only the ones still holding something a lock
     /// saved survive.
@@ -144,7 +149,7 @@ public static class CacheReset
     /// <para>Reparse points are never descended into — see the type remarks — and a directory link found on
     /// the way is removed with a NON-recursive delete, which unlinks it and leaves whatever it pointed at
     /// alone.</para></summary>
-    private static void DeleteTree(string dir)
+    internal static void DeleteTree(string dir)
     {
         if (!Directory.Exists(dir)) return;
         // The root itself can be a link — sweep the link, never the target behind it.

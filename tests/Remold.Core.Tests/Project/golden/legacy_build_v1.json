@@ -1,0 +1,117 @@
+[
+  {
+    "path": "combined_bind_vesna_body.buf",
+    "length": 240,
+    "sha256": "f7adac09de4977dfd5413d85653a68a6221620f794dc7ffcd0f4800b35fd3257"
+  },
+  {
+    "path": "combined_ib_vesna_body.buf",
+    "length": 12,
+    "sha256": "d19c56fe954b4adbb040580d9ae4e98a692b51f8e2cab91d7ddecb903cec9204"
+  },
+  {
+    "path": "combined_skin_vesna_body.buf",
+    "length": 192,
+    "sha256": "d1f9a528d0512202d4f68b2a0f1bcdd3d633ed2342d980c00520bd78c6e7d5f7"
+  },
+  {
+    "path": "combined_vb1_vesna_body.buf",
+    "length": 120,
+    "sha256": "5246c85c54128b97f1cc558a88fb1b6e12783a7ba0d45d9951fe0c03a161eaa3"
+  },
+  {
+    "path": "convert_cs_vesna_body.hlsl",
+    "length": 1740,
+    "sha256": "a20762bc3cee215489266c75a0d59d8b94f047400460602e6bbdbd130810108e"
+  },
+  {
+    "path": "convert_witness_vesna_body.hlsl",
+    "length": 2154,
+    "sha256": "fded1d1e7578eca28941c40786a30fa63bb81b03e70d92b3b826e2dab8a8f6c0"
+  },
+  {
+    "path": "gf2mod.json",
+    "length": 718,
+    "sha256": "f06af7261c26060dd64a99a91683795aa284190d11bb0887d5e83d7df5a3b439"
+  },
+  {
+    "path": "mod.ini",
+    "length": 6212,
+    "sha256": "d596a95059e355c8214e813a99c929b2b6cf64074354e8fa5e7ffdc3aed57414"
+  },
+  {
+    "path": "owner_part_vesna_body.buf",
+    "length": 8,
+    "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+  },
+  {
+    "path": "palette_seed_vesna_body.buf",
+    "length": 128,
+    "sha256": "59160118b6ec92c768dbf108f969dc12d786fa19935201e3a3755ee1a000ff74"
+  },
+  {
+    "path": "recover_vesna_body_cs.hlsl",
+    "length": 2103,
+    "sha256": "006ef797b746d8e38b2348df967766d19a470c826c6c2e53adc9572cbe9f6ca2"
+  },
+  {
+    "path": "recover_vesna_body_lod1_cs.hlsl",
+    "length": 2103,
+    "sha256": "006ef797b746d8e38b2348df967766d19a470c826c6c2e53adc9572cbe9f6ca2"
+  },
+  {
+    "path": "repair.json",
+    "length": 7895,
+    "sha256": "0482b883162712d70f1163b201d9df67a9ed49b8f64b1323280d322b6c1473bd"
+  },
+  {
+    "path": "skin_cs_vesna_body.hlsl",
+    "length": 1576,
+    "sha256": "a207094263ed3620d715e22d358014438124de6eff3a76c0405788bc63950f17"
+  },
+  {
+    "path": "union_vesna_body.json",
+    "length": 145,
+    "sha256": "62aa0a6772c18d29179cd5eda2c79ddd370b2ca23d0072d3fc59888b6f6105e0"
+  },
+  {
+    "path": "vesna_body_cpinv.buf",
+    "length": 512,
+    "sha256": "06c63f6c1860c9f550ab9cdde67e91a436a7b7697d25e99a42d14cdd0bb7e5a0"
+  },
+  {
+    "path": "vesna_body_lod1_cpinv.buf",
+    "length": 384,
+    "sha256": "87a3c60112e413f362dd4f60b8b7ac70babaf343aed9d9a600c192a920b147f8"
+  },
+  {
+    "path": "vesna_body_lod1_map_vesna_body.buf",
+    "length": 8,
+    "sha256": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d"
+  },
+  {
+    "path": "vesna_body_lod1_off.buf",
+    "length": 16,
+    "sha256": "f9759435fe4e09726d8efa3f96a23f3a2ba93850dcbed8a3fd8ae4c28354b311"
+  },
+  {
+    "path": "vesna_body_lod1_sel.buf",
+    "length": 96,
+    "sha256": "0c49c64790b8c671265664a37c86153db5fb7f062df30d031b753cd134d2ca23"
+  },
+  {
+    "path": "vesna_body_map_vesna_body.buf",
+    "length": 8,
+    "sha256": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d"
+  },
+  {
+    "path": "vesna_body_off.buf",
+    "length": 16,
+    "sha256": "043dcdc2cec24de4041662b31a5f885bb7419c27a7254f89a5913daacd518bed"
+  },
+  {
+    "path": "vesna_body_sel.buf",
+    "length": 128,
+    "sha256": "caeda60861bc9f32f375b2fe0aef9f8cfe74cca6edb38fad5e44abe67bf12b07"
+  }
+]

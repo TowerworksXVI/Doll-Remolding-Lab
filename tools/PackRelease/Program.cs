@@ -8,6 +8,8 @@
 // The publish folder itself is left untouched; its own flat exe is simply not carried over.
 
 using Microsoft.NET.HostModel.AppHost;
+using Remold.Core;
+using Remold.Core.Workbench;
 
 const string AppDll = "Remold.App.dll";
 
@@ -26,13 +28,27 @@ if (!File.Exists(Path.Combine(pubDir, AppDll)))
     return 1;
 }
 // The shipped sharing seed has to end up beside the assemblies: without it a fresh install pays the full
-// sharing crawl on first launch. It is a build Content item, so a missing one means the publish folder is
-// incomplete — checked HERE, beside the other input guard and before anything is written, so a refusal
-// leaves outDir empty and the retry sees this message rather than "pack into a fresh folder".
-const string Seed = @"data\sharing_seed.json";
-if (!File.Exists(Path.Combine(pubDir, Seed)))
+// sharing crawl on first launch. Its observation memo rides along, and is what keeps that crawl cheap for
+// the rows a game update has moved past the seed. Both are build Content items, so a missing one means the
+// publish folder is incomplete — checked HERE, beside the other input guard and before anything is
+// written, so a refusal leaves outDir empty and the retry sees this message rather than "pack into a fresh
+// folder".
+// The shader slot catalog rides the same way: without it a build cannot say which ps registers to probe,
+// so donor maps stop binding.
+foreach (var shipped in new[]
+         { LabPaths.SharingSeedRelativePath, LabPaths.AssetHashSeedRelativePath, @"data\charps_slots.json" })
+    if (!File.Exists(Path.Combine(pubDir, shipped)))
+    {
+        Console.WriteLine($"{pubDir} holds no {shipped} — re-publish the app.");
+        return 1;
+    }
+// Present is not the same as usable. Both seed files are refused at LOAD when their schema is not the one
+// the app reads, and that refusal is silent — a fresh install just measures the whole population, which is
+// the exact cost the seed exists to avoid. Nothing else in the release flow can see it, so the pack is
+// where a stale pair has to stop.
+if (ShippedMeasurement.Refusal(pubDir) is { } stale)
 {
-    Console.WriteLine($"{pubDir} holds no {Seed} — re-publish the app.");
+    Console.WriteLine(stale);
     return 1;
 }
 if (Directory.Exists(outDir) && Directory.EnumerateFileSystemEntries(outDir).Any())

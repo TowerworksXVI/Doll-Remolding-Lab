@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Runtime.Intrinsics.X86;
 using Remold.Core.Bundles;
@@ -33,7 +33,8 @@ public static class BufferHash
         BundleReader? reader = null)
     {
         var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
-            ?? throw new InvalidDataException($"mesh '{meshName}' not found in bundle");
+            ?? throw new InvalidDataException(
+                $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
         return Compute(MeshRaw.From(field));
     }
 

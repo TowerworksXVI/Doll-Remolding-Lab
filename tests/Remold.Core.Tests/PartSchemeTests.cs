@@ -138,12 +138,40 @@ public class PartSchemeTests
     }
 
     [Fact]
-    public void Load_FailsLoudly_OnAResourceBelongingToNoVariant()
+    public void Load_SkipsAndReports_ResourceRowsBelongingToNoListedVariant()
+    {
+        // Releases pre-seed an unshipped outfit's resource rows ahead of its list/group/clothes rows
+        // (measured on catalog 26932); no clothes row can reach them, so they cost nothing — the load
+        // succeeds, names the skip, and the healthy outfits read whole.
+        using var g = new TempGame();
+        var (t, gr, l, r) = VesnaFixture();
+        r = r.Concat(new[]
+        {
+            TempGame.PartsResourceRow(999999991, "P1_stray"),
+            TempGame.PartsResourceRow(999999992, "P1_stray2"),
+            TempGame.PartsResourceRow(888888881, "P2_stray"),
+        }).ToArray();
+        var notes = new System.Collections.Generic.List<string>();
+
+        var scheme = PartScheme.Load(Db(g, t, gr, l, r), notes.Add);
+
+        var slots = scheme.For(107101);
+        Assert.NotNull(slots);
+        Assert.Equal(new[] { "P1_cloth1", "P1_cloth2" }, slots![1].Variants[0].Tokens);
+        var report = Assert.Single(notes);
+        Assert.Contains("3 row(s)", report);
+        Assert.DoesNotContain("variant id", report);
+        Assert.Contains("skips", report);
+    }
+
+    [Fact]
+    public void Load_ReportsNothing_WhenEveryResourceRowIsListed()
     {
         using var g = new TempGame();
-        var db = Db(g, resources: new[] { TempGame.PartsResourceRow(999999991, "P1_stray") });
-        var ex = Assert.Throws<InvalidDataException>(() => PartScheme.Load(db));
-        Assert.Contains("P1_stray", ex.Message);
+        var (t, gr, l, r) = VesnaFixture();
+        var notes = new System.Collections.Generic.List<string>();
+        PartScheme.Load(Db(g, t, gr, l, r), notes.Add);
+        Assert.Empty(notes);
     }
 
     [Fact]

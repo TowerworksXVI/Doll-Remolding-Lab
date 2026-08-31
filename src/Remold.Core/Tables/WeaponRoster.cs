@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Remold.Core.Bundles;
 using Remold.Core.Model;
 
 namespace Remold.Core.Tables;
@@ -246,6 +247,7 @@ public static class WeaponRoster
                 key = owner + GroupSuffix;
                 display = charsByName.TryGetValue(owner, out var c) ? c.DisplayName ?? owner : owner;
             }
+            if (RosterBlacklist.IsBlacklisted(key) || RosterBlacklist.IsBlacklisted(display)) continue;
             if (!groups.TryGetValue(key, out var g))
                 groups[key] = g = (display, new List<Outfit>());
             g.Outfits.Add(WeaponOutfit(w.WeaponId, folderStem, w.Rarity, w.ModelPath, w.DisplayName));

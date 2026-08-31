@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "catalog_id": "charps-26932-r3",
+  "game_build": "26932",
+  "source_reflection_sha256_16": "fa6e3457c2ec977f",
+  "provenance": "offline reflection over the character shader bundle, 2815 unique fragment variants (rule: unique DXBC blob, _MainTex folded into BaseMap; reproduces charps-26109-r2 five keys exactly); _SMO and the VFX cluster beyond _DissolveTex are NOT in this bundle and carry no rows",
+  "validation_policy": "filter_index_tag_probe",
+  "inputs": {
+    "BaseMap": {
+      "0": 198,
+      "1": 238,
+      "2": 1104,
+      "3": 944,
+      "4": 320
+    },
+    "BumpMap": {
+      "2": 202,
+      "3": 924,
+      "4": 788,
+      "5": 368,
+      "6": 120,
+      "7": 48
+    },
+    "RMOTex": {
+      "3": 138,
+      "4": 708,
+      "5": 588,
+      "6": 288,
+      "7": 120,
+      "8": 48
+    },
+    "BlendTex": {
+      "2": 8,
+      "3": 74,
+      "4": 218,
+      "5": 288,
+      "6": 212,
+      "7": 156,
+      "8": 128,
+      "9": 72,
+      "10": 16
+    },
+    "RampMap": {
+      "3": 14,
+      "4": 108,
+      "5": 404,
+      "6": 630,
+      "7": 490,
+      "8": 317,
+      "9": 299,
+      "10": 232,
+      "11": 96,
+      "12": 16
+    },
+    "GlitterMap": {
+      "4": 42,
+      "5": 237,
+      "6": 276,
+      "7": 140,
+      "8": 68,
+      "9": 60,
+      "10": 36,
+      "11": 8
+    },
+    "DetailAlbedo": {
+      "4": 14,
+      "5": 93,
+      "6": 171,
+      "7": 136,
+      "8": 52,
+      "9": 8
+    },
+    "DetailNormalRM": {
+      "5": 14,
+      "6": 93,
+      "7": 171,
+      "8": 136,
+      "9": 52,
+      "10": 8
+    },
+    "DetailMask": {
+      "6": 14,
+      "7": 93,
+      "8": 171,
+      "9": 136,
+      "10": 52,
+      "11": 8
+    },
+    "MatcapTex": {
+      "2": 24,
+      "3": 120,
+      "4": 120,
+      "5": 48
+    },
+    "MatcapNormalTex": {
+      "3": 24,
+      "4": 120,
+      "5": 120,
+      "6": 48
+    },
+    "Specularmap": {
+      "1": 168
+    },
+    "DissolveTex": {
+      "0": 1,
+      "1": 1,
+      "2": 4,
+      "3": 48,
+      "4": 154,
+      "5": 324,
+      "6": 228,
+      "7": 96,
+      "8": 40,
+      "9": 16
+    },
+    "PaintMaskTexture": {
+      "4": 4,
+      "5": 42,
+      "6": 150,
+      "7": 196,
+      "8": 119,
+      "9": 91,
+      "10": 104,
+      "11": 64,
+      "12": 16
+    }
+  }
+}

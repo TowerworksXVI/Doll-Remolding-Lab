@@ -30,8 +30,7 @@ public static class GameLocator
     private static readonly string Rel =
         Path.Combine("GF2_Exilium_Data", "LocalCache", "Data", "AssetBundles_Windows");
 
-    /// <summary>The game's VFS manifest filename (<c>md5("AssetBundleFileSystem")</c>): a fixed name
-    /// every GF2 install ships and no other game's cache has, so it anchors the accept-test.</summary>
+    /// <summary>The game's VFS manifest filename.</summary>
     private const string VfsManifestFile = "08dfe7d89b6fe56375d6dfec87ffcc8a.bundle";
 
     private static readonly Regex LibPath = new("\"path\"\\s*\"([^\"]+)\"", RegexOptions.Compiled);
@@ -83,7 +82,7 @@ public static class GameLocator
             problem ??= "This isn't a standard GF2 install layout.";
         }
         return (null, problem ??
-            "No AssetBundles_Windows folder found here. Pick the game's install folder or its bundle cache.");
+            "No AssetBundles_Windows folder found here. Pick the game's install folder.");
     }
 
     /// <summary>Null when <paramref name="dir"/> carries the GF2 sentinels, else why it doesn't:
@@ -99,10 +98,10 @@ public static class GameLocator
             // The cache is filled on the game's first run, so an install that has never launched reaches
             // here with the folder tree in place and no catalog in it. Both remedies are named.
             if (!catalogs.MoveNext())
-                return "No GF2 catalog here (catalog_main…), so this isn't the game's bundle cache. "
-                    + "Pick the game's install folder. Launch the game once if it has never run on this machine.";
+                return "This folder doesn't have the game's files yet. Pick the game's install folder, "
+                    + "and launch the game once if it has never run on this machine.";
             if (!File.Exists(Path.Combine(dir, VfsManifestFile)))
-                return "This folder is missing the game's file manifest, so it isn't a GF2 install (or it's an incomplete copy).";
+                return "This folder is missing some of the game's files, so it isn't a GF2 install (or it's an incomplete copy).";
             return null;
         }
         catch (IOException) { return "The folder couldn't be read (a lock or permissions)."; }

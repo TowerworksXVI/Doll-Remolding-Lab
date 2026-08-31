@@ -37,15 +37,24 @@ public sealed class GameVfs
     };
 
     public string CatalogVersion { get; }
+    /// <summary>Identity of the exact catalog source this view parsed. Path separates game installs;
+    /// length and mtime are the same source guards used by the parsed-catalog snapshot.</summary>
+    public string CatalogIdentity { get; }
+    /// <summary>Stable identity of the game install containing this view. Unlike the catalog identity it
+    /// survives game updates, so a prior-catalog local measurement can prove it came from this install.</summary>
+    public string InstallIdentity { get; }
     public CatalogIndex Catalog { get; }
     public GffManifest Manifest { get; }
 
     private readonly string _bundleDir;
 
-    private GameVfs(string bundleDir, string catalogVersion, CatalogIndex catalog, GffManifest manifest)
+    private GameVfs(string bundleDir, string catalogVersion, string catalogIdentity,
+        CatalogIndex catalog, GffManifest manifest)
     {
         _bundleDir = bundleDir;
         CatalogVersion = catalogVersion;
+        CatalogIdentity = catalogIdentity;
+        InstallIdentity = Workbench.NameKey.Of(Path.GetFullPath(bundleDir).ToLowerInvariant());
         Catalog = catalog;
         Manifest = manifest;
     }
@@ -59,15 +68,20 @@ public sealed class GameVfs
         var bundleDir = GameInfo.BundleDir(anyGamePath);
         var manifestPath = GffManifest.PathIn(bundleDir);
         if (manifestPath is null) return null;
-        return new GameVfs(bundleDir, GameInfo.CatalogVersion(anyGamePath),
-            catalog, GffManifest.Read(manifestPath));
+        string catalogVersion = GameInfo.CatalogVersion(anyGamePath);
+        string catalogPath = GameInfo.CatalogPath(anyGamePath)!;
+        var catalogFile = new FileInfo(catalogPath);
+        string catalogIdentity = string.Join("|", Path.GetFullPath(catalogPath),
+            catalogFile.Length, catalogFile.LastWriteTimeUtc.Ticks);
+        return new GameVfs(bundleDir, catalogVersion, catalogIdentity, catalog,
+            GffManifest.LoadCached(manifestPath, LabPaths.GffManifestSnapshotFile(catalogVersion)));
     }
 
     /// <summary>Assemble a forward view from already-built pieces. Tests only — pairs a hand-authored
     /// <see cref="CatalogIndex.ForTest"/> with a synthetic manifest so locate/deobfuscate run the REAL
     /// forward mechanics.</summary>
     internal static GameVfs ForTest(string bundleDir, string catalogVersion, CatalogIndex catalog, GffManifest manifest) =>
-        new(bundleDir, catalogVersion, catalog, manifest);
+        new(bundleDir, catalogVersion, "test|" + catalogVersion, catalog, manifest);
 
     /// <summary>Install-completeness check (no content reads): the physical files the manifest
     /// addresses that are missing on disk, empty = healthy. Non-empty means a mid-update or incomplete
@@ -78,11 +92,8 @@ public sealed class GameVfs
             Directory.EnumerateFiles(_bundleDir, "*.bundle").Select(Path.GetFileNameWithoutExtension)!,
             StringComparer.OrdinalIgnoreCase);
         var missing = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var name in Manifest.Names)
-        {
-            var stub = Manifest.ReadStubAt(Manifest.Locate(name).Position);
-            if (!present.Contains(stub.PhysHash)) missing.Add(stub.PhysHash);
-        }
+        foreach (var physicalHash in Manifest.PhysicalHashes)
+            if (!present.Contains(physicalHash)) missing.Add(physicalHash);
         return missing.ToList();
     }
 

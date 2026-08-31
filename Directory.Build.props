@@ -1,0 +1,7 @@
+<Project>
+  <!-- Every test run records a .trx (see test.runsettings): a failure keeps its name even when it
+       will not reproduce. Ad-hoc runs kept forgetting the flag; the harness must not be forgettable. -->
+  <PropertyGroup>
+    <RunSettingsFilePath>$(MSBuildThisFileDirectory)test.runsettings</RunSettingsFilePath>
+  </PropertyGroup>
+</Project>

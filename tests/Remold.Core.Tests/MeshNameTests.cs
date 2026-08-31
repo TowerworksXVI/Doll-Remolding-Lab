@@ -47,7 +47,7 @@ public class MeshNameTests
     [InlineData("c_VesnaSSR0101_slg_cloth1_lod3", "lod3")]
     [InlineData("c_VesnaSSR0101_slg_hair_lodm0", "lodm0")]              // the mid _lodm<n> tier
     // the same mid tier on a variant garment, where the marker is INFIXED — the spelling a tail test
-    // misreads as "_Dorm", and what ModBuilder's unshipped-tier skip keys on
+    // misreads as "_Dorm", so the generic parser has to recognize the marker in place
     [InlineData("c_VesnaSSR0101_slg_P1_body1_lodm0_Dorm", "lodm0")]
     [InlineData("C_VESNASSR0101_SLG_BODY_LOD0", "lod0")]               // lower-cased
     [InlineData("c_VesnaSSR0101_slg_body_lod0_extra", "lod0")]        // first marker wins
@@ -73,7 +73,7 @@ public class MeshNameTests
     [Theory]
     [InlineData("c_VesnaSSR0101_slg_cloth1_lod1", null)]
     [InlineData("c_VesnaSSR0101_slg_cloth1_lod1_Fight", "Fight")]
-    [InlineData("c_VesnaSSR0101_slg_P1_body1_lodm0_Dorm", "Dorm")]   // infixed marker, unrendered tier
+    [InlineData("c_VesnaSSR0101_slg_P1_body1_lodm0_Dorm", "Dorm")]   // infixed medium-tier marker
     [InlineData("c_VesnaSSR0101_slg_cloth4_trans_lod0", null)]       // _trans is part identity
     [InlineData("cloth1_lod1_Dorm", "Dorm")]                         // no outfit prefix to strip
     public void Variant_ReadsTheOutfitStateOffAWholeMeshName(string meshName, string? expected)

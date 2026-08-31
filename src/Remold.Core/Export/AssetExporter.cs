@@ -1,9 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Buffers.Binary;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Remold.Core.Bundles;
 using Remold.Core.Mesh;
@@ -50,14 +53,16 @@ public sealed class ExportReport
 }
 
 /// <summary>
-/// Exports a part's high-detail (lod0) mesh + its textures to a mod working folder, recipe-exact
-/// (<see cref="ExportRecipePart"/>): meshes to <c>meshes/</c> as <c>.glb</c>, textures to
+/// Exports a part's high-detail (lod0) mesh + its textures to a mod working folder for Blender
+/// (<see cref="BuildRiggedGlbs"/>): meshes to <c>meshes/</c> as <c>.glb</c>, textures to
 /// <c>textures/</c> as <c>.png</c>. Textures resolve renderer-first
 /// (<see cref="Textures.PartTextureResolver"/>); a part whose renderer binds no texture reports the miss
 /// loudly and exports the mesh untextured.
 /// </summary>
 public static class AssetExporter
 {
+    public const string RiggedBuildSpec = "rigged-build-spec-v2";
+
     /// <summary>Filename of the optional whole-outfit combined glb (all skinned parts, one union-skeleton
     /// armature) written alongside the per-part glbs in <c>meshes/</c>. Deterministic so the Edit pane can
     /// find it without project plumbing.</summary>
@@ -81,12 +86,179 @@ public static class AssetExporter
 
     /// <summary>The candidacy roster a rigged export filters its appended bone tail against: every part of
     /// the subject, in the subject model's own order, plus the wardrobe <paramref name="Scheme"/> presence
-    /// is classified against (null = not modular, or the tables wouldn't read, which only widens the offer).
-    /// Null roster at the export means candidacy is unknown and the whole subject skeleton is offered, the
-    /// behaviour before this filter existed.</summary>
+    /// is classified against. Null roster at the export means candidacy is unknown and the whole subject
+    /// skeleton is offered, the behaviour before this filter existed.
+    ///
+    /// <para>A null <paramref name="Scheme"/> is not the harmless end of anything. It means either "this
+    /// subject is not modular" — where nothing is lost, since no <c>P&lt;n&gt;_</c> token needs classifying
+    /// — or "the tables would not read", where every modular token classifies as an unknown variant, no
+    /// sibling can vouch for another, coverage returns nothing, and the tail NARROWS to each part's own
+    /// posed bones. That is the under-offer direction: bones a build would have accepted paint on are not
+    /// offered at all. The roster cannot tell the two apart; the caller that read the tables can, and the
+    /// app's open says so on its status line.</para></summary>
     public sealed record SubjectRoster(IReadOnlyList<RosterPart> Parts,
         IReadOnlyList<Tables.PartScheme.Slot>? Scheme = null,
         bool PartsPoolAlone = false);
+
+    /// <summary>One stock texture a rigged build actually addressed, using the durable stock-PNG cache's
+    /// own key plus the run-local filename written into the GLB sidecar.</summary>
+    public readonly record struct StockTextureDependency(string BundleContentId, string TextureName,
+        long PathId, string DestinationFileName);
+
+    /// <summary>Structured facts observed by one rigged build. They are output state rather than assumptions
+    /// at the open call site: cache publication reads these flags and the exact bundles and stock textures
+    /// this invocation touched.</summary>
+    public sealed class RiggedBuildDiagnostics
+    {
+        private readonly HashSet<string> _bundleReads = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _requiredBundleReads = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, StockTextureDependency> _stockTextures =
+            new(StringComparer.OrdinalIgnoreCase);
+        private int _hadTransientFailures;
+
+        public bool Completed { get; private set; }
+        public bool WasCanceled { get; private set; }
+        public bool HadProjectAuthoredContent { get; private set; }
+        public bool ProducedComposition { get; private set; }
+        /// <summary>Whether every build input came from the game-side route. A composition is a product
+        /// shape, not authored content; <see cref="ProducedComposition"/> lets per-part and combined cache
+        /// publishers require the product shape they own.</summary>
+        public bool GameSideOnly => !HadProjectAuthoredContent;
+        public bool HadTransientFailures => System.Threading.Volatile.Read(ref _hadTransientFailures) != 0;
+        public IReadOnlyList<string> BundleReads =>
+            _bundleReads.OrderBy(value => value, StringComparer.Ordinal).ToArray();
+        public IReadOnlyList<string> RequiredBundleReads =>
+            _requiredBundleReads.OrderBy(value => value, StringComparer.Ordinal).ToArray();
+        public IReadOnlyList<StockTextureDependency> StockTextures =>
+            _stockTextures.Values.OrderBy(value => value.DestinationFileName, StringComparer.Ordinal).ToArray();
+
+        internal void ObserveInputs(
+            IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut,
+                IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+            string? combinedOut,
+            IReadOnlyDictionary<string, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>>? authoredMaps,
+            IReadOnlyDictionary<string, IReadOnlyList<TextureTransportOverride>>? authoredTextureMaps,
+            IReadOnlyCollection<string>? observedGameSidePreparedGlbs)
+        {
+            ProducedComposition |= combinedOut is not null;
+            var gamePrepared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (observedGameSidePreparedGlbs is not null)
+                foreach (string path in observedGameSidePreparedGlbs)
+                    try { gamePrepared.Add(Path.GetFullPath(path)); } catch { /* malformed cannot certify */ }
+            bool IsObservedGamePrepared(string path)
+            {
+                try { return gamePrepared.Contains(Path.GetFullPath(path)); }
+                catch { return false; }
+            }
+            HadProjectAuthoredContent |= parts.Any(part => part.BakedRest is not null
+                    || part.EditedGlb is { } edited && !IsObservedGamePrepared(edited))
+                || authoredMaps is { Count: > 0 }
+                || authoredTextureMaps is { Count: > 0 };
+        }
+
+        internal void ObserveBundle(string logical, bool required)
+        {
+            if (string.IsNullOrWhiteSpace(logical)) return;
+            _bundleReads.Add(logical);
+            if (required) _requiredBundleReads.Add(logical);
+        }
+
+        internal void ObserveStockTexture(string contentId, string name, long pathId, string destination)
+        {
+            if (string.IsNullOrWhiteSpace(contentId) || string.IsNullOrWhiteSpace(name)
+                || string.IsNullOrWhiteSpace(destination)) return;
+            _stockTextures[destination] = new StockTextureDependency(contentId, name, pathId, destination);
+        }
+
+        internal void TransientFailure() =>
+            System.Threading.Interlocked.Exchange(ref _hadTransientFailures, 1);
+        internal void Canceled() => WasCanceled = true;
+        internal void Complete() => Completed = true;
+    }
+
+    /// <summary>The canonical app-side half of a rig-cache identity. It includes every roster and build-spec
+    /// value that can change a per-part rig, but never run-directory paths. List order is preserved where the
+    /// exporter preserves it; strings are length-prefixed so no game-produced delimiter can alias another
+    /// shape.</summary>
+    public static string RiggedBuildFingerprint(Outfit outfit, string character, SubjectRoster? roster,
+        IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut,
+            IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+        bool wardrobeUnreadable)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var number = new byte[8];
+        void Number(long value)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(number, value);
+            hash.AppendData(number);
+        }
+        void Flag(bool value) => Number(value ? 1 : 0);
+        void Text(string? value)
+        {
+            if (value is null) { Number(-1); return; }
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Number(bytes.Length);
+            hash.AppendData(bytes);
+        }
+
+        Text(RiggedBuildSpec);
+        Number(outfit.ModelConfigId);
+        Text(outfit.Stem);
+        Number((int)outfit.Kind);
+        Text(character);
+        Flag(wardrobeUnreadable);
+
+        Number(parts.Count);
+        foreach (var part in parts)
+        {
+            Text(part.Part);
+            Text(part.SourceBundle);
+            Text(part.MeshName);
+            Flag(part.GlbOut is not null);
+            Number(part.PathId);
+            Flag(part.EditedGlb is not null);
+            if (part.BakedRest is null) Number(-1);
+            else
+            {
+                Number(part.BakedRest.Count);
+                foreach (var value in part.BakedRest) Number(BitConverter.SingleToInt32Bits(value));
+            }
+        }
+
+        Flag(roster is not null);
+        if (roster is not null)
+        {
+            Flag(roster.PartsPoolAlone);
+            Number(roster.Parts.Count);
+            foreach (var part in roster.Parts)
+            {
+                Text(part.Mesh);
+                Text(part.Token);
+                Text(part.SourceBundle);
+                Number(part.PathId);
+                Flag(part.CastsShadows);
+                Number((int)part.Visibility);
+            }
+            if (roster.Scheme is null) Number(-1);
+            else
+            {
+                Number(roster.Scheme.Count);
+                foreach (var slot in roster.Scheme)
+                {
+                    Number(slot.Id);
+                    Number(slot.Variants.Count);
+                    foreach (var variant in slot.Variants)
+                    {
+                        Number(variant.Id);
+                        Flag(variant.IsDefault);
+                        Number(variant.Tokens.Count);
+                        foreach (var token in variant.Tokens) Text(token);
+                    }
+                }
+            }
+        }
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
 
     /// <summary>The <c>rosterDegraded</c> entry a rigged build adds when an export fell back to offering the
     /// WHOLE skeleton because candidacy was unknown for it — no row of the roster measured, or the exported
@@ -99,514 +271,23 @@ public static class AssetExporter
     /// part, and this route only decides whether a slot may certify coverage.</summary>
     private const string RosterUnmeasured = "its mesh or its weights couldn't be read";
 
-    /// <summary>Filename a combined session's Blender send lands under, declared to the bridge through the
-    /// session file. Distinct from <see cref="CombinedGlbName"/> so a send never writes over the published
-    /// combined glb, whose fingerprint and map sidecar describe the app's own build.</summary>
-    public const string CombinedSendGlbName = "_combined.send.glb";
-
-    /// <summary>A stable fingerprint of the inputs that built a combined Blender glb: catalog version plus
-    /// the ordered per-part (token, bundle, object-name) identity, plus — for a part taken from its EDITED
-    /// workspace glb — that file's own identity (length + last-write time), plus the same identity for every
-    /// texture PNG the build would embed. Persisted beside the cached <see cref="CombinedGlbName"/> so an
-    /// open reuses it ONLY while the inputs still match; a part added/removed/re-addressed, a game update,
-    /// a change to included edited geometry, or a repainted map forces a rebuild. Deterministic (no hashing)
-    /// so it round-trips and is inspectable; parts compare in the order given.
-    /// <paramref name="parts"/> carries <c>EditedGlb</c> = the workspace glb path when the part is edited.
-    /// A path whose stamp can't be read folds to a fixed marker, matching what an absent edit produces.
-    ///
-    /// <para><paramref name="texturePaths"/> is the maps' half (<see cref="EmbeddedTexturePaths"/> supplies
-    /// it), stamped rather than event-driven: a card drop, an external editor and a revert all rewrite the
-    /// file, and a stamp catches every route with no plumbing to forget. No default: an open that forgot
-    /// the maps would hand the modder a glb with the pre-edit texture baked in, so a caller with none
-    /// passes an empty sequence and says so.</para></summary>
-    public static string CombinedFingerprint(string catalogVersion,
-        IEnumerable<(string Token, string Bundle, string ObjectName, string? EditedGlb)> parts,
-        IEnumerable<string> texturePaths)
-    {
-        var sb = new System.Text.StringBuilder();
-        // v14: the version moves whenever the combined build's own output rules change — a cached glb built
-        // to an older rule renders parts at poses this build no longer writes, or carries an armature this
-        // build no longer draws, so it must rebuild rather than open. v7 moved the subject's unposed bones
-        // from armature nodes to zero-weighted tail joints (MeshGltf.ExtraBone), so a v6 cache opens in
-        // Blender with those bones as loose empties nothing can be painted against. v8 reduces an EDITED
-        // part's re-read skin to the bones its geometry rides (MeshSkin.WeightedOnly): a v7 cache of a
-        // session holding an edited part stands every later part's shared joints at that part's tail
-        // worlds instead of their own. v9 filters the appended tail to the bones a build would actually
-        // accept paint on (see SubjectRoster), so a v8 cache offers bones every send would be refused at.
-        // v10 adds the wardrobe's own coverage to that tail (see PoolDerive.VariantGroups), so a v9 cache
-        // leaves out bones a build now accepts paint on. v11 widens that tail again with the scene-context
-        // pair's coverage (same seam), so a v10 cache leaves out bones a build now accepts paint on. v12
-        // widens it once more: an unmeasurable sibling piece no longer kills its slot's coverage, so a v11
-        // cache leaves out the bones those slots certify. v13 drops the last narrowing — coverage no longer
-        // stops at what the POOL tables, since a group bone rides an appended palette slot of its own — so a
-        // v12 cache leaves out every bone only the group's own members carry, which is most of them.
-        // v14 admits every stored skin width (1–4) to candidacy measurement, so a v13 cache holds tails
-        // and groups derived while the below-four siblings read as unmeasurable — an under-offer wherever
-        // a roster carries one. v15 forms coverage from the unified variant×context predicate — a bone
-        // certifies when every (variant, context) cell the target displays in holds an on-screen poser —
-        // so a v14 cache leaves out bones the old per-slot and per-scene rules could not see a build now
-        // accepts paint on.
-        sb.Append("combined-v15\n").Append(catalogVersion).Append('\n');
-        foreach (var p in parts)
-        {
-            sb.Append(p.Token).Append('\t').Append(p.Bundle).Append('\t').Append(p.ObjectName);
-            if (p.EditedGlb is not null) sb.Append('\t').Append("edit:").Append(FileStamp(p.EditedGlb));
-            sb.Append('\n');
-        }
-        sb.Append(TextureStamps(texturePaths));
-        return sb.ToString();
-    }
-
-    /// <summary>The texture half of <see cref="CombinedFingerprint"/>, also the whole key the per-part open
-    /// gate carries: one <c>tex\t&lt;path&gt;\t&lt;stamp&gt;</c> line per file. Sorted and de-duplicated
-    /// HERE — a caller's enumeration order is whatever the project list happens to be, and two orderings of
-    /// the same set must not read as two different specs.</summary>
-    public static string TextureStamps(IEnumerable<string> texturePaths)
-    {
-        var sb = new System.Text.StringBuilder();
-        foreach (var path in texturePaths.Distinct(StringComparer.OrdinalIgnoreCase)
-                                         .OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
-            sb.Append("tex\t").Append(path).Append('\t').Append(FileStamp(path)).Append('\n');
-        return sb.ToString();
-    }
-
-    /// <summary>The workspace texture PNGs a Blender rebuild for <paramref name="meshNames"/> could embed:
-    /// every materialized Texture2D target the project records a USER among those meshes for, resolved to
-    /// the very file <see cref="ResolvePartPngs"/> would read. A target with no recorded users is INCLUDED:
-    /// it can't be shown unrelated, and the failures are not symmetric — over-including costs one avoidable
-    /// rebuild, under-including hands the modder a glb carrying the map they just replaced.</summary>
-    public static IReadOnlyList<string> EmbeddedTexturePaths(ModProject project, IEnumerable<string> meshNames)
-    {
-        var meshes = new HashSet<string>(meshNames, StringComparer.Ordinal);
-        var paths = new List<string>();
-        foreach (var t in project.Targets)
-        {
-            if (t.AssetType != "Texture2D") continue;
-            if (t.Users is { Count: > 0 } users && !users.Any(meshes.Contains)) continue;
-            try { paths.Add(Path.GetFullPath(project.Resolve(t.ReplaceFile))); }
-            catch { /* no RootDir / unresolvable relative — there is no file to stamp */ }
-        }
-        return paths;
-    }
-
-    /// <summary>A file's identity for the cache gate: length + last-write ticks, or <c>?</c> when unreadable.
-    /// Cheap enough for every open (no content hash of a multi-megabyte glb).
-    ///
-    /// <para>The stamp is compared for EQUALITY, never ordered: a card drop and a revert both reach the file
-    /// through <c>File.Copy</c>, which carries the SOURCE's last-write time over, so the ticks a workspace
-    /// file ends up with are whatever the modder's file (or the stored original) carried, and can move
-    /// backwards.</para></summary>
-    private static string FileStamp(string path)
-    {
-        try
-        {
-            var fi = new FileInfo(path);
-            return fi.Exists ? $"{fi.Length}:{fi.LastWriteTimeUtc.Ticks}" : "?";
-        }
-        catch { return "?"; }
-    }
-
-    /// <summary>May the cached combined glb at <paramref name="combinedPath"/> be launched as-is? Only when
-    /// the sidecar records BOTH the current input <paramref name="fingerprint"/> and the identity of the file
-    /// this app published there. The output half guards the file itself: anything that lands on the path
-    /// outside <see cref="PublishCombined"/> — a hand-dropped copy, a partial replace — rebuilds instead of
-    /// opening as the app's own build.</summary>
-    public static bool CombinedCacheHit(string combinedPath, string fingerprintPath, string fingerprint)
-    {
-        if (!File.Exists(combinedPath)) return false;
-        string stored;
-        try { stored = File.Exists(fingerprintPath) ? File.ReadAllText(fingerprintPath) : ""; }
-        catch { return false; }   // unreadable sidecar = mismatch = rebuild
-        return stored.Length > 0 && stored == SidecarText(fingerprint, combinedPath);
-    }
-
-    /// <summary>Whether a published combined glb has no <see cref="PreviewMaps"/> record beside it. A session
-    /// classifies every image its send carries against that record; with none, untouched stock maps read as
-    /// authored and each ships a redundant copy. A REUSED glb has to be asked this directly: the reuse skips
-    /// the publish, which is the only other place the answer is known.</summary>
-    public static bool CombinedMapRecordMissing(string combinedPath) =>
-        !File.Exists(PreviewMaps.SidecarPath(combinedPath));
-
-    /// <summary>May a combined glb built under these conditions be left cached for the next open? THE one
-    /// home for that rule — <see cref="PublishCombined"/> publishes either way, and a false here means the
-    /// caller drops the fingerprint sidecar so the next open rebuilds.
-    ///
-    /// <para>Two kinds of degrade, and only one blocks reuse. A row whose BYTES were unavailable this run
-    /// (<paramref name="rosterRowsUnreadable"/>, e.g. a bundle the running game holds) may read differently
-    /// the moment the lock clears, and the fingerprint cannot tell — so it blocks, as do unreadable roster
-    /// inputs and a part that fell back to the game copy while carrying an edit (the fingerprint would claim
-    /// an edit the file does not hold). A row whose CONTENT measured unmeasurable is NOT an input here and
-    /// must never become one: the same catalog serves the same bytes to every rerun, so the cached tail is
-    /// exactly what a rebuild would write. Every character's face row degrades that way, so gating on it
-    /// keeps every combined session rebuilding on every open.</para></summary>
-    public static bool CombinedCacheable(IReadOnlyCollection<string> partsFellBackToGame, bool hasRoster,
-        IReadOnlyCollection<string> rosterRowsUnreadable, bool rosterInputsUnreadable) =>
-        partsFellBackToGame.Count == 0 && hasRoster && rosterRowsUnreadable.Count == 0 && !rosterInputsUnreadable;
-
-    /// <summary>What the fingerprint sidecar holds: the input fingerprint plus the published glb's own stamp.</summary>
-    private static string SidecarText(string fingerprint, string combinedPath) =>
-        fingerprint + "output\t" + FileStamp(combinedPath) + "\n";
-
-    /// <summary>Publish a freshly-built combined glb and bless its fingerprint sidecar, atomically and ONLY on
-    /// a real success. The temp's existence is the sole success signal — never a pre-existing destination, or
-    /// a failed rebuild would bless the stale <paramref name="combinedPath"/>. Ordering: move the temp over
-    /// the destination, and only THEN write the sidecar (the published file's own stamp plus the input
-    /// fingerprint, see <see cref="CombinedCacheHit"/>), so a sidecar can never name a spec the file on disk
-    /// doesn't match. Any failure leaves both old files untouched, so the next open rebuilds. Returns true
-    /// when the fresh combined is published.
-    ///
-    /// <para>The map sidecar moves with the glb: the build writes it beside the temp, where nothing looks for
-    /// it. Without it, every image in a returned glb resolves as authored — including untouched stock maps —
-    /// and each ships a redundant explicit copy. A failed move clears the destination rather than leaving an
-    /// older build's sidecar, which would resolve this glb's images against another one's origins. The glb
-    /// publishes either way, so a build whose sidecar was lost calls <paramref name="onMapSidecarLost"/> —
-    /// nothing else marks a session that can no longer tell a stock map from an authored one.</para></summary>
-    public static bool PublishCombined(string tempPath, string combinedPath, string fingerprintPath, string fingerprint,
-        Action? onMapSidecarLost = null)
-    {
-        if (!File.Exists(tempPath)) return false;   // build produced nothing — never bless the stale destination
-        try { File.Move(tempPath, combinedPath, overwrite: true); }
-        catch { return false; }   // couldn't replace (e.g. the destination is locked) — leave the old file + old fingerprint
-        PublishMapSidecar(tempPath, combinedPath, onMapSidecarLost);
-        try { File.WriteAllText(fingerprintPath, SidecarText(fingerprint, combinedPath)); }
-        catch { /* best-effort — a missing/stale fingerprint forces a rebuild next time, never a stale reuse */ }
-        return true;
-    }
-
-    /// <summary>Move the <see cref="PreviewMaps"/> sidecar from <paramref name="tempPath"/> onto
-    /// <paramref name="finalPath"/>'s name; when there is none, or the move fails, remove whatever sidecar
-    /// the destination still carries. <paramref name="onLost"/> fires only where a sidecar EXISTED and did
-    /// not make it: a build that embedded no maps has no record to lose.</summary>
-    private static void PublishMapSidecar(string tempPath, string finalPath, Action? onLost = null)
-    {
-        var from = PreviewMaps.SidecarPath(tempPath);
-        var to = PreviewMaps.SidecarPath(finalPath);
-        bool had = File.Exists(from);
-        try
-        {
-            if (had) { File.Move(from, to, overwrite: true); return; }
-        }
-        catch { /* fall through to the clear below */ }
-        try { if (File.Exists(to)) File.Delete(to); } catch { /* best effort */ }
-        if (had) onLost?.Invoke();
-    }
-
-
-    /// <summary>
-    /// Recipe-exact single-part materialization for the Outfit Workbench route. Reads the part's mesh by the
-    /// assembly prefab RECIPE's exact identity — the renderer slot name (<see cref="RecipePart.SlotName"/>)
-    /// in the logical bundle the CATALOG pins for the recipe's mesh address
-    /// — with NO name-convention fallback of any kind. A CROSS-PREFIX part needs this: an alt outfit whose
-    /// recipe reuses the BASE outfit's face is not under the alt's <see cref="Outfit.MeshPrefix"/>, so a
-    /// prefix+token derivation finds nothing. Every link of recipe → address → bundle → mesh that can't
-    /// resolve FAILS LOUDLY, with a <c>Note</c> naming the broken link.
-    ///
-    /// <para>Textures resolve renderer-first through the subject's <paramref name="scope"/>; a whole-slot
-    /// miss is reported loudly and the part exports untextured. The glb is geometry-only — the rig and the
-    /// textured Blender glb are rebuilt lazily by <see cref="BuildRiggedGlbs"/>.</para>
-    /// </summary>
-    /// <param name="onSelfWrite">Called with the full path of every <c>textures/</c> file this export is
-    /// about to write, immediately before the write. A caller watching that folder for the modder's own
-    /// external edits uses it to tell its writes from theirs, so the watch can stay up for the run. May be
-    /// invoked from the export's thread.</param>
-    public static ExportReport ExportRecipePart(string anyGamePath, GameVfs vfs, Workbench.SubjectScope scope,
-        Outfit outfit, string character, RecipePart recipe, string outDir, IProgress<string>? log = null,
-        CancellationToken ct = default, string? sharedRoot = null, Action<string>? onSelfWrite = null)
-    {
-        var report = new ExportReport { OutputDir = outDir };
-        // the subject-resolution surface resolves these to nothing; this entry point takes the subject
-        // directly and answers the same way (ExportBlacklist's contract: empty, no visible trace)
-        if (ExportBlacklist.IsBlocked(character) || ExportBlacklist.IsBlocked(outfit.Stem)) return report;
-        var reader = new BundleReader();
-        var meshDir = Path.Combine(outDir, "meshes");
-        var texDir = Path.Combine(sharedRoot ?? outDir, "textures");
-        var subjectSlug = ModNaming.SubjectSlug(character, outfit.Stem);
-        var origDir = Path.Combine(outDir, "originals");
-        var texOrigDir = Path.Combine(sharedRoot ?? outDir, "originals");
-        var token = recipe.Token;
-
-        // Cached logical→plain deobfuscate. IOException (sharing violation = game running) PROPAGATES so the
-        // shell's BUSY catch owns it; an absent/undecodable id → null.
-        var decCache = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
-        byte[]? Deobfuscate(string logical)
-        {
-            if (decCache.TryGetValue(logical, out var hit)) return hit;
-            return decCache[logical] = vfs.TryDeobfuscateLogical(logical);
-        }
-
-        // recipe mesh address → owning logical bundle, or null with a named reason (the loud-fail chain).
-        string? MeshBundle(string address, out string? reason)
-        {
-            var owner = vfs.Catalog.ResolveAddress(address);
-            if (owner is null) { reason = $"no catalog entry for mesh address '{address}'"; return null; }
-            if (vfs.Locate(owner) is null) { reason = $"the bundle '{owner}' (for mesh address '{address}') isn't in this install"; return null; }
-            reason = null; return owner;
-        }
-
-        void FailMesh(string named)
-        {
-            report.Files.Add(new ExportedFile("mesh",
-                recipe.SlotName.Length > 0 ? recipe.SlotName : outfit.MeshPrefix + token, "", false, named));
-            log?.Report($"mesh  {token}: {named}");
-        }
-
-        // --- prefab-exact mesh resolution, loud-fail per broken link. Two backed forms: recipe (address →
-        //     catalog → bundle → mesh by name), or smr-body (resolved bundle → mesh by PATH ID, since enemy
-        //     bundles ship same-named copies). ---
-        if (!recipe.IsRecipeBacked && !recipe.IsSmrBacked)
-        {
-            FailMesh($"part '{token}' carries no prefab mesh identity — neither a recipe address nor a "
-                   + "serialized renderer mesh (a recipe orphan, or a prop with no skinned renderer)");
-            return report;
-        }
-        string meshName;
-        string srcBundle;
-        (AssetsTools.NET.AssetTypeValueField Field, string SourceHash, bool Streamed) got;
-        if (recipe.IsRecipeBacked)
-        {
-            meshName = recipe.SlotName;
-            var owner = MeshBundle(recipe.MeshAddress, out var addrErr);
-            if (owner is null) { FailMesh($"couldn't resolve part '{token}' mesh — {addrErr}"); return report; }
-            srcBundle = owner;
-            var meshDec0 = Deobfuscate(srcBundle);
-            if (meshDec0 is null) { FailMesh($"the recipe bundle '{srcBundle}' for part '{token}' couldn't be read"); return report; }
-            var g = reader.GetMeshFieldAndHash(meshDec0, meshName);
-            if (g is null) { FailMesh($"mesh '{meshName}' not found in its recipe bundle '{srcBundle}'"); return report; }
-            got = g.Value;
-        }
-        else
-        {
-            srcBundle = recipe.MeshBundle!;
-            var meshDec0 = Deobfuscate(srcBundle);
-            if (meshDec0 is null) { FailMesh($"the mesh bundle '{srcBundle}' for part '{token}' couldn't be read"); return report; }
-            var g = reader.GetMeshFieldAndHashByPathId(meshDec0, recipe.MeshPathId);
-            if (g is null) { FailMesh($"no mesh at path id {recipe.MeshPathId} in bundle '{srcBundle}' for part '{token}'"); return report; }
-            got = g.Value;
-            // The recorded name is the RENDERER SLOT's, not the mesh asset's own m_Name: on some enemy/prop
-            // slots the two differ, and the ledger, the roster and the build all key a part by its slot
-            // name. The selector here is the path id, so the name is not what finds the mesh.
-            meshName = recipe.SlotName;
-        }
-        long? meshPathId = recipe.IsRecipeBacked ? null : recipe.MeshPathId;
-        var field = got.Field;
-        // The glb carries the part under the recorded name too: Blender's collections, the send-back match
-        // and the map-origin record all join on it.
-        var mesh = UnityMesh.Decode(field, meshName);
-        int submeshCount = mesh.Submeshes.Count;
-
-        // staged files commit atomically at the end (or roll back on cancel)
-        var staged = new List<ExportedFile>();
-        var stagedPaths = new List<string>();
-        // dedupe by the bundle-scoped FILE NAME: two same-named textures from different bundles are distinct
-        // files, so keying on the name alone would collapse them. pngByName is the name→path lookup the UV
-        // guide needs (first-wins is fine — it only sizes the guide).
-        var exportedTexPath = new Dictionary<string, string>(StringComparer.Ordinal);
-        var pngByName = new Dictionary<string, string>(StringComparer.Ordinal);
-        bool cancelled = false;
-
-        // --- textures (renderer-first PartTextureResolver, keyed by the part token) ---
-        var partTex = PartTextureResolver.Resolve(scope, reader, Deobfuscate, outfit, token, submeshCount);
-        // LOUD MISS: the prefab renderer bound no textures. The mesh still exports, but the part must never
-        // ship untextured SILENTLY — stage a non-Ok "texture" finding (AddExport drops it, so it makes no
-        // target). Materializer.CommitPart reads its Note back out as MaterializeResult.Warning.
-        if (partTex.All.Count == 0)
-        {
-            var warn = $"part '{token}': no textures resolved from its prefab renderer — the mesh exports untextured";
-            staged.Add(new ExportedFile("texture", meshName, "", false, warn));
-            log?.Report($"tex   {token}: {warn}");
-        }
-        else if (partTex.HasFailedMaterial)
-        {
-            // PARTIAL miss: at least one material reference couldn't resolve, so that submesh exports
-            // untextured. Same non-Ok staging as the whole-slot miss above.
-            var warn = $"part '{token}': some materials couldn't be resolved from its prefab renderer — those submeshes export untextured";
-            staged.Add(new ExportedFile("texture", meshName, "", false, warn));
-            log?.Report($"tex   {token}: {warn}");
-        }
-        var users = new[] { meshName };
-        Directory.CreateDirectory(texDir);
-        // the two flat maps live beside the stock maps: plugging the neutral normal into a normal slot in
-        // Blender IS the "blank this slot" gesture, and the preview-map sidecar identifies it by content
-        PreviewMaps.WriteNeutrals(texDir);
-        foreach (var t in partTex.All)
-        {
-            if (ct.IsCancellationRequested) { cancelled = true; break; }
-            var tn = t.Name;
-            // The workspace file is bundle-scoped (<name>.<bundle>.png) via the shared
-            // TextureExport.BundleScopedName: two same-named textures from DIFFERENT bundles are distinct
-            // game assets and must not collide on one file. A null bundle means the reference never resolved
-            // — a loud per-texture failure, never a name-convention re-derivation.
-            string texHash;
-            try
-            {
-                texHash = t.Bundle ?? throw new FileNotFoundException("texture carries no pinned bundle");
-            }
-            catch (Exception e)
-            {
-                staged.Add(new("texture", tn, "", false, e.Message, t.Bundle, Users: users, Source: t.Source));
-                log?.Report($"tex   {tn}: FAILED — {e.Message}");
-                continue;
-            }
-            var fileName = TextureExport.BundleScopedName(texHash, tn, subjectSlug);
-            var outFile = Path.Combine(texDir, fileName);
-            if (exportedTexPath.TryGetValue(fileName, out var existing))
-            {
-                // Already exported THIS run — the first occurrence staged the full source_hash + meta.
-                pngByName.TryAdd(tn, existing);
-                staged.Add(new("texture", tn, existing, true, null, texHash, Users: users, Source: t.Source));
-                continue;
-            }
-            if (File.Exists(outFile))
-            {
-                // The workspace PNG is on disk from a prior materialize but nothing staged it THIS run — read
-                // the meta from the live bundle so the staged target is complete, and reuse the pristine
-                // originals/ copy. IOException propagates (BUSY); any other read fault stages what we have.
-                Bundles.BundleReader.TextureMeta? meta = null;
-                try
-                {
-                    var texDec = Deobfuscate(texHash);
-                    if (texDec is not null) meta = reader.GetTextureMeta(texDec, tn);
-                }
-                catch (IOException) { throw; }
-                catch { /* couldn't read the bundle — stage what we have */ }
-                var origTexReuse = Path.Combine(texOrigDir, fileName);
-                exportedTexPath[fileName] = outFile;
-                pngByName.TryAdd(tn, outFile);
-                staged.Add(new("texture", tn, outFile, true, null, texHash,
-                    File.Exists(origTexReuse) ? origTexReuse : null,
-                    Users: users, TextureMeta: meta, Source: t.Source));
-                continue;
-            }
-            try
-            {
-                var texDec = Deobfuscate(texHash) ?? throw new FileNotFoundException($"bundle '{texHash}' couldn't be read");
-                onSelfWrite?.Invoke(outFile);
-                if (!TextureExport.ExportPng(reader, texDec, tn, outFile))
-                {
-                    staged.Add(new("texture", tn, "", false, "not found in bundle", texHash, Users: users, Source: t.Source));
-                    log?.Report($"tex   {tn}: FAILED — not found in bundle");
-                    continue;
-                }
-                var meta = reader.GetTextureMeta(texDec, tn);
-                // every exported texture keeps a pristine originals/ baseline — what revert restores and what
-                // edit detection compares against — bundle-scoped to match its workspace file
-                Directory.CreateDirectory(texOrigDir);
-                var origTex = Path.Combine(texOrigDir, fileName);
-                File.Copy(outFile, origTex, overwrite: true);
-                exportedTexPath[fileName] = outFile;
-                pngByName.TryAdd(tn, outFile);
-                staged.Add(new("texture", tn, outFile, true, null, texHash, origTex,
-                    Users: users, TextureMeta: meta, Source: t.Source));
-                stagedPaths.Add(outFile);
-                stagedPaths.Add(origTex);
-                log?.Report($"tex   {tn} ({t.Source}) → textures/{Path.GetFileName(outFile)}");
-            }
-            catch (IOException) { throw; }   // sharing violation = BUSY, not a per-texture failure
-            catch (Exception e)
-            {
-                staged.Add(new("texture", tn, "", false, e.Message));
-                log?.Report($"tex   {tn}: FAILED — {e.Message}");
-            }
-        }
-
-        // --- mesh glb (geometry-only) + LOD fan-out (recipe-exact siblings) + UV guide ---
-        UnityMesh? stagedMesh = null; string? stagedMeshPath = null;
-        if (!cancelled && !ct.IsCancellationRequested)
-        {
-            try
-            {
-                Directory.CreateDirectory(meshDir);
-                var skin = MeshSkin.Decode(field);
-                // Scene-rest uprighting for a mesh that ships lying down (character parts have none → null).
-                // Recipe parts: the mesh's own bundle may carry its real skeleton. SMR-backed parts: the
-                // skeleton lives in the subject's assembly prefab, since the SMR's ordered m_Bones point
-                // positionally into that hierarchy.
-                SceneRig? sceneRig = null;
-                if (skin.IsSkinned)
-                    sceneRig = recipe.IsRecipeBacked
-                        ? SceneRig.TryRead(Deobfuscate(srcBundle)!, meshName, skin)
-                        : scope.Candidates.Count > 0
-                            ? SceneRig.TryReadForMeshRef(scope.Candidates[0].Dec, recipe.MeshPathId, skin)
-                            : null;
-                var uprighting = sceneRig?.Uprighting;
-                var glbOut = Path.Combine(meshDir, Safe(token) + ".glb");
-                MeshGltf.ExportGlb(mesh, glbOut, uprighting: uprighting);
-                Directory.CreateDirectory(origDir);
-                var origFile = Path.Combine(origDir, Safe(token) + ".glb");
-                File.Copy(glbOut, origFile, overwrite: true);
-
-                // LOD fan-out: ONLY the prefab's sibling tier slots, each resolved prefab-exact — by recipe
-                // address, or by bundle+path-id on an smr-body tier. A tier that can't resolve is logged and
-                // skipped, never name-guessed.
-                var siblings = new List<LodSlot>();
-                foreach (var sib in recipe.SiblingTiers)
-                {
-                    bool sibSmr = !string.IsNullOrEmpty(sib.MeshBundle) && sib.MeshPathId != 0;
-                    // an empty slot name/identity is unresolvable too — logged, so no skip is ever silent
-                    if (string.IsNullOrEmpty(sib.SlotName) || (string.IsNullOrEmpty(sib.MeshAddress) && !sibSmr))
-                    { log?.Report($"      ({token}: LOD tier with an empty slot name/identity in the prefab — skipped)"); continue; }
-                    string? sowner;
-                    if (sibSmr) sowner = sib.MeshBundle;
-                    else
-                    {
-                        sowner = MeshBundle(sib.MeshAddress, out var sreason);
-                        if (sowner is null) { log?.Report($"      ({token}: LOD slot '{sib.SlotName}' not resolvable — {sreason}; skipped)"); continue; }
-                    }
-                    var sdec = Deobfuscate(sowner!);
-                    if (sdec is null) { log?.Report($"      ({token}: LOD bundle '{sowner}' unreadable — skipped)"); continue; }
-                    var sgot = sibSmr ? reader.GetMeshFieldAndHashByPathId(sdec, sib.MeshPathId)
-                                      : reader.GetMeshFieldAndHash(sdec, sib.SlotName);
-                    if (sgot is null) { log?.Report($"      ({token}: LOD mesh '{sib.SlotName}' not in '{sowner}' — skipped)"); continue; }
-                    // recorded by SLOT name on both forms, as the representative tier is
-                    siblings.Add(new LodSlot(sib.SlotName, sowner!)
-                    { PathId = sibSmr ? sib.MeshPathId : null });
-                }
-                if (siblings.Count > 0)
-                    log?.Report($"      ({token}: +{siblings.Count} LOD slot(s) → {string.Join(",", siblings.Select(s => MeshName.Lod(s.ObjectName)))})");
-
-                staged.Add(new("mesh", meshName, glbOut, true, $"{mesh.VertexCount} verts", srcBundle, origFile,
-                    siblings.Count > 0 ? siblings : null,
-                    BakedRest: uprighting is { } bg ? RestBake.ToList(bg) : null,
-                    PathId: meshPathId));
-                stagedPaths.Add(glbOut); stagedPaths.Add(origFile);
-                stagedMesh = mesh; stagedMeshPath = glbOut;
-                log?.Report($"mesh  {token}: {mesh.VertexCount} verts ({submeshCount} submesh) → meshes/{Path.GetFileName(glbOut)}");
-
-                // UV guides — per texture, beside it; shared merge artifacts, so not staged for rollback
-                WriteTextureUvGuides(mesh, partTex, pngByName, log, token, onSelfWrite);
-            }
-            catch (IOException) { throw; }
-            catch (Exception e)
-            {
-                staged.Add(new("mesh", meshName, "", false, e.Message));
-                log?.Report($"mesh  {token}: FAILED — {e.Message}");
-            }
-        }
-        else cancelled = true;
-
-        // commit atomically, or trash the cancelled part's partial files
-        if (cancelled || ct.IsCancellationRequested)
-        {
-            foreach (var p in stagedPaths) { try { File.Delete(p); } catch { /* best effort */ } }
-            log?.Report(stagedPaths.Count > 0
-                ? $"      (cancelled — discarded {stagedPaths.Count} partial file(s) for '{token}')"
-                : $"      (cancelled before '{token}')");
-            return report;
-        }
-        report.Files.AddRange(staged);
-        if (stagedMeshPath is not null && stagedMesh is not null)
-            report.OriginalMeshByPath[stagedMeshPath] = stagedMesh;
-        report.CompletedParts.Add(token);
-        return report;
-    }
+    /// <summary>Filename a session's Blender send lands under — what the open declares to the bridge as the
+    /// session file's <c>sendAs</c>, on every route that writes one. Distinct from the glb the session was
+    /// opened on (<see cref="CombinedGlbName"/>, or the run folder's composition) so a send never writes
+    /// over it: that file's map record is what classifies the send's own images.</summary>
+    public const string SessionSendGlbName = "return.glb";
 
     /// <summary>
     /// Lazy open-in-Blender upgrade: rebuild the RIGGED Blender-facing glb(s) for already-exported parts —
     /// the named/posed armature + JOINTS/WEIGHTS + per-submesh preview material the Add skips, since the rig
     /// is ~the entire Add cost and is only needed when the modder actually opens Blender. Each mesh is read
-    /// from the SAME bundle the Add recorded, so the geometry is byte-identical to the shipped glb; textures
-    /// re-resolve from the on-disk PNGs in <paramref name="texDir"/>, keyed by
-    /// <paramref name="recordedTextureBundles"/> so a game rescan can't re-point them. The bone-name table is
+    /// from the SAME bundle the Add recorded, so the geometry is byte-identical to the shipped glb.
+    ///
+    /// <para>The part's renderer-bound maps are put in <paramref name="texDir"/> here, at the seam every open
+    /// route passes: the resolver already names each map and its owning bundle, and the run's own
+    /// deobfuscation cache already holds that bundle's bytes (the material walk read them to get the names),
+    /// so a map costs a decode and a PNG encode at worst and a hard link at best — see
+    /// <see cref="StockTextureCache"/>. The bone-name table is
     /// built per rebuild from the subject's own bundles; a joint it can't name degrades to a hash-named node.
     /// An edited part takes its geometry and skin from its workspace glb but its bone NAMES from the GAME
     /// rigs of the whole subject (<see cref="EditedScenePaths"/>), so it shares the union armature's joints
@@ -649,11 +330,11 @@ public static class AssetExporter
     /// narrower or wider than a fully-measured one, not whether a rerun would differ.</param>
     /// <param name="rosterUnreadable">The subset of <paramref name="rosterDegraded"/>'s rows whose BYTES
     /// were unavailable this run — a locked or missing bundle, not content that measured unmeasurable. This
-    /// is the one axis of the tail the combined fingerprint cannot pin: everything else candidacy reads is a
-    /// pure function of the catalog version and the workspace stamps, both already in the fingerprint, so a
-    /// row that measured unmeasurable measures unmeasurable on every rerun and its tail is cacheable. A row
-    /// listed HERE may read differently the moment the lock clears, so a caller caching the result must not
-    /// keep it.</param>
+    /// is the one axis of the tail a key over this build's own inputs cannot pin: everything else candidacy
+    /// reads is a pure function of the catalog version and the workspace stamps, so a row that measured
+    /// unmeasurable measures unmeasurable on every rerun and its tail would be cacheable. A row listed HERE
+    /// may read differently the moment the lock clears, so a caller caching the result must not keep it.
+    /// Nothing caches a build today — this is the contract for one that would.</param>
     /// <param name="candidacyCacheFile">Where the candidacy pass may memo its per-mesh measurements
     /// (<see cref="CandidacyCache"/>), or null for no persistence: every part measured fresh, nothing left
     /// behind.
@@ -669,16 +350,54 @@ public static class AssetExporter
     /// <param name="ct">Observed between parts, so a speculative build gives the machinery back promptly
     /// when somebody asks for it. Cancelling throws before <paramref name="combinedOut"/> is written, which
     /// is what keeps a half-built session off disk.</param>
+    /// <param name="authoredMaps">Per part token, the modder's OWN map files for that part, indexed as
+    /// <see cref="OverlayAuthoredMaps"/> indexes them — an entry overrides the stock PNG in its slot. Null
+    /// (or a part with no entry) leaves that part on its stock maps alone. This is the combined route's half
+    /// of what <see cref="MeshGltf.ReexportPartGlb"/> does for a lone part; without it an open-all session
+    /// shows the game texture under the modder's own painted one. Nothing is MARKED authored in the combined
+    /// glb's own record: a send back is classified against the part's own prepared glb, which the lone
+    /// re-export marks, and a mark written beside the combined file would be read by nothing.</param>
+    /// <param name="stockTextureCacheRoot">Where the full-resolution stock PNGs this open needs are kept
+    /// between runs (<see cref="StockTextureCache"/>), or null for no persistence: every map decoded and
+    /// encoded afresh, nothing left behind. The app passes <see cref="LabPaths.StockTextureRoot"/>.</param>
+    /// <param name="unreadableTextures">Receives the NAME of every map this run could not put in front of the
+    /// glb writer — an unreadable bundle, a texture the bundle doesn't hold, or a file that turned out not to
+    /// decode as a picture (which also drops its cache entry, so the next open re-exports it). A map of the
+    /// modder's own lands here under its file name, since nothing else names it. Those material positions
+    /// open untextured, so a caller with a status surface says so once for the run. Deliberately data rather
+    /// than log lines: the two are one object in the app, and a line per texture is the flashing the
+    /// aggregate replaces.</param>
     public static IReadOnlyList<string> BuildRiggedGlbs(string anyGamePath, GameVfs vfs,
         Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
         string texDir, IProgress<string>? log = null, string? combinedOut = null,
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? recordedTextureBundles = null,
         ICollection<string>? vanillaFallbacks = null, SubjectRoster? roster = null,
         ICollection<string>? rosterDegraded = null, string? candidacyCacheFile = null,
-        CancellationToken ct = default, ICollection<string>? rosterUnreadable = null) =>
-        BuildRiggedGlbsCore(anyGamePath, vfs, outfit, character, parts, texDir, log, combinedOut,
-            recordedTextureBundles, vanillaFallbacks, roster, rosterDegraded,
-            new CandidacyCache(candidacyCacheFile), ct, rosterUnreadable);
+        CancellationToken ct = default, ICollection<string>? rosterUnreadable = null,
+        IReadOnlyDictionary<string, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>>? authoredMaps = null,
+        string? stockTextureCacheRoot = null, ICollection<string>? unreadableTextures = null,
+        IReadOnlyDictionary<string, IReadOnlyList<TextureTransportOverride>>? authoredTextureMaps = null,
+        bool reportBlenderTexCoordWarnings = false,
+        RiggedBuildDiagnostics? diagnostics = null,
+        IReadOnlyCollection<string>? observedGameSidePreparedGlbs = null,
+        PreviewBlobMemo? previewMemo = null)
+    {
+        try
+        {
+            var built = BuildRiggedGlbsCore(anyGamePath, vfs, outfit, character, parts, texDir, log, combinedOut,
+                vanillaFallbacks, roster, rosterDegraded, new CandidacyCache(candidacyCacheFile), ct,
+                rosterUnreadable, authoredMaps,
+                stockTextureCacheRoot is null ? null : new StockTextureCache(stockTextureCacheRoot),
+                unreadableTextures, authoredTextureMaps, reportBlenderTexCoordWarnings, diagnostics,
+                observedGameSidePreparedGlbs, previewMemo);
+            diagnostics?.Complete();
+            return built;
+        }
+        catch (OperationCanceledException)
+        {
+            diagnostics?.Canceled();
+            throw;
+        }
+    }
 
     /// <summary>The body of <see cref="BuildRiggedGlbs"/> on a <see cref="CandidacyCache"/> the caller
     /// owns — the seam the candidacy pass's cost is measured through, since what a run had to read and
@@ -686,32 +405,46 @@ public static class AssetExporter
     internal static IReadOnlyList<string> BuildRiggedGlbsCore(string anyGamePath, GameVfs vfs,
         Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
         string texDir, IProgress<string>? log, string? combinedOut,
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? recordedTextureBundles,
         ICollection<string>? vanillaFallbacks, SubjectRoster? roster,
         ICollection<string>? rosterDegraded, CandidacyCache cache, CancellationToken ct,
-        ICollection<string>? rosterUnreadable = null)
+        ICollection<string>? rosterUnreadable = null,
+        IReadOnlyDictionary<string, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>>? authoredMaps = null,
+        StockTextureCache? textureCache = null, ICollection<string>? unreadableTextures = null,
+        IReadOnlyDictionary<string, IReadOnlyList<TextureTransportOverride>>? authoredTextureMaps = null,
+        bool reportBlenderTexCoordWarnings = false,
+        RiggedBuildDiagnostics? diagnostics = null,
+        IReadOnlyCollection<string>? observedGameSidePreparedGlbs = null,
+        PreviewBlobMemo? previewMemo = null)
     {
+        diagnostics?.ObserveInputs(parts, combinedOut, authoredMaps, authoredTextureMaps,
+            observedGameSidePreparedGlbs);
         // the subject-resolution surface resolves these to nothing; this entry point takes the subject
         // directly and answers the same way (ExportBlacklist's contract: empty, no visible trace)
         if (ExportBlacklist.IsBlocked(character) || ExportBlacklist.IsBlocked(outfit.Stem))
             return Array.Empty<string>();
         var subjectSlug = ModNaming.SubjectSlug(character, outfit.Stem);
         var reader = new BundleReader();
+        var warnedTexCoordParts = reportBlenderTexCoordWarnings
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : null;
         // the glbs written here are the ones opened in Blender, so the flat maps have to be on disk beside
         // the stock maps before their sidecars are written
         PreviewMaps.WriteNeutrals(texDir);
         var decCache = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
-        byte[]? Dec(string logical)
+        byte[]? Dec(string logical, bool required = true)
         {
+            diagnostics?.ObserveBundle(logical, required);
             if (decCache.TryGetValue(logical, out var cached)) return cached;
             byte[]? bytes;
             // IOException (sharing violation = game running) PROPAGATES so the shell's BUSY catch offers
             // "close the game and retry"; swallowing it degrades a game-locked read into empty rig output
             try { bytes = vfs.TryDeobfuscateLogical(logical); }
-            catch (IOException) { throw; }
-            catch { bytes = null; }
+            catch (IOException) { diagnostics?.TransientFailure(); throw; }
+            catch { diagnostics?.TransientFailure(); bytes = null; }
+            if (bytes is null) diagnostics?.TransientFailure();
             return decCache[logical] = bytes;
         }
+        byte[]? RequiredDec(string logical) => Dec(logical, required: true);
         // A part this run writes no glb for is read for its share of the subject's skeleton and nothing else,
         // so that read is the one place the BUSY rethrow above must NOT fire: a sibling's locked bundle would
         // otherwise fail an open whose own files are all readable. It degrades instead — those bones stay off
@@ -722,14 +455,13 @@ public static class AssetExporter
         byte[]? DecPart(string logical, string part, string? glbOut)
         {
             if (!SkeletonOnly(glbOut)) return Dec(logical);
-            try { return Dec(logical); }
+            try { return Dec(logical, required: false); }
             catch (IOException)
             {
                 // deliberately NOT cached as null: another part off the same bundle, one this run exports,
                 // has to reach the rethrow rather than inherit this degrade
                 if (lockedForSkeleton.Add(logical))
-                    log?.Report($"      ({part}: the game is using its files, so its bones stay off this "
-                                + "session's armature)");
+                    log?.Report($"Bones missing for {part}: the game is using its files.");
                 return null;
             }
         }
@@ -749,21 +481,25 @@ public static class AssetExporter
         // row degrades rather than measuring.) Failures are null for the same reason: a key that can't be
         // minted costs a re-measure, never an answer.
         var contentIds = new Dictionary<string, string?>(StringComparer.Ordinal);
+        string? ContentIdOf(string logical)
+        {
+            if (contentIds.TryGetValue(logical, out var known)) return known;
+            string? id;
+            try
+            {
+                id = vfs.Catalog.BundleNameToInternalId.TryGetValue(logical, out var internalId)
+                    && vfs.Manifest.TryLocate(internalId, out var located)
+                    ? Convert.ToHexString(located.Stub.SubHash).ToLowerInvariant()
+                    : null;
+            }
+            catch { id = null; }
+            return contentIds[logical] = id;
+        }
         string? CandidacyKey(string logical, string meshName, long pathId)
         {
+            diagnostics?.ObserveBundle(logical, required: false);
             if (!cache.Enabled) return null;
-            if (!contentIds.TryGetValue(logical, out var id))
-            {
-                try
-                {
-                    id = vfs.Catalog.BundleNameToInternalId.TryGetValue(logical, out var internalId)
-                        && vfs.Manifest.TryLocate(internalId, out var located)
-                        ? Convert.ToHexString(located.Stub.SubHash).ToLowerInvariant()
-                        : null;
-                }
-                catch { id = null; }
-                contentIds[logical] = id;
-            }
+            var id = ContentIdOf(logical);
             return id is null ? null : CandidacyCache.Key(id, meshName, pathId);
         }
         // The roster rows the export loop's OWN field reads can answer, joined on the slot name the way
@@ -778,7 +514,136 @@ public static class AssetExporter
         var measuredInLoop = new Dictionary<string, Migoto.PoolDerive.PartBones>(StringComparer.OrdinalIgnoreCase);
 
         // one scope for the whole rebuild — every part shares the subject's resolution closure and the memo
-        var scope = Workbench.SubjectScope.Build(vfs.Catalog, Dec, outfit);
+        var scope = Workbench.SubjectScope.Build(vfs.Catalog, RequiredDec, outfit);
+
+        // ---- the run's texture folder -------------------------------------------------------------------
+        //
+        // Put every renderer-bound map the glbs embed on disk under the name ResolvePartPngs looks it up by.
+        // This is the ONLY producer on the Blender-open route: without it the folder holds the two flat
+        // neutrals and nothing else, every material resolves no image, and the glb ships one material for the
+        // whole part.
+        //
+        // The cost the design turns on: reading and de-obfuscating the owning bundle is already paid — the
+        // material walk above opened it through this run's own `Dec` memo just to read the texture names — so
+        // what a map costs here is a BCn decode and a PNG encode, and nothing else. That pair is ~95% of a
+        // cold open and is why the pictures are kept between runs (StockTextureCache) and, on a miss,
+        // decoded across a few threads at once.
+        var placedTextures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var missedTextures = new HashSet<string>(StringComparer.Ordinal);
+        // Every run-folder map this pass names, by the path the glb writers read it under: the texture it
+        // holds and the durable entry that answers for it. Filled on the export thread and read only by the
+        // glb writes, which are sequential too. It is what lets a picture that turns out not to BE a picture
+        // take its own cache entry down with it — see MapWouldNotDecode.
+        var workspaceMaps = new Dictionary<string, (string? ContentId, string Name, long PathId)>(
+            StringComparer.OrdinalIgnoreCase);
+        var workspaceSrgb = new Dictionary<string, bool?>(StringComparer.OrdinalIgnoreCase);
+        void EnsureWorkspacePngs(PartTextures partTex)
+        {
+            // Every ordinary Texture2D can ride the property-keyed carrier even when the approximation has no
+            // honest PBR socket for it. Toon ramps are float lookup data, not ordinary pictures; flattening
+            // those values to this 8-bit PNG path would be a lossy representation.
+            var wanted = new List<(string Name, string Dest, byte[] Bundle, string? ContentId, long PathId)>();
+            foreach (var t in partTex.All)
+            {
+                if (t.IsRamp || t.Bundle is null) continue;
+                var dest = Path.Combine(texDir, WorkspaceTextureName(partTex, t, subjectSlug));
+                if (!placedTextures.Add(dest)) continue;   // a sibling part of this run shares the map
+                var contentId = ContentIdOf(t.Bundle);
+                if (contentId is not null)
+                    diagnostics?.ObserveStockTexture(contentId, t.Name, t.PathId, Path.GetFileName(dest));
+                else
+                    diagnostics?.TransientFailure(); // no durable stock key means a later rig hit cannot re-home it
+                // Recorded before any of the early-outs below: a file another run of this open already put
+                // there is still one whose entry has to be droppable when it turns out not to decode.
+                workspaceMaps[dest] = (contentId, t.Name, t.PathId);
+                var bundle = Dec(t.Bundle);
+                if (bundle is null) { missedTextures.Add(t.Name); continue; }
+                try
+                {
+                    workspaceSrgb[dest] = reader.GetTextureSrgb(bundle,
+                        new BundleReader.TextureRef(t.Name, t.PathId));
+                }
+                catch { workspaceSrgb[dest] = null; }
+                // Already on disk — the open's per-part build and its combined build share one folder, and
+                // the second must not decode what the first put there.
+                if (File.Exists(dest)) continue;
+                // A cache hit is a link, which costs nothing worth parallelizing — take it inline.
+                if (contentId is not null && textureCache?.TryGet(contentId, t.Name, t.PathId) is { } cached
+                    && StockTextureCache.Place(cached, dest))
+                    continue;
+                // The bytes are in the run's memo already (see above); reading them HERE keeps every
+                // dictionary touch on this thread and leaves the parallel pass pure decode + encode.
+                wanted.Add((t.Name, dest, bundle, contentId, t.PathId));
+            }
+            if (wanted.Count == 0) return;
+            // Bounded: the decode+encode pair is CPU-bound and each worker holds a full-resolution image, so
+            // a 2048² map is tens of megabytes in flight per thread. Half the machine, at most four.
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 4),
+                CancellationToken = ct,
+            };
+            Parallel.ForEach(wanted, options, item =>
+            {
+                // Every failure here costs ONE map and names it: a texture the bundle no longer holds, a
+                // format or a blob the decoder refuses, a file that wouldn't write. The alternative — letting
+                // it out — fails the whole open over one picture, and the modder's geometry is what they came
+                // for. Cancellation is not a texture failure and goes back to the loop.
+                try
+                {
+                    // A reader per worker: the shared one is not thread-safe, and minting one is free.
+                    // Selected by the PATH ID the renderer pinned: a bundle can hold several same-named
+                    // Texture2Ds and a name-selected read takes whichever comes first, which is another
+                    // texture's pixels under this one's name.
+                    var decoded = new BundleReader().GetTexture(item.Bundle,
+                        new BundleReader.TextureRef(item.Name, item.PathId));
+                    if (decoded is null)
+                    {
+                        diagnostics?.TransientFailure();
+                        lock (missedTextures) missedTextures.Add(item.Name);
+                        return;
+                    }
+                    // Publish to the cache first, then link: the cached file is the one every later open
+                    // reads, and a cache that couldn't take it still leaves this run its own copy.
+                    if (item.ContentId is not null
+                        && textureCache?.Publish(decoded.Value, item.ContentId, item.Name, item.PathId) is { } cached
+                        && StockTextureCache.Place(cached, item.Dest))
+                        return;
+                    TextureExport.WritePng(decoded.Value, item.Dest);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch
+                {
+                    diagnostics?.TransientFailure();
+                    lock (missedTextures) missedTextures.Add(item.Name);
+                }
+            });
+        }
+
+        // A picture that will not decode costs exactly its own map. The glb writers are what meet the
+        // failure — they are the only things that decode these files — and this pass is the only thing that
+        // knows where the bytes came from, so the two meet here: the texture is named to the caller, the
+        // durable entry that served it and the run copy linked from it are deleted, and the next open
+        // exports the map from the game again. Without the delete an entry damaged INSIDE its PNG envelope
+        // (the cache's whole-file check reads the signature and the IEND, not the middle) is served to every
+        // later open of every subject that binds that texture, forever.
+        //
+        // A path this pass never named is the modder's OWN map or a shipped neutral: named to the caller
+        // too, since the material opens without it either way, but never deleted — it is not this app's file
+        // and there is no entry behind it.
+        void MapWouldNotDecode(string pngPath)
+        {
+            diagnostics?.TransientFailure();
+            if (!workspaceMaps.TryGetValue(pngPath, out var map))
+            {
+                lock (missedTextures) missedTextures.Add(Path.GetFileNameWithoutExtension(pngPath));
+                return;
+            }
+            lock (missedTextures) missedTextures.Add(map.Name);
+            if (map.ContentId is not null) textureCache?.Invalidate(map.ContentId, map.Name, map.PathId);
+            try { File.Delete(pngPath); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* next open retries */ }
+        }
 
         // Bone-name table, per subject: fold the Transform hierarchies of the scope's candidate prefab
         // bundles (the rig lives in the assembly prefab, not the mesh bundle) plus each part's mesh source
@@ -879,26 +744,58 @@ public static class AssetExporter
                 // A recorded rest that is not an axis-aligned rotation cannot be un-baked by transpose, so
                 // the export skips it and the part lands in bind space rather than a skewed one.
                 if (restRefused)
-                    log?.Report($"      ({part}: its recorded rest pose is not an axis-aligned rotation; the export skips it)");
+                    log?.Report($"{part} opens in bind pose: its rest pose can't be applied.");
                 // Named by the RECORDED name, which is the renderer slot's; on some enemy/prop slots the
                 // mesh asset's own m_Name differs, and the send-back joins its parts to the ledger by the
                 // name the glb carries.
                 var mesh = UnityMesh.Decode(field, meshName);
-                var partTex = PartTextureResolver.Resolve(scope, reader, Dec, outfit, part, mesh.Submeshes.Count);
+                if (warnedTexCoordParts?.Add(part) == true)
+                    foreach (string warning in MeshGltf.TexCoordTransportWarnings(mesh, part))
+                        log?.Report(warning);
+                var partTex = PartTextureResolver.Resolve(scope, reader, RequiredDec, outfit, part,
+                    mesh.Submeshes.Count);
                 // the renderer bound no textures — the preview rebuilds untextured, but never silently
                 if (partTex.All.Count == 0)
-                    log?.Report($"      ({part}: no textures resolved from its prefab renderer — the preview is untextured)");
-                // resolve each renderer texture to its bundle-scoped workspace PNG; a resolved-but-absent map
-                // is reported per texture, never silently dropped
-                var (baseColorPng, normalPng, perSubmesh) = ResolvePartPngs(texDir, subjectSlug, partTex, part, log, recordedTextureBundles);
+                    log?.Report($"{part} opens untextured: its materials bind no maps.");
+                // the part's maps land in texDir here — this is what makes the resolve below find anything
+                EnsureWorkspacePngs(partTex);
+                // resolve each renderer texture to its bundle-scoped workspace PNG; a map that isn't there is
+                // named to the caller, never silently dropped
+                var (baseColorPng, normalPng, perSubmesh) =
+                    ResolvePartPngs(texDir, subjectSlug, partTex, missedTextures);
+                var textureTransport = ResolveTextureTransport(texDir, subjectSlug, meshName, partTex,
+                    workspaceSrgb, missedTextures);
+                // The modder's OWN maps take their material positions from the stock ones, exactly as the
+                // lone route's re-export does, so an open-all session shows the work they painted rather than
+                // the game texture under it.
+                var partAuthored = authoredMaps is null ? null : authoredMaps.GetValueOrDefault(part);
+                perSubmesh = OverlayAuthoredMaps(perSubmesh, partAuthored);
+                if (partAuthored is not null)
+                {
+                    var fixedOverrides = partAuthored.SelectMany((maps, material) => new[]
+                    {
+                        maps.Base is null ? default(TextureTransportOverride?)
+                            : new TextureTransportOverride(material, "", maps.Base, MapKind.BaseColor),
+                        maps.Normal is null ? default(TextureTransportOverride?)
+                            : new TextureTransportOverride(material, "", maps.Normal, MapKind.Normal),
+                        maps.Rmo is null ? default(TextureTransportOverride?)
+                            : new TextureTransportOverride(material, "", maps.Rmo, MapKind.Rmo),
+                    }).OfType<TextureTransportOverride>().ToList();
+                    textureTransport = OverlayAuthoredTextures(textureTransport, fixedOverrides,
+                        markAuthored: false);
+                }
+                var partAuthoredTextures = authoredTextureMaps is null
+                    ? null : authoredTextureMaps.GetValueOrDefault(part);
+                textureTransport = OverlayAuthoredTextures(textureTransport, partAuthoredTextures,
+                    markAuthored: false);
                 if (skin is { IsSkinned: true })
                 {
                     var uprighting = recordedRest;
                     // The modder's own geometry wins for an edited part: its workspace glb holds the authored
                     // mesh AND skin, so the session opens on what they last sent rather than the game copy
                     // their next send would overwrite. It already sits in the space the Add put it in, so it
-                    // combines with no further uprighting. Maps still come from the workspace PNGs — a
-                    // workspace glb carries none.
+                    // combines with no further uprighting. Maps come from the workspace PNGs and the part's
+                    // own authored files — a workspace glb carries neither.
                     if (editedGlb is not null && glbOut is null)
                     {
                         // A workspace glb that won't parse degrades to the game copy rather than dropping the
@@ -919,14 +816,14 @@ public static class AssetExporter
                             editedParts.Add((rigged.Count, e.Skin));
                             rigged.Add(new MeshGltf.RiggedPart(e.Mesh, e.Skin, baseColorPng, normalPng,
                                 ConnectorRests: Composed(sceneRig?.ConnectorRests, uprighting),
-                                PerSubmesh: perSubmesh));
+                                PerSubmesh: perSubmesh, TextureTransport: textureTransport));
                             riggedSlots.Add(meshName);
                             done.Add(part);
                             continue;
                         }
                         // never silent: the game copy opens instead, and the caller says which part
                         vanillaFallbacks?.Add(part);
-                        log?.Report($"      ({part}: its edited file couldn't be read; the game version opens instead)");
+                        log?.Report($"Couldn't read {part}'s edit. The original opens instead.");
                     }
                     if (sceneRig is null && bones.Count == 0) anyHashNamedRig = true;
                     // null glbOut ⇒ collect for the combined glb only, don't rewrite the per-part glb. The
@@ -935,27 +832,34 @@ public static class AssetExporter
                     // replaceable part (see CombinedPose).
                     if (glbOut is not null)
                         pendingLone.Add(new PendingLoneGlb(part, meshName, glbOut, mesh, skin, baseColorPng,
-                            normalPng, perSubmesh, sceneRig?.BonePaths, uprighting, sceneRig?.ConnectorRests));
+                            normalPng, perSubmesh, sceneRig?.BonePaths, uprighting, sceneRig?.ConnectorRests,
+                            textureTransport));
                     var (contextPose, connectors) = CombinedPose(sceneRig, uprighting,
                         // the gated read is the expensive half, so it runs only where the answer can matter
-                        () => Workbench.PartSkinGate.Blocked(Dec, srcBundle, meshName, pathId, reader) is null);
+                        () => Workbench.PartSkinGate.Blocked(RequiredDec, srcBundle, meshName, pathId, reader) is null);
                     rigged.Add(new MeshGltf.RiggedPart(mesh, skin, baseColorPng, normalPng,
                         sceneRig?.BonePaths, uprighting, connectors,
                         PerSubmesh: perSubmesh,
-                        ContextPose: contextPose));   // for the union combined
+                        ContextPose: contextPose,
+                        TextureTransport: textureTransport));   // for the union combined
                     riggedSlots.Add(meshName);
                     done.Add(part);
                 }
                 else if (glbOut is not null)   // rigid prop: no rig, but still upgrade its bare Add glb to textured
                 {
-                    MeshGltf.ExportGlb(mesh, glbOut, baseColorPng, normalPng, perSubmesh, recordedRest);
+                    MeshGltf.ExportGlb(mesh, glbOut, baseColorPng, normalPng, perSubmesh, recordedRest,
+                        onUnreadableMap: MapWouldNotDecode, textureTransport: textureTransport);
                     done.Add(part);
                 }
             }
             // A game-locked read is a WHOLE-run BUSY condition, not a per-part failure: game-file-locked must
             // never degrade into empty output. Genuine per-part decode faults stay isolated below.
             catch (IOException) { throw; }
-            catch { /* skip this part, keep building the others */ }
+            catch
+            {
+                diagnostics?.TransientFailure();
+                /* skip this part, keep building the others */
+            }
         }
         // An edited part is named from the subject's whole rig answer, exactly as a stock part is named from
         // its own, so the two land on the SAME union joints for a shared bone.
@@ -970,7 +874,7 @@ public static class AssetExporter
         // an empty bone table. An enemy subject legitimately has an empty root/Root_M-anchored table
         // (Bip001/Bone001 rigs) while every part's scene rig supplies real names — not a degrade.
         if (rigged.Count > 0 && anyHashNamedRig)
-            log?.Report("      (no bone names resolved for part(s) of this subject; those rig joints use hash names)");
+            log?.Report("Some bones open under generated names.");
 
         var skeleton = SubjectSkeleton(unionParts, bones.Path, out var disagreeing);
         foreach (var line in DisagreementLines(disagreeing)) log?.Report(line);
@@ -979,7 +883,8 @@ public static class AssetExporter
         // bone table + narrow layout + presence + posed bones + the prefab's shadow and visibility flags. It
         // is what decides which of the subject's bones a tail may offer, and it is read for the whole subject
         // — the rows above cover only the parts this project materialized.
-        var candidacy = CandidacyRoster(roster, reader, Dec, measuredInLoop, cache, CandidacyKey,
+        var candidacy = CandidacyRoster(roster, reader, logical => Dec(logical, required: false),
+            measuredInLoop, cache, CandidacyKey,
             rosterDegraded, rosterUnreadable);
         // The roster rows that produced no candidacy, as the build's own held-back list reads them: a
         // wardrobe slot with an unmeasured part of its own certifies no coverage, and the wardrobe standing
@@ -1021,15 +926,16 @@ public static class AssetExporter
                 MeshGltf.ExportRiggedGlb(w.Mesh, w.Skin, bones.Path, w.GlbOut, w.BaseColorPng, w.NormalPng,
                     w.PerSubmesh, w.ScenePaths, w.Uprighting, w.ConnectorRests,
                     ExtraBones(skeleton, w.Skin.BoneHashes, w.Uprighting, ValidFor(w.MeshName)),
-                    m => log?.Report($"      ({w.Part}: {m})"));
+                    m => log?.Report($"{w.Part} · {m}"), MapWouldNotDecode, w.TextureTransport, previewMemo);
             }
             catch (IOException) { throw; }
             catch (Exception e)
             {
+                diagnostics?.TransientFailure();
                 // the part's own glb is what a lone session opens and what its compile round trips, so a
                 // write that didn't land must not be reported as rigged
                 done.Remove(w.Part);
-                log?.Report($"      ({w.Part}: its rig couldn't be written — {e.Message})");
+                log?.Report($"Couldn't build the rig for {w.Part}: {e.Message}");
             }
         }
         ct.ThrowIfCancellationRequested();
@@ -1053,9 +959,54 @@ public static class AssetExporter
                 combinedValid = union;
             }
             MeshGltf.ExportCombinedRiggedGlb(rigged, bones.Path, combinedOut,
-                CombinedExtraBones(skeleton, rigged, combinedValid), m => log?.Report($"      ({m})"));
+                CombinedExtraBones(skeleton, rigged, combinedValid), m => log?.Report(m),
+                MapWouldNotDecode, previewMemo);
         }
+        foreach (var name in missedTextures) unreadableTextures?.Add(name);
+        if (parts.Any(part => part.GlbOut is not null
+            && (!done.Contains(part.Part) || !File.Exists(part.GlbOut))))
+            diagnostics?.TransientFailure();
         return done;
+    }
+
+    /// <summary>The per-submesh map set with the modder's own files laid over the stock ones, slot by slot: an
+    /// authored base colour replaces the stock base colour and leaves the normal and RMO where they are.
+    /// <paramref name="authored"/> is indexed the way the lone route's re-export indexes it — entry <i>i</i>
+    /// answers submesh <i>i</i>, and entries past the submesh count are ignored — so the two routes put the
+    /// same file in the same place. Returns <paramref name="stock"/> itself when there is nothing to lay
+    /// over.</summary>
+    private static List<(string?, string?, string?)> OverlayAuthoredMaps(
+        List<(string?, string?, string?)> stock,
+        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authored)
+    {
+        if (authored is null || authored.Count == 0) return stock;
+        for (int i = 0; i < stock.Count && i < authored.Count; i++)
+            stock[i] = (authored[i].Base ?? stock[i].Item1,
+                        authored[i].Normal ?? stock[i].Item2,
+                        authored[i].Rmo ?? stock[i].Item3);
+        return stock;
+    }
+
+    /// <summary>Lay project pictures over exact property rows without changing their stock resource identity.
+    /// Exact property wins; a property-less legacy fixed override may match only its coarse semantic.</summary>
+    private static IReadOnlyList<TextureTransportSource> OverlayAuthoredTextures(
+        IReadOnlyList<TextureTransportSource> stock, IReadOnlyList<TextureTransportOverride>? authored,
+        bool markAuthored = true)
+    {
+        if (authored is null || authored.Count == 0) return stock;
+        return stock.Select(binding =>
+        {
+            var replacement = authored.FirstOrDefault(candidate =>
+                candidate.MaterialIndex == binding.MaterialIndex
+                && string.Equals(candidate.ShaderProperty, binding.ShaderProperty, StringComparison.Ordinal));
+            if (replacement.Png is not { Length: > 0 })
+                replacement = authored.FirstOrDefault(candidate =>
+                    candidate.MaterialIndex == binding.MaterialIndex && candidate.ShaderProperty.Length == 0
+                    && candidate.Kind == binding.Kind);
+            return replacement.Png is { Length: > 0 } png
+                ? binding with { Png = png, Origin = markAuthored ? MapOrigin.Authored : MapOrigin.Vanilla }
+                : binding;
+        }).ToList();
     }
 
     /// <summary>The subject's parts as <see cref="Migoto.PoolDerive.PoolCandidates"/> reads them, assembled
@@ -1157,7 +1108,8 @@ public static class AssetExporter
         MeshSkin Skin, string? BaseColorPng, string? NormalPng,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? PerSubmesh,
         IReadOnlyList<string>? ScenePaths, Matrix4x4? Uprighting,
-        IReadOnlyDictionary<string, Matrix4x4>? ConnectorRests);
+        IReadOnlyDictionary<string, Matrix4x4>? ConnectorRests,
+        IReadOnlyList<TextureTransportSource>? TextureTransport);
 
     /// <summary>One bone of the subject's skeleton: where it hangs, its rest world in BIND space
     /// (<c>inverse(bindPose)</c>, before any bake), and the uprighting the part it was read from
@@ -1185,11 +1137,11 @@ public static class AssetExporter
     internal static IEnumerable<string> DisagreementLines(IReadOnlyList<string> disagreeing)
     {
         for (int i = 0; i < disagreeing.Count && i < NamedDisagreements; i++)
-            yield return $"      (bone {disagreeing[i]}: this subject's parts bind it in different places, so "
-                         + "it stays off the shared armature)";
+            yield return $"Bone {disagreeing[i]} is off the armature: this item's parts bind it in "
+                         + "different places.";
         if (disagreeing.Count > NamedDisagreements)
-            yield return $"      (…and {disagreeing.Count - NamedDisagreements} more bones bind in different "
-                         + "places, all off the shared armature)";
+            yield return $"…and {disagreeing.Count - NamedDisagreements} more bones bind in different "
+                         + "places, all off the armature.";
     }
 
     /// <summary>
@@ -1468,7 +1420,7 @@ public static class AssetExporter
                 if (UvGuide.TryRenderMerge(mesh, subIdx, gw, gh, guidePath))
                     log?.Report($"uv    {part}: guide → textures/{Path.GetFileName(guidePath)} ({gw}×{gh}, {subIdx.Count} submesh)");
             }
-            catch (Exception e) { log?.Report($"uv    {part}: guide for {Path.GetFileName(png)} failed — {e.Message}"); }
+            catch (Exception e) { log?.Report($"uv    {part}: guide for {Path.GetFileName(png)} failed: {e.Message}"); }
         }
     }
 
@@ -1484,7 +1436,8 @@ public static class AssetExporter
     /// </summary>
     public static string? BuildUvGuideOnDemand(GameVfs vfs,
         string textureName, string textureBundleId,
-        IReadOnlyList<(string MeshName, string MeshAddress, int Submesh, string? ModdedGlb)> samplers, string guidePath)
+        IReadOnlyList<(string MeshName, string MeshAddress, int Submesh, string? ModdedGlb)> samplers, string guidePath,
+        string channel = "TexCoord0", (int Width, int Height)? canvasSize = null)
     {
         if (samplers.Count == 0)
             return $"No part of this subject samples {textureName}. Nothing to draw.";
@@ -1499,9 +1452,15 @@ public static class AssetExporter
         }
 
         int gw = UvGuide.DefaultSize, gh = UvGuide.DefaultSize;
-        var texDec = Dec(textureBundleId);
-        if (texDec is not null && reader.GetTextureMeta(texDec, textureName) is { } meta && meta.Width > 0 && meta.Height > 0)
-        { gw = meta.Width; gh = meta.Height; }
+        if (canvasSize is { Width: > 0, Height: > 0 } size)
+        { gw = size.Width; gh = size.Height; }
+        else
+        {
+            var texDec = Dec(textureBundleId);
+            if (texDec is not null && reader.GetTextureMeta(texDec, textureName) is { } meta
+                && meta.Width > 0 && meta.Height > 0)
+            { gw = meta.Width; gh = meta.Height; }
+        }
 
         // the vanilla fallback: catalog-resolve the address to its bundle and decode the game mesh
         UnityMesh? ResolveVanilla(string meshName, string address)
@@ -1515,13 +1474,14 @@ public static class AssetExporter
             return field is null ? null : UnityMesh.Decode(field);
         }
 
-        return PlotUvGuide(samplers, gw, gh, textureName, guidePath, ResolveVanilla);
+        return PlotUvGuide(samplers, gw, gh, textureName, guidePath, ResolveVanilla, channel);
     }
 
     /// <summary>The guide-rendering core, split out so the modded-vs-vanilla mesh choice is testable without
     /// a <see cref="GameVfs"/>. For each distinct mesh among <paramref name="samplers"/> it loads the
-    /// geometry — PREFERRING the part's edited workspace glb (<c>ModdedGlb</c>), falling back to
-    /// <paramref name="resolveVanilla"/> when the part is unedited or the glb won't read — then merge-plots
+    /// geometry — PREFERRING the part's edited workspace glb (<c>ModdedGlb</c>) for every UV channel it
+    /// carries, and using <paramref name="resolveVanilla"/> for an unedited part or a legacy edit that lacks
+    /// the requested channel — then merge-plots
     /// its sampling submeshes onto <paramref name="guidePath"/> at
     /// <paramref name="gw"/>×<paramref name="gh"/>. The guide is rebuilt FRESH (prior file deleted) so an
     /// edit's new UV layout replaces the stale one instead of overlaying it. A submesh index past a
@@ -1530,90 +1490,159 @@ public static class AssetExporter
     internal static string? PlotUvGuide(
         IReadOnlyList<(string MeshName, string MeshAddress, int Submesh, string? ModdedGlb)> samplers,
         int gw, int gh, string textureName, string guidePath,
-        Func<string, string, UnityMesh?> resolveVanilla)
+        Func<string, string, UnityMesh?> resolveVanilla, string channel = "TexCoord0")
     {
         try { if (File.Exists(guidePath)) File.Delete(guidePath); } catch { /* rebuild overwrites/merges */ }
 
         int plotted = 0;
+        int readable = 0;
+        bool missingChannel = false;
+
+        string Refuse(string message)
+        {
+            try { if (File.Exists(guidePath)) File.Delete(guidePath); } catch { }
+            return message;
+        }
+
         foreach (var group in samplers.GroupBy(s => s.MeshName, StringComparer.Ordinal))
         {
             UnityMesh? mesh = null;
             var moddedGlb = group.Select(s => s.ModdedGlb).FirstOrDefault(m => !string.IsNullOrEmpty(m));
             if (moddedGlb is not null)
             {
-                try { mesh = MeshGltf.ImportGlb(moddedGlb, null); }   // single-mesh workspace glb → take the sole mesh
-                catch { mesh = null; }                                // unreadable edit → fall back to the game mesh
+                try { mesh = MeshGltf.ImportGlb(moddedGlb, null); }
+                catch
+                {
+                    if (channel == "TexCoord0")
+                        return Refuse("Couldn't read this edit's mesh, so no UV guide was drawn. "
+                            + "Send it back from Blender again, or use Revert mesh.");
+                    mesh = null;
+                }
+                if (channel == "TexCoord0" && mesh?.Has(channel) != true)
+                    return Refuse("This edit's mesh has no UV layout, so no UV guide can be drawn.");
             }
-            mesh ??= resolveVanilla(group.Key, group.Select(s => s.MeshAddress).FirstOrDefault(a => !string.IsNullOrEmpty(a)) ?? "");
+            // A legacy edit may predate higher-UV transport. It falls back to the game layout; a current
+            // edit carries the channel and therefore stays authoritative for its own guide.
+            if (mesh?.Has(channel) != true)
+                mesh = resolveVanilla(group.Key, group.Select(s => s.MeshAddress).FirstOrDefault(a => !string.IsNullOrEmpty(a)) ?? "");
             if (mesh is null) continue;
-            if (UvGuide.TryRenderMerge(mesh, group.Select(s => s.Submesh).ToList(), gw, gh, guidePath))
+            readable++;
+            if (!mesh.Has(channel)) { missingChannel = true; continue; }
+            if (UvGuide.TryRenderMerge(mesh, group.Select(s => s.Submesh).ToList(), gw, gh, guidePath, channel))
                 plotted++;
         }
-        return plotted > 0 ? null
-            : $"Couldn't read the meshes that sample {textureName} from the game. Rescan, then try again.";
+        if (plotted > 0) return null;
+        if (channel == "TexCoord1" && missingChannel)
+            return readable == 1
+                ? $"The mesh that samples {textureName} has no second UV set, so no UV1 guide can be drawn."
+                : $"The meshes that sample {textureName} have no second UV set, so no UV1 guide can be drawn.";
+        if (channel == "TexCoord0" && missingChannel)
+            return readable == 1
+                ? $"The mesh that samples {textureName} has no UV layout, so no UV guide can be drawn."
+                : $"The meshes that sample {textureName} have no UV layout, so no UV guide can be drawn.";
+        return $"Couldn't read the meshes that sample {textureName} from the game. Rescan, then try again.";
     }
 
-    /// <summary>Resolve a part's renderer-bound textures to their on-disk workspace PNGs. Every producer
-    /// writes <c>textures/&lt;name&gt;.&lt;bundle&gt;.png</c> via
-    /// <see cref="TextureExport.BundleScopedName"/> and records that bundle on the project target, so
-    /// <paramref name="recordedBundles"/> is the primary source: it names the exact file the producer wrote
-    /// and survives a game rescan. A genuinely unmaterialized texture resolves by the renderer PPtr's pinned
-    /// bundle; there is no name-convention re-derivation, and resolving name-only would miss every file and
-    /// strip the rebuilt glb of its maps. A resolved path that isn't on disk is reported once per texture.
-    /// Returns the part-level base/normal PNGs and the per-submesh (base, normal, RMO) set — the maps the
-    /// Blender-facing glb embeds.</summary>
+    /// <summary>Resolve a part's renderer-bound textures to their on-disk workspace PNGs. The file is named
+    /// by the renderer PPtr's own pinned bundle through <see cref="TextureExport.BundleScopedName"/> — the
+    /// single naming rule every producer of that folder shares, and the one the open's own texture pass
+    /// writes under. There is no name-convention re-derivation: resolving name-only would miss every file and
+    /// strip the rebuilt glb of its maps. A path that isn't on disk names its texture in
+    /// <paramref name="missed"/>, never silently. Returns the part-level base/normal PNGs and the per-submesh
+    /// (base, normal, RMO) set — the maps the Blender-facing glb embeds.</summary>
     internal static (string? BaseColor, string? Normal, List<(string?, string?, string?)> PerSubmesh) ResolvePartPngs(
-        string texDir, string subjectSlug, PartTextures partTex, string part, IProgress<string>? log,
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? recordedBundles = null)
+        string texDir, string subjectSlug, PartTextures partTex, ICollection<string>? missed = null)
     {
-        // one resolution per texture name (base/normal/submesh all share the same file), warned once if missing
-        var resolved = new Dictionary<string, string?>(StringComparer.Ordinal);
+        // one resolution per exact resource; the name-only fallback remains for old SubmeshMaps rows.
+        var resolved = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var t in partTex.All)
         {
-            // Prefer the PROJECT'S RECORDED bundle: the producer wrote textures/<name>.<bundle>.png and
-            // recorded THAT bundle on the target, so this survives a game update. A renderer PPtr that pinned
-            // a bundle wins (disambiguating same-named textures from different bundles); else pick the
-            // recorded bundle whose scoped PNG is actually present.
-            string? texHash = null;
-            if (recordedBundles is not null && recordedBundles.TryGetValue(t.Name, out var recorded) && recorded.Count > 0)
-                texHash = (t.Bundle is not null ? recorded.FirstOrDefault(h => string.Equals(h, t.Bundle, StringComparison.OrdinalIgnoreCase)) : null)
-                          ?? recorded.FirstOrDefault(h => File.Exists(Path.Combine(texDir, TextureExport.BundleScopedName(h, t.Name, subjectSlug))))
-                          ?? recorded[0];
-            // no recorded target ⇒ unmaterialized: the renderer PPtr's pinned bundle is the only identity
-            texHash ??= t.Bundle;
+            // Only the maps the glb embeds are resolved: base colour, normal and RMO. A material's other
+            // maps — the toon ramp above all — never exist as workspace PNGs, so resolving them here
+            // reported a "missing" file per material on every open for maps the export never ships.
+            if (!(t.IsBaseColor || t.IsNormal || t.IsRmo)) continue;
             // a null bundle folds to the deterministic "_" segment (as the producers do); that file was never
-            // written, so File.Exists is false and the miss is reported below
-            var file = Path.Combine(texDir, TextureExport.BundleScopedName(texHash ?? "", t.Name, subjectSlug));
-            if (File.Exists(file)) resolved[t.Name] = file;
+            // written, so File.Exists is false and the miss is named below
+            var file = Path.Combine(texDir, WorkspaceTextureName(partTex, t, subjectSlug));
+            if (File.Exists(file)) resolved[ResourceKey(t)] = file;
             else
             {
-                resolved[t.Name] = null;
-                log?.Report($"      ({part}: texture {t.Name} not found at textures/{Path.GetFileName(file)} — its submesh rebuilds untextured)");
+                resolved[ResourceKey(t)] = null;
+                missed?.Add(t.Name);
             }
         }
-        string? Png(string? name) => name is not null && resolved.TryGetValue(name, out var f) ? f : null;
+        string? Png(TexTarget? target, string? name)
+        {
+            var selected = target ?? partTex.All.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, name, StringComparison.Ordinal));
+            return selected.Name is not null && resolved.TryGetValue(ResourceKey(selected), out var file)
+                ? file : null;
+        }
         var perSubmesh = partTex.Submeshes
-            .Select(sm => (Png(sm.BaseColor), Png(sm.Normal), Png(sm.Rmo)))
+            .Select(sm => (Png(sm.BaseColorTarget, sm.BaseColor), Png(sm.NormalTarget, sm.Normal),
+                Png(sm.RmoTarget, sm.Rmo)))
             .ToList<(string?, string?, string?)>();
-        return (Png(partTex.All.FirstOrDefault(t => t.IsBaseColor).Name),
-                Png(partTex.All.FirstOrDefault(t => t.IsNormal).Name), perSubmesh);
+        var firstBase = partTex.All.FirstOrDefault(t => t.IsBaseColor);
+        var firstNormal = partTex.All.FirstOrDefault(t => t.IsNormal);
+        return (Png(firstBase.Name is null ? null : firstBase, firstBase.Name),
+                Png(firstNormal.Name is null ? null : firstNormal, firstNormal.Name), perSubmesh);
     }
 
-    /// <summary>The project's recorded Texture2D bundles, object-name → the distinct source bundles it was
-    /// materialized from (the game carries same-named textures in different bundles as distinct assets).
-    /// <see cref="ResolvePartPngs"/> keys on this, so a rig rebuild after a game rescan reads the SAME
-    /// workspace PNG the producer wrote rather than re-deriving the bundle from a newer index.</summary>
-    public static IReadOnlyDictionary<string, IReadOnlyList<string>> RecordedTextureBundles(ModProject project)
+    /// <summary>Resolve the full installed material inventory to property-keyed transport rows. Primitive
+    /// projection follows the renderer rule without truncating the inventory: a short material list repeats
+    /// its last position across remaining primitives, while surplus positions carry a null primitive.</summary>
+    internal static IReadOnlyList<TextureTransportSource> ResolveTextureTransport(string texDir,
+        string subjectSlug, string meshName, PartTextures partTex,
+        IReadOnlyDictionary<string, bool?>? srgb = null, ICollection<string>? missed = null)
     {
-        var map = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var t in project.Targets)
-            if (t.AssetType == "Texture2D" && !string.IsNullOrEmpty(t.Bundle))
+        var materials = partTex.Materials ?? Array.Empty<MaterialTextureBindings>();
+        if (materials.Count == 0) return Array.Empty<TextureTransportSource>();
+        int primitiveCount = partTex.Submeshes.Count;
+        var result = new List<TextureTransportSource>();
+        for (int materialIndex = 0; materialIndex < materials.Count; materialIndex++)
+        {
+            var material = materials[materialIndex];
+            var primitives = new List<int?>();
+            if (materialIndex < primitiveCount) primitives.Add(materialIndex);
+            else primitives.Add(null);
+            if (materialIndex == materials.Count - 1 && materials.Count < primitiveCount)
+                for (int primitive = materials.Count; primitive < primitiveCount; primitive++)
+                    primitives.Add(primitive);
+
+            foreach (var binding in material.Textures)
             {
-                if (!map.TryGetValue(t.ObjectName, out var list)) map[t.ObjectName] = list = new();
-                if (!list.Contains(t.Bundle, StringComparer.OrdinalIgnoreCase)) list.Add(t.Bundle);
+                var texture = binding.Texture;
+                if (texture.IsRamp || texture.Bundle is null) continue;
+                string png = Path.Combine(texDir,
+                    WorkspaceTextureName(partTex, texture, subjectSlug));
+                if (!File.Exists(png)) { missed?.Add(texture.Name); continue; }
+                var input = texture.IsBaseColor ? TargetInputKind.BaseColor
+                    : texture.IsNormal ? TargetInputKind.Normal
+                    : texture.IsRmo ? TargetInputKind.Rmo
+                    : texture.IsBlend ? TargetInputKind.Blend
+                    : TargetInputKind.Texture;
+                var kind = UvGuide.MapKindFor(input);
+                bool? colorSpace = srgb is not null && srgb.TryGetValue(png, out var known) ? known : null;
+                foreach (var primitive in primitives)
+                    result.Add(new TextureTransportSource(meshName, material.MaterialIndex, primitive,
+                        binding.ShaderProperty, kind, png, texture.Name, texture.Bundle, texture.PathId,
+                        colorSpace, TexCoord: UvGuide.TexCoordIndex(input)));
             }
-        return map.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.Ordinal);
+        }
+        return result;
     }
+
+    private static string ResourceKey(TexTarget texture) =>
+        $"{texture.Bundle}\u001f{texture.PathId}\u001f{(texture.PathId == 0 ? texture.Name : "")}";
+
+    /// <summary>The stable workspace name, extended with path id only when this inventory contains another
+    /// exact resource with the same bundle and name.</summary>
+    private static string WorkspaceTextureName(PartTextures part, TexTarget texture, string subject) =>
+        part.All.Any(other => other.PathId != texture.PathId
+            && string.Equals(other.Bundle, texture.Bundle, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(other.Name, texture.Name, StringComparison.Ordinal))
+            ? TextureExport.BundleScopedName(texture.Bundle ?? "", texture.Name, subject, texture.PathId)
+            : TextureExport.BundleScopedName(texture.Bundle ?? "", texture.Name, subject);
 
     private static string Safe(string s) =>
         string.Concat(s.Select(c => char.IsLetterOrDigit(c) || c is '_' or '-' or '.' ? c : '_'));

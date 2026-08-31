@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using System.Threading;
 
 namespace Remold.Core.Project;
 
@@ -175,8 +177,9 @@ public static class ModInstall
     /// consequence — the choice itself is the dialog's two buttons.</summary>
     public static string ConflictBody(IReadOnlyList<string> folders)
     {
-        string verb = folders.Count == 1 ? "touches" : "touch";
-        return $"{NameList(folders)} {verb} the same character. Two mods on the same hashes fight over the draw.";
+        string verb = folders.Count == 1 ? "changes" : "change";
+        return $"{NameList(folders)} already {verb} some of the same files. "
+            + "Two mods changing the same thing may not show correctly in game.";
     }
 
     /// <summary>The confirm title for an older version of this same mod under its own folder name.</summary>
@@ -186,8 +189,8 @@ public static class ModInstall
     /// <summary>The confirm body for an older version of this same mod. It is removed only AFTER the new
     /// folder is in place, so a failed install never costs the modder the copy they had.</summary>
     public static string PriorVersionBody(IReadOnlyList<string> folders) => folders.Count == 1
-        ? "Same mod, older version. It is removed after the new one installs."
-        : "Same mod, older versions. They are removed after the new one installs.";
+        ? "This is an older version of the same mod. It is removed after the new one installs."
+        : "These are older versions of the same mod. They are removed after the new one installs.";
 
     /// <summary>"a", "a and b", "a, b and c" — a readable list inside one sentence.</summary>
     private static string NameList(IReadOnlyList<string> names) => names.Count switch
@@ -200,7 +203,7 @@ public static class ModInstall
     /// <summary>Copy <paramref name="builtDir"/> into <paramref name="modsRoot"/> under its own folder name,
     /// replacing a same-named folder. The replaced folder is renamed aside for the length of the swap and
     /// restored if anything throws, so the Mods folder always holds one complete copy of the mod.</summary>
-    public static Outcome Install(string builtDir, string modsRoot)
+    public static Outcome Install(string builtDir, string modsRoot, Action<string>? log = null)
     {
         if (!Directory.Exists(builtDir))
             throw new DirectoryNotFoundException($"the built mod folder is gone: {builtDir}");
@@ -212,15 +215,15 @@ public static class ModInstall
         bool sidelined = false;
         try
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-            if (Directory.Exists(sideline)) Directory.Delete(sideline, recursive: true);
-            CopyTree(builtDir, staging);
+            Retry(() => DeleteTree(staging), "deleting the staging folder");
+            Retry(() => DeleteTree(sideline), "deleting the previous-install folder");
+            Retry(() => CopyTree(builtDir, staging), "copying files to the staging folder");
             if (Directory.Exists(dest))
             {
-                Directory.Move(dest, sideline);
+                Retry(() => Directory.Move(dest, sideline), "moving the previous install aside");
                 sidelined = true;
             }
-            Directory.Move(staging, dest);
+            Retry(() => Directory.Move(staging, dest), "moving the staging folder into place");
         }
         catch (Exception e)
         {
@@ -228,38 +231,48 @@ public static class ModInstall
                 InstallFailedException.FolderUntouched, e);
             try
             {
-                if (Directory.Exists(dest)) Directory.Delete(dest, recursive: true);
-                Directory.Move(sideline, dest);
+                DeleteTree(dest);
+                Retry(() => Directory.Move(sideline, dest), "restoring the previous install");
             }
             catch
             {
                 throw new InstallFailedException(e.Message,
-                    $"The previous install is in {SidelinePrefix + name}. Move it back by hand.", e);
+                    $"The previous install is in {SidelinePrefix + name}. Move it back manually.", e);
             }
             throw new InstallFailedException(e.Message, InstallFailedException.PreviousRestored, e);
         }
         finally
         {
-            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { }
+            try { DeleteTree(staging); } catch { }
         }
         // The sideline was renamed a moment ago, so nothing was holding it then. If something does now, the
         // new mod is installed and the old copy is still loadable — that has to be said, not swallowed.
         if (!sidelined) return new Outcome(dest, null);
-        try { Directory.Delete(sideline, recursive: true); }
+        try { DeleteTree(sideline); }
         catch (Exception) { return new Outcome(dest, SidelinePrefix + name); }
         return new Outcome(dest, null);
+
+        void Retry(Action operation, string description)
+        {
+            int attempts = RetryBusy(operation);
+            if (attempts > 1)
+                log?.Invoke($"the Mods folder was busy {description}; succeeded on attempt {attempts}");
+        }
     }
 
     /// <summary>Remove an installed mod folder named relative to <paramref name="modsRoot"/> — the older
     /// version of this same mod, once the new one is in place. Refuses anything outside the Mods root.</summary>
-    public static void RemoveInstalled(string modsRoot, string relativeFolder)
+    public static void RemoveInstalled(string modsRoot, string relativeFolder, Action<string>? log = null)
     {
         string root = Path.GetFullPath(modsRoot);
         string target = Path.GetFullPath(Path.Combine(root, relativeFolder));
         if (target.Length <= root.Length
             || !target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"'{relativeFolder}' is not inside the Mods folder");
-        if (Directory.Exists(target)) Directory.Delete(target, recursive: true);
+        if (!Directory.Exists(target)) return;
+        int attempts = RetryBusy(() => DeleteTree(target));
+        if (attempts > 1)
+            log?.Invoke($"the Mods folder was busy deleting '{relativeFolder}'; succeeded on attempt {attempts}");
     }
 
     /// <summary>A folder's sidecar text, or null when it has none or can't be read.</summary>
@@ -274,12 +287,80 @@ public static class ModInstall
         catch (UnauthorizedAccessException) { return null; }
     }
 
+    private static readonly TimeSpan[] BusyRetryDelays =
+    {
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromMilliseconds(500),
+    };
+
+    /// <summary>Run a staging filesystem operation up to four times while Windows reports it busy.</summary>
+    internal static int RetryBusy(Action operation, Action<TimeSpan>? delay = null)
+    {
+        ExceptionDispatchInfo? firstBusy = null;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                operation();
+                return attempt;
+            }
+            catch (Exception e) when (IsBusy(e))
+            {
+                firstBusy ??= ExceptionDispatchInfo.Capture(e);
+                if (attempt > BusyRetryDelays.Length)
+                {
+                    firstBusy.Throw();
+                    throw;
+                }
+                (delay ?? Thread.Sleep)(BusyRetryDelays[attempt - 1]);
+            }
+        }
+    }
+
+    private static bool IsBusy(Exception e) => e is UnauthorizedAccessException
+        || e is IOException io && (io.HResult & 0xffff) is 5 or 32;
+
+    /// <summary>Recursively delete a tree after clearing Windows' read-only deletion veto.</summary>
+    private static void DeleteTree(string path)
+    {
+        if (!Directory.Exists(path)) return;
+        var root = new DirectoryInfo(path);
+        if ((root.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            Directory.Delete(path, recursive: true);
+            return;
+        }
+        ClearReadOnly(root);
+        Directory.Delete(path, recursive: true);
+
+        static void ClearReadOnly(DirectoryInfo dir)
+        {
+            foreach (var file in dir.EnumerateFiles())
+                if ((file.Attributes & FileAttributes.ReadOnly) != 0)
+                    file.Attributes &= ~FileAttributes.ReadOnly;
+            foreach (var child in dir.EnumerateDirectories())
+            {
+                if ((child.Attributes & FileAttributes.ReparsePoint) == 0) ClearReadOnly(child);
+                if ((child.Attributes & FileAttributes.ReadOnly) != 0)
+                    child.Attributes &= ~FileAttributes.ReadOnly;
+            }
+            if ((dir.Attributes & FileAttributes.ReadOnly) != 0)
+                dir.Attributes &= ~FileAttributes.ReadOnly;
+        }
+    }
+
     private static void CopyTree(string src, string dest)
     {
         Directory.CreateDirectory(dest);
         foreach (var dir in Directory.GetDirectories(src, "*", SearchOption.AllDirectories))
             Directory.CreateDirectory(Path.Combine(dest, Path.GetRelativePath(src, dir)));
         foreach (var file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
-            File.Copy(file, Path.Combine(dest, Path.GetRelativePath(src, file)), overwrite: true);
+        {
+            string target = Path.Combine(dest, Path.GetRelativePath(src, file));
+            if (File.Exists(target) && (File.GetAttributes(target) & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.ReadOnly);
+            File.Copy(file, target, overwrite: true);
+        }
     }
 }

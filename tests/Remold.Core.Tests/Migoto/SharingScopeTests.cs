@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -58,7 +58,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         Assert.Contains("[TextureOverride_Retex_", ini);
@@ -75,7 +75,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         // no global rebind of the shared hash; the tag + one scoped section per shipped tier instead
@@ -128,10 +128,10 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
-        Assert.Contains(r.Infos, i => i == "VesnaSSR01 has no private mesh to witness its presence. "
-            + "Edits on its shared meshes apply wherever those meshes draw");
+        Assert.Contains(r.Infos, i => i == "VesnaSSR01 has no mesh of its own, so the mod cannot tell "
+            + "when it is on screen. Edits on its shared meshes apply wherever those meshes draw.");
         Assert.DoesNotContain("$zz_gate_", ReadIni(r));
     }
 
@@ -145,7 +145,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         Assert.DoesNotContain(r.Infos, i => i.Contains("no private mesh to witness"));
         Assert.Contains("$zz_gate_", ReadIni(r));
@@ -164,7 +164,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         // the latch: declared, committed in [Present], witnessed by the outfit's private meshes
@@ -250,7 +250,7 @@ public class SharingScopeTests : IDisposable
             texWearers is null ? null : SharingIndex.FromMeasurements("12345", wearers,
                 new Dictionary<string, int[]> { [FaceTexHash] = texWearers },
                 meshWearers,
-                new Dictionary<int, string[]> { [0] = new[] { "aaaa0001" }, [1] = new[] { "aaaa0002" } }));
+                new Dictionary<int, string[]> { [0] = new[] { "aaaa0001" }, [1] = new[] { "aaaa0002" } })).Exact();
 
         var p = new Remold.Core.Project.ModProject { RootDir = proj };
         p.Info.Name = "Face";
@@ -272,7 +272,7 @@ public class SharingScopeTests : IDisposable
                 p.SetChangeKey("Vesna", outfit, Face(outfit).Mesh, Remold.Core.Project.EditVerbs.Retexture, k);
         }
 
-        return ModBuilder.Build(p, env, outRoot);
+        return ReleasedBuild.Build(p, env, outRoot);
     }
 
     private string FaceIb = "", DormIb = "", FaceTexHash = "";
@@ -371,6 +371,51 @@ public class SharingScopeTests : IDisposable
             + "Give both changes the same image", ex.Message);
     }
 
+    /// <summary>The mixed path with ONE image between the two claims: the stock texture is measured as worn
+    /// by the first outfit only, so that claim takes the game-wide rebind and the second — which measures
+    /// as sharing the texture with the first — finds the section already spent. Route: ModBuilder.Build's
+    /// retexture accumulation, the same one the two-image cases above refuse on.
+    ///
+    /// <para>The same image is refused too, keyed or not. The section shows the game's own picture wherever
+    /// no line of it runs, so a second gate under it repaints every wearer outside this mod in the states
+    /// that gate answers, where they showed the game's own picture before. Keyless the two claims come to
+    /// one bind and nothing is added, and that shape is refused beside the keyed one rather than carved
+    /// out: the claim asked for a mechanism this section cannot give it either way.</para></summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(new object[] { new[] { "F6", "F7" } })]
+    public void One_image_refuses_where_the_second_claim_measures_as_shared(string?[]? keys)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => BuildTwoOutfitFaces(
+            new (byte, byte, byte, byte)[] { (1, 2, 3, 255), (1, 2, 3, 255) },
+            texWearers: new[] { 0 }, keys: keys));
+
+        Assert.Equal(ModBuilder.SharedTextureAlreadyWide("tex_face_d",
+            "'c_vesna01_face_lod0' on VesnaSSR01", "'c_vesna01_face_lod0' on VesnaDorm").Message,
+            ex.Message);
+    }
+
+    /// <summary>The legitimate neighbour of the case above: NEITHER claim measures as shared (no index at
+    /// all), so both take the game-wide rebind and the second joins the first's section with a gate of its
+    /// own. Route: the same. Nothing here asked for the draw-scoped mechanism, so nothing is refused — one
+    /// file ships and each key binds it.</summary>
+    [Fact]
+    public void An_unmeasured_second_claim_on_one_image_keeps_its_own_gate()
+    {
+        var r = BuildTwoOutfitFaces(new (byte, byte, byte, byte)[] { (1, 2, 3, 255), (1, 2, 3, 255) },
+            texWearers: null, keys: new string?[] { "F6", "F7" });
+
+        string ini = ReadIni(r);
+        // the game-wide route, since nothing measured either outfit as sharing the texture
+        Assert.Contains("[TextureOverride_Retex_", ini);
+        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        // one image between the two claims, so one file ships — and one bind per key, since dropping the
+        // second would leave that outfit's change showing the game's own picture
+        Assert.DoesNotContain("[Resource_Rtx1]", ini);
+        Assert.Contains("if $zz_key_f6 == 0\nthis = Resource_Rtx0\nendif\n", ini);
+        Assert.Contains("if $zz_key_f7 == 0\nthis = Resource_Rtx0\nendif\n", ini);
+    }
+
     [Fact]
     public void One_outfit_asking_a_scoped_texture_for_two_images_refuses()
     {
@@ -417,7 +462,7 @@ public class SharingScopeTests : IDisposable
                     new SharingIndex.Wearer("Vesna", "Vesna", "VesnaDorm", null),
                 },
                 new Dictionary<string, int[]> { [texHash] = new[] { 0, 1 } },
-                new Dictionary<string, int[]>(), new Dictionary<int, string[]>()));
+                new Dictionary<string, int[]>(), new Dictionary<int, string[]>())).Exact();
 
         var p = new Remold.Core.Project.ModProject { RootDir = proj };
         p.Info.Name = "Twin";
@@ -437,7 +482,7 @@ public class SharingScopeTests : IDisposable
             });
         }
 
-        var ex = Assert.Throws<InvalidOperationException>(() => ModBuilder.Build(p, env, outRoot));
+        var ex = Assert.Throws<InvalidOperationException>(() => ReleasedBuild.Build(p, env, outRoot));
 
         Assert.Equal("stock texture 'tex_twin_a' is retextured with two different images on VesnaSSR01's "
             + "'c_vesna01_face_lod0': 'twin_a.dds' and 'twin_b.dds'. One draw binds one image. "
@@ -453,14 +498,14 @@ public class SharingScopeTests : IDisposable
             texWearers: new[] { 0, 1 }, keys: new string?[] { "F6", "F7" }, sharedMesh: false);
 
         string ini = ReadIni(r);
-        Assert.Contains("global $zz_key_f6 = 1\n", ini);
-        Assert.Contains("global $zz_key_f7 = 1\n", ini);
+        Assert.Contains("global $zz_key_f6 = 0\n", ini);
+        Assert.Contains("global $zz_key_f7 = 0\n", ini);
         Assert.Contains("[Key_zz_key_f6]\nkey = no_modifiers F6\nrun = CommandListKey_zz_key_f6\n", ini);
         Assert.Contains("[Key_zz_key_f7]\nkey = no_modifiers F7\nrun = CommandListKey_zz_key_f7\n", ini);
         // each image's bind sits under its OWN key and its own outfit gate
-        Assert.Contains("if $zz_key_f6 == 1\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
+        Assert.Contains("if $zz_key_f6 == 0\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
             + "ps-t0 = Resource_Rtx0\nendif\n", ini);
-        Assert.Contains("if $zz_key_f7 == 1\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
+        Assert.Contains("if $zz_key_f7 == 0\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
             + "ps-t0 = Resource_Rtx1\nendif\n", ini);
         // nothing about one key applying to both: the section carries each image's own
         Assert.DoesNotContain(r.Warnings, w => w.Contains("different toggle keys"));
@@ -476,9 +521,9 @@ public class SharingScopeTests : IDisposable
 
         string ini = ReadIni(r);
         Assert.DoesNotContain("[Resource_Rtx1]", ini);
-        Assert.Contains("if $zz_key_f6 == 1\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
+        Assert.Contains("if $zz_key_f6 == 0\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
             + "ps-t0 = Resource_Rtx0\nendif\n", ini);
-        Assert.Contains("if $zz_key_f7 == 1\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
+        Assert.Contains("if $zz_key_f7 == 0\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
             + "ps-t0 = Resource_Rtx0\nendif\n", ini);
         Assert.DoesNotContain(r.Warnings, w => w.Contains("different toggle keys"));
     }
@@ -503,12 +548,12 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         Assert.DoesNotContain("$zz_gate_", ini);
         Assert.DoesNotContain("[TextureOverride_Witness_", ini);
-        Assert.Contains(r.Infos, i => i.Contains("no private mesh"));
+        Assert.Contains(r.Infos, i => i.Contains("has no mesh of its own"));
     }
 
     [Fact]
@@ -524,7 +569,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Hide");
         p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         // the shared tier's skip sits under the latch; the private tier's does not
@@ -549,11 +594,11 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         string ini = ReadIni(r);
         Assert.Contains("[TextureOverride_Retex_", ini);
-        Assert.Contains(r.Infos, i => i.Contains("isn't measured"));
+        Assert.Contains(r.Infos, i => i.Contains("haven't been measured"));
     }
 
     [Theory]
@@ -570,7 +615,7 @@ public class SharingScopeTests : IDisposable
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
         Assert.DoesNotContain(r.Infos, i => i.Contains("unmeasured"));
         Assert.Contains(r.Diagnostics, d => d.Contains("sharing reach is a floor")
@@ -580,16 +625,16 @@ public class SharingScopeTests : IDisposable
     }
 
     [Fact]
-    public void No_index_stays_silent_in_infos_and_notes_the_diagnostic()
+    public void A_failed_whole_index_says_every_edit_ships_unscoped_in_user_infos()
     {
         var env = _world.MakeEnv(out _, out _);
         var p = _world.NewProject("Retex");
         _world.AddEditedTexture(p);
 
-        var r = ModBuilder.Build(p, env, _world.OutRoot);
+        var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
-        Assert.Empty(r.Infos);
-        Assert.Contains(r.Diagnostics, d => d.Contains("no sharing measurement"));
+        Assert.Contains("Shared meshes and textures haven't been measured. Every edit applies wherever "
+            + "its mesh or texture draws in game.", r.Infos);
     }
 
     // ---- the tag derivation -----------------------------------------------------------------------

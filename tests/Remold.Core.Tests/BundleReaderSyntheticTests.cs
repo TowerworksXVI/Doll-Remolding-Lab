@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Bundles;
@@ -58,6 +59,34 @@ public class BundleReaderSyntheticTests
         byte[] plain = File.ReadAllBytes(bundle);
 
         Assert.Null(new BundleReader().GetTexture(plain, "not_here"));
+    }
+
+    [Fact]
+    public void GetMaterialShading_reads_the_serialized_shader_keywords_floats_and_colors()
+    {
+        using var t = new TempGame();
+        string bundle = t.At("material.bundle");
+        SyntheticBundle.BuildOneMaterial(bundle, "material.logical", "coat_skinuber", 41,
+            System.Array.Empty<(string, int, long)>(), new[] { "CAB-character" },
+            shading: new SyntheticBundle.MaterialShadingSpec(1, 91,
+                new[] { "_USE_STOCKING", "_GI_FLATTEN" },
+                new Dictionary<string, float> { ["_GlitterDensity"] = 12.5f },
+                new Dictionary<string, float[]>
+                {
+                    ["_StockingCenterColor"] = new[] { 0.25f, 0.5f, 0.75f, 1f },
+                }));
+
+        var shading = new BundleReader().GetMaterialShading(File.ReadAllBytes(bundle), 41);
+
+        Assert.NotNull(shading);
+        Assert.Equal("coat_skinuber", shading!.Name);
+        Assert.Equal((1, 91), (shading.ShaderFileId, shading.ShaderPathId));
+        Assert.Equal(new[] { "_GI_FLATTEN", "_USE_STOCKING" },
+            shading.EnabledKeywords.OrderBy(keyword => keyword, System.StringComparer.Ordinal));
+        Assert.Equal(new[] { "CAB-character" }, shading.ExternalCabs);
+        Assert.Equal(12.5f, shading.Floats["_GlitterDensity"]);
+        Assert.Equal(new[] { 0.25f, 0.5f, 0.75f, 1f },
+            shading.Colors["_StockingCenterColor"]);
     }
 
     // ---- GetBundleName — the VFS logical-identity read ----------------------------

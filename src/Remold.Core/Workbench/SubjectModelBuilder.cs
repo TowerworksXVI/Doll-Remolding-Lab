@@ -209,11 +209,13 @@ public static class SubjectModelBuilder
                     if (tierAddr.Length > 0 || x.Mesh is null)
                     {
                         siblingTiers.Add(new RecipeTierSlot(x.Name, tierAddr, CastsShadows: x.CastsShadows,
-                            Visibility: VisibilityOf(x.Name)));
+                            Visibility: VisibilityOf(x.Name), RendererBundle: tierCand.Bundle,
+                            RendererPathId: x.PathId));
                         continue;
                     }
                     var (tb, tp) = ResolveSlotMesh(scope, tierCand, x.Mesh, spec.Token, problems, out _);
-                    siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp, x.CastsShadows, VisibilityOf(x.Name)));
+                    siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp, x.CastsShadows,
+                        VisibilityOf(x.Name), tierCand.Bundle, x.PathId));
                 }
             // Mirror the exporter's whole-part texture miss: a part whose real materials ALL resolved cleanly
             // yet bind ZERO texture maps will export untextured, so flag it for the tree's ⚠ badge. A part
@@ -228,7 +230,8 @@ public static class SubjectModelBuilder
                 MeshBundle: meshBundle, MeshPathId: meshPathId,
                 IsStatic: spec.Slot.Renderer == SlotRenderer.Static,
                 CastsShadows: spec.Slot.CastsShadows,
-                Visibility: VisibilityOf(spec.Slot.Name)));
+                Visibility: VisibilityOf(spec.Slot.Name),
+                RendererBundle: cand.Bundle, RendererPathId: spec.Slot.PathId));
         }
 
         // Defensive: renderer slots existed but nothing became a part — loud rather than a silent empty
@@ -384,9 +387,8 @@ public static class SubjectModelBuilder
     /// <see cref="Materials.RendererResolver.FindSlot"/>, which resolves a token back to its slot by the
     /// same two prefixes.</para>
     ///
-    /// <para>Internal rather than private because the ledger asks the same question of a materialized
-    /// target's mesh name: <see cref="Materializer.MaterializedParts"/> reads it, so "which part is this
-    /// mesh" has ONE answer for the tree, the roster and the project's targets alike.</para>
+    /// <para>The one home for "which part is this mesh", read by the part union, the tier grouping and
+    /// <see cref="OwnedSlotTokens"/> alike, so the tree and the roster cannot name one slot differently.</para>
     /// </summary>
     internal static Func<string, string> SlotTokens(IReadOnlyList<string> ownedSlotNames, string meshPrefix)
     {
@@ -522,7 +524,8 @@ public static class SubjectModelBuilder
             {
                 var msg = $"Part '{token}': couldn't read the material's bundle.";
                 problems.Add(msg);
-                result.Add(new SubjectMaterial("", mref.PathId, mref.Cab, Array.Empty<SubjectMap>(), msg));
+                result.Add(new SubjectMaterial("", mref.PathId, mref.Cab, Array.Empty<SubjectMap>(), msg,
+                    Bundle: matBundle));
                 continue;
             }
             // The bytes are in hand and the material is about to be read out of them: this bundle's CONTENT
@@ -535,15 +538,17 @@ public static class SubjectModelBuilder
             {
                 var msg = $"Part '{token}': no material found at the expected location in its bundle.";
                 problems.Add(msg);
-                result.Add(new SubjectMaterial("", mref.PathId, mref.Cab, Array.Empty<SubjectMap>(), msg));
+                result.Add(new SubjectMaterial("", mref.PathId, mref.Cab, Array.Empty<SubjectMap>(), msg,
+                    Bundle: matBundle));
                 continue;
             }
 
             var maps = MaterialResolver
                 .ResolveTexSlots(scope.BundleForCab, reader, deobfuscate, matBundle, matDec, te.Value.ExternalCabs, te.Value.Slots)
-                .Select(m => new SubjectMap(m.Slot, m.TextureName, m.BundleHash))
+                .Select(m => new SubjectMap(m.Slot, m.TextureName, m.BundleHash, m.PathId))
                 .ToList();
-            result.Add(new SubjectMaterial(te.Value.Name, mref.PathId, mref.Cab, maps));
+            result.Add(new SubjectMaterial(te.Value.Name, mref.PathId, mref.Cab, maps,
+                Bundle: matBundle));
         }
         return result;
     }

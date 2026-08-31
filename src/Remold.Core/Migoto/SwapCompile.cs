@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -8,6 +8,7 @@ using AssetsTools.NET;
 using AssetsTools.NET.Extra;
 using Remold.Core.Bundles;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
 
 namespace Remold.Core.Migoto;
 
@@ -34,11 +35,27 @@ public static class SwapCompile
     /// <summary><paramref name="Warnings"/> are user-facing: the authored edit won't show or will look
     /// wrong, and there is something the author can do about it. <paramref name="Diagnostics"/> record what
     /// the compile did; they reach the build log and no UI surface. Both are forwarded from
-    /// <see cref="MeshApply"/>.</summary>
+    /// <see cref="MeshApply"/>.
+    ///
+    /// <para>The trailing members describe the emitted bytes well enough to READ THEM BACK without the
+    /// game asset they were sliced against: <paramref name="Channels"/> is the layout target's channel
+    /// table in the form the compile encoded against (widened, on the pooled route), so a reader knows
+    /// where each channel sits in the streams; <paramref name="Submeshes"/> is the emitted submesh table;
+    /// and <paramref name="UnionBoneHashes"/>/<paramref name="UnionBindPoses"/> are the bone order the
+    /// emitted blend indices address, with the bind pose each was stated under.
+    /// <paramref name="UnionInSceneRestSpace"/> names WHICH space that is (see
+    /// <see cref="BuildUnionOrder"/>) — not inferable from the buffers. Those last three are empty/false on
+    /// the single-part compile, which has no union; the channel and submesh tables are answered on both
+    /// routes.</para></summary>
     public readonly record struct Result(
         string Mesh, int VertexCount, int IndexFormat, int IndexBytes, int SubmeshCount,
         int UnionBones, IReadOnlyList<StreamInfo> Streams, IReadOnlyList<string> Warnings,
-        IReadOnlyList<string> Diagnostics, string OutDir);
+        IReadOnlyList<string> Diagnostics, string OutDir,
+        IReadOnlyList<UnityMesh.ChannelDef>? Channels = null,
+        IReadOnlyList<UnityMesh.SubMeshDef>? Submeshes = null,
+        IReadOnlyList<uint>? UnionBoneHashes = null,
+        IReadOnlyList<float[]>? UnionBindPoses = null,
+        bool UnionInSceneRestSpace = false);
 
     /// <summary>Compile <paramref name="weightedGlb"/> onto a single target part and emit
     /// stream*.buf + ib.buf + meta.json into <paramref name="outDir"/> (target bone order, outline baked,
@@ -56,7 +73,8 @@ public static class SwapCompile
     {
         if (!File.Exists(weightedGlb)) throw new FileNotFoundException($"weighted glb not found: {weightedGlb}");
         var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
-            ?? throw new InvalidDataException($"mesh '{meshName}' not found in bundle");
+            ?? throw new AuthoredRefusalException(
+                $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
 
         // compile onto the target's format (mutates field in place), then slice raw streams
         payload ??= MeshGltf.ImportPayload(weightedGlb, lenient: true);   // tolerate morph-accessor quirks
@@ -68,7 +86,8 @@ public static class SwapCompile
 
         WriteStreams(mesh, outDir);
         WriteMeta(outDir, $"{meshName}.swap", unionBones: null, mesh);
-        return BuildResult($"{meshName}.swap", mesh, unionBones: 0, apply.Warnings, apply.Diagnostics, outDir);
+        return BuildResult($"{meshName}.swap", mesh, unionBones: 0, apply.Warnings, apply.Diagnostics, outDir,
+            Channels(field));
     }
 
     /// <summary>Compile a whole-body donor <paramref name="weightedGlb"/> onto the pooled union of
@@ -117,12 +136,17 @@ public static class SwapCompile
         foreach (var m in meshes)
         {
             var f = reader.GetMeshField(m.DeobfuscatedBundle, m.MeshName, m.PathId)
-                ?? throw new InvalidDataException($"mesh '{m.MeshName}' not found in bundle");
+                ?? throw new AuthoredRefusalException(
+                $"the game files no longer hold the mesh '{m.MeshName}'. Rescan, then build again");
             fields.Add(f);
         }
 
         var (unionHashes, unionBind) = BuildUnionOrder(fields, meshNames, layoutTargetIndex,
             meshes.Select(m => m.MeasuredRest).ToList());
+        // Which space that union was stated in — the same verdict BuildUnionOrder took, asked once more so
+        // a caller recording the union can say which space its bind poses are in. A scene-rest union is a
+        // property of the subject; an anchor-space one is a property of this pipeline's anchor.
+        bool sceneRestUnion = TrySceneDelta(meshes[layoutTargetIndex].MeasuredRest, out _);
 
         // ---- rewrite the layout-target field's bone table to the union, then run the proven pipeline ----
         var target = fields[layoutTargetIndex];
@@ -168,7 +192,8 @@ public static class SwapCompile
         WriteMeta(outDir, "pool.swap", unionHashes.Count, mesh);
         File.WriteAllText(Path.Combine(outDir, "unionorder.json"),
             "[" + string.Join(",", unionHashes.Select(h => $"\"{h}\"")) + "]\n");
-        return BuildResult("pool.swap", mesh, unionHashes.Count, result.Warnings, result.Diagnostics, outDir);
+        return BuildResult("pool.swap", mesh, unionHashes.Count, result.Warnings, result.Diagnostics, outDir,
+            Channels(target), unionHashes, unionBind, sceneRestUnion);
     }
 
     /// <summary>Build the union bone order first-seen across <paramref name="fields"/> in argument order. A
@@ -398,14 +423,29 @@ public static class SwapCompile
     }
 
     static Result BuildResult(string meshName, MeshRaw mesh, int unionBones,
-        IReadOnlyList<string> warnings, IReadOnlyList<string> diagnostics, string outDir)
+        IReadOnlyList<string> warnings, IReadOnlyList<string> diagnostics, string outDir,
+        IReadOnlyList<UnityMesh.ChannelDef> channels, IReadOnlyList<uint>? unionHashes = null,
+        IReadOnlyList<float[]>? unionBind = null, bool sceneRestUnion = false)
     {
         var streams = new List<StreamInfo>();
         for (int s = 0; s < mesh.StreamIds.Count; s++)
             streams.Add(new StreamInfo(mesh.StreamIds[s], mesh.Stride(s)));
+        var submeshes = mesh.Submeshes
+            .Select(s => new UnityMesh.SubMeshDef((int)s.FirstByte, (int)s.IndexCount, (int)s.BaseVertex))
+            .ToList();
         return new Result(meshName, mesh.VertexCount, mesh.IndexFormat, mesh.Index.Length,
-            mesh.Submeshes.Count, unionBones, streams, warnings, diagnostics, outDir);
+            mesh.Submeshes.Count, unionBones, streams, warnings, diagnostics, outDir,
+            channels, submeshes, unionHashes, unionBind, sceneRestUnion);
     }
+
+    /// <summary>The mesh field's channel table as the codec reads it — dimension masked to the STORED
+    /// component count, the same mask <see cref="UnityMesh.Decode"/> and <see cref="MeshApply"/> apply, so a
+    /// reader given this table and the emitted streams slices them exactly as the encode laid them out.</summary>
+    static List<UnityMesh.ChannelDef> Channels(AssetTypeValueField field) =>
+        Arr(field["m_VertexData"]["m_Channels"]).Children
+            .Select(c => new UnityMesh.ChannelDef(c["stream"].AsInt, c["offset"].AsInt,
+                c["format"].AsInt, c["dimension"].AsInt & 0xF))
+            .ToList();
 
     private static AssetTypeValueField Arr(AssetTypeValueField f) => f["Array"];
 

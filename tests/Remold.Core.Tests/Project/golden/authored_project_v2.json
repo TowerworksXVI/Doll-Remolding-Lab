@@ -1,0 +1,167 @@
+{
+  "schema": 2,
+  "app_version": "0.4.0",
+  "info": {
+    "name": "Authored fixture",
+    "version": "1.0",
+    "author": "TestAuthor",
+    "include_repair_data": true
+  },
+  "authored_against": {
+    "catalog_version": "26109"
+  },
+  "project_assets": [
+    {
+      "id": "mesh-long",
+      "kind": "geometry",
+      "label": "Long body",
+      "file": "meshes/long.glb",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 73001,
+          "name": "body_mesh"
+        }
+      }
+    },
+    {
+      "id": "ramp-warm",
+      "kind": "ramp",
+      "label": "Warm ramp",
+      "file": "textures/warm.dds",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 91001,
+          "name": "RampMap_Linear_RGBAHalf"
+        }
+      }
+    },
+    {
+      "id": "ramp-cool",
+      "kind": "ramp",
+      "label": "Cool ramp",
+      "file": "textures/cool.dds",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 91002,
+          "name": "RampMap_Linear_RGBAHalf"
+        }
+      }
+    },
+    {
+      "id": "mesh-short",
+      "kind": "geometry",
+      "label": "Short body",
+      "file": "meshes/short.glb",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 73002,
+          "name": "body_mesh"
+        }
+      }
+    }
+  ],
+  "target_slots": [
+    {
+      "id": "slot-geometry",
+      "part": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "tier": "lod0",
+      "input": "geometry",
+      "renderer": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 70001,
+        "name": "c_vesna_body_lod0"
+      },
+      "mesh": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 72001,
+        "name": "body_mesh"
+      }
+    },
+    {
+      "id": "slot-ramp",
+      "part": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "tier": "lod0",
+      "submesh_index": 0,
+      "material_slot_index": 0,
+      "input": "ramp",
+      "renderer": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 70001,
+        "name": "c_vesna_body_lod0"
+      },
+      "material": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 74001,
+        "name": "body_material"
+      }
+    }
+  ],
+  "edit_definitions": [
+    {
+      "id": "edit-long",
+      "target": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "label": "Long body",
+      "bindings": [
+        {
+          "slot_id": "slot-geometry",
+          "kind": "project_asset",
+          "project_asset_id": "mesh-long"
+        },
+        {
+          "slot_id": "slot-ramp",
+          "kind": "project_asset",
+          "project_asset_id": "ramp-warm"
+        }
+      ]
+    },
+    {
+      "id": "edit-short",
+      "target": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "label": "Short body",
+      "bindings": [
+        {
+          "slot_id": "slot-geometry",
+          "kind": "project_asset",
+          "project_asset_id": "mesh-short"
+        },
+        {
+          "slot_id": "slot-ramp",
+          "kind": "project_asset",
+          "project_asset_id": "ramp-cool"
+        }
+      ]
+    }
+  ],
+  "always": [
+    "edit-long"
+  ],
+  "key_groups": []
+}

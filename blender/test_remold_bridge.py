@@ -9,14 +9,87 @@ outside the `test*.py` pattern so this discovery run never tries to import it ag
 """
 import os
 import sys
+import json
 import types
 import unittest
+import tempfile
 from unittest import mock
 
 sys.modules.setdefault("bpy", types.ModuleType("bpy"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import remold_bridge as rb   # noqa: E402  (the bpy stub has to be in place first)
+
+
+class TextureTransportCarrierTests(unittest.TestCase):
+    def test_a_non_object_extras_is_replaced_before_transport_is_appended(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "transport.glb")
+            rb._gf2_glb_write(path, {
+                "asset": {"version": "2.0"},
+                "buffers": [{"byteLength": 0}],
+                "extras": ["legacy non-object extras"],
+            }, b"")
+            rb._gf2_append_texture_transport(path, [{
+                "owner": {"mesh": "veil", "material": 0},
+                "property": "_MaskTex",
+                "semantic": "texture",
+                "texCoord": 1,
+                "stock": {"name": "mask", "bundle": "bundle", "path_id": 71},
+                "srgb": False,
+                "origin": "vanilla",
+                "png": b"carrier bytes",
+                "image_name": "Mask",
+            }])
+
+            root, _ = rb._gf2_glb_read(path)
+            self.assertIsInstance(root["extras"], dict)
+            returned = rb._gf2_read_texture_transport(path)
+            self.assertEqual([row["property"] for row in returned], ["_MaskTex"])
+            self.assertEqual([row["texCoord"] for row in returned], [1])
+
+    def test_uv_layer_lookup_uses_import_order_and_rejects_unusable_indices(self):
+        mesh = types.SimpleNamespace(data=types.SimpleNamespace(uv_layers=[
+            types.SimpleNamespace(name="Primary"), types.SimpleNamespace(name="Effect layout")]))
+
+        self.assertEqual(rb._gf2_uv_layer_name(mesh, 0), "Primary")
+        self.assertEqual(rb._gf2_uv_layer_name(mesh, 1), "Effect layout")
+        self.assertIsNone(rb._gf2_uv_layer_name(mesh, 2))
+        self.assertIsNone(rb._gf2_uv_layer_name(mesh, -1))
+        self.assertIsNone(rb._gf2_uv_layer_name(mesh, True))
+
+    def test_two_properties_on_one_stock_resource_stay_two_exact_bindings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "transport.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"}, "buffers": [{"byteLength": 0}]}, b"")
+            stock = {"name": "shared", "bundle": "bundle", "path_id": 71}
+            rows = []
+            for prop in ("_MaskTex", "_TurbulenceTex"):
+                rows.append({
+                    "owner": {"mesh": "veil", "material": 6},
+                    "property": prop,
+                    "semantic": "texture",
+                    "stock": stock,
+                    "srgb": False,
+                    "origin": "vanilla",
+                    "parameters": {"floats": {"future": 2.0}, "keywords": ["FUTURE"]},
+                    "png": b"different carrier bytes for " + prop.encode("ascii"),
+                    "image_name": prop,
+                })
+
+            rb._gf2_append_texture_transport(path, rows)
+            returned = rb._gf2_read_texture_transport(path)
+
+            self.assertEqual([row["property"] for row in returned], ["_MaskTex", "_TurbulenceTex"])
+            self.assertEqual([row["stock"]["path_id"] for row in returned], [71, 71])
+            self.assertEqual(returned[0]["parameters"]["keywords"], ["FUTURE"])
+            self.assertNotEqual(returned[0]["png"], returned[1]["png"])
+
+    def test_a_legacy_glb_has_no_property_carrier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "legacy.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"}, "buffers": [{"byteLength": 0}]}, b"")
+            self.assertEqual(rb._gf2_read_texture_transport(path), [])
 
 
 class LiveHandlerTests(unittest.TestCase):
@@ -35,17 +108,20 @@ class LiveHandlerTests(unittest.TestCase):
 
 class StatusLineTests(unittest.TestCase):
     def test_clean_scene_reads_ready(self):
-        self.assertEqual(rb.gf2_status_line([]), "✓ Ready to send")
+        self.assertEqual(rb.gf2_status_line([]), "Ready to send")
 
     def test_both_severities_tally_separately(self):
         issues = [("HARD", "a"), ("HARD", "b"), ("SOFT", "c")]
-        self.assertEqual(rb.gf2_status_line(issues), "✗ 2 blocking · ⚠ 1 warning")
+        self.assertEqual(rb.gf2_status_line(issues),
+                         "2 blocking issues · 1 warning — click Check Mesh for details")
 
     def test_blocking_only_omits_the_warning_half(self):
-        self.assertEqual(rb.gf2_status_line([("HARD", "a")]), "✗ 1 blocking")
+        self.assertEqual(rb.gf2_status_line([("HARD", "a")]),
+                         "1 blocking issue — click Check Mesh for details")
 
     def test_warnings_only_omit_the_blocking_half(self):
-        self.assertEqual(rb.gf2_status_line([("SOFT", "a"), ("SOFT", "b")]), "⚠ 2 warnings")
+        self.assertEqual(rb.gf2_status_line([("SOFT", "a"), ("SOFT", "b")]),
+                         "2 warnings — click Check Mesh for details")
 
 
 class DroppedExportOptionTests(unittest.TestCase):
@@ -54,80 +130,26 @@ class DroppedExportOptionTests(unittest.TestCase):
 
     def test_every_dropped_option_is_named(self):
         self.assertEqual(rb.gf2_dropped_options_line(["export_tangents", "export_apply"]),
-                         "Export options this Blender doesn't support: export_apply, export_tangents.")
+                         "The running Blender version does not support these export options: "
+                         "export_apply, export_tangents.")
 
     def test_one_dropped_option_reads_the_same_way(self):
         self.assertEqual(rb.gf2_dropped_options_line(["export_apply"]),
-                         "Export options this Blender doesn't support: export_apply.")
-
-
-class SubjectLabelTests(unittest.TestCase):
-    def test_workspace_layout_yields_the_subject_folder(self):
-        self.assertEqual(rb.gf2_subject_label(r"C:\mods\karst_SSR0101\meshes\_combined.glb"),
-                         "karst_SSR0101")
-
-    def test_forward_slashes_resolve_the_same(self):
-        self.assertEqual(rb.gf2_subject_label("/mods/karst_SSR0101/meshes/body1.glb"),
-                         "karst_SSR0101")
-
-    def test_other_layouts_fall_back_to_the_file_stem(self):
-        self.assertEqual(rb.gf2_subject_label("/somewhere/else/donor.glb"), "donor")
-
-    def test_no_path_yields_nothing(self):
-        self.assertEqual(rb.gf2_subject_label(""), "")
-
-
-class ShortPartNameTests(unittest.TestCase):
-    def test_shared_prefix_is_cut_at_an_underscore(self):
-        names = ["c_KarstSSR0101_slg_body1_lod0", "c_KarstSSR0101_slg_cloth1_lod0"]
-        self.assertEqual(rb.gf2_short_part_names(names), ["body1_lod0", "cloth1_lod0"])
-
-    def test_a_lone_name_stays_whole(self):
-        self.assertEqual(rb.gf2_short_part_names(["c_KarstSSR0101_slg_body1_lod0"]),
-                         ["c_KarstSSR0101_slg_body1_lod0"])
-
-    def test_identical_names_keep_their_tail(self):
-        self.assertEqual(rb.gf2_short_part_names(["a_b_c", "a_b_c"]), ["c", "c"])
-
-    def test_no_shared_prefix_leaves_names_untouched(self):
-        self.assertEqual(rb.gf2_short_part_names(["body", "cloth"]), ["body", "cloth"])
-
-
-class SubjectLineTests(unittest.TestCase):
-    def test_both_halves_join_on_the_separator(self):
-        self.assertEqual(rb.gf2_subject_line("karst_SSR0101", ["body", "cloth", "hair"]),
-                         "karst_SSR0101 · body, cloth, hair")
-
-    def test_parts_alone_when_the_subject_is_not_derivable(self):
-        self.assertEqual(rb.gf2_subject_line("", ["body"]), "body")
-
-    def test_subject_alone_when_there_are_no_parts(self):
-        self.assertEqual(rb.gf2_subject_line("karst_SSR0101", []), "karst_SSR0101")
-
-
-class CollectionsLineTests(unittest.TestCase):
-    def test_attributed_scene_breaks_down_by_collection(self):
-        self.assertEqual(rb.gf2_collections_line(3, 1, True), "Mod 3 · Reference 1")
-
-    def test_unattributed_scene_reports_a_bare_count(self):
-        self.assertEqual(rb.gf2_collections_line(3, 0, False), "3 objects")
-
-    def test_bare_count_is_singular_for_one(self):
-        self.assertEqual(rb.gf2_collections_line(1, 0, False), "1 object")
+                         "The running Blender version does not support these export options: export_apply.")
 
 
 class ScopeLineTests(unittest.TestCase):
-    def test_scope_reads_objects_and_verts_only(self):
+    def test_scope_reads_objects_and_vertices_only(self):
         """Reference never ships, so what is NOT sent is not part of the scope: the line counts only
         what the send carries."""
-        self.assertEqual(rb.gf2_scope_lines(3, 12480, False), ["3 objects · 12,480 verts"])
+        self.assertEqual(rb.gf2_scope_lines(3, 12480, False), ["3 objects · 12,480 vertices"])
 
     def test_singulars(self):
-        self.assertEqual(rb.gf2_scope_lines(1, 1, False), ["1 object · 1 vert"])
+        self.assertEqual(rb.gf2_scope_lines(1, 1, False), ["1 object · 1 vertex"])
 
     def test_modifier_note_only_when_one_would_be_baked(self):
         self.assertEqual(rb.gf2_scope_lines(1, 8, True),
-                         ["1 object · 8 verts", "Modifiers are baked on Send."])
+                         ["1 object · 8 vertices", "Modifiers are baked on Send."])
 
 
 class SessionPartTests(unittest.TestCase):
@@ -165,6 +187,370 @@ class SessionPartTests(unittest.TestCase):
         part that way, so the flags have nothing left to say."""
         session = {"part": "cloth1", "parts": [{"name": "cloth1", "edited": False, "writable": False}]}
         self.assertEqual(rb.gf2_session_parts(session, ["cloth1", "hair"]), ["cloth1"])
+
+
+class TargetRowTests(unittest.TestCase):
+    SESSION = {"revision": 4, "part": None, "parts": [
+        {"name": "body1", "editId": "body-detail", "defaultEditName": "Body Edit 3",
+         "edits": [
+             {"id": "body-base", "label": "Body Base", "holdsAuthoredMesh": False},
+             {"id": "body-detail", "label": "Body Detail", "holdsAuthoredMesh": True}]},
+        {"name": "cloth1", "defaultEditName": "Cloth Edit 2", "edits": [
+            {"id": "cloth-base", "label": "Cloth Base", "holdsAuthoredMesh": False}]},
+        {"name": "face", "writable": False, "edits": []},
+    ]}
+
+    def test_one_row_is_built_for_each_writable_scene_part(self):
+        specs = rb.gf2_target_row_specs(self.SESSION, ["body1", "cloth1", "face"])
+        self.assertEqual([row["part"] for row in specs], ["body1", "cloth1"])
+        self.assertEqual([edit["label"] for edit in specs[0]["edits"]],
+                         ["Body Base", "Body Detail"])
+
+    def test_opened_from_is_the_default_and_new_is_the_fallback(self):
+        body, cloth = rb.gf2_target_row_specs(self.SESSION, ["body1", "cloth1"])
+        self.assertEqual(body["target"], "body-detail")
+        self.assertEqual(cloth["target"], rb.NEW_EDIT_TARGET)
+        self.assertEqual(cloth["new_name"], "Cloth Edit 2")
+
+    def test_previous_unsent_choices_survive_a_rebuild(self):
+        previous = [{"part": "body1", "target": "body-base", "new_name": ""},
+                    {"part": "cloth1", "target": rb.NEW_EDIT_TARGET,
+                     "new_name": "Hand Named"}]
+        body, cloth = rb.gf2_target_row_specs(self.SESSION, ["body1", "cloth1"], previous)
+        self.assertEqual(body["target"], "body-base")
+        self.assertEqual((cloth["target"], cloth["new_name"]),
+                         (rb.NEW_EDIT_TARGET, "Hand Named"))
+
+    def test_an_opened_id_missing_from_legacy_inventory_remains_selectable(self):
+        specs = rb.gf2_target_row_specs({"part": "body1", "parts": [
+            {"name": "body1", "edited": True, "editId": "legacy-edit"}]})
+        self.assertEqual(specs[0]["target"], "legacy-edit")
+        self.assertEqual(specs[0]["edits"][0]["label"], "legacy-edit")
+        self.assertTrue(specs[0]["edits"][0]["holdsAuthoredMesh"])
+
+    def test_a_synthetic_opened_id_uses_the_legacy_edited_flag(self):
+        part = {"name": "body1", "edited": True, "editId": "missing",
+                "edits": [{"id": "other", "label": "Other", "holdsAuthoredMesh": False}]}
+        self.assertTrue(rb._session_edit_rows(part)[-1]["holdsAuthoredMesh"])
+        self.assertEqual(rb.gf2_selected_mesh_edit_labels(
+            {"parts": [part]}, {"body1": "missing"}), ["missing"])
+
+    def test_a_named_session_builds_only_the_named_part_without_scene_names(self):
+        session = dict(self.SESSION, part="cloth1")
+        self.assertEqual([row["part"] for row in rb.gf2_target_row_specs(session)], ["cloth1"])
+
+
+class TargetSidecarTests(unittest.TestCase):
+    SESSION = {"revision": 7, "parts": [
+        {"name": "body1", "editId": "body-edit", "defaultEditName": "Body Edit 2",
+         "edits": [{"id": "body-edit", "label": "Body Edit", "holdsAuthoredMesh": True}]},
+        {"name": "cloth1", "defaultEditName": "Cloth Edit 2", "edits": []},
+    ]}
+
+    def test_existing_and_new_targets_share_the_edit_ids_union(self):
+        rows = [{"part": "body1", "target": "body-edit", "new_name": "ignored"},
+                {"part": "cloth1", "target": rb.NEW_EDIT_TARGET, "new_name": "New Hem"}]
+        self.assertEqual(rb.gf2_edit_targets(rows),
+                         {"body1": "body-edit", "cloth1": {"new": "New Hem"}})
+
+    def test_a_blank_new_name_stays_blank(self):
+        rows = [{"part": "cloth1", "target": rb.NEW_EDIT_TARGET, "new_name": ""}]
+        self.assertEqual(rb.gf2_edit_targets(rows), {"cloth1": {"new": ""}})
+
+    def test_hidden_parts_are_unchanged_in_the_complete_sidecar(self):
+        rows = [{"part": "body1", "target": "body-edit", "new_name": ""}]
+        targets = rb.gf2_send_target_map(self.SESSION, rows)
+        self.assertEqual(rb.gf2_send_sidecar(["cloth1"], targets, self.SESSION), {
+            "source": "blender-send", "hiddenParts": ["cloth1"],
+            "editIds": {"body1": "body-edit"},
+        })
+
+    def test_headless_sidecar_uses_the_same_default_selections(self):
+        targets = rb.gf2_send_target_map(self.SESSION, part_names=["body1", "cloth1"])
+        self.assertEqual(rb.gf2_send_sidecar([], targets, self.SESSION)["editIds"],
+                         {"body1": "body-edit", "cloth1": {"new": "Cloth Edit 2"}})
+
+    def test_sessionless_send_never_stamps_synthetic_new_targets(self):
+        sessionless = {"part": None, "parts": []}
+        targets = rb.gf2_send_target_map(sessionless, part_names=["body1"])
+        self.assertEqual(targets, {})
+        self.assertEqual(rb.gf2_send_sidecar([], targets, sessionless)["editIds"], {})
+
+    def test_captured_targets_ignore_rows_changed_by_an_ack_before_send(self):
+        rows_at_gate = [{"part": "cloth1", "target": rb.NEW_EDIT_TARGET,
+                         "new_name": "This Send"}]
+        captured = rb.gf2_send_target_map(self.SESSION, rows_at_gate)
+        prior = rb.gf2_send_snapshot(self.SESSION, {"cloth1": {"new": "Prior Send"}})
+        live = {"revision": 8, "parts": [*self.SESSION["parts"], {
+            "name": "unused", "edits": []}]}
+        live["parts"][1] = {"name": "cloth1", "defaultEditName": "Cloth Edit 3", "edits": [
+            {"id": "prior-mint", "label": "Prior Send", "holdsAuthoredMesh": True}]}
+        rows_after_ack = rb.gf2_target_row_specs(
+            live, ["cloth1"], previous=rows_at_gate, acknowledged_snapshot=prior)
+        self.assertEqual(rows_after_ack[0]["target"], "prior-mint")
+        self.assertNotEqual(rb.gf2_edit_targets(rows_after_ack), captured)
+        self.assertEqual(rb.gf2_send_sidecar([], captured, live)["editIds"],
+                         {"cloth1": {"new": "This Send"}})
+
+
+class SessionAcknowledgmentTests(unittest.TestCase):
+    def _opening(self, default="Cloth Edit 2"):
+        return {"revision": 10, "parts": [{
+            "name": "cloth1", "defaultEditName": default,
+            "edits": [{"id": "base", "label": "Cloth Base", "holdsAuthoredMesh": False}],
+        }]}
+
+    def test_only_a_higher_revision_is_adoptable(self):
+        current = {"revision": 10}
+        self.assertEqual(rb.gf2_newer_session(current, {"revision": 11}), {"revision": 11})
+        self.assertIsNone(rb.gf2_newer_session(current, {"revision": 10}))
+        self.assertIsNone(rb.gf2_newer_session(current, {"revision": 9}))
+        self.assertIsNone(rb.gf2_newer_session(current, None))
+
+    def test_acknowledged_named_new_edit_becomes_the_selected_existing_edit(self):
+        opening = self._opening()
+        targets = {"cloth1": {"new": "Hand Hem"}}
+        snapshot = rb.gf2_send_snapshot(opening, targets)
+        live = {"revision": 11, "parts": [{
+            "name": "cloth1", "defaultEditName": "Cloth Edit 3", "edits": [
+                {"id": "base", "label": "Cloth Base", "holdsAuthoredMesh": False},
+                {"id": "minted", "label": "Hand Hem", "holdsAuthoredMesh": True}],
+        }]}
+        spec = rb.gf2_target_row_specs(live, ["cloth1"], acknowledged_snapshot=snapshot)[0]
+        self.assertEqual(spec["target"], "minted")
+        self.assertEqual(rb.gf2_edit_targets([spec]), {"cloth1": "minted"})
+        self.assertEqual(rb.gf2_selected_mesh_edit_labels(live, {"cloth1": "minted"}),
+                         ["Hand Hem"])
+
+    def test_blank_new_edit_matches_the_pre_send_default_after_acknowledgment(self):
+        opening = self._opening(default="Cloth Edit 2")
+        snapshot = rb.gf2_send_snapshot(opening, {"cloth1": {"new": ""}})
+        self.assertEqual(snapshot["newMatches"], {"cloth1": "Cloth Edit 2"})
+        live = {"revision": 11, "parts": [{"name": "cloth1", "edits": [
+            {"id": "base", "label": "Cloth Base", "holdsAuthoredMesh": False},
+            {"id": "minted", "label": "Cloth Edit 2", "holdsAuthoredMesh": True}],
+        }]}
+        spec = rb.gf2_target_row_specs(live, ["cloth1"], acknowledged_snapshot=snapshot)[0]
+        self.assertEqual(spec["target"], "minted")
+
+    def test_unacknowledged_refresh_preserves_the_current_new_choice(self):
+        current = self._opening()
+        previous = [{"part": "cloth1", "target": rb.NEW_EDIT_TARGET,
+                     "new_name": "Not Sent Yet"}]
+        spec = rb.gf2_target_row_specs(current, ["cloth1"], previous=previous)[0]
+        self.assertEqual((spec["target"], spec["new_name"]),
+                          (rb.NEW_EDIT_TARGET, "Not Sent Yet"))
+
+    def test_acknowledged_existing_target_does_not_override_a_reselection(self):
+        opening = {"revision": 10, "parts": [{"name": "cloth1", "editId": "edit-a",
+                    "edits": [{"id": "edit-a", "label": "Edit A"},
+                              {"id": "edit-b", "label": "Edit B"}]}]}
+        snapshot = rb.gf2_send_snapshot(opening, {"cloth1": "edit-a"})
+        live = dict(opening, revision=11)
+        previous = [{"part": "cloth1", "target": "edit-b", "new_name": ""}]
+        spec = rb.gf2_target_row_specs(
+            live, ["cloth1"], previous=previous, acknowledged_snapshot=snapshot)[0]
+        self.assertEqual(spec["target"], "edit-b")
+
+    def test_send_snapshot_remembers_inventory_before_the_send(self):
+        snapshot = rb.gf2_send_snapshot(self._opening(), {"cloth1": {"new": "Next"}})
+        self.assertEqual(snapshot["revision"], 10)
+        self.assertEqual(snapshot["knownEditIds"], {"cloth1": ["base"]})
+
+    def test_partial_ack_promotes_only_the_part_that_minted(self):
+        # An all-parts send where only cloth1 changed: cloth1's New row flips to its minted
+        # edit while cloth2 — whose send landed nothing and never mints — keeps its row.
+        opening = {"revision": 10, "parts": [
+            {"name": "cloth1", "edits": [], "defaultEditName": "Edit 1"},
+            {"name": "cloth2", "edits": [], "defaultEditName": "Edit 1"}]}
+        snapshot = rb.gf2_send_snapshot(opening, {"cloth1": {"new": "Edit 1"},
+                                                  "cloth2": {"new": "Edit 1"}})
+        live = {"revision": 11, "parts": [
+            {"name": "cloth1", "edits": [
+                {"id": "minted", "label": "Edit 1", "holdsAuthoredMesh": True}],
+             "defaultEditName": "Edit 2"},
+            {"name": "cloth2", "edits": [], "defaultEditName": "Edit 1"}]}
+        previous = [{"part": "cloth1", "target": rb.NEW_EDIT_TARGET, "new_name": "Edit 1"},
+                    {"part": "cloth2", "target": rb.NEW_EDIT_TARGET, "new_name": "Edit 1"}]
+        specs = rb.gf2_target_row_specs(live, ["cloth1", "cloth2"], previous=previous,
+                                        acknowledged_snapshot=snapshot)
+        self.assertEqual(specs[0]["target"], "minted")
+        self.assertEqual((specs[1]["target"], specs[1]["new_name"]),
+                         (rb.NEW_EDIT_TARGET, "Edit 1"))
+
+    def test_new_send_snapshot_replaces_the_old_duplicate_mint_candidate(self):
+        unrelated = {"revision": 11, "parts": [{"name": "cloth1", "edits": [
+            {"id": "base", "label": "Cloth Base", "holdsAuthoredMesh": False},
+            {"id": "unrelated", "label": "Other", "holdsAuthoredMesh": True}]}]}
+        second = rb.gf2_send_snapshot(unrelated, {"cloth1": {"new": "Second"}})
+        fulfilled = {"revision": 12, "parts": [{"name": "cloth1", "edits": [
+            *unrelated["parts"][0]["edits"],
+            {"id": "old-mint", "label": "First", "holdsAuthoredMesh": True},
+            {"id": "minted", "label": "Second", "holdsAuthoredMesh": True}]}]}
+        self.assertEqual(rb._snapshot_minted_edit(
+            fulfilled["parts"][0], "cloth1", second)["id"], "minted")
+
+    def test_panel_wrap_width_scales_and_survives_garbage(self):
+        self.assertEqual(rb.gf2_panel_wrap_width(384, 1.0), 48)
+        self.assertEqual(rb.gf2_panel_wrap_width(384, 1.5), 32)
+        self.assertEqual(rb.gf2_panel_wrap_width(0, 1.0), 48)
+        self.assertEqual(rb.gf2_panel_wrap_width(None, None), 48)
+
+    def test_wrapped_lines_never_exceed_the_width_and_indent_continuations(self):
+        tip = "Deleting all of a part's geometry sends it as a hide."
+        lines = rb.gf2_wrapped_lines(tip, 32)
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertLessEqual(len(line), 32)
+        self.assertEqual(" ".join(line.strip() for line in lines), tip)
+
+
+class _FakeTargetRows(list):
+    def add(self):
+        row = types.SimpleNamespace(part_name="", part_label="", target="", new_name="")
+        self.append(row)
+        return row
+
+
+class _FakeScene(dict):
+    def __init__(self, glb_path=""):
+        super().__init__()
+        self.gf2_glb_path = glb_path
+        self.gf2_target_rows = _FakeTargetRows()
+
+
+class SceneSessionRefreshTests(unittest.TestCase):
+    def test_rebuild_keeps_dynamic_enum_strings_referenced(self):
+        scene = _FakeScene()
+        session = {"parts": [{"name": "body1", "editId": "body-edit", "edits": [
+            {"id": "body-edit", "label": "Body Edit", "holdsAuthoredMesh": False}]}]}
+        with mock.patch.object(rb, "gf2_part_collections",
+                               lambda: [types.SimpleNamespace(name="body1")]):
+            rb._rebuild_target_rows(scene, session)
+        items = rb._TARGET_ITEM_REFS["body1"]
+        self.assertIs(rb._gf2_target_items(scene.gf2_target_rows[0], None), items)
+        self.assertEqual([item[1] for item in items], ["Body Edit", "New Edit"])
+
+    def test_higher_revision_promotes_the_send_snapshot_and_clears_pending_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            glb = os.path.join(directory, "cloth.glb")
+            opening = {"revision": 4, "parts": [{"name": "cloth1",
+                       "defaultEditName": "Cloth Edit 2", "edits": []}]}
+            scene = _FakeScene(glb)
+            scene[rb.SESSION_KEY] = json.dumps(opening)
+            scene[rb.SEND_SNAPSHOT_KEY] = json.dumps(
+                rb.gf2_send_snapshot(opening, {"cloth1": {"new": ""}}))
+            old_row = scene.gf2_target_rows.add()
+            old_row.part_name = "cloth1"
+            old_row.target = rb.NEW_EDIT_TARGET
+            old_row.new_name = ""
+            live = {"revision": 5, "parts": [{"name": "cloth1", "edits": [
+                {"id": "minted", "label": "Cloth Edit 2", "holdsAuthoredMesh": True}]}]}
+            with open(rb.session_path(glb), "w", encoding="utf-8") as stream:
+                json.dump(live, stream)
+            context = types.SimpleNamespace(scene=scene)
+            with mock.patch.object(rb.bpy, "context", context, create=True), \
+                    mock.patch.object(rb, "gf2_part_collections",
+                                      lambda: [types.SimpleNamespace(name="cloth1")]):
+                adopted = rb._refresh_session_snapshot(scene)
+            self.assertEqual(adopted["revision"], 5)
+            self.assertEqual(scene.gf2_target_rows[0].target, "minted")
+            self.assertNotIn(rb.SEND_SNAPSHOT_KEY, scene)
+
+    def test_revision_advance_consumes_the_snapshot_and_keeps_unminted_rows(self):
+        # The session file belongs to this run alone, so a revision past the snapshot's means the
+        # app processed that send. A part that minted nothing keeps its New row as it stands.
+        with tempfile.TemporaryDirectory() as directory:
+            glb = os.path.join(directory, "cloth.glb")
+            opening = {"revision": 4, "parts": [{"name": "cloth1",
+                       "defaultEditName": "Cloth Edit 2", "edits": []}]}
+            snapshot = rb.gf2_send_snapshot(opening, {"cloth1": {"new": "Cloth Edit 2"}})
+            scene = _FakeScene(glb)
+            scene[rb.SESSION_KEY] = json.dumps(opening)
+            scene[rb.SEND_SNAPSHOT_KEY] = json.dumps(snapshot)
+            row = scene.gf2_target_rows.add()
+            row.part_name = "cloth1"
+            row.target = rb.NEW_EDIT_TARGET
+            row.new_name = "Cloth Edit 2"
+            unrelated = {"revision": 5, "parts": [{"name": "cloth1",
+                         "defaultEditName": "Cloth Edit 2", "edits": []}]}
+            with open(rb.session_path(glb), "w", encoding="utf-8") as stream:
+                json.dump(unrelated, stream)
+            with mock.patch.object(rb.bpy, "context", types.SimpleNamespace(scene=scene), create=True), \
+                    mock.patch.object(rb, "gf2_part_collections",
+                                      lambda: [types.SimpleNamespace(name="cloth1")]):
+                adopted = rb._refresh_session_snapshot(scene)
+            self.assertEqual(adopted["revision"], 5)
+            self.assertNotIn(rb.SEND_SNAPSHOT_KEY, scene)
+            self.assertEqual(scene.gf2_target_rows[0].target, rb.NEW_EDIT_TARGET)
+            self.assertEqual(scene.gf2_target_rows[0].new_name, "Cloth Edit 2")
+
+    def test_unreadable_refresh_retains_session_and_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            glb = os.path.join(directory, "cloth.glb")
+            scene = _FakeScene(glb)
+            current = {"revision": 4, "parts": [{"name": "cloth1"}]}
+            scene[rb.SESSION_KEY] = json.dumps(current)
+            row = scene.gf2_target_rows.add()
+            row.part_name = "cloth1"
+            row.target = rb.NEW_EDIT_TARGET
+            row.new_name = "Work In Progress"
+            with open(rb.session_path(glb), "w", encoding="utf-8") as stream:
+                stream.write("{")
+            with mock.patch.object(rb.bpy, "context", types.SimpleNamespace(scene=scene), create=True):
+                retained = rb._refresh_session_snapshot(scene)
+            self.assertEqual(retained, current)
+            self.assertIs(scene.gf2_target_rows[0], row)
+            self.assertEqual(row.new_name, "Work In Progress")
+
+    def test_store_session_writes_the_explicit_scene_even_when_it_is_empty(self):
+        explicit = _FakeScene()
+        context_scene = _FakeScene()
+        with mock.patch.object(
+                rb.bpy, "context", types.SimpleNamespace(scene=context_scene), create=True):
+            rb._store_session({"revision": 2}, explicit)
+        self.assertEqual(json.loads(explicit[rb.SESSION_KEY]), {"revision": 2})
+        self.assertNotIn(rb.SESSION_KEY, context_scene)
+
+
+class LiveSessionReadTests(unittest.TestCase):
+    def test_a_complete_document_is_read_with_forward_compatible_notices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            glb = os.path.join(directory, "part.glb")
+            with open(rb.session_path(glb), "w", encoding="utf-8") as stream:
+                json.dump({"revision": 3, "parts": [], "notices": ["Texture table was unreadable."]},
+                          stream)
+            self.assertEqual(rb._read_live_session(glb)["revision"], 3)
+            self.assertEqual(rb._read_live_session(glb)["notices"],
+                             ["Texture table was unreadable."])
+
+    def test_an_unreadable_document_returns_no_replacement_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            glb = os.path.join(directory, "part.glb")
+            with open(rb.session_path(glb), "w", encoding="utf-8") as stream:
+                stream.write('{"revision":')
+            self.assertIsNone(rb._read_live_session(glb))
+            self.assertIsNone(rb.gf2_newer_session({"revision": 3}, rb._read_live_session(glb)))
+
+
+class SessionPresentationTests(unittest.TestCase):
+    def test_only_explicit_false_starts_a_part_hidden(self):
+        session = {"parts": [{"name": "body1", "viewportVisible": False},
+                             {"name": "cloth1", "viewportVisible": True},
+                             {"name": "hair"}]}
+        self.assertFalse(rb.gf2_part_viewport_visible(session, "body1"))
+        self.assertTrue(rb.gf2_part_viewport_visible(session, "cloth1"))
+        self.assertTrue(rb.gf2_part_viewport_visible(session, "hair"))
+        self.assertTrue(rb.gf2_part_viewport_visible(session, "unknown"))
+
+    def test_notice_list_ignores_non_sentences_and_wraps_with_one_warning_prefix(self):
+        notices = rb.gf2_session_notices(
+            {"notices": [" A readable notice sentence. ", "   ", "", 12]})
+        self.assertEqual(notices, ["A readable notice sentence."])
+        lines = rb.gf2_wrapped_notice_lines("A notice sentence that must wrap in a narrow panel.", 24)
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(lines[0].startswith("⚠ "))
+        self.assertTrue(all(line.startswith("  ") for line in lines[1:]))
 
 
 class ClaimedMeshTests(unittest.TestCase):
@@ -212,40 +598,47 @@ class OverwriteWarningTests(unittest.TestCase):
     def test_nothing_edited_says_nothing(self):
         self.assertIsNone(rb.gf2_overwrite_warning([]))
 
-    def test_one_edited_part_reads_singular(self):
-        self.assertEqual(rb.gf2_overwrite_warning(["c_KarstSSR0101_slg_cloth2_lod0"]),
-                         "cloth2 already carries an edit. Sending replaces it.")
+    def test_one_selected_edit_names_the_stored_mesh_work(self):
+        self.assertEqual(rb.gf2_overwrite_warning(["Hem Fix"]),
+                         "Sending replaces the mesh work stored in Hem Fix.")
 
-    def test_several_edited_parts_read_plural(self):
-        self.assertEqual(rb.gf2_overwrite_warning(["c_KarstSSR0101_slg_body1_lod0",
-                                                   "c_KarstSSR0101_slg_cloth2_lod0"]),
-                         "body1, cloth2 already carry edits. Sending replaces them.")
+    def test_several_selected_edits_share_the_exact_lead(self):
+        self.assertEqual(rb.gf2_overwrite_warning(["Body Sculpt", "Hem Fix"]),
+                         "Sending replaces the mesh work stored in Body Sculpt, Hem Fix.")
 
 
-class EditedShippingPartTests(unittest.TestCase):
-    SESSION = {"parts": [{"name": "body1", "edited": True},
-                         {"name": "cloth1", "edited": False},
-                         {"name": "hair", "edited": True}]}
+class SelectedMeshEditTests(unittest.TestCase):
+    SESSION = {"parts": [
+        {"name": "body1", "edits": [
+            {"id": "body-stock", "label": "Body Stock", "holdsAuthoredMesh": False},
+            {"id": "body-sculpt", "label": "Body Sculpt", "holdsAuthoredMesh": True}]},
+        {"name": "cloth1", "edits": [
+            {"id": "cloth-fix", "label": "Hem Fix", "holdsAuthoredMesh": True}]},
+    ]}
 
-    def test_only_the_edited_parts_that_actually_ship_are_named(self):
-        self.assertEqual(rb.gf2_edited_shipping_parts(self.SESSION, ["body1", "cloth1"]), ["body1"])
+    def test_only_selected_existing_targets_with_mesh_work_are_named(self):
+        targets = {"body1": "body-sculpt", "cloth1": {"new": "Fresh Hem"}}
+        self.assertEqual(rb.gf2_selected_mesh_edit_labels(self.SESSION, targets), ["Body Sculpt"])
 
-    def test_an_emptied_part_has_nothing_to_lose(self):
-        """Its workspace file is never written, so an edit it holds is not at risk."""
-        self.assertEqual(rb.gf2_edited_shipping_parts(self.SESSION, ["cloth1"]), [])
+    def test_an_empty_existing_edit_does_not_trigger_confirmation(self):
+        self.assertEqual(rb.gf2_selected_mesh_edit_labels(self.SESSION,
+                                                          {"body1": "body-stock"}), [])
 
-    def test_no_session_description_warns_about_nothing(self):
-        self.assertEqual(rb.gf2_edited_shipping_parts({}, ["body1", "hair"]), [])
+    def test_every_selected_mesh_holding_edit_is_named_in_part_order(self):
+        targets = {"body1": "body-sculpt", "cloth1": "cloth-fix"}
+        self.assertEqual(rb.gf2_selected_mesh_edit_labels(self.SESSION, targets),
+                         ["Body Sculpt", "Hem Fix"])
 
-    def test_a_part_this_session_already_sent_counts_as_edited(self):
-        """The app's description is a launch-time snapshot. Without this, a second Send in one session
-        says nothing about the part the first one just wrote over."""
-        self.assertEqual(rb.gf2_edited_shipping_parts(self.SESSION, ["cloth1"], sent=["cloth1"]),
-                         ["cloth1"])
-
-    def test_the_sent_list_adds_to_the_apps_view_rather_than_replacing_it(self):
-        self.assertEqual(rb.gf2_edited_shipping_parts(self.SESSION, ["body1", "cloth1"], sent=["cloth1"]),
-                         ["body1", "cloth1"])
+    def test_equal_edit_labels_are_qualified_by_part_and_deduped_by_id(self):
+        session = {"parts": [
+            {"name": "body1", "edits": [
+                {"id": "body-edit", "label": "Edit 1", "holdsAuthoredMesh": True}]},
+            {"name": "cloth1", "edits": [
+                {"id": "cloth-edit", "label": "Edit 1", "holdsAuthoredMesh": True}]},
+        ]}
+        labels = rb.gf2_selected_mesh_edit_labels(
+            session, {"body1": "body-edit", "cloth1": "cloth-edit"})
+        self.assertEqual(labels, ["body1 — Edit 1", "cloth1 — Edit 1"])
 
 
 class EmptyingIsAHideTests(unittest.TestCase):
@@ -334,6 +727,86 @@ class UnskinnedPartTests(unittest.TestCase):
             self.assertEqual(rb.gf2_fill_missing_weights([prop], None), (0, 3))
 
 
+class TransformWarningTests(unittest.TestCase):
+    """What an Object-mode transform actually costs, per skin state.
+
+    A skinned mesh's object transform is baked into the exported vertices once and its node written at
+    identity, so moving, rotating or scaling one is not a mistake and must not be reported as one. The
+    single exception is a mirroring scale, which flips the geometry without flipping the winding. An
+    unskinned mesh keeps its local positions and carries the transform on the node, which the app never
+    reads — so the whole of it is lost, and that IS worth stopping for."""
+
+    IDENTITY = {"location": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]}
+
+    def _after(self, **changes):
+        after = {k: list(v) for k, v in self.IDENTITY.items()}
+        after.update({k: list(v) for k, v in changes.items()})
+        return after
+
+    def _warn(self, skinned, before=None, **changes):
+        return rb.gf2_transform_warning("body1", self.IDENTITY if before is None else before,
+                                        self._after(**changes), skinned)
+
+    # ---- skinned: the exporter bakes it, so ordinary placement says nothing
+
+    def test_a_scaled_skinned_mesh_says_nothing(self):
+        self.assertIsNone(self._warn(True, scale=[2.0, 2.0, 2.0]))
+
+    def test_a_moved_skinned_mesh_says_nothing(self):
+        self.assertIsNone(self._warn(True, location=[0.0, 3.0, 0.0]))
+
+    def test_a_rotated_skinned_mesh_says_nothing(self):
+        self.assertIsNone(self._warn(True, rotation=[0.707, 0.707, 0.0, 0.0]))
+
+    # ---- skinned: a mirroring scale ships geometry the winding no longer matches
+
+    def test_a_negatively_scaled_skinned_mesh_reads_inside_out(self):
+        sev, message = self._warn(True, scale=[-1.0, 1.0, 1.0])
+        self.assertEqual(sev, "SOFT")
+        self.assertEqual(message, "'body1' has a negative Object Mode scale. The mesh ships mirrored "
+                                  "without flipped faces and renders inside-out.")
+
+    def test_two_negative_axes_are_a_rotation_not_a_mirror(self):
+        """Handedness is what matters, and an even number of flipped axes keeps it."""
+        self.assertIsNone(self._warn(True, scale=[-1.0, -1.0, 1.0]))
+
+    def test_a_mesh_imported_mirrored_is_not_warned_for_staying_mirrored(self):
+        before = dict(self.IDENTITY, scale=[-1.0, 1.0, 1.0])
+        self.assertIsNone(self._warn(True, before=before, scale=[-2.0, 2.0, 2.0]))
+
+    # ---- unskinned: the node carries it and the app drops it
+
+    def test_a_moved_unskinned_mesh_is_warned(self):
+        sev, message = self._warn(False, location=[0.0, 3.0, 0.0])
+        self.assertEqual(sev, "SOFT")
+        self.assertEqual(message, "'body1' has no skeleton. Object Mode position, rotation, and scale "
+                                  "are dropped on Send. Apply the transform (Ctrl+A in Object Mode), "
+                                  "or edit the geometry in Edit Mode.")
+
+    def test_a_rotated_unskinned_mesh_is_warned(self):
+        self.assertIsNotNone(self._warn(False, rotation=[0.707, 0.707, 0.0, 0.0]))
+
+    def test_a_scaled_unskinned_mesh_is_warned(self):
+        self.assertIsNotNone(self._warn(False, scale=[2.0, 2.0, 2.0]))
+
+    def test_an_unskinned_mesh_left_where_it_arrived_says_nothing(self):
+        self.assertIsNone(self._warn(False))
+
+    def test_float_noise_is_not_a_change(self):
+        self.assertIsNone(self._warn(False, location=[0.0, 1e-5, 0.0]))
+
+    # ---- a baseline that predates a component leaves it uncompared
+
+    def test_an_older_baseline_without_a_move_warns_about_nothing(self):
+        before = {"scale": [1.0, 1.0, 1.0]}
+        self.assertIsNone(rb.gf2_transform_warning("body1", before,
+                                                   self._after(location=[0.0, 3.0, 0.0]), False))
+
+    def test_no_baseline_scale_leaves_a_mirror_uncompared(self):
+        self.assertIsNone(rb.gf2_transform_warning("body1", {}, self._after(scale=[-1.0, 1.0, 1.0]),
+                                                   True))
+
+
 def _full_pass(cheap, shipping=("mesh",), unsolvable=(), session=None):
     """Run gf2_run_checks with the scene reads it makes stubbed out, so the composition of the full
     pass is testable without Blender: what the cheap pass returned, what ships, the session, and what
@@ -352,13 +825,13 @@ class FullPassTests(unittest.TestCase):
     def test_full_pass_adds_the_slow_blocker_ahead_of_the_warnings(self):
         got = _full_pass([("HARD", "no armature"), ("SOFT", "scale")], unsolvable=[("body1", 4)])
         self.assertEqual([sev for sev, _ in got], ["HARD", "HARD", "SOFT"])
-        self.assertIn("4 vertex(es)", got[1][1])
+        self.assertIn("4 vertices have", got[1][1])
 
     def test_the_blocker_names_the_objects_it_found(self):
         """The blocker names every object it found, so the modder knows where to look."""
         got = _full_pass([], unsolvable=[("body1", 4), ("cloth1", 2)])
         self.assertEqual(len(got), 1)
-        self.assertIn("6 vertex(es)", got[0][1])
+        self.assertIn("6 vertices have", got[0][1])
         self.assertIn("'body1', 'cloth1'", got[0][1])
 
     def test_the_blocker_joins_the_leading_hards_not_the_hard_count(self):
@@ -389,6 +862,171 @@ class FullPassTests(unittest.TestCase):
             got = rb.gf2_run_checks([], None)
         self.assertEqual(calls, [])
         self.assertEqual(got, [("HARD", "empty")])
+
+
+class _AlphaSocket:
+    def __init__(self, node, name):
+        self.node = node
+        self.name = name
+        self.links = []
+        self.default_value = None
+
+
+class _AlphaLink:
+    def __init__(self, source, target):
+        self.from_socket = source
+        self.from_node = source.node
+        self.to_socket = target
+
+
+class _AlphaLinks:
+    def new(self, source, target):
+        link = _AlphaLink(source, target)
+        source.links.append(link)
+        target.links.append(link)
+        return link
+
+    @staticmethod
+    def remove(link):
+        link.from_socket.links.remove(link)
+        link.to_socket.links.remove(link)
+
+
+class _AlphaNode:
+    def __init__(self, node_type, bl_idname, name, input_names=(), output_names=()):
+        self.type = node_type
+        self.bl_idname = bl_idname
+        self.name = name
+        self.label = ""
+        self.location = types.SimpleNamespace(x=0, y=0)
+        self.clamp = False
+        self.inputs = {name: _AlphaSocket(self, name) for name in input_names}
+        self.outputs = {name: _AlphaSocket(self, name) for name in output_names}
+        self._properties = {}
+
+    def get(self, name, default=None):
+        return self._properties.get(name, default)
+
+    def __setitem__(self, name, value):
+        self._properties[name] = value
+
+
+class _AlphaNodes(list):
+    def get(self, name):
+        return next((node for node in self if node.name == name), None)
+
+    def new(self, bl_idname):
+        if bl_idname != "ShaderNodeMapRange":
+            raise AssertionError("fixture only creates Map Range nodes")
+        node = _AlphaNode("MAP_RANGE", bl_idname, "Map Range",
+                          ("Value", "From Min", "From Max", "To Min", "To Max"), ("Result",))
+        self.append(node)
+        return node
+
+
+class _AlphaTree:
+    def __init__(self, source_socket="Alpha"):
+        self.nodes = _AlphaNodes()
+        self.links = _AlphaLinks()
+        texture = _AlphaNode("TEX_IMAGE", "ShaderNodeTexImage", "Base Color", (), ("Color", "Alpha"))
+        principled = _AlphaNode("BSDF_PRINCIPLED", "ShaderNodeBsdfPrincipled", "Principled",
+                                ("Alpha",), ())
+        self.nodes.extend((texture, principled))
+        self.links.new(texture.outputs[source_socket], principled.inputs["Alpha"])
+
+
+class _AlphaObject:
+    def __init__(self, material):
+        self.data = types.SimpleNamespace(materials=[material])
+
+
+class ImportedAlphaPreparationTests(unittest.TestCase):
+    def test_post_cleanup_derivation_never_touches_a_removed_import_wrapper(self):
+        class RemovedMesh:
+            @property
+            def name(self):
+                raise ReferenceError("StructRNA of type Object has been removed")
+
+            @property
+            def type(self):
+                raise ReferenceError("StructRNA of type Object has been removed")
+
+        live = types.SimpleNamespace(type="MESH", name="cloth")
+        removed = RemovedMesh()
+        live_collection = [live, removed]
+        imported_before_cleanup = tuple(live_collection)
+        live_collection.remove(removed)  # cleanup deletes the imported Icosphere before derivation
+        self.assertEqual(len(imported_before_cleanup), 2)
+
+        self.assertEqual(rb._gf2_new_objects(live_collection, "MESH", set()), [live])
+
+    def test_legacy_blend_is_selected_uses_legacy_overlap_and_gets_the_map_range(self):
+        material = types.SimpleNamespace(name="legacy blend", blend_method="BLEND",
+                                         show_transparent_back=True, use_backface_culling=True,
+                                         node_tree=_AlphaTree())
+
+        got = rb.gf2_prepare_imported_alpha_materials([_AlphaObject(material)])
+
+        self.assertEqual(got, {"blended": 1, "remapped": 1, "missing_overlap": (),
+                               "missing_alpha_link": ()})
+        self.assertEqual(material.blend_method, "BLEND")
+        self.assertFalse(material.show_transparent_back)
+        self.assertFalse(material.use_backface_culling)
+        remap = next(node for node in material.node_tree.nodes if node.get(rb.ALPHA_REMAP_TAG))
+        self.assertEqual(remap.inputs["From Max"].default_value, 254.0 / 255.0)
+        self.assertEqual(remap.inputs["Value"].links[0].from_socket.name, "Alpha")
+
+    def test_color_feed_is_not_remapped_but_settings_and_popup_degradation_are_applied(self):
+        material = types.SimpleNamespace(name="unexpected graph", surface_render_method="BLENDED",
+                                         use_backface_culling=True, node_tree=_AlphaTree("Color"))
+        popups = []
+        with mock.patch.object(rb, "_popup", lambda title, lines, icon: popups.append((title, lines, icon))):
+            got = rb.gf2_prepare_imported_alpha_materials([_AlphaObject(material)])
+
+        self.assertEqual(got["remapped"], 0)
+        self.assertEqual(got["missing_overlap"], ("unexpected graph",))
+        self.assertEqual(got["missing_alpha_link"], ("unexpected graph",))
+        self.assertFalse(material.use_backface_culling)  # settings precede and survive graph rejection
+        self.assertEqual(len(popups), 1)
+        self.assertEqual(popups[0][0], "Alpha Preview Warnings")
+        self.assertEqual(len(popups[0][1]), 2)
+        self.assertTrue(all(line.startswith("⚠ ") for line in popups[0][1]))
+
+
+class PartLabelTests(unittest.TestCase):
+    """The app's session label IS the part's display name; the structural cut is only the
+    no-session fallback. Multi-token part names (`P3_body_fight`) are exactly what the fallback
+    cannot derive, which is why the label rides the session document."""
+
+    def _scene(self, session):
+        return types.SimpleNamespace(
+            context=types.SimpleNamespace(scene={rb.SESSION_KEY: json.dumps(session)}))
+
+    def test_the_session_label_wins_over_the_structural_cut(self):
+        session = {"parts": [
+            {"name": "c_KarstSSR0101_slg_P3_body_fight_lod0", "label": "P3_body_fight"},
+            {"name": "c_KarstSSR0101_slg_P1_cloth2_lod0", "label": "P1_cloth2"},
+        ]}
+        with mock.patch.object(rb, "bpy", self._scene(session)):
+            rb._LABELS_CACHE["raw"] = None
+            self.assertEqual(rb.gf2_label("c_KarstSSR0101_slg_P3_body_fight_lod0"), "P3_body_fight")
+            # a Blender duplicate suffix still resolves to the labeled part
+            self.assertEqual(rb.gf2_label("c_KarstSSR0101_slg_P1_cloth2_lod0.001"), "P1_cloth2")
+
+    def test_without_a_session_the_structural_cut_and_modder_names_stand(self):
+        with mock.patch.object(rb, "bpy", self._scene({"parts": []})):
+            rb._LABELS_CACHE["raw"] = None
+            self.assertEqual(rb.gf2_label("c_KarstSSR0101_slg_P1_cloth2_lod0"), "cloth2")
+            self.assertEqual(rb.gf2_label("my own mesh"), "my own mesh")
+
+    def test_a_rewritten_session_refreshes_the_labels(self):
+        first = self._scene({"parts": [{"name": "c_X_slg_body_lod0", "label": "body"}]})
+        second = self._scene({"parts": [{"name": "c_X_slg_body_lod0", "label": "P2_body"}]})
+        with mock.patch.object(rb, "bpy", first):
+            rb._LABELS_CACHE["raw"] = None
+            self.assertEqual(rb.gf2_label("c_X_slg_body_lod0"), "body")
+        with mock.patch.object(rb, "bpy", second):
+            self.assertEqual(rb.gf2_label("c_X_slg_body_lod0"), "P2_body")
 
 
 if __name__ == "__main__":

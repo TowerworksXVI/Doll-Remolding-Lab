@@ -20,17 +20,17 @@ The release is a self-contained build, so it also carries the **.NET runtime** (
 
 | Component | Version | License | Upstream |
 | --- | --- | --- | --- |
-| Avalonia (incl. `Avalonia.Desktop`, `Avalonia.Themes.Fluent`, `Avalonia.Themes.Simple`, `Avalonia.Controls.DataGrid`, `Avalonia.Controls.ColorPicker`, `Avalonia.Win32`, `Avalonia.X11`, `Avalonia.Native`, `Avalonia.FreeDesktop`, `Avalonia.Skia`, `Avalonia.Remote.Protocol`) | 11.2.3 | MIT | <https://github.com/AvaloniaUI/Avalonia> |
-| Avalonia.Fonts.Inter | 11.2.3 | MIT (package); the embedded **Inter** typeface is SIL OFL 1.1 | <https://github.com/AvaloniaUI/Avalonia> · <https://github.com/rsms/inter> |
-| Avalonia.Angle.Windows.Natives (Google ANGLE) | 2.1.22045.20230930 | BSD-3-Clause | <https://github.com/AvaloniaUI/angle> |
+| Avalonia (incl. `Avalonia.Desktop`, `Avalonia.Themes.Fluent`, `Avalonia.Win32`, `Avalonia.X11`, `Avalonia.Native`, `Avalonia.FreeDesktop`, `Avalonia.Skia`, `Avalonia.Remote.Protocol`) | 11.3.20 | MIT | <https://github.com/AvaloniaUI/Avalonia> |
+| Avalonia.Fonts.Inter | 11.3.20 | MIT (package); the embedded **Inter** typeface is SIL OFL 1.1 | <https://github.com/AvaloniaUI/Avalonia> · <https://github.com/rsms/inter> |
+| Avalonia.Angle.Windows.Natives (Google ANGLE) | 2.1.25547.20250602 | BSD-3-Clause | <https://github.com/AvaloniaUI/angle> |
 | SkiaSharp + `SkiaSharp.NativeAssets.Win32` | 2.88.9 | MIT | <https://github.com/mono/SkiaSharp> |
-| HarfBuzzSharp + `HarfBuzzSharp.NativeAssets.Win32` | 7.3.0.3 | MIT | <https://github.com/mono/SkiaSharp> |
+| HarfBuzzSharp + `HarfBuzzSharp.NativeAssets.Win32` | 8.3.1.1 | MIT | <https://github.com/mono/SkiaSharp> |
 | MicroCom.Runtime | 0.11.0 | MIT | <https://github.com/kekekeks/MicroCom> |
 | CommunityToolkit.Mvvm | 8.3.2 | MIT | <https://github.com/CommunityToolkit/dotnet> |
 | CommunityToolkit.HighPerformance | 8.4.0 | MIT | <https://github.com/CommunityToolkit/dotnet> |
 | Tmds.DBus.Protocol | 0.21.3 | MIT | <https://github.com/tmds/Tmds.DBus> |
 
-`Avalonia.BuildServices` (0.0.29) is a build-time dependency only and is not redistributed.
+`Avalonia.BuildServices` (11.3.2) is a build-time dependency only and is not redistributed.
 
 ## Assets and geometry
 

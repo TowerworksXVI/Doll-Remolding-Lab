@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Remold.Core.Export;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
@@ -35,6 +36,7 @@ public class BuildBlacklistTests : IDisposable
     [InlineData("c_Helena_body_lod0", true)]
     [InlineData("C_HELENA_BODY", true)]      // case-insensitive
     [InlineData("Helena", true)]
+    [InlineData("Melanie", true)]
     [InlineData("c_Helen_body", false)]      // a different character, not a prefix of this one
     [InlineData("c_Vesna01_body_lod0", false)]
     [InlineData(null, false)]
@@ -43,10 +45,10 @@ public class BuildBlacklistTests : IDisposable
 
     // Every check fires before the build reads a bundle, so these worlds carry no bytes.
 
-    private static BuildEnv EnvFor(SubjectModel model) => new(
+    private static BuildEnv EnvFor(SubjectModel model) => new BuildEnv(
         (c, s) => string.Equals(c, model.Character, StringComparison.OrdinalIgnoreCase)
             && string.Equals(s, model.Stem, StringComparison.OrdinalIgnoreCase) ? model : null,
-        _ => "bundle0", _ => null, CatalogVersion: "12345", AppVersion: "test-1.0");
+        _ => "bundle0", _ => null, CatalogVersion: "12345", AppVersion: "test-1.0").Exact();
 
     private ModProject NewProject(string character, string stem, string name)
     {
@@ -66,7 +68,7 @@ public class BuildBlacklistTests : IDisposable
         var p = NewProject("Helena", "HelenaNPC01", "Blocked Subject");
         p.SetHidden("Helena", "HelenaNPC01", "c_Helena_body_lod0", true);
 
-        var ex = Assert.Throws<BlockedAssetException>(() => ModBuilder.Build(p, EnvFor(model), _out));
+        var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
         Assert.Contains("not a supported asset", ex.Message);
         Assert.Empty(Directory.GetFileSystemEntries(_out));   // no folder, no zip, no work dirs
@@ -84,7 +86,7 @@ public class BuildBlacklistTests : IDisposable
         var p = NewProject("Ilse", "IlseSSR01", "Blocked Tier");
         p.SetHidden("Ilse", "IlseSSR01", "c_ilse01_body_lod0", true);
 
-        var ex = Assert.Throws<BlockedAssetException>(() => ModBuilder.Build(p, EnvFor(model), _out));
+        var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
         Assert.Contains("c_Helena_body_lod1", ex.Message);
         Assert.Contains("not a supported asset", ex.Message);
@@ -112,7 +114,7 @@ public class BuildBlacklistTests : IDisposable
             SubjectCharacter = "Ilse", SubjectOutfit = "IlseSSR01",
         });
 
-        var ex = Assert.Throws<BlockedAssetException>(() => ModBuilder.Build(p, EnvFor(model), _out));
+        var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
         Assert.Contains("c_Helena_body_d", ex.Message);
         Assert.Contains("not a supported asset", ex.Message);

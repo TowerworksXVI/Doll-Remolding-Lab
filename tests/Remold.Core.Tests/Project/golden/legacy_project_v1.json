@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "app_version": "0.3.2",
+  "info": {
+    "name": "Fixture mod",
+    "version": "1.0",
+    "author": "TestAuthor",
+    "include_repair_data": true
+  },
+  "authored_against": {
+    "catalog_version": "26109"
+  },
+  "selection": [
+    {
+      "character": "Vesna",
+      "outfit": "VesnaSSR01"
+    }
+  ],
+  "targets": [
+    {
+      "asset_type": "Mesh",
+      "bundle": "characters/vesna_ssr01",
+      "object_name": "c_vesna_body_lod0",
+      "path_id": 73002,
+      "subject_character": "Vesna",
+      "subject_outfit": "VesnaSSR01",
+      "replace_file": "meshes/body.glb",
+      "original_file": "originals/body.glb",
+      "original_verts": 24,
+      "donor_textures": [
+        {
+          "submesh": 0,
+          "albedo": "textures/body_0_base.png",
+          "ramp": "textures/body_0_ramp.dds",
+          "ramp_origin": "Authored",
+          "rmo_alpha": "Rebuild"
+        }
+      ],
+      "donor_materials": [
+        "body_material"
+      ],
+      "edited": true,
+      "lod_slots": [
+        {
+          "object_name": "c_vesna_body_lod1",
+          "bundle": "characters/vesna_ssr01_lod1",
+          "path_id": 73003
+        }
+      ]
+    },
+    {
+      "asset_type": "Texture2D",
+      "bundle": "characters/vesna_ssr01_textures",
+      "object_name": "body_base",
+      "path_id": 81001,
+      "users": [
+        "c_vesna_body_lod0"
+      ],
+      "replace_file": "textures/body_base.png",
+      "original_file": "originals/body_base.png",
+      "edited": false,
+      "source": "material"
+    }
+  ],
+  "hidden": [
+    {
+      "character": "Vesna",
+      "outfit": "VesnaSSR01",
+      "mesh": "c_vesna_hair_lod0"
+    }
+  ],
+  "build_excluded": [
+    {
+      "character": "Vesna",
+      "outfit": "VesnaSSR01",
+      "mesh": "c_vesna_body_lod0",
+      "verb": "Replace"
+    }
+  ],
+  "change_keys": [
+    {
+      "character": "Vesna",
+      "outfit": "VesnaSSR01",
+      "mesh": "c_vesna_body_lod0",
+      "verb": "Replace",
+      "key": "F7",
+      "starts_off": true
+    }
+  ],
+  "stock_ramps": [
+    {
+      "character": "Vesna",
+      "outfit": "VesnaSSR01",
+      "mesh": "c_vesna_coat_lod0",
+      "material": "coat_material",
+      "ramp": "textures/stock_ramp.dds"
+    }
+  ]
+}

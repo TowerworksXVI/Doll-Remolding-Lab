@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "catalog_id": "charps-26109-r2",
+  "game_build": "26109",
+  "source_reflection_sha256_16": "26d3da3dac2b86cf",
+  "provenance": "offline reflection over the game's character pixel shaders, 2813 variants",
+  "validation_policy": "filter_index_tag_probe",
+  "inputs": {
+    "BaseMap": { "0": 198, "1": 238, "2": 1104, "3": 944, "4": 320 },
+    "BumpMap": { "2": 202, "3": 924, "4": 788, "5": 368, "6": 120, "7": 48 },
+    "RMOTex": { "3": 138, "4": 708, "5": 588, "6": 288, "7": 120, "8": 48 },
+    "BlendTex": { "2": 8, "3": 74, "4": 218, "5": 288, "6": 212, "7": 156, "8": 128, "9": 72, "10": 16 },
+    "RampMap": { "3": 14, "4": 108, "5": 404, "6": 630, "7": 490, "8": 317, "9": 299, "10": 232, "11": 96, "12": 16 }
+  }
+}

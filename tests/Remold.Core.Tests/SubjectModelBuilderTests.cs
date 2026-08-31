@@ -83,11 +83,16 @@ public class SubjectModelBuilderTests
         var cloth1 = model.Parts.Single(p => p.Token == "cloth1");
         Assert.Equal("c_TestySSR01_slg_cloth1_lod0", cloth1.SlotName);              // lod0 representative
         Assert.Equal("Assets/X/c_TestySSR01_slg_cloth1_lod0.mesh", cloth1.MeshAddress);
+        Assert.Equal("prefab.bundle", cloth1.RendererBundle);
+        Assert.NotEqual(0, cloth1.RendererPathId);
         Assert.Equal(3, cloth1.Materials.Count);                                    // order preserved
         Assert.Equal("M_cloth1", cloth1.Materials[0].Name);
+        Assert.Equal("matA.bundle", cloth1.Materials[0].Bundle);
         Assert.True(cloth1.Materials[1].IsPlaceholder);                             // empty slot kept in place
         Assert.Equal("", cloth1.Materials[1].Name);
+        Assert.Null(cloth1.Materials[1].Bundle);
         Assert.Equal("M_cloth1b", cloth1.Materials[2].Name);
+        Assert.Equal("matB.bundle", cloth1.Materials[2].Bundle);
 
         var baseMap = Assert.Single(cloth1.Materials[0].Maps);
         Assert.Equal("_BaseMap", baseMap.Slot);
@@ -209,8 +214,11 @@ public class SubjectModelBuilderTests
         Assert.DoesNotContain(model.Parts, p => p.Token == "cloth2");
         var fight = Assert.Single(model.Parts, p => p.Token == "cloth2_Fight");
         Assert.Equal("c_TestySSR01_slg_cloth2_lod0_Fight", fight.SlotName);   // the real lod0 slot, not the tier
-        Assert.Equal(902L, fight.SiblingTiers!.Single().MeshPathId);          // …_lod1 rides along as its tier
-        Assert.Equal("c_TestySSR01_slg_cloth2_lod1", fight.SiblingTiers!.Single().SlotName);
+        var tier = Assert.Single(fight.SiblingTiers!);
+        Assert.Equal(902L, tier.MeshPathId);                                  // …_lod1 rides along as its tier
+        Assert.Equal("c_TestySSR01_slg_cloth2_lod1", tier.SlotName);
+        Assert.Equal("prefab.bundle", tier.RendererBundle);
+        Assert.NotEqual(0, tier.RendererPathId);
 
         // the Pick roster reads the SAME rule — no phantom token there either
         var scope = SubjectScope.Build(cat, deobfuscate, outfit);

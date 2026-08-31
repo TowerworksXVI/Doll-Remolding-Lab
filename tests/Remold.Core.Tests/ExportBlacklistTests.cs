@@ -8,7 +8,7 @@ namespace Remold.Core.Tests;
 
 /// <summary>
 /// The export-phase content policy (<c>Export/ExportBlacklist</c>) — the child-NPC content policy at the
-/// two entry points that take a subject directly and so can be reached without the roster surface.
+/// entry point that takes a subject directly and so can be reached without the roster surface.
 /// Load-bearing: a failure here means an enforcement point was removed, and that removal is the bug.
 /// </summary>
 public class ExportBlacklistTests
@@ -17,13 +17,14 @@ public class ExportBlacklistTests
     [InlineData("c_Helena_body_lod0", true)]
     [InlineData("C_HELENA_BODY", true)]      // case-insensitive
     [InlineData("Helena", true)]
+    [InlineData("Melanie", true)]
     [InlineData("c_Helen_body", false)]      // a different character, not a prefix of this one
     [InlineData("c_Wren_body", false)]
     [InlineData(null, false)]
     public void IsBlocked_MatchesTheBareNameOnly(string? name, bool expected) =>
         Assert.Equal(expected, ExportBlacklist.IsBlocked(name));
 
-    // Both seam tests hand the entry point nulls for everything past the guard: the pin is that a
+    // The seam test hands the entry point nulls for everything past the guard: the pin is that a
     // blocked subject returns EMPTY before the export touches the game, the scope, or the disk — any
     // access ahead of the guard fails the test loudly instead of silently exporting.
 
@@ -40,14 +41,5 @@ public class ExportBlacklistTests
             },
             @"X:\nowhere\textures");
         Assert.Empty(done);
-    }
-
-    [Fact]
-    public void ARecipeExport_OnABlockedSubject_ExportsNothingSilently()
-    {
-        var report = AssetExporter.ExportRecipePart(@"X:\nowhere", null!, null!,
-            new Outfit(0, "HelenaNPC01", OutfitKind.Base), "Helena", null!, @"X:\nowhere\out");
-        Assert.Empty(report.Files);
-        Assert.Empty(report.CompletedParts);
     }
 }

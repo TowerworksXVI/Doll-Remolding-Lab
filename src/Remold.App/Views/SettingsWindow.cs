@@ -32,6 +32,8 @@ public sealed class SettingsInput
     public string DefaultLibrary { get; init; } = "";
     public string? MigotoLoaderExe { get; init; }          // null = unset (no default, never detected)
     public string Author { get; init; } = "";
+    /// <summary>The value a NEW mod's "Editable by others" starts on.</summary>
+    public bool IncludeRepairData { get; init; } = true;
     public int RecentCount { get; init; }
     /// <summary>A force-rescan sweep is already owed — armed on an earlier Save and not yet run, here or in
     /// a previous session. The row OPENS armed on it, so the form shows what is actually pending rather than
@@ -50,6 +52,9 @@ public sealed class SettingsResult
     public string? LibraryRoot { get; set; }
     public string? MigotoLoaderExe { get; set; }
     public string Author { get; set; } = "";
+    /// <summary>The value a NEW mod's "Editable by others" starts on. Existing mods are never touched by
+    /// it — each carries its own serialized choice.</summary>
+    public bool IncludeRepairData { get; set; } = true;
     public bool ClearRecents { get; set; }
     /// <summary>Sweep the rebuilt caches and re-read the game. Like <see cref="ClearRecents"/> it is ARMED
     /// on the form and lands with the Save; the sweep itself waits for the rescan queue.
@@ -100,16 +105,15 @@ internal static class SettingsValidation
     ///
     /// <para>The 3DMigoto row is deliberately NOT among them. Its verdict is advisory: the loader is
     /// optional, so a form held shut over it holds every unrelated edit on the form with it — and a path a
-    /// released build already saved would leave the dialog unsaveable for good. Install is where a host a
-    /// built mod would not fire on is refused (<see cref="InstallGate.LoaderReason"/>), with the same
-    /// diagnosis standing on the status bar's 3DMigoto cell the whole time.</para></summary>
+    /// released build already saved would leave the dialog unsaveable for good. The diagnosis also stands
+    /// on the status bar's 3DMigoto cell.</para></summary>
     internal static bool SaveCommits(bool gamePathOk, bool projectsFolderOk, bool cpuLimitOk) =>
         gamePathOk && projectsFolderOk && cpuLimitOk;
 
     /// <summary>What a refused Save reads on the form-level line: it names the glyph the rows holding it shut
     /// are wearing, so the sentence and the rows point at each other. Built from
     /// <see cref="GlyphBlocking"/> itself — the line can't come to name a glyph the rows don't show.</summary>
-    internal const string SaveRefused = "Can't save yet. Fix the rows marked " + GlyphBlocking + " first.";
+    internal const string SaveRefused = "Cannot save yet. Fix the rows marked " + GlyphBlocking + " first.";
 
     /// <summary>The form-level line after a Save attempt, or null when there is nothing for it to say. A Save
     /// the rows let through closes the form, so the only thing left to report is the refusal — and reporting
@@ -143,7 +147,7 @@ internal static class SettingsValidation
     // The form answers "what is this set to" for every row at once, so a blank box is a reading of its own
     // rather than an empty slot. Each is deliberate: three name the fallback the app will actually use, and
     // the loader — the one setting with no fallback and no default — shows nothing, because it is optional
-    // and the Build pane is where an unset loader is worth saying something about.
+    // and the Launch command is where an unset loader is worth saying something about.
 
     internal const string GameNotSet = "Not set. The app asks for the game folder on the main screen.";
 
@@ -154,14 +158,14 @@ internal static class SettingsValidation
     /// <summary>Blank projects folder. An all-clear naming the library that stands in, so the row answers
     /// where New Mod will put things rather than leaving the modder to know the default.</summary>
     internal static RowReading BlankProjectsRow(string defaultLibrary) =>
-        new(GlyphOk, $"Using the default library: {defaultLibrary}.");
+        new(GlyphOk, $"Using the default projects folder: {defaultLibrary}.");
 
     /// <summary>Blank CPU limit. An all-clear naming the number of cores it comes to.</summary>
     internal static RowReading BlankCpuRow(int processorCount) =>
         new(GlyphOk, $"Using every core ({processorCount}).");
 
-    /// <summary>Blank 3DMigoto loader: nothing to show. The loader is optional — Install and Launch are the
-    /// only two things that want one, and they say so themselves.</summary>
+    /// <summary>Blank 3DMigoto loader: nothing to show. The loader is optional; Launch is the only live
+    /// action that wants one, and it says so itself.</summary>
     internal static RowReading BlankLoaderRow() => RowReading.Nothing;
 
     /// <summary>The CPU row's whole reading, blank included. A cap that parses says so on the glyph rather
@@ -183,17 +187,17 @@ internal static class SettingsValidation
     /// <summary>What the Settings row's hookless-host verdict adds to the shared sentence: on THIS surface
     /// the reading is advisory and the form still commits, so the row says so rather than leaving the modder
     /// hunting for the thing holding their Save.
-    /// <para>Composed here rather than folded into <see cref="InstallGate.NoTextureHook"/> because it is
-    /// false on the Build pane, where a hookless host is exactly what turns Install off.</para></summary>
+    /// <para>Composed here rather than folded into <see cref="LoaderGate.NoTextureHook"/> because the
+    /// Settings reading is advisory and the form still commits.</para></summary>
     internal const string LoaderStillSaveable =
-        "You can still save; only Install and Launch need a working loader.";
+        "Select a different loader exe. You can still save Settings.";
 
-    internal const string LoaderNoHook = InstallGate.NoTextureHook + " " + LoaderStillSaveable;
+    internal const string LoaderNoHook = LoaderGate.NoTextureHook + " " + LoaderStillSaveable;
     internal const string LoaderReady = "Mods you build will show up in game with this 3DMigoto.";
 
     /// <summary>Whether the 3DMigoto box names a loader a built mod would actually fire on, or the plain
-    /// reason it doesn't. Blank is allowed and always passes — the loader is optional, and Install and
-    /// Launch are the only two things that want one. Each failure answers for itself: an exe that isn't
+    /// reason it doesn't. Blank is allowed and always passes — the loader is optional, and Launch is the
+    /// only live action that wants one. Each failure answers for itself: an exe that isn't
     /// there says nothing about its configuration, and a host with no ini says nothing about its hook.
     /// <para>ADVISORY: what this answers reaches the row's own glyph and nothing else — see
     /// <see cref="SaveCommits"/>.</para>
@@ -216,7 +220,7 @@ internal static class SettingsValidation
     internal readonly record struct ProjectsFolderCheck(bool Ok, string? Reason, IReadOnlyList<string> Created);
 
     internal const string NotWritableFolder = "Not a writable folder. Select one the app can create files in.";
-    internal const string WritableFolder = "New Mod can create project folders here.";
+    internal const string WritableFolder = "New mod can create project folders here.";
     internal const string WillBeCreated = "Will be created on Save.";
 
     /// <summary>Whether the projects-folder box names somewhere mods can actually be created. Blank is the
@@ -400,6 +404,7 @@ public sealed class SettingsWindow : Window
     private readonly RowVerdict _migotoVerdict = new();
     private readonly LiveRow _migotoRow;
     private readonly TextBox _authorBox;
+    private readonly CheckBox _repairDataBox;
     private readonly ComboBox _editorBox;
     private readonly TextBox _cpuBox;
     private readonly RowVerdict _cpuVerdict = new();
@@ -448,7 +453,7 @@ public sealed class SettingsWindow : Window
         // ── Game folder ───────────────────────────────────────────────────────
         // Read when the form opens and again after every edit. The game path is the ROOT (the folder holding
         // GF2_Exilium.exe) — the one canonical value everywhere.
-        _gameBox = new TextBox { Text = _gamePath ?? "", Watermark = "Paste or Browse to the game folder", VerticalAlignment = VerticalAlignment.Center };
+        _gameBox = new TextBox { Text = _gamePath ?? "", Watermark = "Path to the game folder", VerticalAlignment = VerticalAlignment.Center };
         _gameRow = new LiveRow(_gameBox, _gameVerdict, ReadGameRow, offThread: true, EditDebounce, () => _closed);
         var gameRe = SmallButton("Re-detect");
         gameRe.Click += (_, _) => RedetectGame();
@@ -503,25 +508,25 @@ public sealed class SettingsWindow : Window
             _libraryRow.Apply(id, SettingsValidation.Reading(check.Ok, blocking: true,
                 check.Ok ? SettingsValidation.WritableFolder : check.Reason!));
         };
-        var libHint = Hint("Where New Mod creates project folders. A typed folder is created on Save. "
+        var libHint = Hint("Where New mod creates project folders. A typed folder is created on Save. "
             + "Open mods stay where they are.");
         AddRow(grid, ref row, "Projects folder", WithVerdict(_libraryBox, _libraryVerdict),
             libHint, libDefault, libBrowse);
 
         // ── 3DMigoto loader ───────────────────────────────────────────────────
         // Never detected and never defaulted: a wrong guess writes a mod folder into someone else's
-        // install. Blank means Install and Launch stay off. The exe is the one path asked for — its name
+        // install. Blank means Launch stays off. The exe is the one path asked for — its name
         // varies by distribution — and the Mods folder beside it is derived.
         _migotoBox = new TextBox
         {
             Text = _migotoLoaderExe ?? "",
-            Watermark = "Not set. Browse to the loader exe beside the Mods folder",
+            Watermark = "Path to the loader exe beside the Mods folder",
             VerticalAlignment = VerticalAlignment.Center,
         };
         _migotoRow = new LiveRow(_migotoBox, _migotoVerdict, ReadMigotoRow, offThread: true, EditDebounce, () => _closed);
         var migotoClear = SmallButton("Clear");
-        // blank → unset, which this row shows as nothing at all: the loader is optional, and the Build pane is
-        // where an unset one is worth a word.
+        // blank → unset, which this row shows as nothing at all: the loader is optional, and Launch is where
+        // an unset one is worth a word.
         migotoClear.Click += (_, _) => { _migotoBox.Text = ""; _migotoRow.Evaluate(); };
         var migotoBrowse = SmallButton("Browse…");
         // A picked exe is answered for on the spot, like the game and projects rows: the pick is the moment
@@ -537,14 +542,25 @@ public sealed class SettingsWindow : Window
             _migotoRow.Apply(id, SettingsValidation.Reading(why is null, blocking: false,
                 why ?? SettingsValidation.LoaderReady));
         };
-        var migotoHint = Hint("3DMigoto Loader.exe, or SSMT's per-game Run.exe. Install drops built mods in the Mods folder beside it.");
+        var migotoHint = Hint("3DMigoto Loader.exe, or SSMT's per-game Run.exe. Launch starts it before the game.");
         AddRow(grid, ref row, "3DMigoto loader", WithVerdict(_migotoBox, _migotoVerdict),
             migotoHint, migotoClear, migotoBrowse);
 
         // ── Author ────────────────────────────────────────────────────────────
-        _authorBox = new TextBox { Text = input.Author, Watermark = "handle", Width = 240, HorizontalAlignment = HorizontalAlignment.Left };
+        _authorBox = new TextBox { Text = input.Author, Watermark = "Name or handle", Width = 240, HorizontalAlignment = HorizontalAlignment.Left };
         var authorHint = Hint("Default for new mods. Existing mods keep their own.");
         AddRow(grid, ref row, "Author", _authorBox, authorHint);
+
+        // ── Repair data ───────────────────────────────────────────────────────
+        // Seeds new mods only. Each project carries its own serialized choice after creation.
+        _repairDataBox = new CheckBox
+        {
+            Content = "New mods are editable by others",
+            IsChecked = input.IncludeRepairData,
+        };
+        var repairHint = Hint("Lets Doll Remolding Lab import a built mod and rebuild it. "
+            + "Default for new mods. Existing mods keep their own.");
+        AddRow(grid, ref row, "Editable mods", _repairDataBox, repairHint);
 
         // ── CPU limit ─────────────────────────────────────────────────────────
         // Blank = every logical processor. The one value behind all of the app's wide parallel work.
@@ -638,7 +654,13 @@ public sealed class SettingsWindow : Window
             }
             // An async void handler that lets a throw escape takes the PROCESS down. Whatever a validator
             // hits — a dying share, a permissions wall — the form stays up and says so.
-            catch (Exception e) { ShowSaveStatus($"Save failed: {e.Message}"); }
+            // Whatever the rule hit is a diagnosis of a disk it was reading, not of a value on this form:
+            // the line says the settings didn't land and leaves the rows to name what they refused.
+            catch (Exception e)
+            {
+                AppLog.Write("Couldn't check the settings form's values", e);
+                ShowSaveStatus("Couldn't check these settings. Try again.");
+            }
             finally { save.IsEnabled = true; }
         };
         cancel.Click += (_, _) =>
@@ -751,8 +773,8 @@ public sealed class SettingsWindow : Window
 
     /// <summary>Put the 3DMigoto row's own reading on its glyph: whether the path names a loader a
     /// built mod would fire on — the file, its ini, and the texture hook in that ini's tree. Blank is
-    /// allowed and says nothing; the loader is optional, and Install and Launch are the only two things that
-    /// want one.
+    /// allowed and says nothing; the loader is optional, and Launch is the only live action that
+    /// wants one.
     ///
     /// <para>REPORTS ONLY. A bad reading here never holds the Save (see
     /// <see cref="SettingsValidation.SaveCommits"/>), so it reads as a caution rather than a stop, and the
@@ -766,7 +788,7 @@ public sealed class SettingsWindow : Window
         // Read the box HERE: controls are UI-thread-only, and a read inside the Task.Run lambda runs on
         // the pool.
         var typed = _migotoBox.Text;
-        // Blank leaves Install and Launch off: nothing to read, so nothing to wait on and no throbber to flash.
+        // Blank leaves Launch off: nothing to read, so nothing to wait on and no throbber to flash.
         bool named = !string.IsNullOrWhiteSpace(typed);
         int id = _migotoRow.Begin();
         if (named) _migotoRow.Pulse();
@@ -838,6 +860,7 @@ public sealed class SettingsWindow : Window
         LibraryRoot = _libraryBox.Text,   // blank → ApplySettings Empty2Nulls it to the default library
         MigotoLoaderExe = _migotoBox.Text,    // blank → ApplySettings Empty2Nulls it back to unset
         Author = _authorBox.Text?.Trim() ?? "",
+        IncludeRepairData = _repairDataBox.IsChecked == true,
         ClearRecents = _clearRecents,
         ForceRescan = _forceRescan,
         ForceRescanWasOwed = _forceRescanWasOwed,   // the row's opening state, so the Save can tell arming from carrying
@@ -940,7 +963,7 @@ public sealed class SettingsWindow : Window
     private static string RecentLabel(int n) => n > 0 ? $"Clear recent mods ({n})" : "No recent mods";
 
     /// <summary>What the row reads once the clear is armed: it lands with the rest of the form.</summary>
-    internal const string RecentsPendingLabel = "Recents clear on Save";
+    internal const string RecentsPendingLabel = "Recent mods clear on Save";
 
     /// <summary>The force-rescan row's label in the one-shot actions area.</summary>
     internal const string ForceRescanLabel = "Force rescan";

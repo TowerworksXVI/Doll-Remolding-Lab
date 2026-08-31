@@ -105,6 +105,8 @@ public sealed record SubjectModel(
 /// <see cref="Remold.Core.Model.VisibilityOverride.None"/> keeps the part out of every other part's pool
 /// and off the witness stand; its own Replace, Retexture and Hide are unaffected. Read off the prefab, so
 /// it costs no mesh read, and only a list that named this node sets it.</param>
+/// <param name="RendererBundle">Logical bundle containing the representative renderer object.</param>
+/// <param name="RendererPathId">Exact path id of the representative renderer object.</param>
 public sealed record SubjectPart(
     string Token,
     string SlotName,
@@ -117,12 +119,13 @@ public sealed record SubjectPart(
     long MeshPathId = 0,
     bool IsStatic = false,
     bool CastsShadows = true,
-    Remold.Core.Model.VisibilityOverride Visibility = Remold.Core.Model.VisibilityOverride.None)
+    Remold.Core.Model.VisibilityOverride Visibility = Remold.Core.Model.VisibilityOverride.None,
+    string? RendererBundle = null,
+    long RendererPathId = 0)
 {
-    /// <summary>The prefab-exact identity carried down to <see cref="AssetExporter.ExportRecipePart"/>:
-    /// representative slot + sibling tiers, recipe-backed (address) or smr-backed (bundle+path-id). A part
-    /// backed neither way yields a <see cref="RecipePart"/> the exporter fails loudly on rather than
-    /// falling back to name matching.</summary>
+    /// <summary>The prefab-exact identity of one part: representative slot + sibling tiers, recipe-backed
+    /// (address) or smr-backed (bundle+path-id). A part backed neither way yields a
+    /// <see cref="RecipePart"/> a read fails loudly on rather than falling back to name matching.</summary>
     public RecipePart ToRecipePart() =>
         new(Token, SlotName, MeshAddress, SiblingTiers ?? Array.Empty<RecipeTierSlot>(),
             MeshBundle, MeshPathId, IsStatic);
@@ -140,7 +143,8 @@ public sealed record SubjectMaterial(
     long PathId,
     string? Cab,
     IReadOnlyList<SubjectMap> Maps,
-    string? Problem = null)
+    string? Problem = null,
+    string? Bundle = null)
 {
     /// <summary>True for an empty renderer slot (PPtr 0:0) — a placeholder that holds submesh order.</summary>
     public bool IsPlaceholder => PathId == 0 && Cab is null;
@@ -148,8 +152,19 @@ public sealed record SubjectMaterial(
 
 /// <summary>One texture a material binds: shader <see cref="Slot"/> (<c>_BaseMap</c>/<c>_BumpMap</c>/…),
 /// the Texture2D <see cref="TextureName"/>, and the logical <see cref="BundleId"/> (never shown). Texture
-/// dimensions are NOT read at build time; the inspector reads them lazily on node selection.</summary>
-public sealed record SubjectMap(string Slot, string TextureName, string BundleId);
+/// dimensions are NOT read at build time; the inspector reads them lazily on node selection.
+///
+/// <para><see cref="PathId"/> is WHICH texture in that bundle — the material's own PPtr, and the only thing
+/// that selects when a bundle ships same-named assets, which every ramp library does. Reads go through it;
+/// the name is what the modder is shown. A row the app synthesizes rather than reads off a material carries
+/// 0, which reads as "nothing stands behind this slot".</para></summary>
+public sealed record SubjectMap(string Slot, string TextureName, string BundleId, long PathId = 0)
+{
+    /// <summary>How to read this map out of its bundle: by pathId when there is one, else by name — the
+    /// same fall-back <see cref="ProjectTarget"/> makes for a target recorded before pathIds.</summary>
+    public Bundles.BundleReader.TextureRef Ref =>
+        PathId != 0 ? Bundles.BundleReader.TextureRef.ByPathId(PathId) : TextureName;
+}
 
 /// <summary>The subject's rig, read from the assembly prefab's Transform hierarchy. <see cref="Bones"/> is
 /// in read order with parent links. An unreadable hierarchy yields a null skeleton plus a loud Problems

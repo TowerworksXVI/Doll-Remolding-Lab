@@ -43,16 +43,181 @@ public class BlenderSessionTests
         });
 
         Assert.EndsWith("_combined.gf2session.json", BlenderBridge.SessionPath(glb));
-        var (part, parts) = BlenderBridge.ReadSession(glb);
-        Assert.Equal("body1_lod0", part);
-        Assert.Equal(new[] { "body1_lod0", "cloth1_lod0" }, parts.Select(p => p.Name).ToArray());
-        Assert.Equal(new[] { true, false }, parts.Select(p => p.Edited).ToArray());
+        var session = BlenderBridge.ReadSessionDocument(glb)!;
+        Assert.Equal("body1_lod0", session.Part);
+        Assert.Equal(new[] { "body1_lod0", "cloth1_lod0" }, session.Parts.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { true, false }, session.Parts.Select(p => p.Edited).ToArray());
+    }
+
+    [Fact]
+    public void WriteSession_RoundTripsTheLiveEditAndViewportContract()
+    {
+        using var g = new TempGame();
+        var glb = g.At("_combined.glb");
+        var edits = new[]
+        {
+            new BlenderSessionEdit("edit-long", "Long", HoldsAuthoredMesh: true),
+            new BlenderSessionEdit("edit-maps", "Blue", HoldsAuthoredMesh: false),
+        };
+        var notices = MainWindowViewModel.BlenderOpenNotices(new[] { "hair" },
+            wardrobeUnreadable: true, new[] { "cloth_d" });
+        BlenderBridge.WriteSession(glb, "body1_lod0", new[]
+        {
+            new SessionPart("body1_lod0", Edited: true, EditId: "edit-long", Edits: edits,
+                DefaultEditName: "Edit 3", ViewportVisible: false),
+        }, sendAs: "return.glb", notices: notices);
+
+        var session = BlenderBridge.ReadSessionDocument(glb);
+
+        Assert.NotNull(session);
+        Assert.Equal(1, session!.Revision);
+        Assert.Equal("body1_lod0", session.Part);
+        Assert.Equal("return.glb", session.SendAs);
+        Assert.Equal(notices, session.Notices);
+        Assert.All(session.Notices!, notice => Assert.DoesNotContain("n't", notice));
+        var part = Assert.Single(session.Parts);
+        Assert.Equal("edit-long", part.OpenedFromEditId);
+        Assert.Equal(edits, part.Edits);
+        Assert.Equal("Edit 3", part.DefaultEditName);
+        Assert.False(part.IsViewportVisible);
+        var json = File.ReadAllText(BlenderBridge.SessionPath(glb));
+        Assert.Contains("\"holdsAuthoredMesh\": true", json);
+        Assert.Contains("\"viewportVisible\": false", json);
+    }
+
+    [Fact]
+    public void SessionRewriteFailure_NamesTheStalePanelConsequence()
+    {
+        using var g = new TempGame();
+        string opened = g.At("composition.glb");
+
+        Assert.Equal("Could not update composition.gf2session.json after this send — "
+            + "the Blender panel may offer stale targets until reopened.",
+            MainWindowViewModel.BlenderSessionRewriteFailure(opened));
+    }
+
+    [Fact]
+    public void SupersededIngressCleanup_LogsAnUnsafePathWithoutDeletingIt()
+    {
+        using var g = new TempGame();
+        string project = g.At("project");
+        string outside = g.At("outside/return.glb");
+        Directory.CreateDirectory(Path.GetDirectoryName(outside)!);
+        File.WriteAllText(outside, "keep");
+        var log = new List<string>();
+
+        MainWindowViewModel.DeleteSupersededBlenderIngress(project, outside, log.Add);
+
+        Assert.True(File.Exists(outside));
+        Assert.Contains("outside", Assert.Single(log));
+    }
+
+    [Fact]
+    public void RewriteSession_AtomicallyAdvancesTheLiveRevisionAndPreservesTheRun()
+    {
+        using var g = new TempGame();
+        var glb = g.At("_combined.glb");
+        BlenderBridge.WriteSession(glb, "cloth1_lod0", new[]
+        {
+            new SessionPart("cloth1_lod0", Edited: false, DefaultEditName: "Edit 1"),
+        }, sendAs: "return.glb");
+
+        bool rewritten = BlenderBridge.RewriteSession(glb, session => session with
+        {
+            Parts = session.Parts.Select(part => part with
+            {
+                EditId = "edit-minted",
+                Edits = new[] { new BlenderSessionEdit("edit-minted", "Edit 1", true) },
+                DefaultEditName = "Edit 2",
+            }).ToList(),
+        });
+
+        Assert.True(rewritten);
+        var session = BlenderBridge.ReadSessionDocument(glb);
+        Assert.NotNull(session);
+        Assert.Equal(2, session!.Revision);
+        Assert.Equal("cloth1_lod0", session.Part);
+        Assert.Equal("return.glb", session.SendAs);
+        var part = Assert.Single(session.Parts);
+        Assert.Equal("edit-minted", part.OpenedFromEditId);
+        Assert.Equal("Edit 2", part.DefaultEditName);
+        Assert.Empty(Directory.EnumerateFiles(g.Root, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void AcknowledgeReturn_AdvancesImmutableBaselinesAndWritesTargetsBeforeTheRevision()
+    {
+        using var g = new TempGame();
+        string opened = g.At("run/composition.glb");
+        string returned = g.At("run/return.glb");
+        string originalWorkspace = g.At("run/parts/cloth.glb");
+        Directory.CreateDirectory(Path.GetDirectoryName(opened)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(originalWorkspace)!);
+        File.WriteAllBytes(opened, new byte[] { 9 });
+        File.WriteAllBytes(originalWorkspace, new byte[] { 8 });
+        BlenderBridge.WriteSession(opened, null,
+            new[] { new SessionPart("cloth", false, Edits: Array.Empty<BlenderSessionEdit>()) },
+            "return.glb", new[]
+            {
+                new BlenderSessionTarget("cloth", "", originalWorkspace,
+                    Subject: "Vesna", Outfit: "VesnaSSR01"),
+            });
+
+        string preparedDirectory = g.At("prepared/cloth");
+        Directory.CreateDirectory(preparedDirectory);
+        string prepared = Path.Combine(preparedDirectory, "workspace.glb");
+        File.WriteAllBytes(prepared, new byte[] { 7 });
+        string ingress = g.At("ingress/return.glb");
+        var exact = new BlenderSessionTarget("cloth", "asset-2", prepared, "edit-2", "slot-2",
+            ingress, BindingKind.ProjectAsset, Array.Empty<BlenderSlotBaseline>(),
+            Subject: "Vesna", Outfit: "VesnaSSR01");
+
+        File.WriteAllBytes(returned, new byte[] { 1 });
+        Assert.True(BlenderBridge.AcknowledgeReturn(opened, returned,
+            session => session with { Notices = new List<string> { "First" } },
+            new[] { new BlenderTargetAcknowledgement(exact, prepared) }));
+
+        string firstBaseline = BlenderBridge.ReadReturnBaseline(returned)!;
+        Assert.NotEqual(Path.GetFullPath(returned), Path.GetFullPath(firstBaseline));
+        Assert.NotEqual(Path.GetFullPath(opened), Path.GetFullPath(firstBaseline));
+        Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(firstBaseline));
+        Assert.Equal(Path.GetFullPath(opened), Path.GetFullPath(
+            BlenderBridge.ReadReturnSessionGlb(returned)!));
+        var firstTarget = Assert.Single(BlenderBridge.ReadReturnTargets(returned));
+        Assert.Equal("asset-2", firstTarget.ProjectAssetId);
+        Assert.Equal("edit-2", firstTarget.EditDefinitionId);
+        Assert.Equal(new byte[] { 7 }, File.ReadAllBytes(firstTarget.Workspace));
+        Assert.Equal(2, BlenderBridge.ReadSessionDocument(opened)!.Revision);
+
+        File.WriteAllBytes(returned, new byte[] { 2 });
+        Assert.True(BlenderBridge.AcknowledgeReturn(opened, returned,
+            session => session, new[] { new BlenderTargetAcknowledgement(exact, prepared) }));
+        string secondBaseline = BlenderBridge.ReadReturnBaseline(returned)!;
+
+        Assert.NotEqual(firstBaseline, secondBaseline);
+        Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(firstBaseline));
+        Assert.Equal(new byte[] { 2 }, File.ReadAllBytes(secondBaseline));
+        Assert.Equal(3, BlenderBridge.ReadSessionDocument(opened)!.Revision);
+        Assert.Empty(Directory.EnumerateFiles(g.Root, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void SessionReadAndRewrite_LeaveAnUnreadableFileUntouched()
+    {
+        using var g = new TempGame();
+        var glb = g.At("_combined.glb");
+        var path = BlenderBridge.SessionPath(glb);
+        const string broken = "{not a complete session";
+        File.WriteAllText(path, broken);
+
+        Assert.Null(BlenderBridge.ReadSessionDocument(glb));
+        Assert.False(BlenderBridge.RewriteSession(glb, session => session));
+        Assert.Equal(broken, File.ReadAllText(path));
     }
 
     /// <summary>The bridge reads <c>sendAs</c> off the session json (its reader is a deliberate copy of
-    /// this contract), so the property name and value are pinned here. A session that names none keeps the
-    /// key out entirely: the bridge then sends under the opened glb's own name, the part-session
-    /// overwrite-in-place contract.</summary>
+    /// this contract), so the property name and value are pinned here. Omitting it remains compatible with
+    /// hand-written/older sessions, but app-created sessions name a distinct return artifact.</summary>
     [Fact]
     public void WriteSession_NamesTheSendFile_OnlyWhenAsked()
     {
@@ -60,11 +225,255 @@ public class BlenderSessionTests
         var glb = g.At("_combined.glb");
         var parts = new[] { new SessionPart("body1_lod0", Edited: false) };
 
-        BlenderBridge.WriteSession(glb, null, parts, sendAs: AssetExporter.CombinedSendGlbName);
-        Assert.Contains("\"sendAs\": \"_combined.send.glb\"", File.ReadAllText(BlenderBridge.SessionPath(glb)));
+        BlenderBridge.WriteSession(glb, null, parts, sendAs: AssetExporter.SessionSendGlbName);
+        Assert.Contains($"\"sendAs\": \"{AssetExporter.SessionSendGlbName}\"",
+            File.ReadAllText(BlenderBridge.SessionPath(glb)));
 
         BlenderBridge.WriteSession(glb, null, parts);
         Assert.DoesNotContain("sendAs", File.ReadAllText(BlenderBridge.SessionPath(glb)));
+    }
+
+    [Fact]
+    public void APartSendPathIsDistinctAndMapsBackToItsWorkspaceGlb()
+    {
+        using var g = new TempGame();
+        var workspace = g.At("body1_lod0.glb");
+
+        var send = BlenderBridge.PartSendPath(workspace);
+
+        Assert.Equal("body1_lod0.send.glb", BlenderBridge.PartSendName(workspace));
+        Assert.NotEqual(Path.GetFullPath(workspace), Path.GetFullPath(send));
+        Assert.Equal(Path.GetFullPath(workspace), Path.GetFullPath(BlenderBridge.WorkspaceForPartSend(send)!));
+        Assert.Null(BlenderBridge.WorkspaceForPartSend(workspace));
+    }
+
+    [Fact]
+    public void AnAppSessionMapsItsReturnBySessionAndProjectAssetIdentity()
+    {
+        using var g = new TempGame();
+        var opened = g.At("opened.glb");
+        var workspace = g.At("body1_lod0.glb");
+        var send = BlenderBridge.PartSendPath(opened);
+
+        BlenderBridge.WriteSession(opened, "body1_lod0",
+            new[] { new SessionPart("body1_lod0", false) },
+            sendAs: BlenderBridge.PartSendName(opened),
+            targets: new[] { new BlenderSessionTarget("body1_lod0", "asset-body", workspace) });
+
+        var target = Assert.Single(BlenderBridge.ReadReturnTargets(send));
+        Assert.Equal("asset-body", target.ProjectAssetId);
+        Assert.Equal(Path.GetFullPath(workspace), target.Workspace);
+        Assert.Equal(Path.GetFullPath(workspace), BlenderBridge.WorkspaceForPartSend(send));
+    }
+
+    /// <summary>A part-addressable route carries the subject identity needed to resolve its send-time
+    /// selection and the prepared glb; the reader admits it beside exact-slot compatibility rows.</summary>
+    [Fact]
+    public void A_part_route_target_round_trips_with_its_subject_identity()
+    {
+        using var g = new TempGame();
+        var opened = g.At("opened.glb");
+        string prepared = g.At("cloth1_lod0.glb");
+        var send = BlenderBridge.PartSendPath(opened);
+
+        BlenderBridge.WriteSession(opened, null,
+            new[] { new SessionPart("cloth1_lod0", false) },
+            sendAs: BlenderBridge.PartSendName(opened), targets: new[]
+            {
+                new BlenderSessionTarget("cloth1_lod0", "", prepared,
+                    Subject: "Vesna", Outfit: "VesnaSSR01"),
+            });
+
+        var target = Assert.Single(BlenderBridge.ReadReturnTargets(send));
+        Assert.True(target.IsPartRoute);
+        Assert.False(target.IsExactSlot);
+        Assert.Equal("Vesna", target.Subject);
+        Assert.Equal("VesnaSSR01", target.Outfit);
+        Assert.Equal(Path.GetFullPath(prepared), target.Workspace);
+    }
+
+    /// <summary>The route-shape contract that replaces launch-time action classification: modern exact
+    /// rows are also part-addressable, stock rows are part-addressable only, and the old asset/workspace
+    /// row is neither shape.</summary>
+    [Fact]
+    public void A_return_target_classifies_exact_and_part_route_shapes()
+    {
+        var exact = new BlenderSessionTarget("body", "asset", @"C:\w\body.glb",
+            "edit-1", "slot-1", @"C:\i\return.glb", Subject: "Vesna", Outfit: "VesnaSSR01");
+        var part = new BlenderSessionTarget("cloth", "", @"C:\w\cloth.glb",
+            Subject: "Vesna", Outfit: "VesnaSSR01");
+        var legacy = new BlenderSessionTarget("hair", "asset", @"C:\w\hair.glb");
+
+        Assert.True(exact.IsExactSlot);
+        Assert.True(exact.IsPartRoute);
+        Assert.False(part.IsExactSlot);
+        Assert.True(part.IsPartRoute);
+        Assert.False(legacy.IsExactSlot);
+        Assert.False(legacy.IsPartRoute);
+    }
+
+    /// <summary>Emptying a part and sending it back is the modder saying the part is not to draw, so the
+    /// return puts its hide in Always. The library's activation rule alone would leave the hide unplaced on
+    /// every part that already has an answer — which is nearly all of them — and the send would change
+    /// nothing while reporting nothing.</summary>
+    [Fact]
+    public void An_emptied_parts_return_hides_the_part_and_counts_it()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        Assert.Equal(new[] { "edit-long" }, session.Snapshot().Always);
+
+        int hidden = HideEmptied(session, AuthoredEditFixtures.Body);
+
+        Assert.Equal(1, hidden);
+        var hide = Assert.Single(session.Outline().Edits, edit => edit.Kind == EditDefinitionKind.Hide);
+        Assert.Contains(hide.Id, session.Snapshot().Always);
+        // The part's content edit is left exactly where it was: the send said hide it, not delete it.
+        Assert.Contains("edit-long", session.Snapshot().Always);
+    }
+
+    /// <summary>Sending the same emptied part twice changes nothing the second time, and says so by
+    /// counting nothing.</summary>
+    [Fact]
+    public void A_second_send_of_an_emptied_part_changes_nothing()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        HideEmptied(session, AuthoredEditFixtures.Body);
+        long revision = session.Revision;
+
+        int hidden = HideEmptied(session, AuthoredEditFixtures.Body);
+
+        Assert.Equal(0, hidden);
+        Assert.Equal(revision, session.Revision);
+    }
+
+    /// <summary>The hide route as the return itself takes it: inside the one compound transaction the whole
+    /// send commits as.</summary>
+    private static int HideEmptied(AuthoredEditSession session, TargetPart part)
+    {
+        int hidden = 0;
+        session.Compound(change =>
+            hidden = MainWindowViewModel.HideEmptiedParts(change, new[] { part }));
+        return hidden;
+    }
+
+    [Fact]
+    public void Exact_session_targets_round_trip_edit_slot_ingress_and_starting_binding()
+    {
+        using var g = new TempGame();
+        string opened = g.At("opened.glb");
+        string send = BlenderBridge.PartSendPath(opened);
+        string ingress = g.At(Path.Combine(".ingress", "edit-2", "slot-geometry", "return.glb"));
+        var materials = new[]
+        {
+            new BlenderSlotBaseline("slot-base-0", 0, TargetInputKind.BaseColor,
+                BindingKind.ProjectAsset, "picture-2"),
+            new BlenderSlotBaseline("slot-normal-0", 0, TargetInputKind.Normal,
+                BindingKind.SourceSlot, SourceSlotId: "slot-normal-1", SourceEditDefinitionId: "edit-2"),
+        };
+        BlenderBridge.WriteSession(opened, "body1_lod0",
+            new[] { new SessionPart("body1_lod0", true, EditId: "edit-2") },
+            sendAs: BlenderBridge.PartSendName(opened), targets: new[]
+            {
+                new BlenderSessionTarget("body1_lod0", "asset-2", opened, "edit-2",
+                    "slot-geometry", ingress, BindingKind.ProjectAsset, materials),
+            });
+
+        var target = Assert.Single(BlenderBridge.ReadReturnTargets(send));
+        Assert.True(target.IsExactSlot);
+        Assert.Equal("edit-2", target.EditDefinitionId);
+        Assert.Equal("slot-geometry", target.SlotId);
+        Assert.Equal(Path.GetFullPath(ingress), target.IngressReturn);
+        Assert.Equal(BindingKind.ProjectAsset, target.SourceBindingKind);
+        Assert.Equal(materials, target.MaterialSlots);
+    }
+
+    [Fact]
+    public void Edit_2_resolves_its_own_geometry_instead_of_edit_1s()
+    {
+        using var g = new TempGame();
+        var project = AuthoredEditFixtures.Golden();
+        project.RootDir = g.Root;
+        string meshes = g.At("meshes");
+        Directory.CreateDirectory(meshes);
+        File.WriteAllBytes(Path.Combine(meshes, "long.glb"), new byte[] { 1 });
+        File.WriteAllBytes(Path.Combine(meshes, "short.glb"), new byte[] { 2 });
+        var session = new AuthoredEditSession(project);
+
+        var first = MainWindowViewModel.GeometryFile(session.Slots("edit-long"), g.Root);
+        var second = MainWindowViewModel.GeometryFile(session.Slots("edit-short"), g.Root);
+
+        Assert.Equal(Path.Combine(meshes, "long.glb"), first.Path);
+        Assert.Equal(Path.Combine(meshes, "short.glb"), second.Path);
+        Assert.Null(first.Missing);
+        Assert.Null(second.Missing);
+    }
+
+    [Fact]
+    public void Scene_sources_separate_direct_edits_first_edit_open_all_and_stock_references()
+    {
+        var project = AuthoredEditFixtures.Golden();
+        Assert.Equal("edit-long",
+            MainWindowViewModel.ActiveOrFirstContentEdit(project, AuthoredEditFixtures.Body));
+
+        project.Always.Clear();
+        project.Always.Add("edit-short");
+        Assert.Equal("edit-short",
+            MainWindowViewModel.ActiveOrFirstContentEdit(project, AuthoredEditFixtures.Body));
+
+        project.EditDefinitions.Insert(0, new EditDefinition
+        {
+            Id = "hide-body", Kind = EditDefinitionKind.Hide, Label = "Hidden",
+            Target = AuthoredEditFixtures.Body,
+        });
+        project.Always.Clear();
+        project.Always.Add("hide-body");
+        project.EditDefinitions.Add(new EditDefinition
+        {
+            Id = "edit-hair", Kind = EditDefinitionKind.Content, Label = "Hair edit",
+            Target = AuthoredEditFixtures.Hair,
+        });
+        project.EditDefinitions.Add(new EditDefinition
+        {
+            Id = "hide-hair", Kind = EditDefinitionKind.Hide, Label = "Hidden",
+            Target = AuthoredEditFixtures.Hair,
+        });
+        project.Always.Add("hide-hair");
+
+        // The edit entrance skips the active hide and takes the first content edit in authored order.
+        Assert.Equal("edit-long",
+            MainWindowViewModel.ActiveOrFirstContentEdit(project, AuthoredEditFixtures.Body));
+        Assert.Equal("edit-long", MainWindowViewModel.SessionBlenderSourceEdit(project,
+            AuthoredEditFixtures.Body, requested: null, requestedEditId: null,
+            openAllFromFirstEdit: true));
+        // The all-stock entrance and a reference beside a direct edit both stay stock.
+        Assert.Null(MainWindowViewModel.SessionBlenderSourceEdit(project, AuthoredEditFixtures.Body,
+            requested: null, requestedEditId: null, openAllFromFirstEdit: false));
+        Assert.Null(MainWindowViewModel.SessionBlenderSourceEdit(project, AuthoredEditFixtures.Hair,
+            AuthoredEditFixtures.Body, requestedEditId: "edit-short", openAllFromFirstEdit: false));
+        Assert.False(MainWindowViewModel.SessionBlenderViewportVisible(project,
+            AuthoredEditFixtures.Hair, carriesReferences: true));
+        // Only the direct target gets the edit it explicitly addressed.
+        Assert.Equal("edit-short", MainWindowViewModel.SessionBlenderSourceEdit(project,
+            AuthoredEditFixtures.Body, AuthoredEditFixtures.Body, "edit-short",
+            openAllFromFirstEdit: false));
+
+        Assert.False(MainWindowViewModel.SessionBlenderViewportVisible(project,
+            AuthoredEditFixtures.Body, carriesReferences: true));
+        Assert.True(MainWindowViewModel.SessionBlenderViewportVisible(project,
+            AuthoredEditFixtures.Body, carriesReferences: false));
+    }
+
+    [Fact]
+    public void MalformedAppTargetMetadataNeverFallsBackToTheReturnFilename()
+    {
+        using var g = new TempGame();
+        var workspace = g.At("body1_lod0.glb");
+        var send = BlenderBridge.PartSendPath(workspace);
+        File.WriteAllText(BlenderBridge.TargetPath(send), "{not valid json");
+
+        Assert.True(BlenderBridge.ReturnTargetMetadataExists(send));
+        Assert.Empty(BlenderBridge.ReadReturnTargets(send));
+        Assert.Null(BlenderBridge.WorkspaceForPartSend(send));
     }
 
     /// <summary>The unskinned marker is the bridge's authority for exempting a part from the weight gate
@@ -86,21 +495,21 @@ public class BlenderSessionTests
         Assert.Contains("\"unskinned\": true", json);
         Assert.Equal(1, json.Split("\"unskinned\"").Length - 1);   // the skinned part writes no key
 
-        var (_, parts) = BlenderBridge.ReadSession(glb);
+        var parts = BlenderBridge.ReadSessionDocument(glb)!.Parts;
         Assert.Equal(new[] { true, false }, parts.Select(p => p.Unskinned).ToArray());
     }
 
     /// <summary>A session file written before the marker existed reads as fully skinned, which is the
     /// state that still blocks — the exemption is only ever an explicit declaration.</summary>
     [Fact]
-    public void ReadSession_APartWithNoUnskinnedKey_ReadsAsSkinned()
+    public void ReadSessionDocument_APartWithNoUnskinnedKey_ReadsAsSkinned()
     {
         using var g = new TempGame();
         var glb = g.At("_combined.glb");
         File.WriteAllText(BlenderBridge.SessionPath(glb),
             """{"part":null,"parts":[{"name":"body1_lod0","edited":false,"writable":true}]}""");
 
-        var (_, parts) = BlenderBridge.ReadSession(glb);
+        var parts = BlenderBridge.ReadSessionDocument(glb)!.Parts;
         Assert.False(Assert.Single(parts).Unskinned);
     }
 
@@ -111,67 +520,11 @@ public class BlenderSessionTests
         var glb = g.At("_combined.glb");
         BlenderBridge.WriteSession(glb, null, new[] { new SessionPart("body1_lod0", false) });
 
-        var (part, parts) = BlenderBridge.ReadSession(glb);
-        Assert.Null(part);                       // the bridge reads this as "all of them"
-        Assert.Single(parts);
+        var session = BlenderBridge.ReadSessionDocument(glb)!;
+        Assert.Null(session.Part);                       // the bridge reads this as "all of them"
+        Assert.Single(session.Parts);
     }
 
-    /// <summary>A part whose GAME mesh can't be replaced rides the combined session as context: it exports, so
-    /// the modder can edit the head against the face, but the session must not offer it back. The app is what
-    /// declares that; the bridge turns an unwritable part into Reference scenery.</summary>
-    [Fact]
-    public void TheCombinedSessionDeclaresAnUnreplaceableParts_Unwritable()
-    {
-        using var g = new TempGame();
-        SyntheticBundle.BuildOneSkinnedMesh(g.At("face.bundle"), "face_lod0",
-            SessionTri, SessionIdx, SessionBones, blendShapes: 21);
-        SyntheticBundle.BuildOneSkinnedMesh(g.At("hair.bundle"), "hair_lod0",
-            SessionTri, SessionIdx, SessionBones);
-        byte[]? Deobfuscate(string id) => id switch
-        {
-            "b_face" => File.ReadAllBytes(g.At("face.bundle")),
-            "b_hair" => File.ReadAllBytes(g.At("hair.bundle")),
-            _ => null,
-        };
-
-        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
-        {
-            ("face", "b_face", "face_lod0", null, null, 0L, null),
-            ("hair", "b_hair", "hair_lod0", null, null, 0L, null),
-        };
-        var parts = new List<SessionPart>
-        {
-            new("face_lod0", Edited: false),
-            new("hair_lod0", Edited: false),
-        };
-
-        MainWindowViewModel.DeclareUnwritableParts(Deobfuscate, spec, parts);
-
-        Assert.Equal(new[] { false, true }, parts.Select(p => p.IsWritable).ToArray());
-
-        // …and it survives the sidecar the bridge reads
-        var glb = g.At("_combined.glb");
-        BlenderBridge.WriteSession(glb, null, parts);
-        var (_, back) = BlenderBridge.ReadSession(glb);
-        Assert.Equal(new[] { "hair_lod0" },
-            back.Where(p => p.IsWritable).Select(p => p.Name).ToArray());
-    }
-
-    /// <summary>A mesh the read can't reach is left writable: that failure has its own route, and pulling the
-    /// part into Reference over it would take away an edit that works.</summary>
-    [Fact]
-    public void ACombinedSessionsUnreadableMesh_StaysWritable()
-    {
-        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
-        {
-            ("body", "b_gone", "body_lod0", null, null, 0L, null),
-        };
-        var parts = new List<SessionPart> { new("body_lod0", Edited: false) };
-
-        MainWindowViewModel.DeclareUnwritableParts(_ => null, spec, parts);
-
-        Assert.True(parts[0].IsWritable);
-    }
 
     /// <summary>The sidecar's default: a part written without the flag is writable, so the shape a session
     /// declares nothing about behaves exactly as it did.</summary>
@@ -183,9 +536,15 @@ public class BlenderSessionTests
         File.WriteAllText(BlenderBridge.SessionPath(glb),
             "{\"part\": null, \"parts\": [{\"name\": \"body1_lod0\", \"edited\": false}]}");
 
-        var (_, parts) = BlenderBridge.ReadSession(glb);
+        var session = BlenderBridge.ReadSessionDocument(glb)!;
 
-        Assert.True(Assert.Single(parts).IsWritable);
+        var part = Assert.Single(session.Parts);
+        Assert.True(part.IsWritable);
+        Assert.True(part.IsViewportVisible);
+        Assert.Null(part.OpenedFromEditId);
+        Assert.Null(part.Edits);
+        Assert.Null(part.DefaultEditName);
+        Assert.Equal(0, session.Revision);
     }
 
     private static readonly float[] SessionTri = { 0, 0, 0, 1, 0, 0, 1, 1, 0 };
@@ -193,12 +552,10 @@ public class BlenderSessionTests
     private static readonly uint[] SessionBones = { 11u, 22u };
 
     [Fact]
-    public void ReadSession_NoFile_ReadsAsNoSession()
+    public void ReadSessionDocument_NoFile_ReadsAsNoSession()
     {
         using var g = new TempGame();
-        var (part, parts) = BlenderBridge.ReadSession(g.At("nothing.glb"));
-        Assert.Null(part);
-        Assert.Empty(parts);
+        Assert.Null(BlenderBridge.ReadSessionDocument(g.At("nothing.glb")));
     }
 
     // ---------------------------------------------------------------- inbound: the emptied-part list
@@ -576,79 +933,43 @@ public class BlenderSessionTests
         public void Report(string value) => Lines.Add(value);
     }
 
-    // ---------------------------------------------------------------- the session's map list survives publish
+    // ---------------------------------------------------------------- the session's map record
 
+    /// <summary>A session record holds every part's maps, and it answers per SLOT: the same image, read out of
+    /// the same record, is untouched on the slot it was exported on and an ask on a slot it never sat on.
+    /// Moving an object between part collections in Blender is that ask — the object keeps the material it
+    /// arrived with — and the map it brings ships as the receiving part's own, exactly as the per-part route
+    /// publishes a deliberate cross-part link. Route: ExportCombinedRiggedGlb onto the session's own
+    /// composition glb → ReadSubmeshMaps against the record beside it → BlenderMaterialReturn.Normalize.
+    /// </summary>
     [Fact]
-    public void PublishCombined_MovesTheMapSidecarOntoTheGlbItPublishes()
-    {
-        // The build writes the map sidecar beside whatever file it wrote — a TEMP path. Left there, the
-        // published glb has no sidecar and every image in a send-back resolves as authored.
-        using var g = new TempGame();
-        var combined = g.At("_combined.glb");
-        var tmp = combined + ".cafe.tmp";
-        var fp = g.At("_combined.fingerprint");
-        var map = WritePng(g.At("body_d.png"), 3);
-        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", map) }, h => Paths[h], tmp);
-        Assert.True(File.Exists(PreviewMaps.SidecarPath(tmp)));   // written under the temp's name
-
-        Assert.True(AssetExporter.PublishCombined(tmp, combined, fp, "fp-1"));
-
-        Assert.True(File.Exists(PreviewMaps.SidecarPath(combined)));
-        Assert.False(File.Exists(PreviewMaps.SidecarPath(tmp)));
-        Assert.Contains(PreviewMaps.ReadSidecar(combined).Values,
-                        e => e.Source == Path.GetFullPath(map));
-    }
-
-    [Fact]
-    public void PublishCombined_MaplessBuild_ClearsAStaleSidecarAtTheDestination()
-    {
-        // A sidecar from an OLDER build resolves this glb's images against another build's origins. No
-        // sidecar is the safe direction — everything reads authored, at the cost of a redundant copy.
-        using var g = new TempGame();
-        var combined = g.At("_combined.glb");
-        var fp = g.At("_combined.fingerprint");
-        File.WriteAllText(PreviewMaps.SidecarPath(combined), "{\"images\":[]}");
-        var tmp = combined + ".f00d.tmp";
-        File.WriteAllText(tmp, "FRESH");                     // a build that embedded no maps writes no sidecar
-
-        Assert.True(AssetExporter.PublishCombined(tmp, combined, fp, "fp-1"));
-        Assert.False(File.Exists(PreviewMaps.SidecarPath(combined)));
-    }
-
-    /// <summary>Moving an object between part collections re-assigns geometry, and the moved object keeps
-    /// its material. The map it brings is stock for a DIFFERENT part of the same subject, so the identity
-    /// check is scoped to every map the SESSION shipped — scoped to one part's own it matches nothing and
-    /// the app writes a redundant copy as an authored donor.</summary>
-    [Fact]
-    public void ASiblingPartsStockMap_ResolvesAsVanilla_WhenTheCheckIsScopedToTheSession()
+    public void ASessionRecord_AnswersPerSlot_SoASiblingsStockMapIsAnAsk()
     {
         using var g = new TempGame();
         var mapA = WritePng(g.At("body_d.png"), 1);
         var mapB = WritePng(g.At("cloth_d.png"), 90);
-        var combined = g.At("_combined.glb");
+        var combined = g.At("composition.glb");
 
-        // what the app handed Blender: each part with its own map, published from a temp build
-        var tmp = combined + ".abcd.tmp";
+        // what the app handed Blender: one build of the session's parts, each with its own map
         MeshGltf.ExportCombinedRiggedGlb(
-            new[] { RiggedPart("body1_lod0", mapA), RiggedPart("cloth1_lod0", mapB) }, h => Paths[h], tmp);
-        Assert.True(AssetExporter.PublishCombined(tmp, combined, g.At("_combined.fingerprint"), "fp-1"));
+            new[] { RiggedPart("body1_lod0", mapA), RiggedPart("cloth1_lod0", mapB) }, h => Paths[h], combined);
         var sessionSidecar = File.ReadAllBytes(PreviewMaps.SidecarPath(combined));
+
+        // mapB on the slot it WAS exported on: cloth1's own, and nothing ships
+        Assert.Equal(MapOrigin.Vanilla,
+            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0")[0].BaseColor.Origin);
 
         // after the two objects swapped part collections, body1 carries the material cloth1 arrived with
         MeshGltf.ExportCombinedRiggedGlb(
             new[] { RiggedPart("body1_lod0", mapB), RiggedPart("cloth1_lod0", mapA) }, h => Paths[h], combined);
         File.WriteAllBytes(PreviewMaps.SidecarPath(combined), sessionSidecar);
 
+        // the same image, the same record, a slot it never sat on: the modder's own work now
         var maps = MeshGltf.ReadSubmeshMaps(combined, "body1_lod0");
-        Assert.Equal(MapOrigin.Vanilla, maps[0].BaseColor.Origin);
-        Assert.Equal(Path.GetFullPath(mapB), maps[0].BaseColor.StockPng);   // the sibling's stock map, kept stock
-
-        // the control: scoped to body1 alone the same image matches nothing, and would ship as a donor
-        var ownMapOnly = PreviewMaps.ReadSidecar(combined).Values
-            .Where(e => e.Source == Path.GetFullPath(mapA))
-            .ToDictionary(e => (e.Hash, e.Kind), e => e);
-        Assert.Equal(MapOrigin.Authored,
-            PreviewMaps.Resolve(PreviewMaps.ToPreview(mapB, MapKind.BaseColor), MapKind.BaseColor, ownMapOnly).Origin);
+        Assert.Equal(MapOrigin.Authored, maps[0].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, g.At("body-return")));
+        Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
+        AssertSamePixels(mapB, row.Albedo!);
     }
 
     /// <summary>The per-part workspace glb a re-split writes carries the part's own preview materials and map
@@ -795,89 +1116,388 @@ public class BlenderSessionTests
     /// place that ownership is written down — a part opened in a session has no sidecar of its own. Read per
     /// owner, the SAME image is a link on the part that never had it and untouched on the part that did.</summary>
     [Fact]
-    public void ACombinedSessionsSiblingLink_ShipsTheSiblingsStockMap()
+    public void Exact_part_records_treat_a_siblings_stock_map_as_authored_only_for_the_linking_part()
     {
         using var g = new TempGame();
         var bodyMap = WritePng(g.At("body_d.png"), 1);
         var clothMap = WritePng(g.At("cloth_d.png"), 90);
+        var bodyWorkspace = g.At("body1_lod0.glb");
+        var clothWorkspace = g.At("cloth1_lod0.glb");
         var combined = g.At("_combined.glb");
-        var textures = g.At("textures");
 
-        // what the app handed Blender: each part on its own map
-        MeshGltf.ExportCombinedRiggedGlb(
-            new[] { RiggedPart("body1_lod0", bodyMap), RiggedPart("cloth1_lod0", clothMap) }, h => Paths[h], combined);
-        var sessionSidecar = File.ReadAllBytes(PreviewMaps.SidecarPath(combined));
+        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", bodyMap) }, h => Paths[h], bodyWorkspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("cloth1_lod0", clothMap) }, h => Paths[h], clothWorkspace);
 
         // what came back: body1's slot re-linked to the image cloth1 arrived on
         MeshGltf.ExportCombinedRiggedGlb(
             new[] { RiggedPart("body1_lod0", clothMap), RiggedPart("cloth1_lod0", clothMap) }, h => Paths[h], combined);
-        File.WriteAllBytes(PreviewMaps.SidecarPath(combined), sessionSidecar);
 
-        var linked = DonorTextureIntake.Collect(MeshGltf.ReadSubmeshMaps(combined, "body1_lod0"), textures,
-            "body1", p => p, PreviewMaps.ReadOwnedStock(combined, "body1_lod0"));
-        var row = Assert.Single(linked!);
-        Assert.Equal(Path.GetFullPath(clothMap), row.Albedo);          // the sibling's PNG, referenced whole
+        var linked = BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(combined, "body1_lod0", bodyWorkspace), g.At("body-return"));
+        var row = Assert.Single(linked);
         Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
+        AssertSamePixels(clothMap, row.Albedo!);
 
         // the control: cloth1 carries the same image and it is cloth1's own, so nothing ships
-        Assert.Null(DonorTextureIntake.Collect(MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0"), textures,
-            "cloth1", p => p, PreviewMaps.ReadOwnedStock(combined, "cloth1_lod0")));
+        Assert.Empty(BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0", clothWorkspace), g.At("cloth-return")));
     }
 
-    /// <summary>A record written before the owner was recorded can name no owner. Ownership is then unknowable
-    /// rather than empty: an empty answer would read every part's own map as a sibling link and ship the whole
-    /// outfit's stock maps as donors.</summary>
+    /// <summary>An open that could read every map says nothing extra; one that couldn't NAMES them, once, on
+    /// the line that stays put. The names are what make the miss reportable — there is no log file behind this
+    /// line — and past three the rest are counted. No fix clause: nothing the modder does changes it.</summary>
     [Fact]
-    public void AMapRecordWithNoOwner_LeavesOwnershipUnknowable()
+    public void TheOpensStatusLine_NamesTheUnreadableTexturesOnceOrNotAtAll()
     {
-        using var g = new TempGame();
-        var map = WritePng(g.At("body_d.png"), 7);
-        var combined = g.At("_combined.glb");
-        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", map) }, h => Paths[h], combined);
-        var sidecar = PreviewMaps.SidecarPath(combined);
-        File.WriteAllText(sidecar, File.ReadAllText(sidecar).Replace("\"owner\": \"body1_lod0\"", "\"owner\": \"\""));
+        Assert.Empty(MainWindowViewModel.BlenderOpenNotices(Array.Empty<string>(), false,
+            Array.Empty<string>()));
+        Assert.Equal("Could not read cloth_a_d. That material opens untextured.", Notice("cloth_a_d"));
+        Assert.Equal("Could not read cloth_a_d and cloth_b_d. Those materials open untextured.",
+            Notice("cloth_b_d", "cloth_a_d"));
+        Assert.Equal("Could not read body_d, cloth_a_d and cloth_b_d. Those materials open untextured.",
+            Notice("cloth_a_d", "body_d", "cloth_b_d"));
+        Assert.Equal("Could not read body_d, cloth_a_d, cloth_b_d and 2 more textures. "
+            + "Those materials open untextured.",
+            Notice("cloth_a_d", "body_d", "cloth_b_d", "face_d", "hair_d"));
 
-        Assert.Null(PreviewMaps.ReadOwnedStock(combined, "body1_lod0"));
-        Assert.Null(PreviewMaps.ReadOwnedStock(g.At("never_built.glb")));
+        static string Notice(params string[] textures) => Assert.Single(
+            MainWindowViewModel.BlenderOpenNotices(Array.Empty<string>(), false, textures));
     }
 
-    /// <summary>A record that names owners but never the mesh asked for knows nothing about that part —
-    /// a re-split writes ownership under the RETURNED mesh name, which a rename moves off the caller's.
-    /// Unknowable, not empty: an empty answer reads every vanilla match as a sibling link and ships the
-    /// part's own stock maps as donors.</summary>
+    /// <summary>The deliberate cross-part texture link, through the shape the app really produces: the target
+    /// of a send is the part's OWN prepared glb, whose record holds only that part's own maps. A slot the
+    /// modder re-pointed at a SIBLING part's map therefore comes back matching nothing the record holds, which
+    /// is exactly what classifies it as the modder's own work — and it ships as that part's own map, pixel for
+    /// pixel. Nothing else records the link, so this is the whole of it.</summary>
     [Fact]
-    public void AMapRecordThatNeverMentionsTheMesh_LeavesOwnershipUnknowable()
+    public void ASiblingPartsMapPluggedIntoAPartsSlot_ShipsAsThatPartsOwnMap()
     {
         using var g = new TempGame();
-        var map = WritePng(g.At("cloth_d.png"), 3);
-        var combined = g.At("_combined.glb");
-        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("cloth1_lod0", map) }, h => Paths[h], combined);
-
-        Assert.NotNull(PreviewMaps.ReadOwnedStock(combined, "cloth1_lod0"));
-        Assert.Null(PreviewMaps.ReadOwnedStock(combined, "body1_lod0"));
-    }
-
-    /// <summary>A record that DOES hold the mesh and owns no image for it answers with the empty set: it
-    /// can say the part owns nothing, so every vanilla match on it really is a sibling link.</summary>
-    [Fact]
-    public void AMapRecordHoldingTheMeshAndOwningNothingForIt_AnswersEmpty()
-    {
-        using var g = new TempGame();
-        var bodyRmo = WritePng(g.At("body_r.png"), 11);
+        var bodyMap = WritePng(g.At("body_d.png"), 1);
         var clothMap = WritePng(g.At("cloth_d.png"), 90);
-        var combined = g.At("_combined.glb");
+        // what the open handed Blender for body1: its own prepared glb, on its own map
+        var workspace = g.At("body1_lod0.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", bodyMap) }, h => Paths[h], workspace);
+        // what came back: the same part, its base colour re-pointed at cloth1's map
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", clothMap) }, h => Paths[h], returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("body-return")));
+        Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
+        AssertSamePixels(clothMap, row.Albedo!);
+    }
+
+    /// <summary>The control on the same shape: the part's OWN untouched map is not a link, so nothing ships
+    /// and the slot stays bound to the game's map.</summary>
+    [Fact]
+    public void ThePartsOwnUntouchedMap_StaysItsOwn()
+    {
+        using var g = new TempGame();
+        var bodyMap = WritePng(g.At("body_d.png"), 1);
+        var workspace = g.At("body1_lod0.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", bodyMap) }, h => Paths[h], workspace);
+
+        Assert.Empty(BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(workspace, "body1_lod0", workspace), g.At("body-return")));
+    }
+
+    // ---------------------------------------------------------------- the link INSIDE one part
+
+    /// <summary>The same gesture one part in: the modder plugs material 2's picture into material 1's slot.
+    /// It is an ask exactly as a sibling PART's map is, and it ships as that slot's own map. Read against the
+    /// whole record it matched "one of this part's stock maps" and vanished — the slot kept the game texture
+    /// it was already on and no authored row was written at all. Route: ExportCombinedRiggedGlb (the open's
+    /// workspace) → ReadSubmeshMaps(returned, part, workspace) → BlenderMaterialReturn.Normalize.</summary>
+    [Fact]
+    public void AMaterialsStockMapPluggedIntoAnotherSlotOfTheSamePart_ShipsAsThatSlotsOwnMap()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        // what came back: material 1 re-pointed at material 2's picture
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapB, mapB) },
+            h => Paths[h], returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+
+        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Vanilla, incoming[1].BaseColor.Origin);   // material 2 is still on its own
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(0, row.Submesh);
+        Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
+        AssertSamePixels(mapB, row.Albedo!);
+    }
+
+    /// <summary>The link the other way round lands on the other slot, so the answer follows the gesture rather
+    /// than a fixed slot: material 1's picture in material 2's slot ships for material 2.</summary>
+    [Fact]
+    public void TheSameLinkTheOtherWayRound_ShipsForTheOtherSlot()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapA) },
+            h => Paths[h], returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+
+        Assert.Equal(MapOrigin.Vanilla, incoming[0].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Authored, incoming[1].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(1, row.Submesh);
+        AssertSamePixels(mapA, row.Albedo!);
+    }
+
+    /// <summary>The whole part untouched, every picture re-encoded by the tool that wrote the file: nothing is
+    /// an ask. The bytes cannot say so, so the pixels do — and the pixel comparison has to find each slot's
+    /// OWN map, which is what makes the link case below more than a hash miss.</summary>
+    [Fact]
+    public void AReEncodedUntouchedReturn_StaysOnItsOwnMaps()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], returned);
+        ReEncodeEmbeddedImages(returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+
+        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
+        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+    }
+
+    /// <summary>…and the link survives the same re-encode: the returned picture is material 2's whatever
+    /// bytes carry it, so it is still an ask for material 1's slot.</summary>
+    [Fact]
+    public void AReEncodedIntraPartLink_StillShipsAsThatSlotsOwnMap()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapB, mapB) },
+            h => Paths[h], returned);
+        ReEncodeEmbeddedImages(returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+
+        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Vanilla, incoming[1].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(0, row.Submesh);
+        AssertSamePixels(mapB, row.Albedo!);
+    }
+
+    /// <summary>The send AFTER an intra-part link. The re-split re-opens material 1 on the modder's own copy of
+    /// material 2's picture, so the workspace now holds two files with the same pixels — that copy on slot 0,
+    /// the stock map still on slot 1. A send that touches nothing has to bring the copy back as the modder's
+    /// work: matched against the stock map it reproduces, the link would revert to the game texture one send
+    /// after it was made, silently.</summary>
+    [Fact]
+    public void TheSendAfterAnIntraPartLink_KeepsTheModdersOwnCopy()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapB, mapB) },
+            h => Paths[h], returned);
+        // the link applied: the file the intake writes, and the part re-opened over it
+        var linked = Assert.Single(BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace), g.At("return-maps")));
+        var reopened = g.At("body1_lod0.reopened.glb");
+        MeshGltf.ReexportPartGlb(returned, "body1_lod0", reopened, recordGlb: workspace,
+            authoredMaps: new (string?, string?, string?)[] { (linked.Albedo, null, null), default });
+
+        // the second send, with nothing touched in Blender
+        var second = MeshGltf.ReadSubmeshMaps(reopened, "body1_lod0", reopened);
+
+        Assert.Equal(MapOrigin.Authored, second[0].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Vanilla, second[1].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(second, g.At("second-maps")));
+        Assert.Equal(0, row.Submesh);
+        AssertSamePixels(mapB, row.Albedo!);
+    }
+
+    /// <summary>A workspace from a release that recorded no per-slot stock keeps exactly the answer it always
+    /// gave: the whole record settles every slot. Old workspaces still open and still round-trip — at the cost
+    /// of the intra-part link they never could see.</summary>
+    [Fact]
+    public void AWorkspaceRecordWithNoSlotRows_KeepsTheWholeRecordAnswer()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapB, mapB) },
+            h => Paths[h], returned);
+        StripSlotRows(PreviewMaps.SidecarPath(workspace));
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
+
+        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
+        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+    }
+
+    /// <summary>A mesh renamed in Blender comes back under a name the record's slot rows do not carry, so the
+    /// record cannot say what any of its slots was exported over. Unknowable, not empty: the part's own
+    /// untouched maps stay untouched. Read as empty, a rename would ship every map of the part as a redundant
+    /// copy of the game's own.</summary>
+    [Fact]
+    public void ARenameInBlender_LeavesThePartsOwnMapsUntouched()
+    {
+        using var g = new TempGame();
+        var mapA = WritePng(g.At("cloth_a_d.png"), 10);
+        var mapB = WritePng(g.At("cloth_b_d.png"), 80);
+        var workspace = g.At("body1_lod0.glb");
+        var returned = g.At("return.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0", mapA, mapB) },
+            h => Paths[h], workspace);
+        MeshGltf.ExportCombinedRiggedGlb(new[] { TwoMaterialPart("body1_lod0.001", mapA, mapB) },
+            h => Paths[h], returned);
+
+        var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0.001", workspace);
+
+        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
+        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+    }
+
+    /// <summary>The record's per-slot rows are all-or-nothing per MESH: a mesh it names at all carries a row
+    /// for every (primitive, kind) the export bound a stock map to. The classifying read falls back per MESH
+    /// but answers per (index, kind), so a record naming the mesh with rows for only SOME kinds would never
+    /// reach the fallback — every untouched map of a missing kind would read as the modder's own and ship a
+    /// redundant copy of the game's own picture. Route: ExportCombinedRiggedGlb → WriteSidecar →
+    /// ReadSlotStock.</summary>
+    [Fact]
+    public void AnExportsSlotRows_CoverEveryStockBoundSlotOfTheMeshTheyName()
+    {
+        using var g = new TempGame();
+        var albedo = WritePng(g.At("cloth_d.png"), 10);
+        var normal = WritePng(g.At("cloth_n.png"), 40);
+        var rmo = WritePng(g.At("cloth_r.png"), 70);
+        // the two submeshes bind DIFFERENT kinds: all three on the first, no normal on the second
+        var perSubmesh = new (string? Base, string? Normal, string? Rmo)[]
+        {
+            (albedo, normal, rmo),
+            (albedo, null, rmo),
+        };
+        var workspace = g.At("body1_lod0.glb");
         MeshGltf.ExportCombinedRiggedGlb(new[]
         {
-            RiggedPart("body1_lod0", rmoPng: bodyRmo),
-            RiggedPart("cloth1_lod0", clothMap),
-        }, h => Paths[h], combined);
-        // body1's images attributed elsewhere; its submesh row still names it
-        var sidecar = PreviewMaps.SidecarPath(combined);
-        File.WriteAllText(sidecar, File.ReadAllText(sidecar)
-            .Replace("\"owner\": \"body1_lod0\"", "\"owner\": \"cloth1_lod0\""));
+            new MeshGltf.RiggedPart(TwoTriangles("body1_lod0"),
+                new MeshSkin
+                {
+                    BoneHashes = new[] { HRoot },
+                    BindPoses = new List<Matrix4x4> { Matrix4x4.Identity },
+                },
+                albedo, PerSubmesh: perSubmesh),
+        }, h => Paths[h], workspace);
 
-        Assert.Empty(PreviewMaps.ReadOwnedStock(combined, "body1_lod0")!);
+        // what the fixture bound stock maps to, by construction — one row is owed for each
+        var owed = new List<(int, MapKind)>();
+        for (int i = 0; i < perSubmesh.Length; i++)
+        {
+            if (perSubmesh[i].Base is not null) owed.Add((i, MapKind.BaseColor));
+            if (perSubmesh[i].Normal is not null) owed.Add((i, MapKind.Normal));
+            if (perSubmesh[i].Rmo is not null) owed.Add((i, MapKind.Rmo));
+        }
+
+        var rows = PreviewMaps.ReadSlotStock(workspace, "body1_lod0");
+
+        Assert.NotNull(rows);
+        Assert.Equal(owed.OrderBy(k => k.Item1).ThenBy(k => k.Item2).ToArray(),
+                     rows!.Keys.OrderBy(k => k.Index).ThenBy(k => k.Kind).ToArray());
     }
+
+    /// <summary>Re-encode every picture a glb carries without touching a pixel — what a tool that rewrites the
+    /// file does to a map nobody edited. Asserts the bytes really changed, so a test resting on this cannot
+    /// quietly fall back to the byte-identical path it means to avoid.</summary>
+    private static void ReEncodeEmbeddedImages(string glb)
+    {
+        var model = SharpGLTF.Schema2.ModelRoot.Load(glb,
+            new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
+        foreach (var image in model.LogicalImages)
+        {
+            var before = image.Content.Content.ToArray();
+            using var decoded = Image.Load<Rgba32>(before);
+            using var stream = new MemoryStream();
+            decoded.SaveAsPng(stream, new SixLabors.ImageSharp.Formats.Png.PngEncoder
+            {
+                CompressionLevel = SixLabors.ImageSharp.Formats.Png.PngCompressionLevel.BestSpeed,
+                FilterMethod = SixLabors.ImageSharp.Formats.Png.PngFilterMethod.None,
+            });
+            var after = stream.ToArray();
+            Assert.NotEqual(before, after);
+            image.Content = new SharpGLTF.Memory.MemoryImage(after);
+        }
+        model.SaveGLB(glb);
+    }
+
+    /// <summary>Drop the per-slot stock rows from a map record, leaving exactly what a release that never
+    /// wrote them produced.</summary>
+    private static void StripSlotRows(string sidecar)
+    {
+        var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(sidecar))!.AsObject();
+        Assert.True(doc.Remove("slots"));
+        File.WriteAllText(sidecar, doc.ToJsonString());
+    }
+
+    /// <summary>A skinned part of TWO submeshes, each material on its own base colour — the multi-material
+    /// shape an intra-part texture link needs.</summary>
+    private static MeshGltf.RiggedPart TwoMaterialPart(string name, string first, string second) => new(
+        TwoTriangles(name),
+        new MeshSkin
+        {
+            BoneHashes = new[] { HRoot },
+            BindPoses = new List<Matrix4x4> { Matrix4x4.Identity },
+        },
+        BaseColorPng: first,
+        PerSubmesh: new (string?, string?, string?)[] { (first, null, null), (second, null, null) });
+
+    private static UnityMesh TwoTriangles(string name) => new()
+    {
+        Name = name,
+        VertexCount = 6,
+        Channels = new()
+        {
+            ["Vertex"] = new[] { 0f, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0 },
+            ["TexCoord0"] = new[] { 0f, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1 },
+            ["BlendIndices"] = new float[24],
+            ["BlendWeight"] = Enumerable.Range(0, 6).SelectMany(_ => new[] { 1f, 0, 0, 0 }).ToArray(),
+        },
+        Dims = new()
+        {
+            ["Vertex"] = 3,
+            ["TexCoord0"] = 2,
+            ["BlendIndices"] = 4,
+            ["BlendWeight"] = 4,
+        },
+        Submeshes = new() { new[] { 0, 1, 2 }, new[] { 3, 4, 5 } },
+    };
 
     /// <summary>Sidecar rows carry the name a part was EXPORTED under, so a mesh renamed in Blender comes
     /// back under a name no row matches. The two namespaces stay apart: the glb-INTERNAL read keys what
@@ -949,7 +1569,7 @@ public class BlenderSessionTests
     // ---------------------------------------------------------------- a lost map record is never silent
 
     /// <summary>A glb whose map record went missing resolves every image as authored — an untouched stock RMO
-    /// included. Its emissive mask rides an alpha channel glTF cannot carry, so with nothing to rebuild the
+    /// included. Its emissive mask has no glTF material semantic, so with nothing to rebuild the
     /// mask from it ships dead. The intake asks per submesh instead, and the answer the caller resolves off
     /// the part's own renderer puts the mask back whole.</summary>
     [Fact]
@@ -965,66 +1585,27 @@ public class BlenderSessionTests
         Assert.Equal(MapOrigin.Authored, maps[0].Rmo.Origin);         // no record: the stock map reads authored
         Assert.Empty(PreviewMaps.ReadSubmeshRmoSources(combined, "body1_lod0"));
 
+        var none = new ResolvedMap(MapOrigin.None);
+        var returned = maps.Concat(new[] { new IncomingMaps(none, none) }).ToList();
         var asked = new List<int>();
-        var row = Assert.Single(DonorTextureIntake.Collect(maps, g.At("textures"), "body1", p => p,
-            null, i => { asked.Add(i); return stockRmo; })!);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(returned, g.At("textures"),
+            i => { asked.Add(i); return stockRmo; }));
 
         Assert.Equal(new[] { 0 }, asked.ToArray());                   // asked only where a mask had to be rebuilt
         AssertSamePixels(stockRmo, row.Rmo!);
 
         // the control: with nothing to answer, the same send ships the mask as a dead zero
-        var blank = Assert.Single(DonorTextureIntake.Collect(maps, g.At("textures"), "blank", p => p)!);
+        var blank = Assert.Single(BlenderMaterialReturn.Normalize(maps, g.At("blank")));
         using var shipped = Image.Load<Rgba32>(blank.Rmo!);
         Assert.Equal(0, shipped[0, 0].A);
-    }
-
-    /// <summary>The glb publishes whether or not its map record makes it across, so a record that did not is
-    /// the only thing that can say the next send-back will read untouched maps as authored.</summary>
-    [Fact]
-    public void PublishCombined_ARecordThatCouldNotMove_SaysSo()
-    {
-        using var g = new TempGame();
-        var combined = g.At("_combined.glb");
-        var tmp = combined + ".cafe.tmp";
-        MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", WritePng(g.At("body_d.png"), 3)) },
-            h => Paths[h], tmp);
-        File.WriteAllText(PreviewMaps.SidecarPath(combined), "{\"images\":[]}");
-        bool lost = false;
-
-        // the destination record held open: the move fails and so does the clear that follows it
-        using (File.Open(PreviewMaps.SidecarPath(combined), FileMode.Open, FileAccess.Read, FileShare.None))
-            Assert.True(AssetExporter.PublishCombined(tmp, combined, g.At("_combined.fingerprint"), "fp-1",
-                onMapSidecarLost: () => lost = true));
-
-        Assert.True(lost);
-        Assert.True(File.Exists(combined));   // the edit still publishes — the record is what was lost
-    }
-
-    /// <summary>A build that embedded no maps writes no record, so there is none to lose and nothing to
-    /// report: the clear at the destination is routine, not a failure.</summary>
-    [Fact]
-    public void PublishCombined_ABuildThatWroteNoRecord_ReportsNothingLost()
-    {
-        using var g = new TempGame();
-        var combined = g.At("_combined.glb");
-        var tmp = combined + ".f00d.tmp";
-        File.WriteAllText(tmp, "FRESH");
-        File.WriteAllText(PreviewMaps.SidecarPath(combined), "{\"images\":[]}");
-        bool lost = false;
-
-        Assert.True(AssetExporter.PublishCombined(tmp, combined, g.At("_combined.fingerprint"), "fp-1",
-            onMapSidecarLost: () => lost = true));
-
-        Assert.False(lost);
-        Assert.False(File.Exists(PreviewMaps.SidecarPath(combined)));
     }
 
     // ---------------------------------------------------------------- the send read is lenient
 
     /// <summary>A Blender export can carry accessors this app never reads — a shape key's, say — that strict
     /// schema validation rejects outright. Every other read of a returned glb skips validation for that
-    /// reason, and the send read is the one that must: Send has already overwritten the workspace file, so a
-    /// refusal here costs the modder the edit that is on disk.</summary>
+    /// reason, and the send read is the one that must: the external artifact still has to reach the
+    /// normalizer rather than costing the modder the edit it carries.</summary>
     [Fact]
     public void ReadSend_AGlbCarryingAnAccessorWeNeverRead_StillReadsTheEditBack()
     {
@@ -1041,202 +1622,16 @@ public class BlenderSessionTests
         Assert.Equal(3, edit.Mesh!.VertexCount);
     }
 
-    // ---------------------------------------------------------------- what a send-back reports
-
-    private static readonly string[] Nothing = Array.Empty<string>();
-
-    private static MainWindowViewModel.SendBackMaps Maps(int authored = 0, int blanked = 0,
-        params string[] notes) => new(authored, blanked, notes);
-
-    [Fact]
-    public void SendBackSummary_OnePartApplied_NamesIt()
-    {
-        Assert.Equal("Applied Blender edit to body1.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps()));
-    }
-
-    [Fact]
-    public void SendBackSummary_SeveralPartsApplied_Counts()
-    {
-        // "authored", not "authored in Blender": the count also carries a sibling map linked in the shader
-        // editor and an untouched own map with a texture edit behind it, neither of which Blender painted.
-        Assert.Equal("Applied Blender edits to 3 parts. 2 maps authored.",
-            MainWindowViewModel.SendBackSummary(new[] { "a", "b", "c" }, Nothing, Nothing, Maps(authored: 2)));
-    }
-
-    /// <summary>A blanked slot ships no file, so counting it as an authored map promises one that never
-    /// arrives. The two are separate news on one line.</summary>
-    [Fact]
-    public void SendBackSummary_BlankedSlots_AreCountedApartFromAuthoredMaps()
-    {
-        Assert.Equal("Applied Blender edit to body1. 2 slots blanked.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(blanked: 2)));
-        Assert.Equal("Applied Blender edit to body1. 1 map authored · 1 slot blanked.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(1, 1)));
-    }
-
-    /// <summary>A map the intake had to give up on is named in the same line — the status is written once
-    /// per send-back, so anything said earlier is gone by the time this lands.</summary>
-    [Fact]
-    public void SendBackSummary_WhatTheIntakeGaveUpOn_IsSaidOnce()
-    {
-        Assert.Equal("Applied Blender edits to 2 parts. 1 map authored. Couldn't read body_r.png.",
-            MainWindowViewModel.SendBackSummary(new[] { "a", "b" }, Nothing, Nothing,
-                Maps(1, 0, "Couldn't read body_r.png.", "Couldn't read body_r.png.")));
-    }
-
-    /// <summary>The launch line is where a session with no map record says so, and it says it in terms of what
-    /// the modder will see: untouched maps coming back as authored copies.</summary>
-    [Fact]
-    public void MapRecordLostNote_SaysWhatTheSessionCanNoLongerTell()
-    {
-        Assert.Equal(" No texture record for this session. Untouched maps come back as authored copies.",
-            MainWindowViewModel.MapRecordLostNote(true));
-        Assert.Equal("", MainWindowViewModel.MapRecordLostNote(false));
-    }
-
-    /// <summary>A glb whose record went missing is asked about directly, because a REUSED session never runs
-    /// the publish that reports the loss. Without this the second open of a session proceeds silently and
-    /// every map it sends back classifies as authored.</summary>
-    [Fact]
-    public void CombinedMapRecordMissing_IsTheReuseRoutesOwnAnswer()
-    {
-        using var g = new TempGame();
-        var combined = g.At("_combined.glb");
-        File.WriteAllText(combined, "GLB");
-
-        Assert.True(AssetExporter.CombinedMapRecordMissing(combined));
-
-        File.WriteAllText(PreviewMaps.SidecarPath(combined), "{\"images\":[]}");
-        Assert.False(AssetExporter.CombinedMapRecordMissing(combined));
-    }
-
-    [Fact]
-    public void SendBackSummary_AnEmptiedPart_ReadsAsHidden_NotAsAFailure()
-    {
-        // The point of the explicit emptied list: a part back with no mesh is a deliberate Hide, and must
-        // never read as "couldn't read it back".
-        Assert.Equal("Applied Blender edit to body1. Hidden in the mod: cloth2.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, new[] { "cloth2" }, Maps()));
-    }
-
-    [Fact]
-    public void SendBackSummary_AFailedPart_IsNamedAgainstTheTotalThatCameBack()
-    {
-        Assert.Equal("Applied Blender edits to 1 of 2 parts. Couldn't read hair back.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, new[] { "hair" }, Nothing, Maps()));
-    }
-
-    [Fact]
-    public void SendBackSummary_AddedGeometry_IsCounted()
-    {
-        // added submeshes land as donor-named rows in the Edit tree, and nothing else there ties them to the
-        // send that made them
-        Assert.Equal("Applied Blender edit to body1. The send added 1 submesh.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(), newSubmeshes: 1));
-        Assert.Equal("Applied Blender edits to 2 parts. The send added 3 submeshes.",
-            MainWindowViewModel.SendBackSummary(new[] { "a", "b" }, Nothing, Nothing, Maps(), newSubmeshes: 3));
-    }
-
-    [Fact]
-    public void SendBackSummary_NoAddedGeometry_SaysNothingAboutSubmeshes() =>
-        Assert.DoesNotContain("submesh",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(authored: 2)));
-
-    [Fact]
-    public void SendBackSummary_NothingMatched_SaysSo()
-    {
-        Assert.Equal("Nothing in the Blender send matched a part of this mod.",
-            MainWindowViewModel.SendBackSummary(Nothing, Nothing, Nothing, Maps()));
-    }
-
-    /// <summary>A send-all hands back every writable part, so the count is of what the send-back TOOK. Twenty
-    /// parts back with one edit among them is one applied edit, not twenty — and twenty back with no edit at
-    /// all is a different answer from a send that matched no part of the mod.</summary>
-    [Fact]
-    public void SendBackSummary_CountsWhatWasTaken_NotWhatCameBack()
-    {
-        Assert.Equal("Applied Blender edit to body1.",
-            MainWindowViewModel.SendBackSummary(new[] { "body1" }, Nothing, Nothing, Maps(), leftAlone: 19));
-        Assert.Equal("Nothing changed in the Blender send.",
-            MainWindowViewModel.SendBackSummary(Nothing, Nothing, Nothing, Maps(), leftAlone: 20));
-    }
-
-    /// <summary>A hide IS news, so it speaks for the send rather than being prefixed by "nothing
-    /// changed".</summary>
-    [Fact]
-    public void SendBackSummary_UnchangedPartsBesideAHide_SayOnlyTheHide()
-    {
-        Assert.Equal("Hidden in the mod: cloth2.",
-            MainWindowViewModel.SendBackSummary(Nothing, Nothing, new[] { "cloth2" }, Maps(), leftAlone: 5));
-    }
-
-    /// <summary>The count the summary reads is the BUILD's blanked rule, not the explicit gesture alone: a
-    /// Replace submesh that authored something and named no normal/RMO ships those flat, and the cards and
-    /// chips both say so. A summary counting only the gesture would leave the common case unannounced.</summary>
-    [Fact]
-    public void BlankedSlotCount_CountsEveryBlankTheBuildWillShip()
-    {
-        // albedo only: the two relief slots it named no file for go flat
-        Assert.Equal(2, MainWindowViewModel.BlankedSlotCount(new List<SubmeshTextures>
-        {
-            new() { Submesh = 0, Albedo = "textures/body_s0_base.png" },
-        }));
-        // the explicit gesture is still counted, and its asking pulls the file-less normal flat beside it
-        Assert.Equal(2, MainWindowViewModel.BlankedSlotCount(new List<SubmeshTextures>
-        {
-            new() { Submesh = 0, RmoOrigin = SlotOrigin.ExplicitNeutral },
-        }));
-        // no flat albedo exists, so a neutral-plugged albedo is not one of them
-        Assert.Equal(2, MainWindowViewModel.BlankedSlotCount(new List<SubmeshTextures>
-        {
-            new() { Submesh = 0, AlbedoOrigin = SlotOrigin.ExplicitNeutral },
-        }));
-        // a submesh that asked for nothing at all inherits every slot
-        Assert.Equal(0, MainWindowViewModel.BlankedSlotCount(new List<SubmeshTextures>
-        {
-            new() { Submesh = 0 },
-        }));
-        Assert.Equal(0, MainWindowViewModel.BlankedSlotCount(null));
-        // and the count runs across every row of the send
-        Assert.Equal(3, MainWindowViewModel.BlankedSlotCount(new List<SubmeshTextures>
-        {
-            new() { Submesh = 0, Albedo = "textures/body_s0_base.png" },
-            new() { Submesh = 1, Albedo = "textures/body_s1_base.png", Normal = "textures/body_s1_nrm.png" },
-        }));
-    }
-
-    /// <summary>A combined send reports one total, so each part's asks roll into the session's.</summary>
-    [Fact]
-    public void SendBackMaps_RollUpAcrossParts()
-    {
-        var total = Maps(1, 2, "first") + Maps(3, 0, "second");
-
-        Assert.Equal(4, total.Authored);
-        Assert.Equal(2, total.Blanked);
-        Assert.Equal(new[] { "first", "second" }, total.Notes);
-    }
-
-    // ---------------------------------------------------------------- fixtures
+    // ---------------------------------------------------------------- fixtures shared by the bridge tests
 
     private const uint HRoot = 0x1111_1111;
-    private static readonly Dictionary<uint, string> Paths = new() { [HRoot] = "root" };
-
-    /// <summary>A prefab mount offset: a pure translation, which the rest bake refuses (baking a float
-    /// translation into vertex data breaks the bit-exact round trip), so it reaches the session as a scene
-    /// rest rather than an uprighting.</summary>
-    private static readonly Matrix4x4 Mount = Matrix4x4.CreateTranslation(0, 0.5f, 2);
-
-    /// <summary>One bone under one connector, rested at <see cref="Mount"/>. The connector's recorded rest is
-    /// bind-normalized by inverse(measured G), which for a bone whose bind pose is identity is the mount
-    /// itself — so the stored rest is identity and composing G back recovers the scene world.</summary>
-    private static SceneRig MountedRig() => new()
+    private const uint HWeapon = 0x2222_2222;
+    private static readonly Dictionary<uint, string> Paths = new()
     {
-        BonePaths = new[] { "hips/weapon_01" },
-        BoneRestWorlds = new[] { Mount },
-        MeasuredRest = Mount,
-        ConnectorRests = new Dictionary<string, Matrix4x4> { ["hips"] = Matrix4x4.Identity },
+        [HRoot] = "root",
+        [HWeapon] = "hips/weapon_01",
     };
+    private static readonly Matrix4x4 Mount = Matrix4x4.CreateTranslation(0, 0.5f, 2);
 
     private static UnityMesh Triangle(string name) => new()
     {
@@ -1246,73 +1641,94 @@ public class BlenderSessionTests
         {
             ["Vertex"] = new[] { 0f, 0, 0, 1, 0, 0, 0, 1, 0 },
             ["TexCoord0"] = new[] { 0f, 0, 1, 0, 0, 1 },
-            ["BlendIndices"] = new float[12],
+            ["BlendIndices"] = new[] { 0f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
             ["BlendWeight"] = new[] { 1f, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 },
         },
-        Dims = new() { ["Vertex"] = 3, ["TexCoord0"] = 2, ["BlendIndices"] = 4, ["BlendWeight"] = 4 },
+        Dims = new()
+        {
+            ["Vertex"] = 3,
+            ["TexCoord0"] = 2,
+            ["BlendIndices"] = 4,
+            ["BlendWeight"] = 4,
+        },
         Submeshes = new() { new[] { 0, 1, 2 } },
     };
 
-    private static MeshGltf.RiggedPart RiggedPart(string name, string? baseColorPng = null, string? rmoPng = null) =>
-        new(Triangle(name),
-            new MeshSkin { BoneHashes = new[] { HRoot }, BindPoses = new List<Matrix4x4> { Matrix4x4.Identity } },
-            baseColorPng,
-            PerSubmesh: rmoPng is null ? null : new (string?, string?, string?)[] { (null, null, rmoPng) });
+    private static MeshGltf.RiggedPart RiggedPart(string name, string? basePng = null,
+        string? rmoPng = null) => new(
+        Triangle(name),
+        new MeshSkin
+        {
+            BoneHashes = new[] { HRoot },
+            BindPoses = new List<Matrix4x4> { Matrix4x4.Identity },
+        },
+        BaseColorPng: basePng,
+        PerSubmesh: new (string?, string?, string?)[] { (basePng, null, rmoPng) });
 
-    /// <summary>A deterministic non-uniform image, so two fixtures' maps can never hash alike.</summary>
-    private static string WritePng(string path, int seed)
+    private static SceneRig MountedRig() => new()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        using var img = new Image<Rgba32>(8, 8);
-        for (int y = 0; y < 8; y++)
-            for (int x = 0; x < 8; x++)
-                img[x, y] = new Rgba32((byte)(x * 31 + seed), (byte)(y * 17 + seed), (byte)(x * y + seed), (byte)(200 + x));
-        img.SaveAsPng(path);
+        BonePaths = new[] { "hips/weapon_01" },
+        MeasuredRest = Mount,
+        BoneRestWorlds = new[] { Mount },
+        ConnectorRests = new Dictionary<string, Matrix4x4> { ["hips"] = Matrix4x4.Identity },
+    };
+
+    private static string WritePng(string path, byte seed)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(4, 4,
+            new Rgba32(seed, unchecked((byte)(seed + 1)), unchecked((byte)(seed + 2)),
+                unchecked((byte)(seed + 3))));
+        image.SaveAsPng(path);
         return path;
     }
 
-    /// <summary>Pixel-for-pixel equality, alpha included — the channel an emissive mask rides in, and the one
-    /// a comparison of visible colour would miss losing.</summary>
-    private static void AssertSamePixels(string expectedPath, string actualPath)
+    private static void AssertSamePixels(string expected, string actual)
     {
-        using var expected = Image.Load<Rgba32>(expectedPath);
-        using var actual = Image.Load<Rgba32>(actualPath);
-        Assert.Equal(expected.Width, actual.Width);
-        Assert.Equal(expected.Height, actual.Height);
-        for (int y = 0; y < expected.Height; y++)
-            for (int x = 0; x < expected.Width; x++)
-                Assert.Equal(expected[x, y], actual[x, y]);
+        using var a = Image.Load<Rgba32>(expected);
+        using var b = Image.Load<Rgba32>(actual);
+        Assert.Equal(a.Size, b.Size);
+        for (int y = 0; y < a.Height; y++)
+            for (int x = 0; x < a.Width; x++)
+                Assert.Equal(a[x, y], b[x, y]);
     }
 
-    /// <summary>Give a glb an accessor with no bufferView, referenced by nothing — the shape strict schema
-    /// validation refuses and every read this app makes of a returned glb ignores. The JSON chunk is rewritten
-    /// in place, so the binary chunk and every existing index survive untouched.</summary>
-    private static void AddUnreadAccessor(string glbPath)
+    private static void AddUnreadAccessor(string glb)
     {
-        var glb = File.ReadAllBytes(glbPath);
-        int jsonLength = BitConverter.ToInt32(glb, 12);
-        var json = System.Text.Encoding.UTF8.GetString(glb, 20, jsonLength)
-            .Replace("\"accessors\":[", "\"accessors\":[{\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},")
-            .Replace("\"POSITION\":0", "\"POSITION\":1")
-            .Replace("\"TEXCOORD_0\":1", "\"TEXCOORD_0\":2")
-            .Replace("\"indices\":2", "\"indices\":3");
+        byte[] source = File.ReadAllBytes(glb);
+        using var input = new MemoryStream(source);
+        using var reader = new BinaryReader(input);
+        uint magic = reader.ReadUInt32();
+        uint version = reader.ReadUInt32();
+        _ = reader.ReadUInt32();
+        uint jsonLength = reader.ReadUInt32();
+        uint jsonType = reader.ReadUInt32();
+        byte[] jsonBytes = reader.ReadBytes(checked((int)jsonLength));
+        byte[] remainder = reader.ReadBytes(checked((int)(input.Length - input.Position)));
 
-        var text = System.Text.Encoding.UTF8.GetBytes(json);
-        var chunk = new byte[text.Length + (4 - text.Length % 4) % 4];
-        Array.Fill(chunk, (byte)' ');                                  // chunks pad to 4 bytes, JSON with spaces
-        text.CopyTo(chunk, 0);
-        var binary = glb[(20 + jsonLength)..];
+        var root = System.Text.Json.Nodes.JsonNode.Parse(
+            System.Text.Encoding.UTF8.GetString(jsonBytes).TrimEnd(' ', '\0'))!.AsObject();
+        var accessors = root["accessors"]!.AsArray();
+        accessors.Add(new System.Text.Json.Nodes.JsonObject
+        {
+            ["componentType"] = 5126,
+            ["count"] = 1,
+            ["type"] = "SCALAR",
+        });
+        byte[] rewritten = System.Text.Encoding.UTF8.GetBytes(root.ToJsonString());
+        int paddedLength = (rewritten.Length + 3) & ~3;
 
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-        w.Write(0x46546C67u);                                          // "glTF"
-        w.Write(2u);
-        w.Write(12 + 8 + chunk.Length + binary.Length);
-        w.Write(chunk.Length);
-        w.Write(0x4E4F534Au);                                          // "JSON"
-        w.Write(chunk);
-        w.Write(binary);
-        w.Flush();
-        File.WriteAllBytes(glbPath, ms.ToArray());
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output);
+        writer.Write(magic);
+        writer.Write(version);
+        writer.Write(checked((uint)(12 + 8 + paddedLength + remainder.Length)));
+        writer.Write(checked((uint)paddedLength));
+        writer.Write(jsonType);
+        writer.Write(rewritten);
+        for (int i = rewritten.Length; i < paddedLength; i++) writer.Write((byte)' ');
+        writer.Write(remainder);
+        File.WriteAllBytes(glb, output.ToArray());
     }
+
 }

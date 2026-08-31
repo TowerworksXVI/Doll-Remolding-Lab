@@ -17,7 +17,7 @@ Textures and meshes, for all of every character's outfits, and every enemy I cou
 Everywhere I could find. Refitting room, dorm, crew deck, combat, reflections, distant LODs. 
 
 **What servers does it work on?**
-The Lab and the mods have been tested on Darkwinter. They should work fine on Haoplay or CN, but please report via Github if you have any issues.
+The Lab and the mods have been tested on Darkwinter and CN, and should work on Haoplay. Please report via Github if you have any issues.
 
 **Will this get my account banned?**
 Mod at your own risk. Nothing is ever guaranteed.
@@ -39,15 +39,17 @@ Technical limitations of the 3DMigoto workaround. Some parts use facial expressi
 Yes. I'd like it if at least some of your mods ended up free eventually - my main goal for this tool is to grow the GFL2 modding ecosystem - but the Lab comes with no obligations. 
 
 **Can I edit someone else's mod?**
-This is not currently supported, but is a possible future feature.
+This is in progress. Mods include the instructions for the Lab to do this (you can opt out with a checkbox, or permanently in Settings). The actual loading will be built soon.
 
 **Only Girls' Frontline 2? What about other games?**
-GFL2 is the only game *I am aware of* with this particular combination of CPU skinning and Unity bundle setup. Most F2P/gacha games use DX12 and GPU skinning and are serviced fine by 3DMigoto already. Most non-F2P games allow less roundabout modding techniques. 
+Most F2P/gacha games use DX12 and GPU skinning and are serviced fine by 3DMigoto already. Most non-F2P games allow less roundabout modding techniques. 
 
-If you'd like to extend this to another game, the basic technique is described in [the palette recovery guide](PALETTE_RECOVERY_GUIDE.md). Feel free to reach out with any questions.
+If you'd like to extend this to another game with this particular combination of CPU skinning and Unity bundle setup, the basic technique is described in [the palette recovery guide](PALETTE_RECOVERY_GUIDE.md). Feel free to reach out with any questions.
 
 **Who are you anyway?**
-Nobody you've heard of, and nobody from any existing modding or data-mining scene. This is a throwaway Github dedicated purely to this project, to separate it from my day job. I'm just a guy who needed a side project to play around with AI on, I wanted to see more mods for GFL2, and the project succeeded further than I expected and grew somewhat out of my control. 
+Nobody you've heard of, and nobody from any existing modding or data-mining scene. Not associated with any game developers, GFL2 or otherwise. 
+
+This is a throwaway Github dedicated purely to this project, to separate it from my day job. I'm just a guy who needed a side project to play around with AI on, I wanted to see more mods for GFL2, and the project succeeded further than I expected and grew somewhat out of my control. 
 
 ## The Mods
 
@@ -64,7 +66,7 @@ I measured no framerate drop on a modern PC, and have optimized the mods where p
 Typically no, unless they touch entirely different things. Details of conflict resolution are left to your mod loader of choice.
 
 **My mod broke after a game update. Why?**
-The game files changed, so the hashes changed. Rebuild it in the Lab and it should be good to go, unless the outfit received major edits. A standalone "mod repair tool" is on my radar.
+The game files changed, so the hashes changed. Rebuild it in the Lab and it should be good to go, unless the outfit received major edits. Being able to open and repair abandoned mods is in progress - see "Can I edit someone else's mod?"
 
 **Mobile?**
 No. Never happening. 3DMigoto-like applications don't work on mobile. But if you have GFL2 working in Linux or something and would like help getting this tool to run, reach out.

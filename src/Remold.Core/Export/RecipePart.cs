@@ -19,12 +19,12 @@ namespace Remold.Core.Export;
 /// its siblings draw.</para></summary>
 public readonly record struct RecipeTierSlot(string SlotName, string MeshAddress,
     string? MeshBundle = null, long MeshPathId = 0, bool CastsShadows = true,
-    VisibilityOverride Visibility = VisibilityOverride.None);
+    VisibilityOverride Visibility = VisibilityOverride.None,
+    string? RendererBundle = null, long RendererPathId = 0);
 
 /// <summary>
-/// The prefab-exact identity of one workbench part, carried down into
-/// <see cref="AssetExporter.ExportRecipePart"/> so the mesh is read by exact identity, never re-derived
-/// from mesh prefix + name-convention token. Two backed forms:
+/// The prefab-exact identity of one workbench part, so the mesh is read by exact identity, never
+/// re-derived from mesh prefix + name-convention token. Two backed forms:
 ///
 /// <para><b>Recipe-backed</b> (character/RX prefabs): <see cref="SlotName"/> is the representative
 /// (<c>_lod0</c>) slot name, which the mesh object in the addressed bundle also carries as its

@@ -10,6 +10,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Avalonia.Headless" Version="11.3.20" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Remold.Core\Remold.Core.csproj" />
@@ -25,8 +26,15 @@
   <ItemGroup>
     <!-- Golden emitted-text assets (the emission contract, pinned from synthetic inputs). -->
     <None Include="Migoto\golden\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Project\golden\**" CopyToOutputDirectory="PreserveNewest" />
     <!-- the shipped sharing measurement, so its committed shape is under test -->
     <None Include="..\..\data\sharing_seed.json" Link="data\sharing_seed.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- and its observation memo, whose committed shape ships beside it -->
+    <None Include="..\..\data\asset_hashes_seed.json" Link="data\asset_hashes_seed.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <!-- the shipped shader slot catalog, so its committed shape is under test -->
+    <None Include="..\..\data\charps_slots.json" Link="data\charps_slots.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

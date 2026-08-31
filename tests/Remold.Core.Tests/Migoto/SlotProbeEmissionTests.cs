@@ -10,7 +10,8 @@ namespace Remold.Core.Tests.Migoto;
 /// <summary>
 /// The slot-probe emission a Replace build carries instead of a pixel-shader pass table: each stock map of
 /// the anchor gets a <c>[TextureOverride]</c> tag with a per-kind <c>filter_index</c>, and the draw list
-/// probes <c>ps-t0..t6</c> for those indices AT THE DRAW. The bound state is final by draw time; a
+/// probes the registers the build's slot plan names for those indices AT THE DRAW. The bound state is
+/// final by draw time; a
 /// variable written by a PS-keyed section is one listed draw stale, because ShaderOverride lists run VS
 /// before PS and the draw fires from the VS phase.
 /// </summary>
@@ -23,7 +24,8 @@ public class SlotProbeEmissionTests : IDisposable
 
     private (string Ini, IReadOnlyList<string> Warnings, IReadOnlyList<string> Diagnostics) Emit(
         IReadOnlyList<StockMapTag>? stockMaps, bool donorTexed, IReadOnlyList<RetexEntry>? retex = null,
-        bool donorNormal = false, IReadOnlyDictionary<int, SubmeshMaps>? subTextures = null)
+        bool donorNormal = false, IReadOnlyDictionary<int, SubmeshMaps>? subTextures = null,
+        IReadOnlyList<StockPropertyTag>? stockProperties = null)
     {
         string dump = Path.Combine(_root, "alpha-" + Guid.NewGuid().ToString("N")[..8]);
         SyntheticPool.WritePartDump(dump, seed: 3, verts: 32, boneHashes: new uint[] { 101, 102 });
@@ -60,6 +62,7 @@ public class SlotProbeEmissionTests : IDisposable
                             nrm is null ? MapSlot.Neutral : MapSlot.From(nrm), MapSlot.Neutral),
                     }),
                     StockMaps = stockMaps,
+                    StockProperties = stockProperties,
                 },
             },
         });
@@ -165,6 +168,34 @@ public class SlotProbeEmissionTests : IDisposable
     }
 
     [Fact]
+    public void A_generic_only_replacement_emits_property_probes_without_the_fixed_probe_sweep()
+    {
+        string generic = Path.Combine(_root, "generic-only.dds");
+        FlatDds.Write(generic, (20, 40, 60, 255));
+        var properties = new[]
+        {
+            new PropertyMapSlot("_DetailMask", MapSlot.From(generic), new[] { 6, 7 }),
+        };
+        var (ini, _, _) = Emit(stockMaps: null, donorTexed: true,
+            subTextures: new Dictionary<int, SubmeshMaps>
+            {
+                [0] = new(Properties: properties),
+            },
+            stockProperties: new[]
+            {
+                new StockPropertyTag("f4f4d4d4", "_DetailMask", new[] { 6, 7 }, "alpha"),
+            });
+
+        string draw = ini[ini.IndexOf("[CommandListDraw_swap]", StringComparison.Ordinal)..];
+        Assert.Contains("$zz_slot_x", draw);
+        Assert.DoesNotContain("$zz_slot_a", draw);
+        Assert.DoesNotContain("$zz_slot_n", draw);
+        Assert.DoesNotContain("$zz_slot_r", draw);
+        Assert.DoesNotContain("[TextureOverride_SlotTag_", ini);
+        Assert.Contains("[TextureOverride_PropertyTag_f4f4d4d4]", ini);
+    }
+
+    [Fact]
     public void Duplicate_tags_collapse_and_a_kind_conflict_is_recorded()
     {
         var dupes = new[]
@@ -202,13 +233,16 @@ public class SlotProbeEmissionTests : IDisposable
     /// <summary>An out-of-range row that asks for nothing impossible still degrades to a warning: the
     /// geometry swap is worth more than the row.</summary>
     [Fact]
-    public void An_out_of_range_row_asking_for_a_bindable_map_is_skipped_with_a_warning()
+    public void An_out_of_range_row_asking_for_a_bindable_map_is_skipped_with_a_diagnostic()
     {
         string dds = Path.Combine(_root, "far.dds");
         FlatDds.Write(dds, (5, 5, 5, 255));
-        var (ini, warnings, _) = Emit(Tags, donorTexed: true,
+        var (ini, warnings, diagnostics) = Emit(Tags, donorTexed: true,
             subTextures: new Dictionary<int, SubmeshMaps> { [99] = new(MapSlot.From(dds)) });
-        Assert.Contains(warnings, w => w.Contains("submesh 99") && w.Contains("out of range"));
+        // A pipeline suffix and a submesh position: the change list refuses this by name long before a
+        // build reaches here, so the row is the emitter's own account and belongs in the log.
+        Assert.Contains(diagnostics, d => d.Contains("submesh 99") && d.Contains("out of range"));
+        Assert.DoesNotContain(warnings, w => w.Contains("out of range"));
         Assert.Contains("drawindexed = ", ini);
     }
 

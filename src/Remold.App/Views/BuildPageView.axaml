@@ -1,0 +1,662 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Remold.App.ViewModels"
+             xmlns:bp="using:Remold.App.ViewModels.BuildPage"
+             xmlns:views="using:Remold.App.Views"
+             xmlns:conv="using:Avalonia.Data.Converters"
+             x:Class="Remold.App.Views.BuildPageView"
+             x:DataType="bp:BuildPageVm">
+
+  <UserControl.Styles>
+    <Style Selector="Border.buildPanel">
+      <Setter Property="Background" Value="{StaticResource HudPanelBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource HudBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Padding" Value="10" />
+    </Style>
+    <Style Selector="Border.buildCard">
+      <Setter Property="Background" Value="{StaticResource HudPanelAltBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource HudBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Padding" Value="8" />
+    </Style>
+    <Style Selector="Border.buildCard.focused">
+      <Setter Property="BorderBrush" Value="{StaticResource HudAccentBrush}" />
+    </Style>
+    <Style Selector="Border.libraryRow.selected">
+      <Setter Property="BorderBrush" Value="{StaticResource HudAccentBrush}" />
+    </Style>
+    <Style Selector="TextBlock.panelTitle">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{StaticResource HudTextBrush}" />
+      <Setter Property="FontSize" Value="14" />
+    </Style>
+    <Style Selector="TextBlock.sectionLabel">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
+    </Style>
+    <Style Selector="TextBlock.mark">
+      <Setter Property="Foreground" Value="{StaticResource HudAmberBrush}" />
+    </Style>
+    <Style Selector="TextBlock.mark.blocked">
+      <Setter Property="Foreground" Value="{StaticResource HudErrorBrush}" />
+    </Style>
+    <Style Selector="TextBlock.footerGlyph">
+      <Setter Property="Foreground" Value="{StaticResource HudAccentBrush}" />
+    </Style>
+    <Style Selector="TextBlock.footerGlyph.alarm">
+      <Setter Property="Foreground" Value="{StaticResource HudErrorBrush}" />
+    </Style>
+    <Style Selector="Button.flat /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="2" />
+    </Style>
+    <Style Selector="Button.flat:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource HudBorderBrush}" />
+    </Style>
+    <Style Selector="Button.diagnosticCounts">
+      <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
+    </Style>
+    <Style Selector="Button.diagnosticCounts.warning">
+      <Setter Property="Foreground" Value="{StaticResource HudAmberBrush}" />
+    </Style>
+    <Style Selector="Button.diagnosticCounts.blocked">
+      <Setter Property="Foreground" Value="{StaticResource HudErrorBrush}" />
+    </Style>
+    <Style Selector="TextBlock.issueLine.heading">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
+    </Style>
+  </UserControl.Styles>
+
+  <UserControl.Resources>
+    <DataTemplate x:Key="DiagnosticIssueTemplate" x:DataType="bp:BuildIssueVm">
+      <Grid Margin="0,3" RowDefinitions="Auto,Auto" HorizontalAlignment="Stretch">
+        <TextBlock Classes="issueLine" Classes.heading="{Binding IsHeading}"
+                   Text="{Binding Message}" TextWrapping="Wrap" FontSize="11" />
+        <ItemsControl Grid.Row="1" ItemsSource="{Binding Placements}" IsVisible="{Binding HasPlacements}"
+                      HorizontalAlignment="Left" MaxWidth="640" Margin="0,2,0,0">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="bp:BuildPlacementChipVm">
+              <Button Content="{Binding Label}" Command="{Binding FocusCommand}"
+                      Click="OnDiagnosticFlyoutChipClick"
+                      Padding="5,1" FontSize="10" Margin="0,0,4,2"
+                      ToolTip.Tip="{x:Static bp:BuildPlacementChipVm.FocusTip}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Grid>
+    </DataTemplate>
+  </UserControl.Resources>
+
+  <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                AllowAutoHide="False">
+    <!-- AllowDrop sits on the whole page, not only on the three surfaces that take a drop: without it the
+         AddHandler drag handlers never fire outside them, so a drag over anything else keeps whatever the
+         platform last offered and reads as droppable. What a drag can actually do is decided in one place,
+         BuildPageView.Accepts, which the drop asks again. -->
+    <Grid Width="{Binding $parent[ScrollViewer].Bounds, Converter={x:Static views:BuildPageView.PageWidth}}"
+          RowDefinitions="*,112" RowSpacing="10" DragDrop.AllowDrop="True">
+
+      <Grid Grid.Row="0" ColumnDefinitions="250,*,300" ColumnSpacing="10">
+
+        <!-- Edit library: every authored edit and every placement, read directly from Outline(). -->
+        <Border Grid.Column="0" Classes="buildPanel">
+          <Grid RowDefinitions="Auto,*" RowSpacing="8">
+            <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+              <TextBlock Classes="panelTitle" Text="Edits" />
+              <TextBlock Grid.Column="1" Text="✗" Foreground="{StaticResource HudErrorBrush}"
+                         IsVisible="{Binding HasBlocked}" ToolTip.Tip="{Binding PrimaryBlockedMessage}" />
+              <TextBlock Grid.Column="1" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
+                         IsVisible="{Binding EditsNeedAttention}" ToolTip.Tip="Some edits have warnings." />
+            </Grid>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
+              <Panel>
+                <TextBlock Text="This lists every edit in the mod. Add the first one in ② Edit."
+                           Margin="4,8" TextWrapping="Wrap"
+                           Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding !HasSubjects}" />
+                <!-- the library authors placements, so it sleeps while a build runs: a tick that lands
+                     mid-run is refused, and the box would keep the answer the mod never took -->
+                <ItemsControl ItemsSource="{Binding Subjects}" IsEnabled="{Binding BoardEnabled}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="bp:BuildSubjectVm">
+                      <StackPanel Margin="0,0,0,12" Spacing="5">
+                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold"
+                                   Foreground="{StaticResource HudAccentBrush}" TextWrapping="Wrap"
+                                   ToolTip.Tip="{Binding Label}" />
+                        <ItemsControl ItemsSource="{Binding Parts}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="bp:BuildPartVm">
+                              <StackPanel Spacing="3" Margin="0,2,0,7">
+                                <TextBlock Text="{Binding Label}" Classes="sectionLabel"
+                                           TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Label}" />
+                                <ItemsControl ItemsSource="{Binding Edits}">
+                                  <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="bp:BuildEditRowVm">
+                                      <Border Classes="buildCard libraryRow" Classes.selected="{Binding IsSelected}"
+                                              Padding="7,6" Margin="0,0,0,4"
+                                              ToolTip.Tip="Drag this edit onto Always or a state.">
+                                        <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto,Auto"
+                                              ColumnSpacing="5">
+                                          <!-- the name trims in its star column with the full name on hover;
+                                               the change account gets its own line, never squeezed beside it -->
+                                          <Button x:Name="DragGrab" Classes="flat" Grid.Row="0" Grid.Column="0"
+                                                  HorizontalContentAlignment="Left"
+                                                  Command="{Binding OpenCommand}"
+                                                  ToolTip.Tip="{Binding Label}">
+                                            <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" />
+                                          </Button>
+                                          <TextBlock Grid.Row="1" Grid.ColumnSpan="3"
+                                                     Text="{Binding ChangeSummary}" FontSize="10"
+                                                     Foreground="{StaticResource HudSubtextBrush}"
+                                                     IsVisible="{Binding HasChangeSummary}"
+                                                     TextWrapping="Wrap" Margin="2,1,0,0" />
+                                          <TextBlock Grid.Row="0" Grid.Column="1" Classes="mark"
+                                                     Classes.blocked="{Binding IsBlocked}"
+                                                     Text="{Binding Mark}" IsVisible="{Binding HasWarning}"
+                                                     ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
+                                          <Button Grid.Row="0" Grid.Column="2" Classes="flat" Content="⋯"
+                                                  FontSize="11"
+                                                  ToolTip.Tip="Choose where this edit is used.">
+                                            <Button.Flyout>
+                                              <Flyout Placement="BottomEdgeAlignedRight">
+                                                <StackPanel Width="230" Spacing="5">
+                                                  <TextBlock Text="Use in…" FontWeight="SemiBold" />
+                                                  <!-- capped and scrolling like both sibling flyouts: a mod
+                                                       with many states otherwise runs off the screen -->
+                                                  <ScrollViewer MaxHeight="320"
+                                                                VerticalScrollBarVisibility="Auto">
+                                                    <ItemsControl ItemsSource="{Binding UseIn}">
+                                                      <ItemsControl.ItemTemplate>
+                                                        <DataTemplate x:DataType="bp:BuildPlacementChoiceVm">
+                                                          <CheckBox Content="{Binding Label}"
+                                                                    IsChecked="{Binding IsPlaced, Mode=TwoWay}"
+                                                                    Margin="0,2" />
+                                                        </DataTemplate>
+                                                      </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                  </ScrollViewer>
+                                                </StackPanel>
+                                              </Flyout>
+                                            </Button.Flyout>
+                                          </Button>
+                                          <ItemsControl Grid.Row="2" Grid.ColumnSpan="3"
+                                                        ItemsSource="{Binding PlacementChips}">
+                                            <ItemsControl.ItemsPanel>
+                                              <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                              <DataTemplate x:DataType="x:String">
+                                                <Border BorderBrush="{StaticResource HudBorderBrush}"
+                                                        BorderThickness="1" CornerRadius="2"
+                                                        Padding="4,1" Margin="0,2,4,0">
+                                                  <TextBlock Text="{Binding}" FontSize="10"
+                                                             Foreground="{StaticResource HudSubtextBrush}" />
+                                                </Border>
+                                              </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                          </ItemsControl>
+                                        </Grid>
+                                      </Border>
+                                    </DataTemplate>
+                                  </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                              </StackPanel>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </Panel>
+            </ScrollViewer>
+          </Grid>
+        </Border>
+
+        <!-- Behavior board: Always plus every key group and every ordered state. -->
+        <Border x:Name="BehaviorBoard" Grid.Column="1" Classes="buildPanel">
+          <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8">
+            <TextBlock Grid.Row="0" Classes="panelTitle" Text="Behavior" />
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
+              <!-- the board authors the mod's behaviour, so it sleeps while a build runs -->
+              <StackPanel Spacing="8" IsEnabled="{Binding BoardEnabled}">
+                <Border x:Name="AlwaysDropZone" Classes="buildCard" Classes.focused="{Binding IsMarked}"
+                        DataContext="{Binding Always}"
+                        x:DataType="bp:BuildAlwaysVm" DragDrop.AllowDrop="True"
+                        ToolTip.Tip="Edits here are active all the time.">
+                  <StackPanel Spacing="6">
+                    <TextBlock Text="Always" FontWeight="SemiBold" />
+                    <ItemsControl ItemsSource="{Binding Tokens}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="bp:BuildTokenVm">
+                          <Border Classes="buildCard" Padding="6,3" Margin="0,0,5,5"
+                                  ToolTip.Tip="Drag this onto a state or Always to move it.">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                              <Button x:Name="DragGrab" Classes="flat" Content="{Binding Display}"
+                                      Command="{Binding OpenCommand}" ToolTip.Tip="Work on this edit in ② Edit." />
+                              <TextBlock Classes="mark" Classes.blocked="{Binding IsBlocked}"
+                                         Text="{Binding Mark}" IsVisible="{Binding HasWarning}"
+                                         ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
+                              <Button Classes="flat" Content="×" Command="{Binding RemoveCommand}"
+                                      ToolTip.Tip="Remove this edit from here." />
+                            </StackPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Content="＋ Edit ▾" FontSize="11" Padding="6,2" HorizontalAlignment="Left">
+                      <Button.Flyout>
+                        <Flyout Placement="BottomEdgeAlignedLeft">
+                          <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding AvailableEdits}" MinWidth="200">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="bp:BuildEditChoiceVm">
+                                  <Button Classes="flat" Content="{Binding Display}"
+                                          Command="{Binding AddCommand}" Click="OnChoiceFlyoutClick"
+                                          HorizontalAlignment="Stretch"
+                                          HorizontalContentAlignment="Left" Padding="6,3" />
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </ScrollViewer>
+                        </Flyout>
+                      </Button.Flyout>
+                    </Button>
+                  </StackPanel>
+                </Border>
+
+                <!-- the one surface that teaches: what a key group, a state and Always are, then the
+                     first action -->
+                <TextBlock Margin="4,6" TextWrapping="Wrap" IsVisible="{Binding !HasGroups}"
+                           Foreground="{StaticResource HudSubtextBrush}"
+                           Text="Always is on all the time, and a key group switches between its states with one key. Each state holds its own edits, and ＋ New key makes a group from an edit." />
+
+                <ItemsControl ItemsSource="{Binding Groups}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="bp:BuildGroupVm">
+                      <Border Classes="buildCard" Classes.focused="{Binding IsMarked}" Margin="0,0,0,8">
+                        <StackPanel Spacing="7">
+                          <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
+                            <views:KeyCaptureButton Grid.Column="0" BoundKey="{Binding Key, Mode=TwoWay}"
+                                                    EmptyLabel="＋ Key"
+                                                    ToolTip.Tip="Click, then press a key. Delete or Backspace clears it." />
+                            <TextBox Grid.Column="1" Text="{Binding Label, Mode=OneWay}"
+                                     Watermark="{Binding DisplayName}" FontSize="12"
+                                     KeyDown="OnBoardLabelKeyDown" LostFocus="OnBoardLabelLostFocus" />
+                            <TextBlock Grid.Column="2" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
+                                       IsVisible="{Binding HasCollision}" ToolTip.Tip="{Binding CollisionTip}"
+                                       VerticalAlignment="Center" />
+                            <Button Grid.Column="3" Content="Delete" Command="{Binding DeleteCommand}"
+                                    ToolTip.Tip="Delete this key group and its states. The edits themselves are kept." />
+                          </Grid>
+                          <Border Background="{StaticResource HudBgBrush}" CornerRadius="3" Padding="7,5"
+                                  IsVisible="{Binding IsKeyless}">
+                            <TextBlock Text="✗ No key set. This blocks the build. Set one with ＋ Key above."
+                                       Foreground="{StaticResource HudErrorBrush}" FontSize="11"
+                                       TextWrapping="Wrap" />
+                          </Border>
+
+                          <ItemsControl ItemsSource="{Binding States}">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate x:DataType="bp:BuildStateVm">
+                                <Border Classes="buildCard" Classes.focused="{Binding IsMarked}"
+                                        Margin="8,0,0,6" DragDrop.AllowDrop="True">
+                                  <StackPanel Spacing="6">
+                                    <!-- the handle is the drag surface, and only it: the name box drags its
+                                         own text selection and the four buttons would lose their clicks -->
+                                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="5">
+                                      <TextBlock x:Name="StateDragHandle" Grid.Column="0" Text="⠿"
+                                                 VerticalAlignment="Center" Padding="2,0"
+                                                 Foreground="{StaticResource HudSubtextBrush}"
+                                                 ToolTip.Tip="Drag to reorder this state." />
+                                      <TextBox Grid.Column="1" Width="115" Text="{Binding Label, Mode=OneWay}"
+                                               Watermark="{Binding DisplayName}" FontSize="11"
+                                               KeyDown="OnBoardLabelKeyDown" LostFocus="OnBoardLabelLostFocus" />
+                                      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4"
+                                                  VerticalAlignment="Center">
+                                        <TextBlock Text="at launch" FontSize="10"
+                                                   Foreground="{StaticResource HudAccentBrush}"
+                                                   IsVisible="{Binding IsLaunch}" />
+                                        <Button Classes="flat" FontSize="10"
+                                                 Foreground="{StaticResource HudSubtextBrush}"
+                                                Command="{Binding OpenCompositionCommand}"
+                                                IsVisible="{Binding CountLine, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}">
+                                          <StackPanel Orientation="Horizontal" Spacing="3">
+                                            <TextBlock Text="{Binding CountLine}" />
+                                            <TextBlock Text="▾" />
+                                          </StackPanel>
+                                          <Button.Flyout>
+                                            <Flyout Placement="BottomEdgeAlignedLeft">
+                                              <ItemsControl ItemsSource="{Binding Composition}" MinWidth="230">
+                                                <ItemsControl.ItemTemplate>
+                                                  <DataTemplate x:DataType="bp:BuildResolvedPartVm">
+                                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12"
+                                                          Margin="0,2">
+                                                      <TextBlock Text="{Binding Part}" FontSize="11" />
+                                                      <TextBlock Grid.Column="1" Text="{Binding Answer}"
+                                                                 FontSize="11"
+                                                                 Foreground="{StaticResource HudSubtextBrush}" />
+                                                    </Grid>
+                                                  </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                              </ItemsControl>
+                                            </Flyout>
+                                          </Button.Flyout>
+                                        </Button>
+                                      </StackPanel>
+                                      <Button Grid.Column="3" Classes="flat" Content="↑"
+                                              Command="{Binding MoveUpCommand}" IsEnabled="{Binding CanMoveUp}"
+                                              ToolTip.Tip="Move this state up." />
+                                      <Button Grid.Column="4" Classes="flat" Content="↓"
+                                              Command="{Binding MoveDownCommand}" IsEnabled="{Binding CanMoveDown}"
+                                              ToolTip.Tip="Move this state down." />
+                                      <Button Grid.Column="5" Classes="flat" Content="×"
+                                              Command="{Binding RemoveCommand}"
+                                              IsEnabled="{Binding CanRemove}" ToolTip.ShowOnDisabled="True"
+                                              ToolTip.Tip="{Binding RemoveTip}" />
+                                    </Grid>
+
+                                    <ItemsControl ItemsSource="{Binding Tokens}">
+                                      <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                      </ItemsControl.ItemsPanel>
+                                      <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="bp:BuildTokenVm">
+                                          <Border Classes="buildCard" Padding="6,3" Margin="0,0,5,5"
+                                                  ToolTip.Tip="Drag this onto a state or Always to move it.">
+                                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                              <Button x:Name="DragGrab" Classes="flat" Content="{Binding Display}"
+                                                      Command="{Binding OpenCommand}"
+                                                      ToolTip.Tip="Work on this edit in ② Edit." />
+                                              <TextBlock Classes="mark" Classes.blocked="{Binding IsBlocked}"
+                                                         Text="{Binding Mark}" IsVisible="{Binding HasWarning}"
+                                                         ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
+                                              <Button Classes="flat" Content="×" Command="{Binding RemoveCommand}"
+                                                      ToolTip.Tip="Remove this edit from here." />
+                                            </StackPanel>
+                                          </Border>
+                                        </DataTemplate>
+                                      </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <Button Content="＋ Edit ▾" FontSize="11" Padding="6,2"
+                                            HorizontalAlignment="Left">
+                                      <Button.Flyout>
+                                        <Flyout Placement="BottomEdgeAlignedLeft">
+                                          <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                                            <ItemsControl ItemsSource="{Binding AvailableEdits}"
+                                                          MinWidth="200">
+                                              <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="bp:BuildEditChoiceVm">
+                                                  <Button Classes="flat" Content="{Binding Display}"
+                                                          Command="{Binding AddCommand}"
+                                                          Click="OnChoiceFlyoutClick"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left" Padding="6,3" />
+                                                </DataTemplate>
+                                              </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                          </ScrollViewer>
+                                        </Flyout>
+                                      </Button.Flyout>
+                                    </Button>
+                                  </StackPanel>
+                                </Border>
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                          <Button Content="＋ State" HorizontalAlignment="Left"
+                                  Command="{Binding AddStateCommand}"
+                                  ToolTip.Tip="Add a state with the same edits as the last one." />
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </ScrollViewer>
+
+            <Button Grid.Row="2" Content="＋ New key ▾" HorizontalAlignment="Left"
+                    ToolTip.Tip="Make a key group from an edit.">
+              <Button.Flyout>
+                <Flyout Placement="TopEdgeAlignedLeft">
+                  <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl ItemsSource="{Binding NewGroupChoices}" MinWidth="220">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="bp:BuildEditRowVm">
+                          <Button Classes="flat" Content="{Binding FullDisplay}"
+                                  Command="{Binding MakeKeyCommand}" Click="OnChoiceFlyoutClick"
+                                  HorizontalAlignment="Stretch"
+                                  HorizontalContentAlignment="Left" Padding="6,3" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+                </Flyout>
+              </Button.Flyout>
+            </Button>
+          </Grid>
+        </Border>
+
+        <!-- Identity, preview, build/install, result and disclosures. -->
+        <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
+          <StackPanel Spacing="10">
+            <Border Classes="buildPanel">
+              <StackPanel Spacing="7">
+                <TextBlock Classes="panelTitle" Text="Mod" />
+                <TextBlock Classes="sectionLabel" Text="Name" />
+                <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageName, Mode=TwoWay}"
+                         Watermark="Mod name" />
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="7">
+                  <StackPanel Grid.Column="0" Spacing="3">
+                    <TextBlock Classes="sectionLabel" Text="Version" />
+                    <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageVersion, Mode=TwoWay}" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Spacing="3">
+                    <TextBlock Classes="sectionLabel" Text="Author" />
+                    <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageAuthor, Mode=TwoWay}" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock Classes="sectionLabel" Text="Description" />
+                <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageDescription, Mode=TwoWay}"
+                         AcceptsReturn="True" MinHeight="58" TextWrapping="Wrap" />
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
+                  <TextBlock Text="Key" Classes="sectionLabel" VerticalAlignment="Center" />
+                  <views:KeyCaptureButton Grid.Column="1"
+                                          BoundKey="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Mode=TwoWay}"
+                                          EmptyLabel="＋ Key" HorizontalAlignment="Left"
+                                          ToolTip.Tip="Turns the whole mod on and off. Delete or Backspace clears it." />
+                  <TextBlock Grid.Column="2" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
+                             IsVisible="{Binding WholeModKeyCollisionTip, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                             ToolTip.Tip="{Binding WholeModKeyCollisionTip}" VerticalAlignment="Center" />
+                </Grid>
+                <CheckBox Content="Editable by others"
+                          IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageIncludesRepairData, Mode=TwoWay}"
+                          ToolTip.Tip="Adds the file a later Doll Remolding Lab version will use to open this mod for editing and repair. Without it, the mod can only be rebuilt from your project." />
+              </StackPanel>
+            </Border>
+
+            <Border Classes="buildPanel">
+              <StackPanel Spacing="7">
+                <TextBlock Classes="panelTitle" Text="Preview" />
+                <Border x:Name="PreviewDropZone" Height="150" Classes="buildCard"
+                        DragDrop.AllowDrop="True" ToolTip.Tip="Drop one PNG, JPG, JPEG, WEBP or BMP here.">
+                  <Panel>
+                    <Image Source="{Binding PreviewImage}" Stretch="Uniform"
+                           IsVisible="{Binding HasPreview}" />
+                    <TextBlock Text="No preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding HasNoPreview}" />
+                    <TextBlock Text="Image missing" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{StaticResource HudAmberBrush}" IsVisible="{Binding PreviewMissing}" />
+                    <TextBlock Text="Reading image…" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding PreviewDecoding}" />
+                    <TextBlock Text="Couldn't read this image" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding PreviewUndecodable}" />
+                  </Panel>
+                </Border>
+                <!-- the name and size trim in a 300-wide column, so the whole line is on hover -->
+                <TextBlock Text="{Binding PreviewTitle}" FontSize="11" IsVisible="{Binding HasPreviewTitle}"
+                           Foreground="{StaticResource HudSubtextBrush}" TextTrimming="CharacterEllipsis"
+                           ToolTip.Tip="{Binding PreviewTitle}" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Button Content="Browse…" Command="{Binding BrowsePreviewCommand}"
+                          IsEnabled="{Binding PreviewEnabled}" ToolTip.ShowOnDisabled="True"
+                          ToolTip.Tip="{Binding PreviewPickTip}" />
+                  <Button Content="Remove" Command="{Binding RemovePreviewCommand}"
+                          IsVisible="{Binding !HasNoPreview}" IsEnabled="{Binding !IsWorkInFlight}" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+
+      <!-- The build strip: fixed actions, status and verdict rows, with diagnostics in an overlay flyout. -->
+      <Border Grid.Row="1" Height="112" BorderBrush="{StaticResource HudBorderBrush}"
+              BorderThickness="0,1,0,0" Padding="4,10,4,9">
+        <!-- Three allocated rows are the strip's height law. Empty state changes content, never geometry. -->
+        <Grid RowDefinitions="34,21,37">
+          <!-- Row 1: the existing action cluster and the completed-build result. -->
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,*" ColumnSpacing="12">
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="7">
+              <Button Classes="primary" Content="Build" Command="{Binding BuildCommand}"
+                      IsEnabled="{Binding CanBuild}" ToolTip.ShowOnDisabled="True"
+                      ToolTip.Tip="{Binding BuildButtonTip}" />
+              <Button Content="Install" Command="{Binding InstallCommand}" IsEnabled="{Binding CanInstall}"
+                      IsVisible="{Binding !LoaderNeedsAttention}" ToolTip.ShowOnDisabled="True"
+                      ToolTip.Tip="{Binding InstallButtonTip}" />
+              <Button Content="{Binding LoaderButtonLabel}" Command="{Binding ChooseLoaderCommand}"
+                      IsVisible="{Binding LoaderNeedsAttention}" ToolTip.Tip="{Binding LoaderButtonTip}" />
+              <Button Content="Log" Command="{Binding OpenLogCommand}"
+                      IsVisible="{Binding HasFailureLog}" ToolTip.Tip="Open the build log." />
+              <Button Content="Open installed folder" Command="{Binding OpenInstalledCommand}"
+                      IsVisible="{Binding HasLastInstall}" ToolTip.Tip="{Binding InstalledFolderTip}" />
+            </StackPanel>
+            <Grid Grid.Column="1" ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="6"
+                  IsVisible="{Binding HasLastBuild}" VerticalAlignment="Center">
+              <TextBlock Grid.Column="0" Text="{Binding BuildAgainLine}" FontSize="11"
+                         VerticalAlignment="Center" Foreground="{StaticResource HudAmberBrush}"
+                         IsVisible="{Binding BuildResultStale}" HorizontalAlignment="Right" />
+              <Button Grid.Column="1" Content="Folder" Command="{Binding OpenFolderCommand}"
+                      ToolTip.Tip="{Binding FolderTip}" />
+              <Button Grid.Column="2" Content="Zip" Command="{Binding OpenZipCommand}"
+                      IsVisible="{Binding HasBuildZip}" />
+              <Button Grid.Column="3" Content="Log" Command="{Binding OpenLogCommand}"
+                      IsVisible="{Binding HasBuildLog}" ToolTip.Tip="Open the build log." />
+            </Grid>
+          </Grid>
+
+          <!-- Row 2: reserved even when the shared status channel is empty. -->
+          <TextBlock Grid.Row="1" Text="{Binding Status}" FontSize="11"
+                     Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center"
+                     TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding StatusTip}" />
+
+          <!-- Row 3: one verdict and the only diagnostic disclosure. No tooltip on the row itself: a tip
+               here covers the counts button too, and the button is a different thing from the verdict. The
+               verdict's own trimmed lines carry their full text; the button says what it opens. -->
+          <Border Grid.Row="2" BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,1,0,0"
+                  Padding="0,7,0,0">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+              <Panel Grid.Column="0">
+                <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="6" IsVisible="{Binding ShowFooterVerdict}">
+                  <TextBlock Grid.Column="0" Text="{Binding Footer.Glyph}" VerticalAlignment="Center"
+                             Classes="footerGlyph" Classes.alarm="{Binding Footer.IsAlarm}" />
+                  <TextBlock Grid.Column="1" Text="{Binding Footer.Lead}" FontWeight="SemiBold"
+                             VerticalAlignment="Center" />
+                  <TextBlock Grid.Column="2" Text="{Binding Footer.Text}" TextWrapping="NoWrap"
+                             TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                             ToolTip.Tip="{Binding Footer.Text}" />
+                </Grid>
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" IsVisible="{Binding ShowBlockedVerdict}">
+                  <TextBlock Grid.Column="0" Text="✗" VerticalAlignment="Center"
+                             Classes="footerGlyph alarm" />
+                  <TextBlock Grid.Column="1" Text="{Binding PrimaryBlockedSummary}" TextWrapping="NoWrap"
+                             TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                             ToolTip.Tip="{Binding PrimaryBlockedSummary}" />
+                  <ItemsControl Grid.Column="2" ItemsSource="{Binding PrimaryBlockedPlacements}"
+                                VerticalAlignment="Center">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="bp:BuildPlacementChipVm">
+                        <Button Content="{Binding Label}" Command="{Binding FocusCommand}"
+                                Padding="5,1" FontSize="10"
+                                ToolTip.Tip="{x:Static bp:BuildPlacementChipVm.FocusTip}" />
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Grid>
+              </Panel>
+
+              <Button Grid.Column="1" Classes="flat diagnosticCounts"
+                      Classes.blocked="{Binding HasBlocked}"
+                      Classes.warning="{Binding HasWarningDiagnosticsOnly}"
+                      IsVisible="{Binding HasDiagnostics}" Padding="5,2" FontSize="11"
+                      VerticalAlignment="Center"
+                      ToolTip.Tip="Open the full list of what the build check found.">
+                <StackPanel Orientation="Horizontal" Spacing="3">
+                  <TextBlock Text="{Binding DiagnosticCounts}" />
+                  <TextBlock Text="▾" />
+                </StackPanel>
+                <Button.Flyout>
+                  <Flyout Placement="TopEdgeAlignedRight">
+                    <!-- Fluent's FlyoutPresenter owns the outer ScrollViewer. Its stock theme caps the
+                         presenter at 456 DIP and enables horizontal scrolling, so policy belongs on that
+                         presenter rather than on this content viewer. The stock template forwards the
+                         ScrollViewer attached properties with TemplateBinding. -->
+                    <Flyout.FlyoutPresenterTheme>
+                      <ControlTheme TargetType="FlyoutPresenter"
+                                    BasedOn="{StaticResource {x:Type FlyoutPresenter}}">
+                        <Setter Property="MaxWidth" Value="760" />
+                        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                      </ControlTheme>
+                    </Flyout.FlyoutPresenterTheme>
+                    <ScrollViewer MaxHeight="{Binding $parent[Window].Bounds, Converter={x:Static views:BuildPageView.FlyoutMaxHeight}}"
+                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                      <StackPanel Spacing="8">
+                        <StackPanel IsVisible="{Binding HasBlocked}" Spacing="2">
+                          <TextBlock Text="{Binding BlockedSectionHeader}" FontWeight="SemiBold"
+                                     Foreground="{StaticResource HudErrorBrush}" />
+                          <ItemsControl ItemsSource="{Binding BlockedRows}"
+                                        ItemTemplate="{StaticResource DiagnosticIssueTemplate}" />
+                        </StackPanel>
+                        <StackPanel IsVisible="{Binding HasWarnings}" Spacing="2">
+                          <TextBlock Text="{Binding WarningSectionHeader}" FontWeight="SemiBold"
+                                     Foreground="{StaticResource HudAmberBrush}" />
+                          <ItemsControl ItemsSource="{Binding WarningRows}"
+                                        ItemTemplate="{StaticResource DiagnosticIssueTemplate}" />
+                        </StackPanel>
+                        <StackPanel IsVisible="{Binding HasInfos}" Spacing="2">
+                          <TextBlock Text="{Binding InfoSectionHeader}" FontWeight="SemiBold" />
+                          <ItemsControl ItemsSource="{Binding Infos}">
+                            <ItemsControl.ItemTemplate>
+                              <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{Binding}" TextWrapping="Wrap" FontSize="11" Margin="0,3" />
+                              </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                          </ItemsControl>
+                        </StackPanel>
+                      </StackPanel>
+                    </ScrollViewer>
+                  </Flyout>
+                </Button.Flyout>
+              </Button>
+            </Grid>
+          </Border>
+        </Grid>
+      </Border>
+    </Grid>
+  </ScrollViewer>
+</UserControl>

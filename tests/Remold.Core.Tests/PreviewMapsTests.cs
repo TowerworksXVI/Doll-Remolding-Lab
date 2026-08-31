@@ -376,8 +376,8 @@ public class PreviewMapsTests
     private static List<SubmeshTextures>? CollectFrom(string glb, IReadOnlyList<IncomingMaps> maps, string texDir)
     {
         var sources = PreviewMaps.ReadSubmeshRmoSources(glb);
-        return DonorTextureIntake.Collect(maps, texDir, "body", p => p, null,
-            i => sources.TryGetValue(i, out var png) ? png : null);
+        return BlenderMaterialReturn.Normalize(maps, texDir,
+            i => sources.TryGetValue(i, out var png) ? png : null).ToList();
     }
 
     /// <summary>Alpha carries the emissive mask and has no glTF channel to ride in, so the export records

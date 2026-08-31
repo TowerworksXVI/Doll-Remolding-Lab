@@ -1,0 +1,51 @@
+<!-- Source for drl-banner-1300x372.png (Nexus banner spec). Re-render:
+     msedge --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1
+            --disable-lcd-text --virtual-time-budget=4000
+            --window-size=1300,372 --screenshot=drl-banner-1300x372.png file:///<abs>/press/banner.src.html
+     --disable-lcd-text matters: without it the subtitle picks up subpixel colour fringing. -->
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0}
+  .banner{
+    position:relative;width:1300px;height:372px;overflow:hidden;
+    background:
+      radial-gradient(600px 600px at 240px 186px, #1E2E39 0%, #152029 64%),
+      #152029;
+  }
+  .art{
+    position:absolute;left:-84px;top:-146px;
+    width:664px;height:664px;
+    transform:scale(1.13334);transform-origin:50% 50%;
+  }
+  .fade{
+    position:absolute;left:360px;top:0;width:280px;height:372px;
+    background:linear-gradient(to right, rgba(21,32,41,0) 0%, rgba(21,32,41,0.88) 68%, #152029 100%);
+  }
+  .lockup{
+    position:absolute;left:556px;top:0;height:372px;
+    display:flex;flex-direction:column;justify-content:center;
+    font-family:"Segoe UI Semibold","Segoe UI",Arial,sans-serif;
+  }
+  .name{
+    font-weight:700;font-size:78px;line-height:1.04;
+    letter-spacing:0.015em;color:#FBF3E7;text-transform:uppercase;
+    text-shadow:0 5px 20px rgba(0,0,0,0.5);
+  }
+  .rule{
+    margin-top:20px;width:104px;height:5px;border-radius:3px;background:#C4714E;
+  }
+  .tag{
+    margin-top:20px;font-weight:400;font-size:27px;letter-spacing:0.012em;
+    color:#C6CFD6;
+  }
+</style>
+<div class="banner">
+  <img class="art" src="../src/Remold.App/Assets/icon.svg">
+  <div class="fade"></div>
+  <div class="lockup">
+    <div class="name">Doll<br>Remolding Lab</div>
+    <div class="rule"></div>
+    <div class="tag">3DMigoto model mods for Girls&rsquo; Frontline 2: Exilium</div>
+  </div>
+</div>

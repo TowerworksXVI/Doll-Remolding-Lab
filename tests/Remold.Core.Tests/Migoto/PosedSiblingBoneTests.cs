@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -53,7 +53,9 @@ public class PosedSiblingBoneTests : IDisposable
     /// <summary>The sibling's bones. Nothing of the target's mesh tables these, so
     /// <see cref="SiblingBone"/> is exactly the bone this test is about: paintable only because the
     /// export offered it, poseable only because the sibling moves it.</summary>
-    private static readonly uint[] MateBones = { 0x00000105, 0x00000106 };
+    // The unused row deliberately precedes the used one. The donor compiles SiblingBone at old union slot
+    // 3; palette pruning removes 0x106 and must rewrite the surviving influence to compact slot 2.
+    private static readonly uint[] MateBones = { 0x00000106, 0x00000105 };
 
     /// <summary>The one the donor is weighted onto.</summary>
     private const uint SiblingBone = 0x00000105;
@@ -103,7 +105,7 @@ public class PosedSiblingBoneTests : IDisposable
         else
             // the same TABLE, and every vertex parked on the other bone: 0x105 is listed and never moved
             SyntheticBundle.BuildOneSkinnedMesh(bm, "c_vesna01_mate_lod0", Cloud(20, 17), WrappedTris(20),
-                new[] { MateBones[1] }, tabledOnlyBones: new[] { SiblingBone });
+                new[] { MateBones[0] }, tabledOnlyBones: new[] { SiblingBone });
         SyntheticBundle.BuildOneTexture(bt, "tex_body_d", 8, 8, 200, 100, 50, 255, colorSpace: 1);
 
         var bytes = new Dictionary<string, byte[]>
@@ -137,7 +139,7 @@ public class PosedSiblingBoneTests : IDisposable
             CatalogVersion: "12345",
             AppVersion: "test-1.0",
             TimelineShoesFor: timelineHides is null ? null
-                : _ => new[] { new Remold.Core.Bundles.TimelineShoe(Array.Empty<string>(), timelineHides) });
+                : _ => new[] { new Remold.Core.Bundles.TimelineShoe(Array.Empty<string>(), timelineHides) }).Exact();
     }
 
     private ModProject NewProject(string name)
@@ -235,7 +237,7 @@ public class PosedSiblingBoneTests : IDisposable
         WriteDonorGlb(BodyBones.Append(SiblingBone).ToArray());
         var lines = new List<string>();
 
-        var r = ModBuilder.Build(p, env, _out, lines.Add, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, lines.Add, zip: false);
 
         // 1. no refusal: the bone IS posed, by the mate — Build returned instead of throwing, and a mod
         // folder came out the far end rather than the half-built state a failed run cleans up
@@ -243,7 +245,7 @@ public class PosedSiblingBoneTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
 
         // 2. the mate joined the pool, and is captured so its palette rows can be recovered
-        Assert.Contains(lines, l => l ==
+        Assert.Contains(r.Diagnostics, d => d ==
             "pool (vesna_body): c_vesna01_body_lod0, c_vesna01_mate_lod0 (anchor c_vesna01_body_lod0)");
         ModBuilderTests.AssertNoDuplicateSections(ini);
         ModBuilderTests.AssertEveryReferencedFileShips(ini, r.OutDir);
@@ -263,6 +265,21 @@ public class PosedSiblingBoneTests : IDisposable
         var riders = RidersOf(r.OutDir, "vesna_body", slot);
         Assert.Equal(2, riders.Verts);
         Assert.Equal(2.0, riders.Weight, 5);
+
+        // The mate owns two full-union rows, but only its second local row survives. The operator and map
+        // are compact, and the emitted skin was rewritten from compiled slot 3 to shipped slot 2.
+        Assert.Equal(BodyBones.Append(SiblingBone), order);
+        Assert.Equal(BodyBones.Length, slot);
+        var mateMap = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_mate_map_vesna_body.buf"));
+        Assert.Equal(sizeof(uint), mateMap.Length);
+        Assert.Equal((uint)slot, BitConverter.ToUInt32(mateMap));
+        var paletteLine = Assert.Single(r.Diagnostics,
+            d => d.StartsWith("palette: vesna_body/vesna_mate ", StringComparison.Ordinal));
+        Assert.Contains("1/2 rows used", paletteLine, StringComparison.Ordinal);
+        Assert.DoesNotContain(r.Diagnostics, d => d.Contains("0x00000106", StringComparison.OrdinalIgnoreCase)
+            && (d.Contains("ill-conditioned", StringComparison.Ordinal)
+                || d.Contains("dense width", StringComparison.Ordinal)
+                || d.Contains("weakly supported", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -276,11 +293,11 @@ public class PosedSiblingBoneTests : IDisposable
         var p = NewProject("PosedSiblingControl");
         WriteDonorGlb(BodyBones.Append(SiblingBone).ToArray());
 
-        var ex = Assert.Throws<InvalidDataException>(() => ModBuilder.Build(p, env, _out, zip: false));
+        var ex = Assert.Throws<InvalidDataException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Equal("the donor rides 1 bone(s) that no pooled part of this outfit poses "
-            + "(first: 0x00000105, carried at zero weight by 'c_vesna01_mate_lod0'). "
-            + "Re-weight the donor onto the bones this outfit moves", ex.Message);
+        Assert.Equal("the new mesh uses 1 bone(s) that no part of this item moves. They are named by "
+            + "'c_vesna01_mate_lod0' but never moved. Re-weight the mesh onto the bones this item moves",
+            ex.Message);
     }
 
     [Fact]
@@ -293,9 +310,9 @@ public class PosedSiblingBoneTests : IDisposable
         var p = NewProject("PosedSiblingTimeline");
         WriteDonorGlb(BodyBones.Append(SiblingBone).ToArray());
 
-        var ex = Assert.Throws<InvalidDataException>(() => ModBuilder.Build(p, env, _out, zip: false));
+        var ex = Assert.Throws<InvalidDataException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("Left out of the pool: 'c_vesna01_mate_lod0' · a dorm scene can hide or reveal it "
+        Assert.Contains("Left out: 'c_vesna01_mate_lod0' · a dorm scene can hide or reveal it "
             + "mid-pose", ex.Message);
         Assert.DoesNotContain("different armature", ex.Message);
     }
@@ -311,10 +328,10 @@ public class PosedSiblingBoneTests : IDisposable
         WriteDonorGlb(BodyBones.Append(SiblingBone).ToArray());
         var lines = new List<string>();
 
-        var r = ModBuilder.Build(p, env, _out, lines.Add, zip: false);
+        var r = ReleasedBuild.Build(p, env, _out, lines.Add, zip: false);
 
         Assert.True(Directory.Exists(r.OutDir));
-        Assert.Contains(lines, l => l ==
+        Assert.Contains(r.Diagnostics, d => d ==
             "pool (vesna_body): c_vesna01_body_lod0, c_vesna01_mate_lod0 (anchor c_vesna01_body_lod0)");
     }
 }

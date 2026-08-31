@@ -37,7 +37,7 @@ public sealed class AboutWindow : Window
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Margin = new Thickness(0, 4, 0, 0) };
         int row = 0;
         Fact(grid, ref row, "Version", info.AppVersion);
-        Fact(grid, ref row, "Project schema", info.ProjectSchema.ToString());
+        Fact(grid, ref row, "Project file version", info.ProjectSchema.ToString());
         Fact(grid, ref row, "Settings", info.SettingsPath);
         Fact(grid, ref row, "Projects folder", info.LibraryRoot);
         Fact(grid, ref row, "Game folder", string.IsNullOrEmpty(info.GamePath) ? "not located" : info.GamePath!);
@@ -54,7 +54,7 @@ public sealed class AboutWindow : Window
                 new TextBlock { Text = "Doll Remolding Lab", FontWeight = FontWeight.Bold, FontSize = 16 },
                 new TextBlock
                 {
-                    Text = "Author mods for GIRLS' FRONTLINE 2: EXILIUM.",
+                    Text = "Make mods for GIRLS' FRONTLINE 2: EXILIUM.",
                     TextWrapping = TextWrapping.Wrap, Foreground = Subtext(),
                 },
                 grid,

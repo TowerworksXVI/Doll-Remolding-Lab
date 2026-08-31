@@ -4,13 +4,14 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace Remold.Core.Textures;
 
 /// <summary>
-/// Renders a mesh's UV0 wireframe to a transparent PNG — the guide a modder layers under their paint.
+/// Renders a selected UV set's wireframe to a transparent PNG — the guide a modder layers under their paint.
 /// Edges are rasterized by hand (Bresenham) so only ImageSharp core is needed, not the
 /// separately-licensed <c>.Drawing</c> package.
 ///
@@ -22,24 +23,53 @@ public static class UvGuide
     /// <summary>Canvas size used when a part has no existing texture to size the guide against.</summary>
     public const int DefaultSize = 2048;
 
-    /// <summary>Render every submesh's UV0 wireframe to <paramref name="outPath"/> as a transparent
-    /// <paramref name="width"/>×<paramref name="height"/> PNG. False (and no write) when the mesh has no
-    /// UV0 channel or the size is non-positive.</summary>
-    public static bool TryRender(UnityMesh mesh, int width, int height, string outPath) =>
-        Render(mesh, null, width, height, outPath, merge: false);
+    /// <summary>The evidenced game-shader UV set for one texture role. Ordinary PBR pictures sample UV0;
+    /// the effect overlay samples UV1. A generic property has no evidenced answer and stays null rather
+    /// than inheriting one from its name.</summary>
+    public static int? TexCoordIndex(TargetInputKind input) => input switch
+    {
+        TargetInputKind.BaseColor or TargetInputKind.Normal or TargetInputKind.Rmo => 0,
+        TargetInputKind.Blend => 1,
+        _ => null,
+    };
+
+    /// <summary>The preview/transport semantic for one authored texture input.</summary>
+    public static MapKind MapKindFor(TargetInputKind input) => input switch
+    {
+        TargetInputKind.BaseColor => MapKind.BaseColor,
+        TargetInputKind.Normal => MapKind.Normal,
+        TargetInputKind.Rmo => MapKind.Rmo,
+        TargetInputKind.Blend => MapKind.Blend,
+        _ => MapKind.Texture,
+    };
+
+    /// <summary>The guide channel for one input. A non-evidenced property retains the guide's historical
+    /// UV0 fallback; transport callers use <see cref="TexCoordIndex"/> directly and therefore do not guess.</summary>
+    public static string TexCoordChannel(TargetInputKind input) =>
+        $"TexCoord{TexCoordIndex(input) ?? 0}";
+
+    /// <summary>Render every submesh's UV wireframe to <paramref name="outPath"/> as a transparent
+    /// <paramref name="width"/>×<paramref name="height"/> PNG. <paramref name="channel"/> picks the UV
+    /// set — TexCoord0 for the ordinary maps, TexCoord1 for the effect overlay, which the corpus samples
+    /// by its own second layout (measured: UV1 exists exactly on the parts that bind <c>_BlendTex</c>).
+    /// False (and no write) when the mesh lacks the channel or the size is non-positive.</summary>
+    public static bool TryRender(UnityMesh mesh, int width, int height, string outPath,
+        string channel = "TexCoord0") =>
+        Render(mesh, null, width, height, outPath, merge: false, channel);
 
     /// <summary>As <see cref="TryRender"/> for a SUBSET of submeshes, merge-plotting onto an existing
     /// same-size guide: a per-texture guide is shared, so every part sampling that texture adds its
     /// islands and the file converges to their union. A missing or size-mismatched file starts fresh —
     /// texture sizes are fixed per catalog, so a mismatch means a stale guide.</summary>
-    public static bool TryRenderMerge(UnityMesh mesh, IReadOnlyList<int> submeshIndices, int width, int height, string outPath) =>
-        Render(mesh, submeshIndices, width, height, outPath, merge: true);
+    public static bool TryRenderMerge(UnityMesh mesh, IReadOnlyList<int> submeshIndices, int width, int height,
+        string outPath, string channel = "TexCoord0") =>
+        Render(mesh, submeshIndices, width, height, outPath, merge: true, channel);
 
     private static bool Render(UnityMesh mesh, IReadOnlyList<int>? submeshIndices, int width, int height,
-        string outPath, bool merge)
+        string outPath, bool merge, string channel)
     {
-        if (!mesh.Has("TexCoord0") || width <= 0 || height <= 0) return false;
-        var uv = mesh.AsVector2("TexCoord0");
+        if (!mesh.Has(channel) || width <= 0 || height <= 0) return false;
+        var uv = mesh.AsVector2(channel);
 
         Image<Rgba32>? existing = null;
         if (merge && File.Exists(outPath))

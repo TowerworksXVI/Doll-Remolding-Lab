@@ -18,8 +18,8 @@ namespace Remold.Core.Tests;
 /// <summary>
 /// The rig rebuild must read preview textures back from the SAME bundle-scoped workspace files every
 /// producer writes; resolving them name-only silently strips every map from the rebuilt glb. These pin
-/// <see cref="AssetExporter.ResolvePartPngs"/>: the scoped file and never the name-only one, a loud miss
-/// when it is absent, and two same-named textures from different bundles kept distinct.
+/// <see cref="AssetExporter.ResolvePartPngs"/>: the scoped file and never the name-only one, the texture
+/// named to the caller when it is absent, and two same-named textures from different bundles kept distinct.
 /// </summary>
 public class AssetExporterTextureResolveTests
 {
@@ -52,7 +52,7 @@ public class AssetExporterTextureResolveTests
         WritePng(Path.Combine(texDir, "body_d.png"), new Rgba32(9, 9, 9, 255));   // must be IGNORED
         WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aabb", "body_n", Subj)), new Rgba32(4, 5, 6, 255));
 
-        var (baseColor, normal, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OnePart("body_d", "body_n", "aabb"), "cloth1", null);
+        var (baseColor, normal, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OnePart("body_d", "body_n", "aabb"));
 
         Assert.Equal(scoped, baseColor);                                   // the bundle-scoped file, not body_d.png
         Assert.EndsWith($"body_d.aabb.{Subj}.png", baseColor);
@@ -61,8 +61,36 @@ public class AssetExporterTextureResolveTests
             (Path.GetFileName(perSubmesh[0].Item1), Path.GetFileName(perSubmesh[0].Item2)));
     }
 
+    /// <summary>Only the maps the glb embeds — base colour, normal, RMO — are resolved at all. A
+    /// material's other maps, the toon ramp above all, never exist as workspace PNGs, so resolving them
+    /// fired a "not found" line per material on every Blender open for files the export never ships.</summary>
     [Fact]
-    public void ResolvePartPngs_AbsentScopedFile_ReturnsNull_AndFiresTheMiss_EvenWhenANameOnlyFileExists()
+    public void ResolvePartPngs_NeverResolvesOrReportsAMapTheGlbDoesNotEmbed()
+    {
+        using var g = new TempGame();
+        var texDir = g.At("textures");
+        WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aabb", "body_d", Subj)), new Rgba32(1, 2, 3, 255));
+        WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aabb", "body_n", Subj)), new Rgba32(4, 5, 6, 255));
+        var withRamp = new PartTextures(
+            All: new[]
+            {
+                new TexTarget("body_d", "aabb", IsBaseColor: true, IsNormal: false, "renderer"),
+                new TexTarget("body_n", "aabb", IsBaseColor: false, IsNormal: true, "renderer"),
+                new TexTarget("RampMap_Linear_RGBAHalf", "aabb", IsBaseColor: false, IsNormal: false,
+                    "renderer"),
+            },
+            Submeshes: new[] { new SubmeshMaps("body_d", "body_n") });
+
+        var missed = new List<string>();
+        var (baseColor, normal, _) = AssetExporter.ResolvePartPngs(texDir, Subj, withRamp, missed);
+
+        Assert.NotNull(baseColor);
+        Assert.NotNull(normal);
+        Assert.Empty(missed);
+    }
+
+    [Fact]
+    public void ResolvePartPngs_AbsentScopedFile_ReturnsNull_AndNamesTheMiss_EvenWhenANameOnlyFileExists()
     {
         using var g = new TempGame();
         var texDir = g.At("textures");
@@ -70,57 +98,30 @@ public class AssetExporterTextureResolveTests
         // the normal's scoped file is MISSING and only a name-only decoy is there, which would hide the gap
         WritePng(Path.Combine(texDir, "body_n.png"), new Rgba32(9, 9, 9, 255));
 
-        var log = new ListLog();
-        var (_, normal, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OnePart("body_d", "body_n", "aabb"), "cloth1", log);
+        var missed = new List<string>();
+        var (_, normal, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OnePart("body_d", "body_n", "aabb"), missed);
 
         Assert.Null(normal);                        // name-only decoy ignored
         Assert.Null(perSubmesh[0].Item2);
-        Assert.Contains(log.Lines, l => l.Contains("body_n") && l.Contains("not found"));   // the miss is loud
+        Assert.Equal(new[] { "body_n" }, missed);   // the miss is named, once
     }
 
     [Fact]
-    public void ResolvePartPngs_AfterRescan_PrefersTheRecordedBundleFile_OverTheRendererPin()
+    public void ResolvePartPngs_ResolvesByTheRendererPinnedBundle()
     {
-        // The rebuild re-runs the resolver against the CURRENT game, and a rescan can pin a DIFFERENT bundle
-        // than the producer wrote to. Here the producer recorded "aaaa" and the renderer now pins "bbbb", so
-        // re-deriving would look for an absent file. The RECORDED bundle must win.
-        using var g = new TempGame();
-        var texDir = g.At("textures");
-        var original = WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aaaa", "body_d", Subj)), new Rgba32(1, 2, 3, 255));
-        // NOTE: the bbbb-scoped file is deliberately NOT on disk — a re-derivation from the fresh pin would miss.
-        var part = new PartTextures(
-            All: new[] { new TexTarget("body_d", "bbbb", IsBaseColor: true, IsNormal: false, "renderer") },
-            Submeshes: new[] { new SubmeshMaps("body_d", null) });
-        var recorded = new Dictionary<string, IReadOnlyList<string>>(System.StringComparer.Ordinal)
-        {
-            ["body_d"] = new[] { "aaaa" },
-        };
-
-        var (baseColor, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, part, "cloth1", null, recorded);
-
-        Assert.Equal(original, baseColor);                 // the recorded workspace file, not the fresh bbbb pin
-        Assert.EndsWith($"body_d.aaaa.{Subj}.png", baseColor);
-    }
-
-    [Fact]
-    public void ResolvePartPngs_UnmaterializedTexture_ResolvesViaTheRendererPin_WhenNotRecorded()
-    {
-        // A genuinely unmaterialized texture resolves by the renderer PPtr's pinned bundle — the same one
-        // the producer would scope its file by — unaffected by records for other textures.
+        // The renderer PPtr's pinned bundle is the texture's identity and the one segment the workspace file
+        // is named by — the same rule the open's own texture pass writes under, so the two cannot drift.
         using var g = new TempGame();
         var texDir = g.At("textures");
         var scoped = WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("cccc", "other_d", Subj)), new Rgba32(7, 8, 9, 255));
+        WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aaaa", "other_d", Subj)), new Rgba32(1, 1, 1, 255));
         var part = new PartTextures(
             All: new[] { new TexTarget("other_d", "cccc", IsBaseColor: true, IsNormal: false, "renderer") },
             Submeshes: new[] { new SubmeshMaps("other_d", null) });
-        var recorded = new Dictionary<string, IReadOnlyList<string>>(System.StringComparer.Ordinal)
-        {
-            ["body_d"] = new[] { "aaaa" },   // records a DIFFERENT texture; "other_d" is unmaterialized
-        };
 
-        var (baseColor, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, part, "cloth1", null, recorded);
+        var (baseColor, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, part);
 
-        Assert.Equal(scoped, baseColor);                   // resolved via the renderer pin, unaffected by the record
+        Assert.Equal(scoped, baseColor);                   // the pinned bundle's file, never the other bundle's
     }
 
     [Fact]
@@ -132,8 +133,8 @@ public class AssetExporterTextureResolveTests
         var redFile = WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aaaa", "body", Subj)), new Rgba32(220, 20, 20, 255));
         var blueFile = WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("bbbb", "body", Subj)), new Rgba32(20, 20, 220, 255));
 
-        var (baseA, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "aaaa"), "partA", null);
-        var (baseB, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "bbbb"), "partB", null);
+        var (baseA, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "aaaa"));
+        var (baseB, _, _) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "bbbb"));
         Assert.Equal(redFile, baseA);
         Assert.Equal(blueFile, baseB);
         Assert.NotEqual(baseA, baseB);
@@ -158,7 +159,7 @@ public class AssetExporterTextureResolveTests
         var texDir = g.At("textures");
         WritePng(Path.Combine(texDir, TextureExport.BundleScopedName("aabb", "body", Subj)), new Rgba32(200, 150, 100, 255));
 
-        var (baseColor, _, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "aabb"), "cloth1", null);
+        var (baseColor, _, perSubmesh) = AssetExporter.ResolvePartPngs(texDir, Subj, OneBaseOnly("body", "aabb"));
         var outPath = g.At("part.glb");
         MeshGltf.ExportGlb(Tri("cloth1"), outPath, baseColor, null, perSubmesh);
 

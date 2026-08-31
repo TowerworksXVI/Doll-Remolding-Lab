@@ -54,11 +54,44 @@ public static class MeshApply
         IReadOnlyList<string> Warnings, IReadOnlyList<string> Diagnostics);
 
     // Every non-skin channel the corpus layout can declare. The list must cover them ALL: a channel left out
-    // of the built arrays is silently ZEROED by Encode. The transport only moves TexCoord0, so TexCoord1+
-    // ride the nearest-original fill.
+    // of the built arrays is silently ZEROED by Encode. Transported UV channels ride as authored; unsupported
+    // or legacy-absent channels ride the nearest-original fill.
     private static readonly string[] GeometryChannels =
         { "Vertex", "Normal", "Tangent", "Color", "TexCoord0", "TexCoord1",
           "TexCoord2", "TexCoord3", "TexCoord4", "TexCoord5", "TexCoord6", "TexCoord7" };
+
+    /// <summary>Make one Blender-returned mesh obey the game baseline's UV transport contract. UV
+    /// layers beyond the baseline's consecutive transportable prefix are removed; prefix layers absent from
+    /// a legacy workspace edit are restored from the fresh baseline by the shipped position/UV0/normal
+    /// nearest rule. A layer already present is never touched, including on added vertices.</summary>
+    internal static void ConformTransportUvs(UnityMesh baseline, UnityMesh returned)
+    {
+        int allowed = MeshGltf.TransportedTexCoordCount(baseline);
+        for (int i = allowed; i < MeshGltf.MaxTexCoordSets; i++)
+        {
+            string channel = $"TexCoord{i}";
+            returned.Channels.Remove(channel);
+            returned.Dims.Remove(channel);
+        }
+
+        var missing = Enumerable.Range(0, allowed)
+            .Select(i => $"TexCoord{i}")
+            .Where(channel => !returned.Has(channel))
+            .ToList();
+        if (missing.Count == 0) return;
+
+        var ties = new List<(float[] Src, float[] Query)>();
+        foreach (var channel in new[] { "TexCoord0", "Normal" })
+            if (baseline.Has(channel) && returned.Has(channel))
+                ties.Add((baseline.Channels[channel], returned.Channels[channel]));
+        var nearest = NearestNeighbors(baseline.Channels["Vertex"], baseline.VertexCount,
+            returned.Channels["Vertex"], returned.VertexCount, ties);
+        foreach (string channel in missing)
+        {
+            returned.Channels[channel] = GatherByNearest(baseline.Channels[channel], 2, nearest);
+            returned.Dims[channel] = 2;
+        }
+    }
 
     /// <summary>Apply <paramref name="payload"/> into <paramref name="meshField"/> (a Mesh base field),
     /// mutating it in place; the caller commits it.</summary>
@@ -104,14 +137,14 @@ public static class MeshApply
     internal static Built BuildSkinned(UnityMesh orig, Payload glb, uint[] targetBoneHashes)
     {
         if (!glb.HasSkin)
-            throw new InvalidOperationException("the mesh payload carries no skin (JOINTS_0/WEIGHTS_0); " +
-                                                "re-export from Blender so weights ride along");
+            throw new InvalidOperationException("the edited mesh has no vertex weights. Paint them in "
+                                                + "Blender, then send the mesh back");
         // NaN/Inf or negative weights would serialize into the blob as undefined deformation the downstream
         // gates can't catch. glTF weights are non-negative by spec, so a negative one is a broken export.
         foreach (var w in glb.JointWeights!)
             if (!float.IsFinite(w) || w < 0f)
-                throw new InvalidOperationException("the mesh payload has invalid skin weights (NaN/Inf/negative); " +
-                                                    "re-paint the affected vertices in Blender");
+                throw new InvalidOperationException("the edited mesh has incorrect vertex weights. Re-paint "
+                                                    + "the affected vertices in Blender, then send the mesh back");
         // Resolve the authored joints onto the target bone order.
         var jr = ResolveAuthoredJoints(targetBoneHashes, glb.SkinJointHashes!, glb.JointIndices!, glb.JointWeights!, glb.VertexCount);
 
@@ -149,7 +182,8 @@ public static class MeshApply
         // original skin, so it doesn't yank to the root or ship an all-zero skin.
         if (jr.FullyUnsafeCount > 0 && orig.Has("BlendIndices") && orig.Has("BlendWeight"))
         {
-            nn = NearestNeighbors(orig.Channels["Vertex"], orig.VertexCount, glb.Channels["Vertex"], n);
+            nn = NearestNeighbors(orig.Channels["Vertex"], orig.VertexCount, glb.Channels["Vertex"], n,
+                TieChannels(orig, glb));
             var oi = orig.Channels["BlendIndices"]; var ow = orig.Channels["BlendWeight"];
             int od = orig.Dims["BlendWeight"];   // the original's STORED influence width (1–4), == BlendIndices dim
             for (int v = 0; v < n; v++)
@@ -194,8 +228,8 @@ public static class MeshApply
         // Only a narrow target reduces, so a reduction always means vertices were crushed onto fewer bones
         // than the author weighted them to — deformation the author can see and act on, not compile detail.
         if (reducedVerts > 0)
-            built.Warnings.Add($"{reducedVerts} vertex(es) had more than {targetWidth} bone influence(s); " +
-                               $"reduced to the strongest {targetWidth} and renormalized");
+            built.Warnings.Add($"{reducedVerts} vertex(es) had more than {targetWidth} bone influence(s). " +
+                               $"They were reduced to the strongest {targetWidth} and renormalized.");
         if (OutOfSkeletonWarning(jr) is { } outOfSkel)
             built.Warnings.Add(outOfSkel);
         return built;
@@ -211,10 +245,12 @@ public static class MeshApply
         var arrays = new Dictionary<string, float[]>();
         foreach (var ch in GeometryChannels)
             if (glb.Has(ch)) arrays[ch] = glb.Channels[ch];
-        // Color and any absent geometry channel fill from the original by proximity. The outline channel
+        // Color and any absent geometry channel fill from the original by proximity, seam twins tie-broken
+        // by the transported channels. The outline channel
         // (Color) is NEVER carried through Blender: this fill supplies its WIDTH (Color.a), and BakeOutline
         // then recomputes the DIRECTION (Color.rgb) from the finished mesh's normals + tangent.
-        nn ??= NearestNeighbors(orig.Channels["Vertex"], orig.VertexCount, glb.Channels["Vertex"], n);
+        nn ??= NearestNeighbors(orig.Channels["Vertex"], orig.VertexCount, glb.Channels["Vertex"], n,
+            TieChannels(orig, glb));
         foreach (var ch in GeometryChannels)
             if (orig.Has(ch) && !arrays.ContainsKey(ch))
                 arrays[ch] = GatherByNearest(orig.Channels[ch], orig.Dims[ch], nn);
@@ -223,7 +259,7 @@ public static class MeshApply
         // Identity byte-restore: when the payload IS the original, the transport's float drift (the glTF UV
         // v-flip, nearest-fill donor ties between coincident verts) must not ship changed bytes. Every
         // original channel wins.
-        bool identity = GeometryUnchanged(glb.Mesh, orig);
+        bool identity = FullGeometryUnchanged(glb.Mesh, orig, arrays);
         if (identity)
             foreach (var ch in GeometryChannels)
                 if (orig.Has(ch)) arrays[ch] = (float[])orig.Channels[ch].Clone();
@@ -462,9 +498,9 @@ public static class MeshApply
             {
                 if (name is "BlendWeight" or "BlendIndices")
                     throw new InvalidOperationException(
-                        $"the authored mesh carries {have} bone influences per vertex ('{name}') but the target " +
-                        $"stores only {L}; dropping influences would silently break the skinning. Re-export " +
-                        "with at most the target's influence count");
+                        $"the edited mesh has {have} bone influences per vertex ('{name}') but this part " +
+                        $"stores only {L}. Dropping influences would break the skinning. Limit the mesh to " +
+                        $"{L} influence(s) per vertex in Blender, then send it back");
                 var trunc = new float[(long)n * L <= int.MaxValue ? n * L : throw new InvalidOperationException($"channel '{name}' too large")];
                 for (int v = 0; v < n; v++)
                     for (int d = 0; d < L; d++)
@@ -476,7 +512,7 @@ public static class MeshApply
             // have < L: widen, filling components [have, L) from the original by nearest-original vertex.
             if (!orig.Has(name) || orig.Dims[name] != L)
                 throw new InvalidOperationException(
-                    $"channel '{name}': the authored mesh has {have} components but the target needs {L}, and the " +
+                    $"channel '{name}': the edited mesh has {have} components but this part needs {L}, and the " +
                     $"original mesh can't supply the rest ({(orig.Has(name) ? $"orig dim {orig.Dims[name]}" : "orig lacks the channel")}). " +
                     "This should be impossible for a mesh decoded from this layout");
             var widened = new float[n * L];
@@ -533,8 +569,14 @@ public static class MeshApply
     private static uint[] ReadBoneHashes(AssetTypeValueField mesh) =>
         mesh["m_BoneNameHashes"]["Array"].Children.Select(c => (uint)c.AsUInt).ToArray();
 
-    /// <summary>Brute-force nearest source vertex (by squared distance) for each query vertex. O(q·s).</summary>
-    private static int[] NearestNeighbors(float[] src, int srcN, float[] query, int queryN)
+    /// <summary>Brute-force nearest source vertex (by squared distance) for each query vertex. O(q·s).
+    /// Coincident source vertices (UV-seam / hard-edge splits) tie on distance, and the winner decides
+    /// which vertex's untransported channels (TexCoord1+, Color) the fill copies — so ties break by the
+    /// transported channels in <paramref name="ties"/>: the source agreeing with the query's own
+    /// TexCoord0/Normal is the vertex the payload actually derives from. Tied on every channel keeps the
+    /// lowest source index.</summary>
+    private static int[] NearestNeighbors(float[] src, int srcN, float[] query, int queryN,
+        IReadOnlyList<(float[] Src, float[] Query)>? ties = null)
     {
         var nn = new int[queryN];
         for (int i = 0; i < queryN; i++)
@@ -546,10 +588,45 @@ public static class MeshApply
                 float dx = src[j * 3] - qx, dy = src[j * 3 + 1] - qy, dz = src[j * 3 + 2] - qz;
                 float d = dx * dx + dy * dy + dz * dz;
                 if (d < best) { best = d; bi = j; }
+                else if (d == best && ties is not null && TieCloser(ties, srcN, queryN, j, bi, i)) bi = j;
             }
             nn[i] = bi;
         }
         return nn;
+    }
+
+    /// <summary>True when tied source <paramref name="j"/> agrees with query vertex <paramref name="i"/>'s
+    /// transported channels strictly better than the standing <paramref name="bi"/> does. Channels compare
+    /// in list order over their shared component prefix (dims may differ — a glb vec3 normal against a
+    /// packed vec4 target); the first channel that separates the two decides.</summary>
+    private static bool TieCloser(IReadOnlyList<(float[] Src, float[] Query)> ties, int srcN, int queryN,
+        int j, int bi, int i)
+    {
+        foreach (var (s, q) in ties)
+        {
+            int sd = s.Length / srcN, qd = q.Length / queryN, dims = Math.Min(sd, qd);
+            float dj = 0, dbi = 0;
+            for (int c = 0; c < dims; c++)
+            {
+                float qc = q[i * qd + c];
+                float a = s[j * sd + c] - qc; dj += a * a;
+                float b = s[bi * sd + c] - qc; dbi += b * b;
+            }
+            if (dj < dbi) return true;
+            if (dj > dbi) return false;
+        }
+        return false;
+    }
+
+    /// <summary>The transported channels the nearest fill may tie-break on, in decision order: TexCoord0
+    /// (the discriminator a UV-seam split exists for), then Normal (hard-edge splits sharing UV). Only a
+    /// channel BOTH sides carry can discriminate.</summary>
+    private static List<(float[] Src, float[] Query)> TieChannels(UnityMesh orig, Payload glb)
+    {
+        var ties = new List<(float[], float[])>();
+        foreach (var ch in new[] { "TexCoord0", "Normal" })
+            if (orig.Has(ch) && glb.Has(ch)) ties.Add((orig.Channels[ch], glb.Channels[ch]));
+        return ties;
     }
 
     private static float[] GatherByNearest(float[] src, int dim, int[] nn)
@@ -621,8 +698,8 @@ public static class MeshApply
             if (sum < 0.5f) bad++;
         }
         if (bad > 0)
-            outp.Add($"{bad} vertex(es) have almost no weight (sum<0.5). They will collapse to the bind pose; " +
-                     "assign/paint weights for them");
+            outp.Add($"{bad} vertex(es) have almost no weight (under 0.5 in total). They will collapse " +
+                     "to the bind pose. Paint weights on them.");
         return outp;
     }
 
@@ -700,9 +777,10 @@ public static class MeshApply
     {
         if (jr.UnresolvedWeightedBones == 0) return null;
         int verts = jr.FullyWeightedVerts + jr.PartialVerts;
-        return $"{verts} vertex(es) are weighted to {jr.UnresolvedWeightedBones} bone(s) the target skeleton " +
-               $"doesn't have. {jr.FullyWeightedVerts} fell back to the original weights, {jr.PartialVerts} " +
-               "dropped that influence and kept the rest. Paint them to a bone the outfit uses.";
+        return $"{verts} vertex(es) are weighted to {jr.UnresolvedWeightedBones} bone(s) this item's " +
+               $"skeleton doesn't have. {jr.FullyWeightedVerts} fell back to the original weights, " +
+               $"{jr.PartialVerts} dropped that influence and kept the rest. Paint them to a bone the "  +
+               "item uses.";
     }
 
     // ---- outline bake (vertex Color) ----
@@ -726,7 +804,7 @@ public static class MeshApply
     {
         if (n == 0 || !arrays.ContainsKey("Color")) return null;   // no outline channel on this target
 
-        if (GeometryUnchanged(glb.Mesh, orig))
+        if (OutlineGeometryUnchanged(glb.Mesh, orig))
         {
             if (orig.Has("Color")) arrays["Color"] = (float[])orig.Channels["Color"].Clone();
             if (orig.Has("Tangent")) arrays["Tangent"] = (float[])orig.Channels["Tangent"].Clone();
@@ -735,9 +813,9 @@ public static class MeshApply
 
         // Can't encode a direction without position + normal + tangent. The nearest-original fill ships,
         // which is stale for edited geometry, so say so rather than pass it off as a bake.
-        const string noFrame = "outline not re-baked: the payload has no normal/tangent frame to encode " +
-                               "against. Vertex Color was carried from the nearest original instead. " +
-                               "Export with normals + tangents (Send to Lab does) for a correct outline.";
+        const string noFrame = "The outline couldn't be recomputed: the mesh has no normals or tangents. " +
+                               "It keeps the original mesh's outline instead. Export with normals and " +
+                               "tangents (Send to Lab does) for a correct outline.";
         if (!arrays.TryGetValue("Normal", out var nrm) || !arrays.TryGetValue("Tangent", out var tan)
             || !arrays.TryGetValue("Vertex", out var pos))
             return noFrame;
@@ -786,10 +864,10 @@ public static class MeshApply
         name.Contains("hair", StringComparison.OrdinalIgnoreCase) ||
         name.Contains("face", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>True when the authored mesh IS the original across everything the transport carries:
-    /// positions, normals, tangents, UV0, and the triangle lists. Positions alone are NOT enough — a
-    /// normals-, tangent-, UV- or topology-only edit also invalidates the stored outline↔tangent pairing and
-    /// must take the re-bake path. The tolerance is RELATIVE (1e-6 of magnitude, floored at 1e-6 absolute)
+    /// <summary>True when the authored mesh is unchanged across the channels that can affect the outline:
+    /// positions, normals, tangents, UV0, and the triangle lists. Higher UV sets deliberately do not enter
+    /// this question: editing UV1 alone cannot invalidate the stored outline↔tangent pairing and must not
+    /// trigger a Color bake. The tolerance is RELATIVE (1e-6 of magnitude, floored at 1e-6 absolute)
     /// so it absorbs transport float noise on any scale: a tiled UV in the tens has ulps larger than an
     /// absolute 1e-6. Triangle indices compare exactly.
     ///
@@ -798,7 +876,7 @@ public static class MeshApply
     /// compiled against the very mesh it was exported from. It is not the rule for a file that came back
     /// through a glTF re-export, whose vertex buffer is re-split and reordered
     /// (<see cref="SendBackGeometry.SameContent"/>).</para></summary>
-    internal static bool GeometryUnchanged(UnityMesh authored, UnityMesh orig)
+    internal static bool OutlineGeometryUnchanged(UnityMesh authored, UnityMesh orig)
     {
         if (orig.VertexCount != authored.VertexCount) return false;
         foreach (var ch in new[] { "Vertex", "Normal", "Tangent", "TexCoord0" })
@@ -817,6 +895,31 @@ public static class MeshApply
             var a = authored.Submeshes[s]; var b = orig.Submeshes[s];
             if (a.Length != b.Length) return false;
             for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        }
+        return true;
+    }
+
+    /// <summary>The stricter identity used only for byte restoration. It starts with outline-relevant
+    /// identity, then compares every higher UV channel the target layout carries and the payload transported.
+    /// An untransported channel is outside the identity question: its nearest-original refill is provisional,
+    /// and an otherwise untouched payload restores the original bytes over that refill. A transported UV1+
+    /// edit still prevents the original channel from being restored over it.</summary>
+    private static bool FullGeometryUnchanged(UnityMesh authored, UnityMesh orig,
+        IReadOnlyDictionary<string, float[]> arrays)
+    {
+        if (!OutlineGeometryUnchanged(authored, orig)) return false;
+        for (int i = 1; i < MeshGltf.MaxTexCoordSets; i++)
+        {
+            string channel = $"TexCoord{i}";
+            if (!orig.Has(channel)) continue;
+            if (!authored.Has(channel)) continue;
+            if (!arrays.TryGetValue(channel, out var a)) return false;
+            var b = orig.Channels[channel];
+            if (a.Length != b.Length) return false;
+            for (int k = 0; k < a.Length; k++)
+                if (MathF.Abs(a[k] - b[k]) > 1e-6f
+                    * MathF.Max(1f, MathF.Max(MathF.Abs(a[k]), MathF.Abs(b[k]))))
+                    return false;
         }
         return true;
     }

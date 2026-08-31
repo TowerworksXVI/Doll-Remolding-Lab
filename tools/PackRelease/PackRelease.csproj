@@ -10,4 +10,10 @@
          the icon/version resources — the same machinery the SDK itself uses at build time -->
     <PackageReference Include="Microsoft.NET.HostModel" Version="3.1.16" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The shipped-seed schema guard reads the schema numbers off the types that WRITE those files
+         (Workbench.ShippedMeasurement). Restating them here would leave the pack guarding a copy of a
+         number that goes stale at the first bump — which is the failure the guard exists to catch. -->
+    <ProjectReference Include="..\..\src\Remold.Core\Remold.Core.csproj" />
+  </ItemGroup>
 </Project>

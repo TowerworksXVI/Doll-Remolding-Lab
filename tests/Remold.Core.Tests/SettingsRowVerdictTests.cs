@@ -84,7 +84,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.BlankProjectsRow(@"D:\Mods\Library");
 
         Assert.Equal(SettingsValidation.GlyphOk, reading.Glyph);
-        Assert.Equal(@"Using the default library: D:\Mods\Library.", reading.Tooltip);
+        Assert.Equal(@"Using the default projects folder: D:\Mods\Library.", reading.Tooltip);
     }
 
     /// <summary>A blank CPU limit is every core, named with the number it comes to on this machine.</summary>
@@ -97,8 +97,8 @@ public class SettingsRowVerdictTests
         Assert.Equal("Using every core (12).", reading.Tooltip);
     }
 
-    /// <summary>The one row that shows nothing when it is blank. The loader is optional — nothing on this
-    /// form wants one — and the Build pane is where an unset loader is worth saying something about.</summary>
+    /// <summary>The one row that shows nothing when it is blank. The loader is optional, and the Launch
+    /// command is where an unset loader is worth saying something about.</summary>
     [Fact]
     public void ABlankLoader_ShowsNothingAtAll()
     {
@@ -186,17 +186,13 @@ public class SettingsRowVerdictTests
             $"no remedy sentence in: {text}");
     }
 
-    /// <summary>ONE home for the diagnosis. The Settings row and the Build pane's Install gate refuse the
-    /// same host in the same words — a modder who reads it on one surface and then the other must not think
-    /// they are two different problems.
-    /// <para>The Settings row adds what the reading means THERE: the form still commits. The suffix stays on
-    /// this side, because on the Build pane it would be false — a hookless host is exactly what turns Install
-    /// off.</para></summary>
+    /// <summary>ONE home for the diagnosis. Settings extends the shared outcome with its local remedy and
+    /// makes clear that the advisory reading does not prevent the form from saving.</summary>
     [Fact]
-    public void TheSettingsRowAndTheInstallGate_RefuseAHooklessHostInTheSameWords()
+    public void TheSettingsRowExtendsTheSharedTextureModDiagnosis()
     {
-        Assert.StartsWith(InstallGate.NoTextureHook, SettingsValidation.LoaderNoHook);
-        Assert.DoesNotContain(SettingsValidation.LoaderStillSaveable, InstallGate.NoTextureHook);
+        Assert.StartsWith(LoaderGate.NoTextureHook, SettingsValidation.LoaderNoHook);
+        Assert.DoesNotContain(SettingsValidation.LoaderStillSaveable, LoaderGate.NoTextureHook);
     }
 
     /// <summary>The one row whose refusal the form saves past says so, on the row itself: a caution the

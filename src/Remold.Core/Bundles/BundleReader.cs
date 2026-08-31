@@ -401,18 +401,15 @@ public sealed class BundleReader
     /// blob.</summary>
     public readonly record struct TextureMeta(int Format, int Width, int Height, int MipCount);
 
-    /// <summary>Read a Texture2D's format/dimensions/mip count by name, without decoding the pixels.
-    /// Captured at export onto the project target so the package build can pre-encode offline; also the
-    /// live fallback (gated on <c>source_hash</c>) for a project with no recorded metadata.</summary>
-    public TextureMeta? GetTextureMeta(byte[] deobfuscatedBundle, string textureName)
+    /// <summary>Read a Texture2D's format/dimensions/mip count without decoding the pixels. Captured at
+    /// export onto the project target so the package build can pre-encode offline; also the live fallback
+    /// (gated on <c>source_hash</c>) for a project with no recorded metadata.</summary>
+    public TextureMeta? GetTextureMeta(byte[] deobfuscatedBundle, TextureRef which)
     {
         var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
+        foreach (var info in Texture2Ds(am, inst, which))
         {
-            if (info.TypeId != ClassTexture2D) continue;
-            var bf = am.GetBaseField(inst, info);
-            if (bf["m_Name"].AsString != textureName) continue;
-            var tex = TextureFile.ReadTextureFile(bf);
+            var tex = TextureFile.ReadTextureFile(am.GetBaseField(inst, info));
             return new TextureMeta(tex.m_TextureFormat, tex.m_Width, tex.m_Height, tex.m_MipCount);
         }
         return null;
@@ -447,15 +444,29 @@ public sealed class BundleReader
     public readonly record struct TextureHashSource(
         byte[] PictureData, int Width, int Height, int MipCount, int Format, bool Srgb);
 
-    /// <summary>Read a Texture2D's hash inputs by name. Returns null if the texture is absent.</summary>
-    public TextureHashSource? GetTextureHashSource(byte[] deobfuscatedBundle, string textureName)
+    /// <summary>Which Texture2D in a bundle a caller means. <see cref="PathId"/> is the game's own identity
+    /// and selects exactly one object; the name does not — a bundle can ship many same-named textures (every
+    /// toon ramp in a ramp library is called <c>RampMap_Linear_RGBAHalf</c>), and a name-selected read takes
+    /// whichever comes first. Name selection exists for the routes that only ever have a name to go on: a
+    /// texture target read back off a project file. Anything holding a live <see cref="Materials.ResolvedMap"/>
+    /// has the pathId and must pass it.</summary>
+    public readonly record struct TextureRef(string? Name, long PathId = 0)
+    {
+        public static TextureRef ByPathId(long pathId) => new(null, pathId);
+        public static TextureRef ByName(string name) => new(name);
+        public static implicit operator TextureRef(string name) => ByName(name);
+
+        /// <summary>How this reference reads in a message to the modder.</summary>
+        public override string ToString() => Name ?? $"path {PathId}";
+    }
+
+    /// <summary>Read a Texture2D's hash inputs. Returns null if the texture is absent.</summary>
+    public TextureHashSource? GetTextureHashSource(byte[] deobfuscatedBundle, TextureRef which)
     {
         var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
+        foreach (var info in Texture2Ds(am, inst, which))
         {
-            if (info.TypeId != ClassTexture2D) continue;
             var bf = am.GetBaseField(inst, info);
-            if (bf["m_Name"].AsString != textureName) continue;
             var tex = TextureFile.ReadTextureFile(bf);
             var colorSpace = bf["m_ColorSpace"];
             return new TextureHashSource(
@@ -466,22 +477,51 @@ public sealed class BundleReader
         return null;
     }
 
-    /// <summary>Decode a Texture2D by name to BGRA32. Handles BCn formats and resolves streamed pixel data
-    /// (the <c>.resS</c> resource inside the bundle).</summary>
-    public DecodedTexture? GetTexture(byte[] deobfuscatedBundle, string textureName)
+    /// <summary>The Texture2D's own Unity color-space flag without reading or decoding its picture data.
+    /// Null means the exact resource is absent. Generic Blender transport inherits this answer instead of
+    /// assigning semantics from a property-name convention.</summary>
+    public bool? GetTextureSrgb(byte[] deobfuscatedBundle, TextureRef which)
     {
         var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
+        foreach (var info in Texture2Ds(am, inst, which))
         {
-            if (info.TypeId != ClassTexture2D) continue;
+            var field = am.GetBaseField(inst, info)["m_ColorSpace"];
+            return !field.IsDummy && field.AsInt == 1;
+        }
+        return null;
+    }
+
+    /// <summary>Decode a Texture2D to BGRA32. Handles BCn formats and resolves streamed pixel data
+    /// (the <c>.resS</c> resource inside the bundle).</summary>
+    public DecodedTexture? GetTexture(byte[] deobfuscatedBundle, TextureRef which)
+    {
+        var (am, bun, inst) = Parse(deobfuscatedBundle);
+        foreach (var info in Texture2Ds(am, inst, which))
+        {
             var bf = am.GetBaseField(inst, info);
-            if (bf["m_Name"].AsString != textureName) continue;
             var tex = TextureFile.ReadTextureFile(bf);
             byte[] encoded = tex.FillPictureData(inst);          // resolves streamed .resS into pictureData
             byte[] bgra = tex.DecodeTextureRaw(encoded, useBgra: true);  // BCn → BGRA32 (base mip)
             return new DecodedTexture(bgra, tex.m_Width, tex.m_Height, ((TextureFormat)tex.m_TextureFormat).ToString());
         }
         return null;
+    }
+
+    /// <summary>The Texture2D(s) a <see cref="TextureRef"/> selects, in file order. A pathId selects at most
+    /// one and never falls back to the name: a reference the bundle no longer holds is the caller's null,
+    /// not a different texture that happens to share its name.</summary>
+    private static IEnumerable<AssetFileInfo> Texture2Ds(AssetsManager am, AssetsFileInstance inst, TextureRef which)
+    {
+        foreach (var info in inst.file.AssetInfos)
+        {
+            if (info.TypeId != ClassTexture2D) continue;
+            if (which.PathId != 0)
+            {
+                if (info.PathId != which.PathId) continue;
+            }
+            else if (am.GetBaseField(inst, info)["m_Name"].AsString != which.Name) continue;
+            yield return info;
+        }
     }
 
     /// <summary>One texture-env slot of a Material: the shader slot (<c>_BaseMap</c>/<c>_BumpMap</c>/…)
@@ -559,5 +599,78 @@ public sealed class BundleReader
         return null;
     }
 
+    public const int ClassShader = 48;
 
+    /// <summary>One material's shading state as serialized: its name, the shader keywords it enables,
+    /// the shader PPtr it draws through (<c>FileId</c> 0 = this bundle, else 1-based into
+    /// <see cref="MaterialShading.ExternalCabs"/>), and its serialized float and colour rows. Absent
+    /// rows mean the shader default applies — absence is recorded by the row not existing, never as
+    /// zero.</summary>
+    public sealed record MaterialShading(
+        string Name,
+        IReadOnlySet<string> EnabledKeywords,
+        int ShaderFileId,
+        long ShaderPathId,
+        IReadOnlyList<string> ExternalCabs,
+        IReadOnlyDictionary<string, float> Floats,
+        IReadOnlyDictionary<string, float[]> Colors);
+
+    /// <summary>Read the Material at <paramref name="pathId"/>'s shading state — keywords, shader PPtr,
+    /// serialized floats and colours. Null when the path id is not a Material here.</summary>
+    public MaterialShading? GetMaterialShading(byte[] deobfuscatedBundle, long pathId)
+    {
+        var (am, bun, inst) = Parse(deobfuscatedBundle);
+        var info = inst.file.GetAssetInfo(pathId);
+        if (info is null || info.TypeId != ClassMaterial) return null;
+        var bf = am.GetBaseField(inst, info);
+        var keywords = new HashSet<string>(StringComparer.Ordinal);
+        var valid = bf["m_ValidKeywords"];
+        if (!valid.IsDummy)
+            foreach (var keyword in valid["Array"].Children) keywords.Add(keyword.AsString);
+        else
+        {
+            // the pre-2021 serialization: one space-joined string
+            var legacy = bf["m_ShaderKeywords"];
+            if (!legacy.IsDummy)
+                foreach (var keyword in legacy.AsString.Split(' ',
+                             StringSplitOptions.RemoveEmptyEntries))
+                    keywords.Add(keyword);
+        }
+        var floats = new Dictionary<string, float>(StringComparer.Ordinal);
+        var colors = new Dictionary<string, float[]>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var pair in bf["m_SavedProperties"]["m_Floats"].Children[0].Children)
+                floats[pair["first"].AsString] = pair["second"].AsFloat;
+            foreach (var pair in bf["m_SavedProperties"]["m_Colors"].Children[0].Children)
+            {
+                var color = pair["second"];
+                colors[pair["first"].AsString] = new[]
+                {
+                    color["r"].AsFloat, color["g"].AsFloat, color["b"].AsFloat, color["a"].AsFloat,
+                };
+            }
+        }
+        catch { /* malformed property block — return whatever parsed */ }
+        return new MaterialShading(bf["m_Name"].AsString, keywords,
+            bf["m_Shader"]["m_FileID"].AsInt, bf["m_Shader"]["m_PathID"].AsLong,
+            ExternalCabs(inst), floats, colors);
+    }
+
+    /// <summary>The fragment shader variants of the Shader asset at <paramref name="pathId"/>, read
+    /// through <see cref="ShaderReflection"/>. Null when the path id is not a Shader here.</summary>
+    public IReadOnlyList<ShaderVariant>? GetShaderVariants(byte[] deobfuscatedBundle, long pathId)
+    {
+        var (am, bun, inst) = Parse(deobfuscatedBundle);
+        var info = inst.file.GetAssetInfo(pathId);
+        if (info is null || info.TypeId != ClassShader) return null;
+        return ShaderReflection.FragmentVariants(am.GetBaseField(inst, info));
+    }
+
+    /// <summary>This bundle's own CAB name — what another bundle's externals reference it by.</summary>
+    public string GetBundleCab(byte[] deobfuscatedBundle)
+    {
+        var (am, bun, inst) = Parse(deobfuscatedBundle);
+        return inst.name;
+    }
 }

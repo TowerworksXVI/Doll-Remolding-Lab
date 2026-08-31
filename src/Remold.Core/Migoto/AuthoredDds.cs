@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Remold.Core.Textures;
 using SixLabors.ImageSharp;
@@ -54,17 +54,18 @@ public static class AuthoredDds
     /// <see cref="Bc7Encoder"/> falls back to; null leaves it at all cores. It does not change the
     /// bytes.</para></summary>
     public static void Encode(string sourcePath, string destPath, bool srgb, Action<string>? log = null,
-        string? cacheDir = null, int? taskCount = null)
+        string? cacheDir = null, int? taskCount = null, string? sourceIdentity = null)
     {
         if (!File.Exists(sourcePath))
-            throw new FileNotFoundException($"texture not found: {sourcePath}", sourcePath);
+            throw new FileNotFoundException(
+                $"'{Path.GetFileName(sourcePath)}' is missing from the mod folder", sourcePath);
         if (IsPassthrough(sourcePath))
         {
             // the extension is only the author's claim: a renamed PNG would ship as a container nothing can
             // bind, and the build would call itself a success
             if (!HasDdsMagic(sourcePath))
                 throw new InvalidDataException(
-                    $"texture is named .dds but carries no DDS header: {sourcePath}");
+                    $"'{Path.GetFileName(sourcePath)}' is named .dds but is not a DDS file");
             File.Copy(sourcePath, destPath, overwrite: true);
             return;
         }
@@ -73,7 +74,7 @@ public static class AuthoredDds
         if (cacheDir is not null)
         {
             SweepStaleCodec(cacheDir);
-            cached = CachePath(cacheDir, sourcePath, srgb);
+            cached = CachePath(cacheDir, sourcePath, srgb, sourceIdentity);
         }
         if (cached is not null && TryServe(cached, destPath))
         {
@@ -84,7 +85,7 @@ public static class AuthoredDds
         using var image = Image.Load<Rgba32>(sourcePath);
         image.Mutate(x => x.Flip(FlipMode.Vertical));
         int w = image.Width, h = image.Height;
-        log?.Invoke($"encoding {Path.GetFileName(sourcePath)} ({w}×{h} BC7)");
+        log?.Invoke($"Encoding {Path.GetFileName(sourcePath)} ({w}×{h})…");
         var pixels = new byte[w * h * 4];
         image.CopyPixelDataTo(pixels);
 
@@ -104,7 +105,8 @@ public static class AuthoredDds
     public static string SourceIdentity(string sourcePath)
     {
         if (!File.Exists(sourcePath))
-            throw new FileNotFoundException($"texture not found: {sourcePath}", sourcePath);
+            throw new FileNotFoundException(
+                $"'{Path.GetFileName(sourcePath)}' is missing from the mod folder", sourcePath);
         using var s = File.OpenRead(sourcePath);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
     }
@@ -115,8 +117,9 @@ public static class AuthoredDds
 
     /// <summary>Where an encode of this source under this tag lives. The source is keyed by CONTENT, so an
     /// edited image misses and a renamed or copied one hits.</summary>
-    private static string CachePath(string cacheDir, string sourcePath, bool srgb) =>
-        Path.Combine(cacheDir, $"{SourceIdentity(sourcePath)}.{(srgb ? "srgb" : "lin")}.{CodecVersion}.dds");
+    private static string CachePath(string cacheDir, string sourcePath, bool srgb, string? sourceIdentity) =>
+        Path.Combine(cacheDir,
+            $"{sourceIdentity ?? SourceIdentity(sourcePath)}.{(srgb ? "srgb" : "lin")}.{CodecVersion}.dds");
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> CodecSwept =
         new(StringComparer.OrdinalIgnoreCase);

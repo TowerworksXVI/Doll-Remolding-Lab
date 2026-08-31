@@ -4,6 +4,30 @@ using System.Text;
 
 namespace Remold.Core.Project;
 
+/// <summary>One key standing in one position of its cycle: the key itself and the state index a gate on it
+/// tests for. A key's cycle is ordinal — one variable stepping 0, 1, … <see cref="KeyCycle.StateCount"/>-1
+/// and wrapping — so a gate names the position rather than an on/off truth.
+///
+/// <para>A bare key string converts to state 0, which is where a two-state group's content sits: the shapes
+/// that predate longer cycles keep saying what they always said.</para>
+///
+/// <para>CAUTION: the conversion has a struct to fill, so a null or blank key string becomes a reference
+/// naming NO key rather than a null reference — and a bare <c>null</c> assigned to a
+/// <c>KeyRef?</c> can be taken for that same thing. Nothing reads <see cref="Key"/> directly for that
+/// reason: <see cref="ModKeys.NormalizeRef"/> is the one place either shape is turned into "no key", and
+/// every gate, declaration and step goes through it.</para></summary>
+public readonly record struct KeyRef(string Key, int State)
+{
+    public KeyRef(string key) : this(key, 0) { }
+
+    public static implicit operator KeyRef(string key) => new(key, 0);
+}
+
+/// <summary>One emitted key's cycle: how many positions it steps through and which one it holds at load.
+/// Keys reset every session, so <see cref="StartState"/> is where the next session starts, not where the
+/// last one left off.</summary>
+public sealed record KeyCycle(string Key, int StateCount, int StartState);
+
 /// <summary>
 /// The one place a toggle-key string is normalized, compared and turned into an ini identifier. A key is
 /// stored as the tokens 3DMigoto's own <c>key =</c> line takes — optional modifiers then the key itself,
@@ -63,6 +87,19 @@ public static class ModKeys
             sb.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '_');
         return sb.ToString();
     }
+
+    /// <summary>The same normalization <see cref="Normalize(string?)"/> applies, carrying the state index
+    /// through untouched: a gate's position in its cycle is not something spelling can change. Null for a
+    /// reference naming no usable key — including the one a null key string converts to, since the implicit
+    /// conversion has a struct to fill and cannot answer "no key" by itself.
+    ///
+    /// <para>Named apart from <see cref="Normalize(string?)"/> rather than overloading it: a key string is
+    /// convertible to a <see cref="KeyRef"/>, so an overload pair would let a call site silently take the
+    /// wrong one.</para></summary>
+    public static KeyRef? NormalizeRef(KeyRef? key) =>
+        // the null branch is cast rather than written bare: an untyped null in a KeyRef?-typed position can
+        // take the string conversion above and come back as a present reference naming nothing
+        key is { } k && Normalize(k.Key) is { } n ? new KeyRef(n, k.State) : (KeyRef?)null;
 
     /// <summary>How a key reads on screen, or <paramref name="empty"/> when there is none.</summary>
     public static string Display(string? key, string empty = "") => Normalize(key) ?? empty;

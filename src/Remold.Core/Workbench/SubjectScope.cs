@@ -41,6 +41,7 @@ public sealed class SubjectScope
     private readonly HashSet<string> _hitSet;
     private readonly IReadOnlyList<string> _hitBundles;
     private readonly Outfit _outfit;
+    private readonly RosterFillCache? _fillCache;
 
     private List<SubjectCandidate>? _candidates;
     private Dictionary<string, VisibilityOverride>? _visibility;
@@ -52,7 +53,8 @@ public sealed class SubjectScope
     private readonly string? _rootName;
 
     private SubjectScope(IReadOnlyList<string> hitBundles, IReadOnlyList<string> scopeBundles,
-        Func<string, byte[]?> tryDeobfuscate, Outfit outfit, string? rootName = null)
+        Func<string, byte[]?> tryDeobfuscate, Outfit outfit, string? rootName = null,
+        RosterFillCache? fillCache = null)
     {
         _hitBundles = hitBundles;
         _hitSet = new HashSet<string>(hitBundles, StringComparer.Ordinal);
@@ -60,6 +62,7 @@ public sealed class SubjectScope
         _tryDeobfuscate = tryDeobfuscate;
         _outfit = outfit;
         _rootName = rootName;
+        _fillCache = fillCache;
     }
 
     /// <summary>The scope's bundles: context-hit prefab bundles in <see cref="GameVfs.ContextRoots"/>
@@ -89,11 +92,13 @@ public sealed class SubjectScope
     /// the mechanics are testable against a hand-authored catalog. <paramref name="tryDeobfuscate"/> is held
     /// for the lazy candidate/CAB reads — pass the operation's MEMOIZED delegate so deobfuscations and
     /// <see cref="BundleReader"/> parse caches are shared.</summary>
-    public static SubjectScope Build(CatalogIndex catalog, Func<string, byte[]?> tryDeobfuscate, Outfit outfit)
+    public static SubjectScope Build(CatalogIndex catalog, Func<string, byte[]?> tryDeobfuscate, Outfit outfit,
+        RosterFillCache? fillCache = null)
     {
         // FIRST, and on the STEM: a curated route must never become a way past the blacklist.
         if (RosterBlacklist.IsBlacklisted(outfit.Stem))
-            return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit);
+            return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit,
+                fillCache: fillCache);
 
         // A curated direct-bundle subject (see Model.SubjectRoute): the catalog names no address for this
         // prefab, so there is no dependency row to close over. The route's own ExtraBundles stand in for
@@ -105,12 +110,14 @@ public sealed class SubjectScope
         if (outfit.Route is { Bundle: { } directBundle })
         {
             if (!catalog.BundleNameToInternalId.ContainsKey(directBundle))
-                return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit);
+                return new SubjectScope(Array.Empty<string>(), Array.Empty<string>(), tryDeobfuscate, outfit,
+                    fillCache: fillCache);
             var direct = new List<string> { directBundle };
             var extras = new HashSet<string>(direct, StringComparer.Ordinal);
             foreach (var extra in outfit.Route.ExtraBundles)
                 if (extras.Add(extra)) direct.Add(extra);
-            return new SubjectScope(new[] { directBundle }, direct, tryDeobfuscate, outfit, outfit.Route.RootName);
+            return new SubjectScope(new[] { directBundle }, direct, tryDeobfuscate, outfit,
+                outfit.Route.RootName, fillCache);
         }
 
         // A curated addressable subject resolves through exactly the same catalog mechanics as a formula
@@ -135,7 +142,7 @@ public sealed class SubjectScope
         foreach (var deps in closures)
             foreach (var b in deps)
                 if (seen.Add(b)) scope.Add(b);
-        return new SubjectScope(hits, scope, tryDeobfuscate, outfit, outfit.Route?.RootName);
+        return new SubjectScope(hits, scope, tryDeobfuscate, outfit, outfit.Route?.RootName, fillCache);
     }
 
     /// <summary>Every scope bundle that parses as an assembly prefab, deduped by ROOT NAME (first wins):
@@ -151,7 +158,21 @@ public sealed class SubjectScope
             var discovered = new List<SubjectCandidate>();
             foreach (var b in ScopeBundles)
                 if (!_hitSet.Contains(b)) TryParse(b, discovered, ownPrefabSource: false);
-            discovered.Sort((a, b) => string.CompareOrdinal(a.Root, b.Root));
+            // Root name first, then the BUNDLE id — because the dedupe below is first-wins and List.Sort is
+            // unstable, so two closure bundles carrying the same root name were being separated by the
+            // packer's dependency order, and the winner could change on a repack that moved nothing. The
+            // bundle id is a catalog fact and total over the set, so the tie now breaks the same way on
+            // every install and across every patch.
+            //
+            // This CAN move a measurement — but only for a subject whose winner was already unstable across
+            // repacks, which is the residual the fingerprint's own summary names. Sharing schema 7 is a
+            // from-scratch generation on every install (no schema-6 row is reusable at any grain), so the
+            // re-measure it would cost is one already being paid: it lands free now, and never again.
+            discovered.Sort((a, b) =>
+            {
+                int byRoot = string.CompareOrdinal(a.Root, b.Root);
+                return byRoot != 0 ? byRoot : string.CompareOrdinal(a.Bundle, b.Bundle);
+            });
 
             // The dorm visibility lists are gathered across every parsed prefab that is a CONSTITUENT of this
             // subject (see SubjectModelBuilder.IsSubjectConstituent), ahead of the root-name dedupe below. The
@@ -234,7 +255,12 @@ public sealed class SubjectScope
         // _rootName pins a curated route's container root in the bundle its address resolves to; the
         // stem formula takes the bundle's first root that parses, which is safe there because address
         // and root agree by construction
-        try { prefab = PrefabReader.Read(dec, ownPrefabSource ? _rootName : null, out declined); }
+        try
+        {
+            prefab = _fillCache is null
+                ? PrefabReader.Read(dec, ownPrefabSource ? _rootName : null, out declined)
+                : _fillCache.Parse(bundle, dec, ownPrefabSource ? _rootName : null, out declined);
+        }
         catch (Exception e)
         {
             _problems.Add($"Assembly prefab in bundle '{bundle}' couldn't be read ({e.Message}).");

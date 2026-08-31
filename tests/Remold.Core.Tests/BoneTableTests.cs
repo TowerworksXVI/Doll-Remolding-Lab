@@ -27,6 +27,30 @@ public class BoneTableTests
     }
 
     [Theory]
+    [InlineData("Prefab/root/Root_M/Toes_L/Shoes01_L", "Shoes01_L")]
+    [InlineData("Prefab/root/Root_M/Toes_L/Shoes01_L/Shoes02_L", "Shoes01_L/Shoes02_L")]
+    [InlineData("root/Root_M/Spine1_M", "root/Root_M/Spine1_M")]
+    public void MatchingSuffix_ReturnsTheFirstSuffixWhoseHashMatches(string fullPath, string suffix)
+    {
+        Assert.Equal(suffix, BoneTable.MatchingSuffix(BoneTable.Hash(suffix), fullPath));
+    }
+
+    [Fact]
+    public void MatchingSuffix_ReturnsNullWhenThePathDoesNotNameTheHash()
+    {
+        Assert.Null(BoneTable.MatchingSuffix(BoneTable.Hash("Shoes01_R"), "Prefab/root/Root_M/Toes_L/Shoes01_L"));
+        Assert.Null(BoneTable.MatchingSuffix(BoneTable.Hash("Shoes01_R"), null));
+    }
+
+    [Fact]
+    public void MatchingLeaf_ReturnsNullWhenTheMatchingSuffixEndsInASeparator()
+    {
+        const string suffix = "Hair01_L/";
+        Assert.Equal(suffix, BoneTable.MatchingSuffix(BoneTable.Hash(suffix), "Prefab/root/" + suffix));
+        Assert.Null(BoneTable.MatchingLeaf(BoneTable.Hash(suffix), "Prefab/root/" + suffix));
+    }
+
+    [Theory]
     [InlineData("Root_M/Spring01", 0x05f0c65fu)]
     [InlineData("Root_M/Spring01/Spring02/Spring03/Spring04/Spring05/Spring06", 0x68bd228fu)]
     [InlineData("Root_M/SpringA01/SpringA02/SpringA03/SpringA04/SpringA05/SpringA06/SpringA07", 0x02ae5487u)]

@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SixLabors.ImageSharp;
@@ -12,7 +14,86 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace Remold.Core.Mesh;
 
 /// <summary>Which slot of a preview material an image fills.</summary>
-public enum MapKind { BaseColor, Normal, Rmo }
+public enum MapKind { BaseColor, Normal, Rmo, Blend, Texture }
+
+/// <summary>One open's transformed preview-image memo, BOUNDED. Source bytes are never retained — only a
+/// path→content-hash note (so an unchanged path skips the read entirely when its transform is already
+/// held) and the transformed blobs, under a retained-byte ceiling with least-recently-served eviction.
+/// Different workspace paths carrying identical PNG bytes share the decode/transform/encode result,
+/// including across concurrent part exports; an evicted entry falls back to what every caller did before
+/// the memo existed — read and transform again — so the ceiling costs time, never correctness.</summary>
+public sealed class PreviewBlobMemo
+{
+    private const long DefaultMaxRetainedBytes = 256L * 1024 * 1024;
+
+    private readonly long _maxRetainedBytes;
+    private readonly object _gate = new();
+    private readonly Dictionary<string, string> _hashByPath = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(string ContentHash, MapKind Kind), LinkedListNode<Entry>> _blobs = new();
+    private readonly LinkedList<Entry> _recency = new();   // most recently served at the head
+    private long _retainedBytes;
+
+    public PreviewBlobMemo(long maxRetainedBytes = DefaultMaxRetainedBytes) =>
+        _maxRetainedBytes = Math.Max(1, maxRetainedBytes);
+
+    internal readonly record struct Blob(byte[] Bytes, string Hash, PreviewMaps.AlphaCoverage Alpha);
+    private readonly record struct Entry((string ContentHash, MapKind Kind) Key, Blob Blob);
+
+    /// <summary>Bytes currently retained by held blobs — the number the ceiling bounds. Test seam.</summary>
+    internal long RetainedBytes { get { lock (_gate) return _retainedBytes; } }
+
+    internal Blob Get(string pngPath, MapKind kind)
+    {
+        string full = Path.GetFullPath(pngPath);
+        lock (_gate)
+        {
+            if (_hashByPath.TryGetValue(full, out string? known)
+                && TryServeLocked((known, kind), out var held))
+                return held;
+        }
+        // The read, hash and transform run OUTSIDE the lock: they are the expensive part, and two workers
+        // minting the same content concurrently just produce byte-identical blobs (one of them is kept).
+        byte[] source = File.ReadAllBytes(full);
+        string contentHash = PreviewMaps.Hash(source);
+        lock (_gate)
+        {
+            _hashByPath[full] = contentHash;
+            if (TryServeLocked((contentHash, kind), out var held)) return held;
+        }
+        byte[] transformed = PreviewMaps.ToPreviewWithAlphaCoverage(source, kind, out var alpha);
+        var blob = new Blob(transformed, PreviewMaps.Hash(transformed), alpha);
+        lock (_gate)
+        {
+            var key = (contentHash, kind);
+            if (TryServeLocked(key, out var raced)) return raced;   // a concurrent mint won; serve it
+            var node = new LinkedListNode<Entry>(new Entry(key, blob));
+            _blobs[key] = node;
+            _recency.AddFirst(node);
+            _retainedBytes += blob.Bytes.Length;
+            while (_retainedBytes > _maxRetainedBytes && _recency.Last is { } oldest
+                   && !ReferenceEquals(oldest, node))
+            {
+                _recency.RemoveLast();
+                _blobs.Remove(oldest.Value.Key);
+                _retainedBytes -= oldest.Value.Blob.Bytes.Length;
+            }
+        }
+        return blob;
+    }
+
+    private bool TryServeLocked((string ContentHash, MapKind Kind) key, out Blob blob)
+    {
+        if (_blobs.TryGetValue(key, out var node))
+        {
+            _recency.Remove(node);
+            _recency.AddFirst(node);
+            blob = node.Value.Blob;
+            return true;
+        }
+        blob = default;
+        return false;
+    }
+}
 
 /// <summary>Where a submesh's map came from once an edited glb is read back.</summary>
 public enum MapOrigin
@@ -37,7 +118,13 @@ public readonly record struct ResolvedMap(MapOrigin Origin, string? StockPng = n
 /// <paramref name="MaterialName"/> is the returned primitive's own material name (what the modder sees
 /// in Blender's slot list), empty when it has none.</summary>
 public readonly record struct IncomingMaps(ResolvedMap BaseColor, ResolvedMap Normal, ResolvedMap Rmo = default,
-    string MaterialName = "");
+    string MaterialName = "", IReadOnlyList<IncomingTexture>? Textures = null,
+    string? BaseColorName = null, string? NormalName = null, string? RmoName = null);
+
+/// <summary>One property-keyed image returned for a material/primitive owner. <see cref="ShaderProperty"/>
+/// is authoritative; <see cref="Kind"/> describes the transform only and never selects a slot.</summary>
+public readonly record struct IncomingTexture(int MaterialIndex, int? PrimitiveIndex, string ShaderProperty,
+    MapKind Kind, ResolvedMap Map, string? ImageName = null);
 
 /// <summary>
 /// The preview maps embedded in a Blender-facing glb, and their identity on the way back.
@@ -49,13 +136,18 @@ public readonly record struct IncomingMaps(ResolvedMap BaseColor, ResolvedMap No
 ///
 /// <para>Identity is the image's CONTENT, recorded in a sidecar written by the same call that writes the
 /// glb (so the two cannot drift). Blender re-packs without re-encoding, so an untouched map returns
-/// byte-identical and hashes to its sidecar entry; anything else is authored. Material and image names,
-/// duplication and slot order do not enter the decision.</para>
+/// byte-identical and hashes to its sidecar entry; anything else is authored. Material and image names and
+/// duplication do not enter the decision.</para>
+///
+/// <para>Content alone is not the whole of it: the sidecar also records, per primitive and kind, WHICH stock
+/// image that slot was exported over (<see cref="SlotSource"/>). A stock map returning on a slot it was never
+/// exported on is a link the modder made by hand — inside one part exactly as across two — and it publishes
+/// like a painted map. A record with no slot rows keeps the older, content-only answer.</para>
 ///
 /// <para>The sidecar also records, per (mesh, submesh), the stock RMO that submesh's material was built
-/// over. glTF has no channel for the emissive mask an RMO carries in alpha, so an authored RMO's mask is
-/// read back off that map at intake — the export's own answer, not a re-derivation that could disagree
-/// with it.</para>
+/// over. The ORM image physically carries alpha, but glTF assigns it no material semantic, so the default
+/// intake rebuild reads the mask from that recorded map rather than trusting a Blender workflow to preserve
+/// it. An explicit authored-alpha answer can override that default.</para>
 ///
 /// <para>The sidecar also names the workspace's shipped neutral normal (<see cref="NeutralN"/>), so a normal
 /// slot the modder filled with it classifies as <see cref="MapOrigin.Neutral"/> by the same content match.
@@ -93,18 +185,82 @@ public static class PreviewMaps
         [property: JsonPropertyName("owner")] string Owner = "");
 
     /// <summary>The stock RMO one submesh's preview material was built over: the mesh it belongs to, its
-    /// primitive index within that mesh, and the workspace PNG. Alpha carries the emissive mask and has no
-    /// glTF channel to travel in, so an authored RMO is rebuilt over the alpha of the map recorded here.
+    /// primitive index within that mesh, and the workspace PNG. Alpha carries the emissive mask but has no
+    /// glTF material semantic, so the default authored-RMO intake rebuilds from the map recorded here.
     /// A combined glb holds several meshes, so the mesh name is part of the identity.</summary>
     public readonly record struct SubmeshSource(
         [property: JsonPropertyName("mesh")] string Mesh,
         [property: JsonPropertyName("index")] int Index,
         [property: JsonPropertyName("rmo")] string Rmo);
 
+    /// <summary>The STOCK image one primitive's preview material was built over in one slot: the mesh, the
+    /// primitive index within it, the kind, and the content hash of what the export embedded there.
+    ///
+    /// <para>This is what tells a slot still bound to ITS OWN stock map from one the modder deliberately
+    /// re-pointed at another slot's. The <see cref="Entry"/> list answers "is this image one of the maps this
+    /// export embedded", which is the same answer for every slot of the part and so cannot see an intra-part
+    /// link at all: plugging material 2's map into material 1 read as material 1 untouched, and the ask
+    /// vanished.</para>
+    ///
+    /// <para>A slot the export gave no stock map — an authored file of the modder's own, or none — records
+    /// nothing. Absence is meaningful and is not the same as the mesh being unrecorded: see
+    /// <see cref="ReadSlotStock"/>.</para></summary>
+    public readonly record struct SlotSource(
+        [property: JsonPropertyName("mesh")] string Mesh,
+        [property: JsonPropertyName("index")] int Index,
+        [property: JsonPropertyName("kind")] MapKind Kind,
+        [property: JsonPropertyName("hash")] string Hash);
+
+    /// <summary>Reserved per-material shader inputs for one property binding. Empty in this stage; the
+    /// stable container means later detail-layer floats and keywords extend the record rather than replace
+    /// its identity shape.</summary>
+    public sealed class TransportParameters
+    {
+        [JsonPropertyName("floats")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Dictionary<string, float>? Floats { get; set; }
+        [JsonPropertyName("keywords")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<string>? Keywords { get; set; }
+    }
+
+    /// <summary>The stock Texture2D behind a transport binding. Property identity stays outside this record:
+    /// two properties may name this same resource and remain independent bindings.</summary>
+    public readonly record struct TransportStock(
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("bundle")] string Bundle,
+        [property: JsonPropertyName("path_id")] long PathId);
+
+    /// <summary>One exact property-keyed image written beside and inside a Blender-facing glb. The owner is
+    /// both the installed material position and its projected primitive (null for a surplus material).
+    /// <see cref="OutboundHash"/> identifies the preview bytes Blender received; <see cref="Stock"/> keeps
+    /// resource identity separate from that derivative content identity.</summary>
+    public readonly record struct TransportBinding(
+        [property: JsonPropertyName("mesh")] string Mesh,
+        [property: JsonPropertyName("material")] int MaterialIndex,
+        [property: JsonPropertyName("primitive")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PrimitiveIndex,
+        [property: JsonPropertyName("property")] string ShaderProperty,
+        [property: JsonPropertyName("semantic")] MapKind Kind,
+        [property: JsonPropertyName("source")] string Source,
+        [property: JsonPropertyName("outbound_hash")] string OutboundHash,
+        [property: JsonPropertyName("stock")] TransportStock Stock,
+        [property: JsonPropertyName("srgb")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Srgb = null,
+        [property: JsonPropertyName("origin")] MapOrigin Origin = MapOrigin.Vanilla,
+        [property: JsonPropertyName("parameters")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TransportParameters? Parameters = null,
+        [property: JsonPropertyName("texCoord")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? TexCoord = null);
+
     private sealed class Sidecar
     {
         [JsonPropertyName("images")] public List<Entry> Images { get; set; } = new();
         [JsonPropertyName("submeshes")] public List<SubmeshSource> Submeshes { get; set; } = new();
+        [JsonPropertyName("slots")] public List<SlotSource> Slots { get; set; } = new();
+        [JsonPropertyName("bindings")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<TransportBinding>? Bindings { get; set; }
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -117,11 +273,132 @@ public static class PreviewMaps
 
     public static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
+    /// <summary>Path-independent content identity of a workspace GLB, its sidecar semantics and every
+    /// picture that sidecar names. Missing dependencies return null, so a final-composition key can never
+    /// certify a workspace whose comparison inputs have disappeared.</summary>
+    public static string? WorkspaceContentIdentity(string glbPath)
+    {
+        try
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            void Bytes(byte[] bytes)
+            {
+                Span<byte> length = stackalloc byte[4];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(length, bytes.Length);
+                hash.AppendData(length);
+                hash.AppendData(bytes);
+            }
+            void FileBytes(string path)
+            {
+                using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                Span<byte> length = stackalloc byte[8];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(length, stream.Length);
+                hash.AppendData(length);
+                hash.AppendData(SHA256.HashData(stream));
+            }
+            string FileHash(string path)
+            {
+                using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            }
+
+            string glb = Path.GetFullPath(glbPath);
+            FileBytes(glb);
+            string sidecar = SidecarPath(glb);
+            if (!File.Exists(sidecar))
+            {
+                Bytes("sidecar-absent"u8.ToArray());
+                return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            }
+            var doc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(sidecar), JsonOpts)
+                ?? new Sidecar();
+            string directory = Path.GetDirectoryName(glb)!;
+            string Content(string relative) => FileHash(Path.GetFullPath(Path.Combine(directory, relative)));
+            var contentAddressed = new Sidecar
+            {
+                Images = doc.Images.Select(entry => entry with { Source = Content(entry.Source) }).ToList(),
+                Submeshes = doc.Submeshes.Select(row => row with { Rmo = Content(row.Rmo) }).ToList(),
+                Slots = doc.Slots,
+                Bindings = doc.Bindings?.Select(binding => binding with
+                    { Source = Content(binding.Source) }).ToList(),
+            };
+            Bytes(JsonSerializer.SerializeToUtf8Bytes(contentAddressed, JsonOpts));
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        catch (Exception e) when (e is not OutOfMemoryException) { return null; }
+    }
+
+    /// <summary>Copy one workspace glb and make its comparison record self-contained at the destination.
+    /// Every external picture named by the record is copied under the destination and the relative source
+    /// is rewritten there. The result can therefore move as one immutable directory after intake accepts
+    /// it, without its authored-map classifier continuing to point into disposable preparation staging.</summary>
+    public static void CopyPortableWorkspace(string sourceGlb, string destinationGlb,
+        string picturesRelativeDirectory = "maps", bool requireSelfContained = false)
+    {
+        string source = Path.GetFullPath(sourceGlb);
+        string destination = Path.GetFullPath(destinationGlb);
+        string destinationDirectory = Path.GetDirectoryName(destination)!;
+        string pictures = Path.GetFullPath(Path.Combine(destinationDirectory, picturesRelativeDirectory));
+        string destinationPrefix = destinationDirectory.TrimEnd(Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!pictures.StartsWith(destinationPrefix, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("The workspace picture directory must be under the destination.",
+                nameof(picturesRelativeDirectory));
+        Directory.CreateDirectory(destinationDirectory);
+        File.Copy(source, destination, overwrite: false);
+
+        string sourceRecord = SidecarPath(source);
+        if (!File.Exists(sourceRecord)) return;
+        var doc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(sourceRecord), JsonOpts)
+            ?? new Sidecar();
+        string sourceDirectory = Path.GetDirectoryName(source)!;
+        var copied = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        int next = 0;
+
+        string Portable(string relative)
+        {
+            if (string.IsNullOrWhiteSpace(relative)) return relative;
+            string full = Path.GetFullPath(Path.Combine(sourceDirectory, relative));
+            if (!File.Exists(full))
+            {
+                if (requireSelfContained)
+                    throw new FileNotFoundException("A workspace picture could not be copied.", full);
+                return Path.GetRelativePath(destinationDirectory, full);
+            }
+            if (!copied.TryGetValue(full, out string? held))
+            {
+                Directory.CreateDirectory(pictures);
+                string extension = Path.GetExtension(full);
+                held = Path.Combine(pictures, $"{next++:D4}{extension}");
+                File.Copy(full, held, overwrite: false);
+                copied.Add(full, held);
+            }
+            return Path.GetRelativePath(destinationDirectory, held);
+        }
+
+        var portable = new Sidecar
+        {
+            Images = doc.Images.Select(entry => entry with { Source = Portable(entry.Source) }).ToList(),
+            Submeshes = doc.Submeshes.Select(row => row with { Rmo = Portable(row.Rmo) }).ToList(),
+            Slots = doc.Slots,
+            Bindings = doc.Bindings?.Select(binding => binding with
+                { Source = Portable(binding.Source) }).ToList(),
+        };
+        File.WriteAllText(SidecarPath(destination), JsonSerializer.Serialize(portable, JsonOpts));
+    }
+
     /// <summary>A readable name for an embedded image so Blender's UI doesn't show <c>Image_0</c>.
     /// Diagnostic only.</summary>
     public static string ImageName(string pngPath, MapKind kind) =>
         Path.GetFileNameWithoutExtension(pngPath).Split('.')[0]
-        + kind switch { MapKind.Normal => "_nrm", MapKind.Rmo => "_rmo", _ => "_base" };
+        + kind switch
+        {
+            MapKind.Normal => "_nrm",
+            MapKind.Rmo => "_rmo",
+            MapKind.Blend => "_effect",
+            MapKind.Texture => "_texture",
+            _ => "_base",
+        };
 
     // ---------------------------------------------------------------- the paired transforms
 
@@ -131,10 +408,154 @@ public static class PreviewMaps
     /// <para><see cref="MapKind.Normal"/> is unpacked and <see cref="MapKind.Rmo"/> is permuted into glTF's
     /// ORM order; <see cref="MapKind.BaseColor"/> is re-encoded and otherwise passes through, since glTF
     /// reads its channels exactly as the game packs them.</para></summary>
-    public static byte[] ToPreview(string pngPath, MapKind kind)
+    public static byte[] ToPreview(string pngPath, MapKind kind) =>
+        ToPreviewWithAlphaCoverage(pngPath, kind, out _);
+
+    /// <inheritdoc cref="ToPreview(string, MapKind)"/>
+    /// <param name="fractionBelowHalfAlpha">The share of the embedded image's pixels whose alpha is under
+    /// half — measured here because the image is already decoded, and reading the file a second time to ask
+    /// costs as much as the encode. Only a BASE COLOUR answer means coverage: an RMO's alpha is the emissive
+    /// mask and a normal's is the packed X, neither of which is transparency. See
+    /// <see cref="CutoutAlphaByte"/> for why HALF and not "not fully opaque".</param>
+    public static byte[] ToPreview(string pngPath, MapKind kind, out double fractionBelowHalfAlpha)
+    {
+        var png = ToPreviewWithAlphaCoverage(pngPath, kind, out var coverage);
+        fractionBelowHalfAlpha = coverage.FractionBelowHalf;
+        return png;
+    }
+
+    /// <summary>The two base-colour coverage measurements made while <see cref="ToPreview(string, MapKind)"/>
+    /// already holds the decoded pixels. <see cref="MidCore5Fraction"/> is the share of the whole image that
+    /// remains after the alpha-16..239 mask is eroded by two pixels (a 5x5 all-mid neighbourhood).</summary>
+    internal readonly record struct AlphaCoverage(double FractionBelowHalf, double MidCore5Fraction);
+
+    /// <summary>The embedding transform and its full alpha measurement in one decode. Non-base maps retain
+    /// the legacy below-half answer for callers that inspect it, but have no blend-coverage answer because
+    /// their alpha channel is data rather than transparency.</summary>
+    internal static byte[] ToPreviewWithAlphaCoverage(
+        string pngPath, MapKind kind, out AlphaCoverage alphaCoverage)
     {
         using var img = PreviewImage(pngPath, kind);
+        return PreviewBytes(img, kind, out alphaCoverage);
+    }
+
+    internal static byte[] ToPreviewWithAlphaCoverage(
+        byte[] png, MapKind kind, out AlphaCoverage alphaCoverage)
+    {
+        using var img = PreviewImage(png, kind);
+        return PreviewBytes(img, kind, out alphaCoverage);
+    }
+
+    private static byte[] PreviewBytes(Image<Rgba32> img, MapKind kind,
+        out AlphaCoverage alphaCoverage)
+    {
+        alphaCoverage = kind == MapKind.BaseColor
+            ? MeasureBaseColorAlpha(img)
+            : new AlphaCoverage(FractionBelowHalfAlpha(img), 0);
         return SavePng(img);
+    }
+
+    /// <summary>The alpha at or above which a pixel survives, in glTF's own 0..1 units — glTF's default
+    /// cutoff, stated rather than assumed, and THE authoritative half of this pair. It is what
+    /// <see cref="MeshGltf"/> writes on a MASK material, so what the mode is chosen for is exactly what the
+    /// viewer then discards.</summary>
+    internal const float GltfAlphaCutoff = 0.5f;
+
+    /// <summary>The same cutoff as a BYTE: the lowest alpha <see cref="GltfAlphaCutoff"/> keeps, so a pixel
+    /// under this is exactly a pixel that cutoff discards. DERIVED rather than spelled a second time — a byte
+    /// <c>b</c> rides as <c>b/255</c>, so the first alpha the cutoff keeps is <c>ceil(cutoff × 255)</c> — and
+    /// the two units therefore cannot drift apart: the share measured here and the cut the viewer performs
+    /// are the same rule in two spellings.
+    ///
+    /// <para>Half, rather than "anything short of 255", because the game's own textures are BC-compressed and
+    /// decode with whole uniform 4x4 blocks of alpha 254 — encoder quantization, present in the shipped data.
+    /// Measured against that noise, "not fully opaque" is true of essentially every diffuse map in the game,
+    /// while the share of pixels under half is 0.0%.</para></summary>
+    private static readonly byte CutoutAlphaByte = (byte)MathF.Ceiling(GltfAlphaCutoff * 255f);
+
+    /// <summary>The share of an image's pixels whose alpha is under <see cref="CutoutAlphaByte"/> — what says
+    /// whether a base colour carries genuine cutout content rather than compression noise. 0 for an image with
+    /// no pixels at all.</summary>
+    private static double FractionBelowHalfAlpha(Image<Rgba32> img)
+    {
+        long below = 0;
+        img.ProcessPixelRows(rows =>
+        {
+            for (int y = 0; y < rows.Height; y++)
+            {
+                var row = rows.GetRowSpan(y);
+                for (int x = 0; x < row.Length; x++)
+                    if (row[x].A < CutoutAlphaByte) below++;
+            }
+        });
+        long total = (long)img.Width * img.Height;
+        return total == 0 ? 0 : (double)below / total;
+    }
+
+    /// <summary>Measure cut coverage and area-forming graded coverage in one walk over the decoded base
+    /// colour. The horizontal/vertical five-pixel windows implement a square erosion without a 25-read inner
+    /// loop; the two byte masks cost two bytes per pixel only while this already-decoded image is embedded.</summary>
+    private static AlphaCoverage MeasureBaseColorAlpha(Image<Rgba32> img)
+    {
+        int width = img.Width;
+        int height = img.Height;
+        long total = (long)width * height;
+        if (total == 0) return default;
+
+        // A map narrower or shorter than five pixels has no legal core centre and therefore cannot declare
+        // BLEND; its below-half result still lets the material fall through honestly to MASK or OPAQUE.
+        byte[]? mid = width >= 5 && height >= 5 ? new byte[checked(width * height)] : null;
+        long below = 0;
+        img.ProcessPixelRows(rows =>
+        {
+            for (int y = 0; y < rows.Height; y++)
+            {
+                var row = rows.GetRowSpan(y);
+                int offset = y * width;
+                for (int x = 0; x < row.Length; x++)
+                {
+                    byte alpha = row[x].A;
+                    if (alpha < CutoutAlphaByte) below++;
+                    if (mid is not null
+                        && alpha is >= MeshGltf.BlendMidAlphaMin and <= MeshGltf.BlendMidAlphaMax)
+                        mid[offset + x] = 1;
+                }
+            }
+        });
+
+        long core = mid is null ? 0 : MidAlphaCore5(mid, width, height);
+        return new AlphaCoverage((double)below / total, (double)core / total);
+    }
+
+    /// <summary>Count pixels whose entire 5x5 neighbourhood belongs to the supplied mid-alpha mask.</summary>
+    private static long MidAlphaCore5(byte[] mid, int width, int height)
+    {
+        var horizontal = new byte[mid.Length];
+        for (int y = 0; y < height; y++)
+        {
+            int offset = y * width;
+            int window = mid[offset] + mid[offset + 1] + mid[offset + 2] + mid[offset + 3] + mid[offset + 4];
+            for (int x = 2; x <= width - 3; x++)
+            {
+                if (window == 5) horizontal[offset + x] = 1;
+                if (x < width - 3)
+                    window += mid[offset + x + 3] - mid[offset + x - 2];
+            }
+        }
+
+        long core = 0;
+        for (int x = 2; x <= width - 3; x++)
+        {
+            int window = horizontal[x] + horizontal[width + x] + horizontal[2 * width + x]
+                + horizontal[3 * width + x] + horizontal[4 * width + x];
+            for (int y = 2; y <= height - 3; y++)
+            {
+                if (window == 5) core++;
+                if (y < height - 3)
+                    window += horizontal[(y + 3) * width + x] - horizontal[(y - 2) * width + x];
+            }
+        }
+        return core;
     }
 
     /// <summary>The same transform, stopping at the pixels — for a caller that compares rather than embeds
@@ -142,9 +563,21 @@ public static class PreviewMaps
     private static Image<Rgba32> PreviewImage(string pngPath, MapKind kind)
     {
         var img = Image.Load<Rgba32>(pngPath);
+        TransformPreview(img, kind);
+        return img;
+    }
+
+    private static Image<Rgba32> PreviewImage(byte[] png, MapKind kind)
+    {
+        var img = Image.Load<Rgba32>(png);
+        TransformPreview(img, kind);
+        return img;
+    }
+
+    private static void TransformPreview(Image<Rgba32> img, MapKind kind)
+    {
         if (kind == MapKind.Normal) UnpackNormal(img);
         else if (kind == MapKind.Rmo) RmoToOrm(img);
-        return img;
     }
 
     /// <summary>An image out of a returned glb, back to stock-PNG space. Inverse of
@@ -285,9 +718,13 @@ public static class PreviewMaps
 
     // ---------------------------------------------------------------- sidecar
 
-    /// <summary>Record what was embedded beside the glb: the images by content, and the stock RMO behind each
-    /// submesh that got one. Sources are stored relative to the glb so a mod folder stays movable.</summary>
-    public static void WriteSidecar(string glbPath, IEnumerable<Entry> entries, IEnumerable<SubmeshSource> submeshes)
+    /// <summary>Record what was embedded beside the glb: the images by content, the stock RMO behind each
+    /// submesh that got one, and the stock image behind each primitive's every slot
+    /// (<paramref name="slots"/>). Sources are stored relative to the glb so a mod folder stays movable;
+    /// slot rows carry content hashes, which no move touches.</summary>
+    public static void WriteSidecar(string glbPath, IEnumerable<Entry> entries,
+        IEnumerable<SubmeshSource> submeshes, IEnumerable<SlotSource>? slots = null,
+        IEnumerable<TransportBinding>? bindings = null)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(glbPath))!;
         var embedded = entries as IReadOnlyCollection<Entry> ?? entries.ToList();
@@ -295,7 +732,10 @@ public static class PreviewMaps
             .Select(e => e with { Source = Rel(dir, e.Source) })
             .DistinctBy(e => (e.Hash, e.Source, e.Kind, e.Owner))
             .ToList();
-        if (rel.Count == 0)
+        var transport = (bindings ?? Array.Empty<TransportBinding>())
+            .Select(binding => binding with { Source = Rel(dir, binding.Source) })
+            .ToList();
+        if (rel.Count == 0 && transport.Count == 0)
         {
             // no maps: clear the sidecar — a stale one would resolve an authored image as stock
             var stale = SidecarPath(glbPath);
@@ -304,12 +744,37 @@ public static class PreviewMaps
         }
         var subs = submeshes.Select(s => s with { Rmo = Rel(dir, s.Rmo) }).ToList();
         File.WriteAllText(SidecarPath(glbPath),
-            JsonSerializer.Serialize(new Sidecar { Images = rel, Submeshes = subs }, JsonOpts));
+            JsonSerializer.Serialize(
+                new Sidecar
+                {
+                    Images = rel,
+                    Submeshes = subs,
+                    Slots = slots?.ToList() ?? new List<SlotSource>(),
+                    Bindings = transport.Count == 0 ? null : transport,
+                },
+                JsonOpts));
+    }
+
+    /// <summary>The exact property bindings recorded for an outbound glb. Source paths are made absolute;
+    /// absence is the legacy three-channel record shape.</summary>
+    public static IReadOnlyList<TransportBinding> ReadTransportBindings(string glbPath)
+    {
+        var path = SidecarPath(glbPath);
+        if (!File.Exists(path)) return Array.Empty<TransportBinding>();
+        var rows = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts)?.Bindings;
+        if (rows is not { Count: > 0 }) return Array.Empty<TransportBinding>();
+        var dir = Path.GetDirectoryName(Path.GetFullPath(glbPath))!;
+        return rows.Select(binding => binding with
+        {
+            Source = Path.GetFullPath(Path.Combine(dir, binding.Source)),
+        }).ToList();
     }
 
     /// <summary>The sidecar's CLASSIFYING entries for a glb, keyed by content hash AND slot kind, or empty when
     /// there is none — every image then reads as authored, shipping a redundant stock copy rather than losing an
-    /// authored map. The kind belongs in the key: the RMO permutation is the identity on any pixel with
+    /// authored map. It answers what the whole export embedded; WHICH slot each image sat on is the separate
+    /// answer <see cref="ReadSlotStock"/> gives, and <see cref="Resolve"/> wants both.
+    /// The kind belongs in the key: the RMO permutation is the identity on any pixel with
     /// R==G==B, so a grayscale map embedded in two slots hashes the same in both, and a hash-only key would keep
     /// one of them and misread the other as authored.
     ///
@@ -356,34 +821,41 @@ public static class PreviewMaps
         return sources;
     }
 
-    /// <summary>The stock PNGs one mesh's own preview materials were embedded from, absolute — what tells a
-    /// slot bound to the part's own vanilla map from one deliberately linked to a SIBLING part's. Null when
-    /// ownership is unknowable, which leaves the caller with its unknowable case rather than an empty answer
-    /// that would read every match as a sibling link: no sidecar, no entry recording an owner at all, or a
-    /// sidecar that never mentions the requested mesh — under an owner or a submesh row. A sidecar that DOES
-    /// hold the mesh and owns nothing for it answers with the empty set.
-    /// <paramref name="meshName"/> resolves as in <see cref="ReadSubmeshRmoSources"/>.</summary>
-    public static IReadOnlySet<string>? ReadOwnedStock(string glbPath, string? meshName = null)
+    /// <summary>What each primitive of one mesh was exported over, per slot kind, as the content hash of the
+    /// stock image embedded there — what tells a slot still bound to its OWN stock map from one deliberately
+    /// re-pointed at another slot's (see <see cref="SlotSource"/>). A slot the export gave no stock map is
+    /// ABSENT from the answer, and absent means "no stock map belongs here", so a stock image arriving on it
+    /// is an ask.
+    ///
+    /// <para>Null where the record cannot say, which is a different answer from an empty one and leaves the
+    /// caller on the whole-record classification rather than reading every one of the part's own maps as a
+    /// link: no sidecar, a record written before slots were recorded at all (a workspace from an earlier
+    /// release), or a record that holds slots but names this mesh in none of them — which is what a mesh
+    /// renamed in Blender comes back as.</para>
+    ///
+    /// <para>Keyed by PRIMITIVE INDEX, as every other per-submesh answer in this pipeline is
+    /// (<see cref="ReadSubmeshRmoSources"/>, <c>SubmeshTextures.Submesh</c>): a primitive past the recorded
+    /// ones is simply absent.</para>
+    ///
+    /// <para>THE INVARIANT the writing side owes: a mesh the record names at all carries a row for EVERY
+    /// (primitive, kind) its export bound a stock map to. The fallback above is per MESH while the answer
+    /// here is scoped per (index, kind), so a record naming the mesh with rows for only some of the kinds
+    /// would not fall back — it would answer "no stock map belongs here" for every slot of the missing kinds
+    /// and read each untouched map of those kinds as the modder's own work, shipping a redundant copy of the
+    /// game's picture. Nothing writes such a record: every export records all three kinds of a primitive
+    /// under one guard.</para></summary>
+    public static IReadOnlyDictionary<(int Index, MapKind Kind), string>? ReadSlotStock(string glbPath,
+        string meshName)
     {
         var path = SidecarPath(glbPath);
         if (!File.Exists(path)) return null;
-        var doc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts);
-        var images = doc?.Images;
-        if (images is not { Count: > 0 } || !images.Any(e => !string.IsNullOrEmpty(e.Owner))) return null;
-        var mesh = meshName ?? FirstMeshName(glbPath);
-        if (mesh is null) return null;
-        var dir = Path.GetDirectoryName(Path.GetFullPath(glbPath))!;
-        var owned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var e in images)
-            // STOCK entries only: an authored entry records the modder's own map, which is not one of the
-            // part's stock images and would widen this set past what it answers about.
-            if (e.Origin == MapOrigin.Vanilla && string.Equals(e.Owner, mesh, StringComparison.Ordinal))
-                owned.Add(Path.GetFullPath(Path.Combine(dir, e.Source)));
-        if (owned.Count == 0
-            && !(doc?.Submeshes ?? new List<SubmeshSource>())
-                .Any(r => string.Equals(r.Mesh, mesh, StringComparison.Ordinal)))
-            return null;
-        return owned;
+        var rows = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts)?.Slots;
+        if (rows is not { Count: > 0 }) return null;
+        var owned = new Dictionary<(int, MapKind), string>();
+        foreach (var r in rows)
+            if (string.Equals(r.Mesh, meshName, StringComparison.Ordinal))
+                owned.TryAdd((r.Index, r.Kind), r.Hash.ToLowerInvariant());
+        return owned.Count == 0 ? null : owned;
     }
 
     /// <summary>The glb's first mesh name — the part a no-name read keys on. Null when the glb won't open,
@@ -409,20 +881,65 @@ public static class PreviewMaps
     ///
     /// <para><paramref name="owner"/> is the mesh whose material carries the slot, which decides ties in that
     /// fallback; <paramref name="stock"/> carries what earlier slots already measured about the recorded
-    /// images, and one is made per call when the caller keeps none.</para></summary>
+    /// images, and one is made per call when the caller keeps none.</para>
+    ///
+    /// <para><paramref name="slot"/> is what THIS slot was exported over (see <see cref="SlotStock"/>). Given
+    /// one, a stock map settles the slot only when it is the slot's OWN: another slot's stock map, of this
+    /// very mesh, is a link the modder made by hand and publishes exactly like a painted map. Omitted, the
+    /// record could not say which map was this slot's, and any stock image the record holds settles it — the
+    /// answer every workspace written before slots were recorded still gets.</para></summary>
     public static ResolvedMap Resolve(byte[]? imageBytes, MapKind kind,
         IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, string? owner = null,
-        StockPixels? stock = null)
+        StockPixels? stock = null, SlotStock? slot = null)
     {
         if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapOrigin.None);
-        if (sidecar.TryGetValue((Hash(imageBytes), kind), out var hit))
+        var hash = Hash(imageBytes);
+        if (sidecar.TryGetValue((hash, kind), out var hit)
+            && (hit.Origin == MapOrigin.Neutral || Owns(slot, hash)))
             return hit.Origin == MapOrigin.Neutral
                 ? new ResolvedMap(MapOrigin.Neutral)
                 : new ResolvedMap(MapOrigin.Vanilla, StockPng: hit.Source);
-        if (SamePixelsAsRecorded(imageBytes, kind, sidecar, owner, stock ?? new StockPixels()) is { } same)
+        if (SamePixelsAsRecorded(imageBytes, kind, sidecar, owner, stock ?? new StockPixels(), slot) is { } same)
             return same;
         return new ResolvedMap(MapOrigin.Authored, AuthoredPng: FromPreview(imageBytes, kind));
     }
+
+    /// <summary>Classify a returned carrier image against its exact outbound property row. The outbound
+    /// bytes are the comparison baseline even when the project authored them: returning that picture
+    /// untouched is not a new ask, while changing it still is. The classifier is scoped to this one
+    /// binding's outbound hash so another property with identical content cannot claim the slot.</summary>
+    public static ResolvedMap ResolveTransport(byte[]? imageBytes, TransportBinding binding)
+    {
+        if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapOrigin.None);
+
+        var recorded = new Dictionary<(string Hash, MapKind Kind), Entry>
+        {
+            [(binding.OutboundHash.ToLowerInvariant(), binding.Kind)] = new Entry(binding.OutboundHash,
+                binding.Source, binding.Kind, MapOrigin.Vanilla, binding.Mesh),
+        };
+        if (binding.Kind == MapKind.Normal)
+        {
+            string? directory = Path.GetDirectoryName(binding.Source);
+            string neutral = Path.Combine(directory ?? "", NeutralN);
+            if (File.Exists(neutral))
+                recorded.TryAdd((Hash(File.ReadAllBytes(neutral)), MapKind.Normal),
+                    new Entry(Hash(File.ReadAllBytes(neutral)), neutral, MapKind.Normal, MapOrigin.Neutral));
+        }
+        return Resolve(imageBytes, binding.Kind, recorded, binding.Mesh, new StockPixels(),
+            new SlotStock(binding.OutboundHash));
+    }
+
+    /// <summary>What ONE slot of one primitive was exported over: the content hash of the stock image the
+    /// export embedded there, or null where it embedded none of the part's own stock — an authored map of the
+    /// modder's, or no map at all. Passing NO <c>SlotStock</c> to <see cref="Resolve"/> is the third answer:
+    /// the record cannot say, and the whole record settles the slot as it always did.</summary>
+    public readonly record struct SlotStock(string? Hash);
+
+    /// <summary>Whether a recorded stock image is the one this slot was exported over. True when the caller
+    /// could not say which map that was — the unscoped answer — and false for a slot the export gave no stock
+    /// map, which nothing the record holds belongs to.</summary>
+    private static bool Owns(SlotStock? slot, string hash) =>
+        slot is not { } s || string.Equals(s.Hash, hash, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>What this returned image reproduces PIXEL for pixel, alpha included — as the classification a
     /// match earns — or null when nothing recorded does. An encoder that re-compresses an image it never
@@ -435,7 +952,8 @@ public static class PreviewMaps
     /// however many slots ask about it. A candidate whose file is gone or won't decode is skipped — it cannot
     /// settle the slot, and the authored answer stands if nothing else does.</para></summary>
     private static ResolvedMap? SamePixelsAsRecorded(byte[] imageBytes, MapKind kind,
-        IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, string? owner, StockPixels stock)
+        IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, string? owner, StockPixels stock,
+        SlotStock? slot)
     {
         Image<Rgba32> returned;
         try { returned = Image.Load<Rgba32>(imageBytes); }
@@ -443,7 +961,7 @@ public static class PreviewMaps
         using (returned)
         {
             var want = Fingerprint(returned);
-            foreach (var e in Candidates(sidecar, kind, owner))
+            foreach (var e in Candidates(sidecar, kind, owner, slot))
             {
                 if (stock.Measure(e) != want) continue;
                 using var recorded = RecordedPixels(e);
@@ -456,15 +974,21 @@ public static class PreviewMaps
         return null;
     }
 
-    /// <summary>The recorded images a slot of this kind could be reproducing, best answer first. The owning
-    /// mesh's own images come first: a part's map and a sibling part's can hold the same picture under
-    /// different encodings, and taking the sibling's would record a link the modder never made. The rest are
-    /// ordered by source path, so two recorded images with identical pixels — one picture under two names —
-    /// answer the same on every read.</summary>
+    /// <summary>The recorded images a slot of this kind could be reproducing, best answer first. Where the
+    /// record says what this slot was exported over, only THAT image can settle it — a re-encode of another
+    /// slot's map is the modder's ask, and reading its pixels as untouched is the same loss the byte path
+    /// refuses. The shipped neutral is never any slot's own and always stays a candidate.
+    ///
+    /// <para>Unscoped, the owning mesh's own images come first: a part's map and a sibling part's can hold the
+    /// same picture under different encodings, and taking the sibling's would record a link the modder never
+    /// made. The rest are ordered by source path, so two recorded images with identical pixels — one picture
+    /// under two names — answer the same on every read.</para></summary>
     private static IEnumerable<Entry> Candidates(
-        IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, MapKind kind, string? owner) =>
+        IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, MapKind kind, string? owner,
+        SlotStock? slot) =>
         sidecar.Values
             .Where(e => e.Kind == kind && e.Origin is MapOrigin.Vanilla or MapOrigin.Neutral)
+            .Where(e => e.Origin == MapOrigin.Neutral || Owns(slot, e.Hash))
             .OrderBy(e => !string.IsNullOrEmpty(owner)
                           && string.Equals(e.Owner, owner, StringComparison.Ordinal) ? 0 : 1)
             .ThenBy(e => e.Source, StringComparer.Ordinal);

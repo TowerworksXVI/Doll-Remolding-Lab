@@ -183,147 +183,10 @@ public class ToggleKeyTests : IDisposable
         proj.SetChangeKey("Vesna", "VesnaSSR01", "body", EditVerbs.Replace, "F6");
         proj.SetChangeKey("Other", "OtherSSR01", "body", EditVerbs.Replace, "F7");
 
-        SubjectRemoval.Remove(proj, "Vesna", "VesnaSSR01", "c_vesna01");
+        proj.RemoveSubjectChangeKeys("Vesna", "VesnaSSR01");
 
         Assert.Null(proj.GetChangeKey("Vesna", "VesnaSSR01", "body", EditVerbs.Replace));
         Assert.Equal("F7", proj.GetChangeKey("Other", "OtherSSR01", "body", EditVerbs.Replace));
-    }
-
-    // ---- the shared-key state each control carries ----
-
-    [Fact]
-    public void Two_changes_on_one_key_each_name_the_other()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            ("body (vesna)", "F6", false),
-            ("hair (vesna)", "f6", false),
-            ("coat (vesna)", "F7", false),
-        });
-
-        Assert.Equal("Same key as hair (vesna). They switch together.", tips[0]);
-        Assert.Equal("Same key as body (vesna). They switch together.", tips[1]);
-        Assert.Equal("", tips[2]);   // the only thing on F7
-    }
-
-    [Fact]
-    public void Three_on_one_key_read_as_a_list()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            ("body (vesna)", "F6", false),
-            ("hair (vesna)", "F6", false),
-            ("coat (vesna)", "F6", false),
-        });
-
-        Assert.Equal("Same key as hair (vesna) and coat (vesna). They switch together.", tips[0]);
-        Assert.Equal("Same key as body (vesna) and coat (vesna). They switch together.", tips[1]);
-        Assert.Equal("Same key as body (vesna) and hair (vesna). They switch together.", tips[2]);
-    }
-
-    [Fact]
-    public void A_change_sharing_the_whole_mods_key_says_so_from_both_sides()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            (KeyCollisions.WholeModLabel, "F6", false),
-            ("body (vesna)", "F6", false),
-        });
-
-        Assert.Equal("Same key as body (vesna). They switch together.", tips[0]);
-        Assert.Equal($"Same key as {KeyCollisions.WholeModLabel}. They switch together.", tips[1]);
-    }
-
-    [Fact]
-    public void Distinct_keys_and_unkeyed_changes_carry_nothing()
-    {
-        Assert.All(KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            ("body (vesna)", "F6", false),
-            ("hair (vesna)", "F7", false),
-            ("coat (vesna)", null, false),
-            ("boot (vesna)", null, false),   // two unkeyed changes are not "both on the same key"
-        }), t => Assert.Equal("", t));
-    }
-
-    [Fact]
-    public void Two_verbs_on_one_part_are_told_apart_by_the_label()
-    {
-        // one part can carry a retexture and a hide at once; without the verb both read as the same owner
-        // and each tip names the row it sits on
-        var tips = KeyCollisions.Tips(new[]
-        {
-            (KeyCollisions.OwnerLabel("body", "vesna", "Base", EditVerbs.Retexture), (string?)"F6", false),
-            (KeyCollisions.OwnerLabel("body", "vesna", "Base", EditVerbs.Hide), "F6", false),
-        });
-
-        // the verb reads in the change list's own words, not as the raw verb token
-        Assert.Equal("Same key as hidden on body (vesna · Base). They switch together.", tips[0]);
-        Assert.Equal("Same key as new textures on body (vesna · Base). They switch together.", tips[1]);
-    }
-
-    [Fact]
-    public void Two_outfits_of_one_character_are_told_apart_by_the_label()
-    {
-        // both outfits carry a part called "body", so without the outfit each tip names its own row
-        var tips = KeyCollisions.Tips(new[]
-        {
-            (KeyCollisions.OwnerLabel("body", "vesna", "Base", EditVerbs.Replace), (string?)"F6", false),
-            (KeyCollisions.OwnerLabel("body", "vesna", "Snowline", EditVerbs.Replace), "F6", false),
-        });
-
-        Assert.Equal("Same key as new mesh on body (vesna · Snowline). They switch together.", tips[0]);
-        Assert.Equal("Same key as new mesh on body (vesna · Base). They switch together.", tips[1]);
-    }
-
-    /// <summary>One key is one switch, so sharers that disagree on how they start say so on the same ⚠ the
-    /// sharing itself carries. The line states what SHIPS: there is no ordering rule to decode, and nothing
-    /// off the row to go and look at. Sharers that agree carry nothing extra.</summary>
-    [Fact]
-    public void Sharers_that_disagree_on_their_start_say_what_ships_beside_the_key()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            ("body (vesna)", "F6", false),
-            ("hair (vesna)", "F6", true),
-            ("coat (vesna)", "F7", true),
-        });
-
-        Assert.Equal("Same key as hair (vesna). They switch together. "
-            + "Starts off is set on some, not all. They all start on.", tips[0]);
-        Assert.Equal("Same key as body (vesna). They switch together. "
-            + "Starts off is set on some, not all. They all start on.", tips[1]);
-        Assert.Equal("", tips[2]);   // alone on F7: nothing to disagree with
-    }
-
-    /// <summary>The whole-mod key has no start box of its own and starts on, so a change that asks to start
-    /// off while sharing it is the same disagreement — and the line reads the same on both controls.</summary>
-    [Fact]
-    public void A_change_starting_off_on_the_whole_mod_key_reads_the_same_outcome()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            (KeyCollisions.WholeModLabel, "F6", false),
-            ("body (vesna)", "F6", true),
-        });
-
-        Assert.Equal("Same key as body (vesna). They switch together. "
-            + "Starts off is set on some, not all. They all start on.", tips[0]);
-        Assert.Equal("Same key as the whole mod. They switch together. "
-            + "Starts off is set on some, not all. They all start on.", tips[1]);
-    }
-
-    [Fact]
-    public void Sharers_that_agree_on_their_start_carry_only_the_sharing()
-    {
-        var tips = KeyCollisions.Tips(new (string, string?, bool)[]
-        {
-            ("body (vesna)", "F6", true),
-            ("hair (vesna)", "F6", true),
-        });
-
-        Assert.All(tips, t => Assert.DoesNotContain(KeyCollisions.StartStateNote, t));
-        Assert.Equal("Same key as hair (vesna). They switch together.", tips[0]);
     }
 
     // ---- the hide collapse's key ----
@@ -348,6 +211,27 @@ public class ToggleKeyTests : IDisposable
     public void A_hide_collapse_that_loses_no_key_warns_about_nothing(string? kept, string? incoming) =>
         Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh", kept, incoming));
 
+    /// <summary>A hide under a plan answers to EVERY state that asks for it, so what collapsed is judged on
+    /// the whole or-list rather than whichever term happens to sit at its front.</summary>
+    [Fact]
+    public void A_hide_collapse_judges_the_whole_list_of_positions_each_claimant_carries()
+    {
+        // two positions of one key against another key: what survives is the first claimant's key
+        Assert.Contains("F6 applies", ModBuilder.HideKeyCollisionWarning("mesh",
+            new[] { new KeyRef("F6", 0), new KeyRef("F6", 2) }, new[] { new KeyRef("F8", 1) }));
+        // the same keys in another order are the same claim, and reading the front term would disagree
+        Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh",
+            new[] { new KeyRef("F6", 0), new KeyRef("F8", 1) },
+            new[] { new KeyRef("F8", 0), new KeyRef("F6", 2) }));
+        // a claimant on two keys against one of them: reading the front term would call these agreed
+        Assert.Contains("F6, F8 applies", ModBuilder.HideKeyCollisionWarning("mesh",
+            new[] { new KeyRef("F6", 0), new KeyRef("F8", 0) }, new[] { new KeyRef("F6", 0) }));
+        // an unkeyed claimant arriving on a keyed one, and two unkeyed ones with nothing to say
+        Assert.Contains("no key applies",
+            ModBuilder.HideKeyCollisionWarning("mesh", Array.Empty<KeyRef>(), new[] { new KeyRef("F8", 0) }));
+        Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh", Array.Empty<KeyRef>(), null));
+    }
+
     // ---- emission shape (the golden test pins the bytes; this pins the intent) ----
 
     [Fact]
@@ -359,12 +243,13 @@ public class ToggleKeyTests : IDisposable
         var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         string v = ModKeys.VariableFor("F6");
 
-        Assert.Contains($"global ${v} = 1", ini);                // starts ON
-        // the press binds the key to a command list; the flip lives THERE, since a variable assignment
+        Assert.Contains($"global ${v} = 0", ini);                // starts ON, at position 0 like any key
+        // the press binds the key to a command list; the step lives THERE, since a variable assignment
         // written in a [Key…] section is dropped when 3DMigoto parses it as a KeyOverride
         Assert.Contains($"[Key_{v}]\nkey = no_modifiers F6\nrun = CommandListKey_{v}\n", ini);
-        Assert.Contains($"[CommandListKey_{v}]\n${v} = 1 - ${v}\n", ini);   // the standard toggle
-        Assert.Contains($"if ${v} == 1\nhandling = skip\nendif", ini);
+        // two positions, so the step wraps straight back — the standard toggle, said ordinally
+        Assert.Contains($"[CommandListKey_{v}]\n${v} = ${v} + 1\nif ${v} == 2\n${v} = 0\nendif\n", ini);
+        Assert.Contains($"if ${v} == 0\nhandling = skip\nendif", ini);
     }
 
     /// <summary>A toggle is per-session: no key variable asks to be restored from a previous run, on either
@@ -380,7 +265,8 @@ public class ToggleKeyTests : IDisposable
         new MigotoEmitter().BuildOverlaysOnly(overlayDir,
             new[] { new RetexEntry("skin", "bbbb2222", dds, "F8") },
             hideHashes: new[] { "aaaa1111" }, modKey: "F6",
-            hideKeys: new Dictionary<string, string> { ["aaaa1111"] = "F9" });
+            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>>
+                { ["aaaa1111"] = new KeyRef[] { "F9" } });
         Assert.DoesNotContain("persist", File.ReadAllText(Path.Combine(overlayDir, "mod.ini")));
 
         string pooledDir = Path.Combine(_root, "nokeep-pooled");
@@ -391,7 +277,7 @@ public class ToggleKeyTests : IDisposable
             OutDir = pooledDir,
             ToggleKey = "F6",
             HideHashes = new[] { "cccc3333" },
-            HideKeys = new Dictionary<string, string> { ["cccc3333"] = "F9" },
+            HideKeys = new Dictionary<string, IReadOnlyList<KeyRef>> { ["cccc3333"] = new KeyRef[] { "F9" } },
             Pipelines = new[]
             {
                 new ReplacePipeline
@@ -466,12 +352,12 @@ public class ToggleKeyTests : IDisposable
         var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
         string mod = ModKeys.VariableFor("F6"), change = ModKeys.VariableFor("F8");
-        Assert.Contains($"if ${mod} == 1\nif ${change} == 1\nthis = ", ini);
+        Assert.Contains($"if ${mod} == 0\nif ${change} == 0\nthis = ", ini);
         Assert.Contains("endif\nendif\n", ini);
-        // one [Key] section per distinct key, whichever tier bound it, each running its own flip list
+        // one [Key] section per distinct key, whichever tier bound it, each running its own step list
         Assert.Contains($"[Key_{mod}]\nkey = no_modifiers F6\nrun = CommandListKey_{mod}\n", ini);
         Assert.Contains($"[Key_{change}]\nkey = no_modifiers F8\nrun = CommandListKey_{change}\n", ini);
-        Assert.Contains($"[CommandListKey_{mod}]\n${mod} = 1 - ${mod}\n", ini);
-        Assert.Contains($"[CommandListKey_{change}]\n${change} = 1 - ${change}\n", ini);
+        foreach (string v in new[] { mod, change })
+            Assert.Contains($"[CommandListKey_{v}]\n${v} = ${v} + 1\nif ${v} == 2\n${v} = 0\nendif\n", ini);
     }
 }

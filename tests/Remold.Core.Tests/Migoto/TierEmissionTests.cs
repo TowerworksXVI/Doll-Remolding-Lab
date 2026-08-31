@@ -2,6 +2,8 @@
 using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
+using Remold.Core.Project;
+using Remold.Core.Skeleton;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -9,7 +11,7 @@ namespace Remold.Core.Tests.Migoto;
 /// <summary>
 /// Replaced LOD tiers: each suppressed part's tier gets its own capture + recovery operator against the
 /// SAME union, and the anchor's tiers run the full chain, falling back per part to the lod0 recover when
-/// there is no same-suffix tier. A tier bone the union never saw fails loudly.
+/// there is no same-suffix tier. A weighted tier bone the union never saw must carry Gate 1's verdict.
 /// </summary>
 public class TierEmissionTests : IDisposable
 {
@@ -165,12 +167,161 @@ public class TierEmissionTests : IDisposable
     }
 
     [Fact]
-    public void A_tier_bone_outside_the_union_fails_loudly()
+    public void A_classified_tier_bone_outside_the_union_uses_the_write_nothing_sentinel()
     {
         string td = Path.Combine(_root, "alpha_bad"); SyntheticPool.WritePartDump(td, 3, 16, new[] { A, 999u });
+        var verdict = new PoolDerive.TierBoneVerdict("alpha", "alpha", "alpha_lod1", 999,
+            PoolDerive.TierBoneClass.Lod1Only, Array.Empty<string>());
+        var req = Request(out string outDir, null, new PoolTier("alpha", "alpha_lod1", "lod1", td,
+            "aaaa0002", BoneVerdicts: new[] { verdict }));
+
+        var result = new MigotoEmitter().Build(req);
+
+        var map = File.ReadAllBytes(Path.Combine(outDir, "alpha_lod1_map_swap.buf"));
+        Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 4));
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void An_unclassified_weighted_tier_bone_outside_the_union_is_a_contract_error()
+    {
+        string td = Path.Combine(_root, "alpha_unclassified");
+        SyntheticPool.WritePartDump(td, 3, 16, new[] { A, 999u });
         var req = Request(out _, null, new PoolTier("alpha", "alpha_lod1", "lod1", td, "aaaa0002"));
-        var e = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(req));
-        Assert.Contains("union palette can't pose it", e.Message);
+
+        var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
+
+        Assert.Equal(
+            "LOD 'alpha_lod1' of 'alpha' cannot be built because its geometry uses a bone missing from the "
+            + "original part. Internal detail: expected exactly one upstream tier-row verdict but found 0. "
+            + "Remove this mesh edit",
+            e.Message);
+        Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void An_ownerless_merged_tier_row_is_a_user_shaped_contract_refusal()
+    {
+        string td = Path.Combine(_root, "alpha_ownerless");
+        SyntheticPool.WritePartDump(td, 3, 16, new[] { A, 999u });
+        var verdict = new PoolDerive.TierBoneVerdict("alpha", "alpha", "alpha_lod1", 999,
+            PoolDerive.TierBoneClass.Merged, Array.Empty<string>());
+        var req = Request(out _, null, new PoolTier("alpha", "alpha_lod1", "lod1", td,
+            "aaaa0002", BoneVerdicts: new[] { verdict }));
+
+        var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
+
+        Assert.Equal(
+            "LOD 'alpha_lod1' of 'alpha' cannot be built because it is missing geometry from another part at "
+            + "this detail level. Internal detail: a MERGED tier-row verdict has no owning part. "
+            + "Remove this mesh edit",
+            e.Message);
+        Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_stale_tier_row_verdict_is_a_user_shaped_contract_refusal()
+    {
+        string td = Path.Combine(_root, "alpha_stale");
+        SyntheticPool.WritePartDump(td, 3, 16, new[] { A });
+        var verdict = new PoolDerive.TierBoneVerdict("alpha", "alpha", "alpha_lod1", 999,
+            PoolDerive.TierBoneClass.Lod1Only, Array.Empty<string>());
+        var req = Request(out _, null, new PoolTier("alpha", "alpha_lod1", "lod1", td,
+            "aaaa0002", BoneVerdicts: new[] { verdict }));
+
+        var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
+
+        Assert.Equal(
+            "LOD 'alpha_lod1' of 'alpha' cannot be built because its recorded bones do not match its geometry. "
+            + "Internal detail: an upstream tier-row verdict does not match a weighted bone outside the union. "
+            + "Remove this mesh edit",
+            e.Message);
+        Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void A_merged_tier_row_emits_the_approved_warning_and_the_write_nothing_sentinel()
+    {
+        uint boot = BoneTable.Hash("Shoes01_L");
+        string td = Path.Combine(_root, "alpha_merged");
+        SyntheticPool.WritePartDump(td, 3, 16, new[] { A, boot });
+        var verdict = new PoolDerive.TierBoneVerdict("cloth1", "cloth1", "cloth1_lod1", boot,
+            PoolDerive.TierBoneClass.Merged, new[] { "shoes", "hair", "dress", "hat" });
+        var req = Request(out string outDir, null, new PoolTier("alpha", "alpha_lod1", "lod1", td,
+            "aaaa0002", SourcePart: "cloth1", SourceMesh: "cloth1_lod1", BoneVerdicts: new[] { verdict }));
+        req = req with
+        {
+            Pipelines = new[]
+            {
+                req.Pipelines.Single() with
+                {
+                    BonePaths = new System.Collections.Generic.Dictionary<uint, string>
+                    {
+                        [boot] = "Prefab/root/Root_M/Toes_L/Shoes01_L",
+                    },
+                },
+            },
+        };
+
+        var result = new MigotoEmitter().Build(req);
+
+        string warning = Assert.Single(result.Warnings);
+        Assert.Equal(
+            "'cloth1' does not show some geometry from 'shoes', 'hair', and 2 more parts at longer view distances. "
+            + "The build log names the bones.",
+            warning);
+        Assert.DoesNotContain('/', warning);
+        Assert.DoesNotContain("cloth1_lod1", warning, StringComparison.Ordinal);
+        Assert.Equal(
+            $"MERGED tier geometry: affected part 'cloth1'; tier mesh 'cloth1_lod1'; owning parts "
+            + $"'shoes', 'hair', 'dress', and 'hat'; "
+            + $"bones 'Shoes01_L' (0x{boot:x8}).",
+            Assert.Single(result.Diagnostics, d => d.StartsWith("MERGED tier geometry:", StringComparison.Ordinal)));
+        var map = File.ReadAllBytes(Path.Combine(outDir, "alpha_lod1_map_swap.buf"));
+        Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 4));
+    }
+
+    [Fact]
+    public void Merged_rows_share_one_warning_and_one_verbose_diagnostic()
+    {
+        uint named = BoneTable.Hash("Shoes01_L");
+        uint[] missing = { named, 998u, 999u };
+        string td = Path.Combine(_root, "alpha_merged_group");
+        SyntheticPool.WritePartDump(td, 3, 24, new[] { A }.Concat(missing).ToArray());
+        var verdicts = missing.Select(b => new PoolDerive.TierBoneVerdict(
+            "cloth1", "cloth1", "cloth1_lod1", b, PoolDerive.TierBoneClass.Merged,
+            new[] { "shoes" })).ToArray();
+        var req = Request(out string outDir, null, new PoolTier("alpha", "alpha_lod1", "lod1", td,
+            "aaaa0002", SourcePart: "cloth1", SourceMesh: "cloth1_lod1", BoneVerdicts: verdicts));
+        req = req with
+        {
+            Pipelines = new[]
+            {
+                req.Pipelines.Single() with
+                {
+                    BonePaths = new System.Collections.Generic.Dictionary<uint, string>
+                    {
+                        [named] = "Prefab/root/Root_M/Toes_L/Shoes01_L",
+                    },
+                },
+            },
+        };
+
+        var result = new MigotoEmitter().Build(req);
+
+        Assert.Equal(
+            "'cloth1' does not show some geometry from 'shoes' at longer view distances. "
+            + "The build log names the bones.",
+            Assert.Single(result.Warnings));
+        string diagnostic = Assert.Single(result.Diagnostics,
+            d => d.StartsWith("MERGED tier geometry:", StringComparison.Ordinal));
+        Assert.Contains("affected part 'cloth1'; tier mesh 'cloth1_lod1'; owning parts 'shoes'", diagnostic);
+        Assert.Contains($"'Shoes01_L' (0x{named:x8})", diagnostic);
+        Assert.Contains("no matching chain suffix (0x000003e6)", diagnostic);
+        Assert.Contains("no matching chain suffix (0x000003e7)", diagnostic);
+        var map = File.ReadAllBytes(Path.Combine(outDir, "alpha_lod1_map_swap.buf"));
+        Assert.All(Enumerable.Range(1, 3), i =>
+            Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, i * 4)));
     }
 
     [Fact]

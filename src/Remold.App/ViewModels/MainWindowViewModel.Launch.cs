@@ -37,8 +37,8 @@ public partial class MainWindowViewModel
     /// reason, re-taken whenever a gate is raised.</summary>
     private bool _loaderExeExists;
 
-    /// <summary>The <c>Mods\</c> folder beside the configured loader, or null when there is none — the
-    /// Install half of the same reads.</summary>
+    /// <summary>The <c>Mods\</c> folder beside the configured loader, or null when there is none. The status
+    /// facet reports this independently of Launch, which does not require the folder.</summary>
     private string? _modsFolder;
 
     /// <summary>What the configured loader's ini tree says it supports — the texture hook a built mod fires
@@ -91,34 +91,36 @@ public partial class MainWindowViewModel
 
     /// <summary>The status bar's 3DMigoto cell, reflecting the configured loader. Recomputed by
     /// <see cref="RaiseModsFolderGates"/> off the same disk reads the gates stand on.</summary>
-    [ObservableProperty] private StatusFacet _migotoStatus = StatusFacet.Loading("3DMigoto …");
+    [ObservableProperty] private StatusFacet _migotoStatus = StatusFacet.Loading("3DMigoto…");
 
     /// <summary>What the loader's state reads as on the status bar. The warn tone says something is
-    /// missing, never that the app is blocked: Install and Launch are the only two things that want the
-    /// loader, and a mod can be picked, edited and built without ever setting one. Pure — the disk reads
-    /// are the caller's.</summary>
+    /// missing, never that the app is blocked: Launch is the only live action that wants the loader, and a
+    /// mod can be picked and edited without ever setting one. Pure — the disk reads
+    /// are the caller's.
+    ///
+    /// <para>Each label says what the state COSTS the modder; the tooltip beside it says why, and what still
+    /// works. This cell's label is not capped, so the tooltip carries what the label does not rather than
+    /// repeating it.</para></summary>
     internal static StatusFacet MigotoFacet(string? loaderExe, bool loaderExists, string? modsFolder,
         MigotoIniFacts ini) =>
         string.IsNullOrWhiteSpace(loaderExe)
             ? StatusFacet.Warn("3DMigoto · not set",
-                "Set the 3DMigoto loader in Settings. Needed for Install and Launch only.")
+                "Launch and Install need the 3DMigoto loader. Set it in Settings.")
         : !loaderExists
-            ? StatusFacet.Warn("3DMigoto · loader missing",
-                $"{InstallGate.LoaderNotFound(loaderExe)} Needed for Install and Launch only.")
+            ? StatusFacet.Warn("3DMigoto · not found",
+                $"{LoaderGate.LoaderNotFound(loaderExe)} Launch and Install need it.")
         : modsFolder is null
-            ? StatusFacet.Warn("3DMigoto · no Mods folder",
-                $"{InstallGate.NoModsFolder(loaderExe)}. Install stays off; Launch still works.")
+            ? StatusFacet.Warn("3DMigoto · can't install mods",
+                $"{LoaderGate.NoModsFolder(loaderExe)} Launch still works.")
         : !ini.Found
-            ? StatusFacet.Warn("3DMigoto · no ini",
-                $"{InstallGate.NoLoaderIni(loaderExe)}. Install stays off; Launch still works.")
+            ? StatusFacet.Warn("3DMigoto · mods won't show up",
+                $"{LoaderGate.NoLoaderIni(loaderExe)} Launch still works.")
         : !ini.HasTextureHook
-            ? StatusFacet.Warn("3DMigoto · no texture hook",
-                $"{InstallGate.NoTextureHook} Install stays off; Launch still works.")
+            ? StatusFacet.Warn("3DMigoto · texture mods won't show",
+                $"{LoaderGate.NoTextureHook} Select a different loader exe in Settings. Launch still works.")
             : StatusFacet.Good("3DMigoto");
 
-    /// <summary>Re-take the loader disk reads and re-raise BOTH gates standing on them — Install and
-    /// Launch — plus the status-bar cell. ONE raiser for one pair of reads: re-raising only one gate
-    /// would leave the other rendering a reason the reads had outgrown.</summary>
+    /// <summary>Re-take the loader disk reads and re-raise Launch plus the status-bar cell.</summary>
     private void RaiseModsFolderGates()
     {
         ReadModsFolderState();
@@ -126,14 +128,7 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(LaunchDisabledReason));
         OnPropertyChanged(nameof(CanLaunchGame));
         OnPropertyChanged(nameof(LaunchButtonTip));
-        OnPropertyChanged(nameof(InstallDisabledReason));
-        OnPropertyChanged(nameof(CanInstallBuild));
-        OnPropertyChanged(nameof(InstallButtonTip));
-        // whether the pane shows Install at all, or the way to set the path in its place
-        OnPropertyChanged(nameof(HasMigotoLoader));
-        OnPropertyChanged(nameof(NeedsMigotoLoader));
-        OnPropertyChanged(nameof(SetMigotoPathLabel));
-        OnPropertyChanged(nameof(SetMigotoPathTip));
+        BuildPage.RefreshInstallState();
     }
 
     /// <summary>Start 3DMigoto, wait for it, then start the game. A Steam-library install starts through
@@ -168,7 +163,7 @@ public partial class MainWindowViewModel
         if (await Task.Run(() => GameLauncher.Resolve(gameDir)) is not { } plan)
         {
             LaunchStatus = StatusFacet.Bad($"No game executable{NotLaunched}",
-                $"No game executable under {gameDir}. Use Tools · Locate game… to point at the install.");
+                $"Couldn't find the game's .exe in {gameDir}. Use Tools · Locate game… to set the install folder.");
             return;
         }
 
@@ -216,7 +211,11 @@ public partial class MainWindowViewModel
                 }
                 catch (Exception e)
                 {
-                    LaunchStatus = StatusFacet.Bad($"3DMigoto didn't start{NotLaunched}", $"{loader} · {e.Message}");
+                    // The start's own exception is a Win32/shell diagnosis of a file the modder can't act on
+                    // from here; what they can do is check the exe itself, so that is what the line says.
+                    AppLog.Write($"Couldn't start the 3DMigoto loader {loader}", e);
+                    LaunchStatus = StatusFacet.Bad($"3DMigoto didn't start{NotLaunched}",
+                        $"Couldn't start {loader}. Check that 3DMigoto still runs on its own.");
                     return;
                 }
 
@@ -230,16 +229,16 @@ public partial class MainWindowViewModel
                         // unmodded. Say so instead of launching it.
                         KillStartedProcess(migoto);
                         LaunchStatus = StatusFacet.Bad($"3DMigoto stopped{NotLaunched}",
-                            "Closed before the game started. The game was not launched.");
+                            "3DMigoto closed before the game started.");
                         return;
                     case LoaderWait.NotElevated:
                         KillStartedProcess(migoto);
-                        LaunchStatus = StatusFacet.Bad($"3DMigoto didn't elevate{NotLaunched}",
-                            "The Windows permission prompt went unanswered. The game was not launched.");
+                        LaunchStatus = StatusFacet.Bad($"Permission prompt not answered{NotLaunched}",
+                            "This 3DMigoto needs Windows permission to start. Answer the prompt, then launch again.");
                         return;
                 }
 
-                LaunchStatus = StatusFacet.Loading("3DMigoto is up. Warming up…");
+                LaunchStatus = StatusFacet.Loading("3DMigoto is running. Warming up…");
                 // The proof is the launch MODE, not whichever Ready rule happened to fire first: when the
                 // started process is itself a loader, so is any successor under its name (a copy that forks
                 // and exits, or quits as a duplicate beside a survivor), and the re-check accepts either.
@@ -259,7 +258,7 @@ public partial class MainWindowViewModel
             {
                 KillStartedProcess(migoto);
                 LaunchStatus = StatusFacet.Bad($"3DMigoto stopped{NotLaunched}",
-                    "Closed before the game started. The game was not launched.");
+                    "3DMigoto closed before the game started.");
                 return;
             }
 
@@ -288,7 +287,9 @@ public partial class MainWindowViewModel
                 }
                 catch (Exception e)
                 {
-                    LaunchStatus = StatusFacet.Bad("Game didn't launch", $"{plan.Target} · {e.Message}");
+                    AppLog.Write($"Couldn't start the game {plan.Target}", e);
+                    LaunchStatus = StatusFacet.Bad("Game didn't launch",
+                        $"Couldn't start {plan.Target}. Check that the game still runs on its own.");
                     return;
                 }
                 launched = plan.Note is { } note
@@ -322,7 +323,10 @@ public partial class MainWindowViewModel
     /// rather than claiming a start this app didn't make; the detail says why nothing else is coming, so the
     /// wait doesn't read as the button having done half its job.</summary>
     internal static StatusFacet LoaderStartsGameLine => StatusFacet.Good("3DMigoto is starting the game")
-        with { Detail = "This 3DMigoto starts the game itself, so the Lab didn't start a second copy." };
+        with
+        {
+            Detail = "This 3DMigoto starts the game itself, so Doll Remolding Lab didn't start a second copy.",
+        };
 
     /// <summary>What the launch reports when the whole sequence had nothing left to do: a host that starts
     /// the game itself was already up, and the game it started is already running. Saying it is STARTING
@@ -330,7 +334,7 @@ public partial class MainWindowViewModel
     internal static StatusFacet GameAlreadyStartedLine => StatusFacet.Good("Game is already running")
         with
         {
-            Detail = "This 3DMigoto starts the game itself and was already running, so both were already up.",
+            Detail = "This 3DMigoto starts the game itself and was already running, so the game was too.",
         };
 
     /// <summary>Whether a launch behind a host that starts the game itself has anything left to start. The

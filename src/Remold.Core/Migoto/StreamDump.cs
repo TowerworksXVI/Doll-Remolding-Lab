@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -109,10 +109,10 @@ public static class StreamDump
     public static string? UnrecoverableSkinReason(AssetTypeValueField meshField) =>
         UnrecoverableSkin(meshField) switch
         {
-            (SkinRefusal.BlendShapes, var n) => $"it carries {n} blend shapes (its posed vertices aren't pure LBS)",
+            (SkinRefusal.BlendShapes, var n) => $"it has {n} blend shapes, which the swap can't reproduce",
             (SkinRefusal.SkinLayout, _) => StoredInfluences(meshField) == 0
-                ? "it carries no skin stream (a rigid layout)"
-                : "it carries a skin stream recovery can't read",
+                ? "it has no skin weights"
+                : "its skin weights are stored in a shape this app can't read",
             _ => null,
         };
 
@@ -155,9 +155,10 @@ public static class StreamDump
         BundleReader? reader = null)
     {
         var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
-            ?? throw new InvalidDataException($"mesh '{meshName}' not found in bundle");
+            ?? throw new InvalidDataException(
+                $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
         if (UnrecoverableSkinReason(field) is { } why)
-            throw new InvalidDataException($"mesh '{meshName}' can't feed palette recovery: {why}");
+            throw new InvalidDataException($"'{meshName}' can't be replaced: {why}");
 
         var mesh = MeshRaw.From(field);
         var skin = MeshSkin.Decode(field);

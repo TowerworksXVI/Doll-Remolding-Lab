@@ -73,4 +73,40 @@ public class LabPathsTests
         Assert.Equal(Path.Combine(System.AppContext.BaseDirectory, "data", "sharing_seed.json"),
             LabPaths.SharingSeedFile);
     }
+
+    [Fact]
+    public void TheSeedsObservationMemo_SitsBesideTheAssembliesToo()
+    {
+        // The seed's other half, minted from the same pass and shipped the same way — so it answers to the
+        // same anchor. Pinned separately because the two are read by different types, and a memo anchored
+        // one folder up would go silently unfound: a missing memo is not an error, only reads the shipped
+        // measurement already paid for.
+        Assert.Equal(Path.Combine(System.AppContext.BaseDirectory, "data", "asset_hashes_seed.json"),
+            LabPaths.AssetHashSeedFile);
+    }
+
+    /// <summary>The candidacy memo rides a REDIRECTED cache root the way the stock-texture tree does. The
+    /// force-rescan sweep clears the index folder under whatever root it is handed, so a memo path that
+    /// hard-coded the real root would be written to one tree and swept from another — the writer and the
+    /// sweeper disagreeing about which file a run is answering from.</summary>
+    [Fact]
+    public void TheCandidacyMemo_FollowsTheCacheRootItIsGiven()
+    {
+        Assert.Equal(Path.Combine("root", "index", "candidacy.json"),
+            LabPaths.CandidacyCacheFileIn("root"));
+        // the production default is that same rule under the real root, not a second spelling of the path
+        Assert.Equal(LabPaths.CandidacyCacheFileIn(LabPaths.CacheRoot), LabPaths.CandidacyCacheFile);
+        // …and it sits inside a tree the sweep actually clears
+        Assert.Contains(LabPaths.DerivedCacheFolders,
+            folder => LabPaths.CandidacyCacheFileIn("root")
+                .StartsWith(Path.Combine("root", folder), System.StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheRiggedGlbCache_FollowsTheCacheRootAndIsForceRescanDerived()
+    {
+        Assert.Equal(Path.Combine("root", "rigs"), LabPaths.RiggedGlbRootIn("root"));
+        Assert.Equal(LabPaths.RiggedGlbRootIn(LabPaths.CacheRoot), LabPaths.RiggedGlbRoot);
+        Assert.Contains("rigs", LabPaths.DerivedCacheFolders);
+    }
 }

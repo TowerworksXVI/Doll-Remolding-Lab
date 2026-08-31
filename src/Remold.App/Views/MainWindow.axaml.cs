@@ -1,7 +1,7 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -19,80 +19,43 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         AvaloniaXamlLoader.Load(this);
-        // The Build pane's preview slot takes a dropped image. DragEnter as well as DragOver, for the
-        // reason the workbench pane states: an unhandled DragEnter leaves the platform's permissive
-        // effects standing, and a release on that frame delivers a drop meant to be refused.
-        if (this.FindControl<Border>("PreviewDrop") is { } slot)
-        {
-            slot.AddHandler(DragDrop.DragEnterEvent, OnPreviewDragOver);
-            slot.AddHandler(DragDrop.DragOverEvent, OnPreviewDragOver);
-            slot.AddHandler(DragDrop.DropEvent, OnPreviewDrop);
-        }
+        // Tunnel, and window-wide: a Pick row's visible name is the CheckBox's own content, so by the time
+        // a press bubbles the CheckBox has already eaten it — the open has to see the press on the way DOWN,
+        // and it recognises Pick rows by their view-model type rather than by naming three trees.
+        AddHandler(PointerPressedEvent, OnPickRowPointerPressed, RoutingStrategies.Tunnel);
     }
 
-    /// <summary>Only a drag carrying a local image file offers the copy cursor — the workbench pane's rule,
-    /// mirrored: a drop that cannot land never invites the release. A payload that PASSES this can still be
-    /// refused once it lands, on state the hover doesn't read (how many files, and whether the project has a
-    /// folder yet), and that refusal writes the pane's line.</summary>
-    private void OnPreviewDragOver(object? sender, DragEventArgs e) =>
-        e.DragEffects = CarriesPreviewImage(e.Data) ? DragDropEffects.Copy : DragDropEffects.None;
-
-    /// <summary>Whether the dragged payload holds at least one local file with an extension the preview
-    /// control takes. The extension test is the VM's own, so the cursor and the refusal can't disagree about
-    /// what an image is.</summary>
-    private static bool CarriesPreviewImage(IDataObject data)
+    /// <summary>Double-click a Pick row → open it in Edit, checking it first. Handling the second press
+    /// here keeps it from reaching the row's checkbox as a second toggle. A double-click landing on the
+    /// checkbox's own box glyph stays a toggle and never opens (see <see cref="PickRowOpenTarget"/>).</summary>
+    private void OnPickRowPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!data.Contains(DataFormats.Files)) return false;
-        if (data.GetFiles() is not { } files) return false;
-        foreach (var item in files)
-            if (item.TryGetLocalPath() is { } path && MainWindowViewModel.IsPreviewImage(path)) return true;
-        return false;
-    }
-
-    private void OnPreviewDrop(object? sender, DragEventArgs e)
-    {
-        if (DataContext is not MainWindowViewModel vm) { e.DragEffects = DragDropEffects.None; return; }
-        // A drag that got this far showed the copy cursor, so an unreadable payload can't just vanish: the
-        // VM is handed an empty list and its refusal line answers for it.
-        var files = e.Data.GetFiles();
-        IReadOnlyList<string> paths = files is null
-            ? Array.Empty<string>()
-            : files.Select(f => f.TryGetLocalPath()).Where(p => p is not null).Select(p => p!).ToList();
-        // Normalize what goes back to the drag source — unset, it returns the platform's Copy|Move|Link.
-        e.DragEffects = DragDropEffects.Copy;
-        vm.DropPreview(paths);
-    }
-
-    /// <summary>The preview's browse route, for both the empty slot and Replace. Lands on the same VM call
-    /// the drop does, so the two ways in can't diverge.</summary>
-    private async void OnPickPreview(object? sender, RoutedEventArgs e)
-    {
+        if (e.ClickCount != 2) return;
         if (DataContext is not MainWindowViewModel vm) return;
-        var picked = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = "Pick a preview image",
-            AllowMultiple = false,
-            FileTypeFilter = new[]
-            {
-                new FilePickerFileType("Images") { Patterns = MainWindowViewModel.PreviewPatterns },
-            },
-        });
-        var path = picked.FirstOrDefault()?.TryGetLocalPath();
-        if (!string.IsNullOrEmpty(path)) vm.SetPreviewFrom(path!);
+        if (!PickRowOpenTarget(e.Source as Control, out object? row)) return;
+        e.Handled = true;
+        vm.OpenSubjectInEdit(row!);
     }
 
-    /// <summary>Double-click a Pick row → open it in Edit, checking it first. A double-tap landing ON the
-    /// checkbox is a mis-detected toggle, not "open", and a row still resolving has no subject to open — both
-    /// are ignored.</summary>
-    private void OnPickRowDoubleTapped(object? sender, TappedEventArgs e)
+    /// <summary>Whether a double-click landing on <paramref name="source"/> means "open this row": yes
+    /// anywhere on an openable Pick row, its checkbox LABEL included — the label is the row's visible name
+    /// and the natural target — but not on the checkbox's own box glyph, where a double-click is two
+    /// deliberate toggles. The label lives inside the CheckBox as its content, so the two are told apart
+    /// by the visual walk: content passes a ContentPresenter on the way up to the CheckBox, template
+    /// chrome does not. A multi-outfit character header names no single subject and a row still resolving
+    /// has nothing to open; neither is a target.</summary>
+    internal static bool PickRowOpenTarget(Control? source, out object? row)
     {
-        if (DataContext is not MainWindowViewModel vm) return;
-        if (e.Source is Control src && src.FindAncestorOfType<CheckBox>(includeSelf: true) is not null) return;
-        if ((e.Source as Control)?.DataContext is { } row)
+        row = source?.DataContext;
+        if (row is not (OutfitVm or CharacterVm { IsSingleOutfit: true })) return false;
+        if (row is OutfitVm { IsLoading: true } or CharacterVm { IsLoading: true }) return false;
+        bool sawContent = false;
+        for (Visual? c = source; c is not null; c = c.GetVisualParent())
         {
-            if (row is OutfitVm { IsLoading: true } or CharacterVm { IsLoading: true }) return;
-            vm.OpenSubjectInEdit(row);
+            if (c is Avalonia.Controls.Presenters.ContentPresenter) sawContent = true;
+            if (c is CheckBox) return sawContent;
         }
+        return true;
     }
 
     // ---- File menu ----------------------------------------------------
@@ -108,7 +71,7 @@ public partial class MainWindow : Window
     private async void OnSaveModAs(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
-        var name = await TextPromptWindow.Show(this, "Save Mod As", "New mod name:", vm.PackageName,
+        var name = await TextPromptWindow.Show(this, "Save mod as", "New mod name:", vm.PackageName,
             confirmLabel: "Save");
         if (name is not null) await vm.SaveModAs(name);
     }
@@ -136,9 +99,7 @@ public partial class MainWindow : Window
         if (!string.IsNullOrEmpty(path)) await vm.OpenModAsync(path!);
     }
 
-    /// <summary>Tools → Settings… — tool paths, the mods folder, the new-mod author default. The Build
-    /// pane's "Set 3DMigoto path" opens the same dialog: the loader row's Browse is the app's one picker for
-    /// that exe, so the pane offers it rather than forking a second one.</summary>
+    /// <summary>Settings — tool paths, the mods folder, and the new-mod author default.</summary>
     private async void OnSettings(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
@@ -177,17 +138,10 @@ public partial class MainWindow : Window
         base.OnClosing(e);
         if (DataContext is not MainWindowViewModel vm)
             return;
-        // Speculative prewarm work is dropped only on a pass the window actually leaves on. A close the
-        // modder backs out of leaves the guess running — the app stays open on the subject it was prepared
-        // for. It never earns a prompt or a wait either way.
-        if (MainWindowViewModel.CloseDropsSpeculativeWork(_closeConfirmed, vm.IsWorkInFlight, vm.CanCloseSilently))
-            vm.CancelSpeculativeWork();
         if (_closeConfirmed)
             return;
         // Work in flight: ask before abandoning it, then run the normal save-first close. Precedes the dirty
-        // gate — the work often produces the changes that gate would save. The cancel is LAST, past every
-        // confirm: its token is terminal, so a window that stays open behind a declined confirm would keep a
-        // dead one and silently no-op every later open or materialize.
+        // gate — the work often produces the changes that gate would save.
         if (vm.IsWorkInFlight)
         {
             e.Cancel = true;
@@ -195,7 +149,6 @@ public partial class MainWindow : Window
             {
                 if (!await vm.ConfirmCloseWithWorkAsync()) return;   // keep working — stay open
                 if (!await vm.ConfirmAppCloseAsync()) return;        // the save-first gate said no — stay open
-                vm.CancelInFlightWork();
                 _closeConfirmed = true;
                 Close();
             });
@@ -210,8 +163,7 @@ public partial class MainWindow : Window
         });
     }
 
-    /// <summary>The window is gone: release the native bitmaps behind the recent rows and the Build pane's
-    /// preview. OnClosed, not OnClosing — a close the modder backs out of leaves the images on screen.</summary>
+    /// <summary>The window is gone: release the native bitmaps behind the recent rows.</summary>
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);

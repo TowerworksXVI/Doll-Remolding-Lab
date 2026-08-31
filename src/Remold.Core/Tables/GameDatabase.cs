@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Remold.Core.Bundles;
 using Remold.Core.Model;
 
 namespace Remold.Core.Tables;
@@ -143,7 +144,7 @@ public sealed class GameDatabase
     /// <summary>The pure grouping/naming half of <see cref="ReadEnemyRoster"/>: join each row's
     /// ModelConfigId to its stem, group by stem (lowest id wins as the outfit's ModelConfigId), vote the
     /// display name by frequency (first-seen wins ties), sort by display label. A row whose id has no
-    /// stem, and an excluded stem, drop silently — not a resolution failure.</summary>
+    /// stem, an excluded stem, and a blacklisted stem/name drop silently — not a resolution failure.</summary>
     internal static List<Character> BuildEnemyRoster(
         IReadOnlyList<(long EnemyId, long ModelCfgId, string? Name)> rows,
         IReadOnlyDictionary<long, string> stems, ISet<string>? excludeStems = null)
@@ -170,6 +171,9 @@ public sealed class GameDatabase
         var result = new List<Character>(byStem.Count);
         foreach (var (stem, (cfgId, votes)) in byStem)
         {
+            if (RosterBlacklist.IsBlacklisted(stem)
+                || voteOrder[stem].Any(RosterBlacklist.IsBlacklisted))
+                continue;
             string? display = null;
             int best = 0;
             foreach (var name in voteOrder[stem])   // first-seen order breaks ties deterministically

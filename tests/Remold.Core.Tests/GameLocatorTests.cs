@@ -46,7 +46,7 @@ public class GameLocatorTests
         Directory.CreateDirectory(abw);
         File.WriteAllText(Path.Combine(abw, "catalog_main_24535.bin"), "x");   // catalog but no VFS manifest
         Assert.Null(GameLocator.Validate(abw));
-        Assert.Contains("file manifest", GameLocator.ValidateDetailed(abw).Problem);
+        Assert.Contains("missing some of the game's files", GameLocator.ValidateDetailed(abw).Problem);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class GameLocatorTests
         Directory.CreateDirectory(abw);
         File.WriteAllText(Path.Combine(abw, "deadbeef.bundle"), "x");   // another game's populated cache
         Assert.Null(GameLocator.Validate(abw));
-        Assert.Contains("catalog", GameLocator.ValidateDetailed(abw).Problem);
+        Assert.Contains("launch the game once", GameLocator.ValidateDetailed(abw).Problem);
     }
 
     [Fact]

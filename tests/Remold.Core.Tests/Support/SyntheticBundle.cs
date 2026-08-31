@@ -26,10 +26,34 @@ internal static class SyntheticBundle
     private const uint SerializedVersion = 17;
     private const string UnityVersion = "2019.4.29f1";
 
-    /// <summary>One Texture2D: <c>m_Name</c>, dimensions, and RGBA32 pixels (<c>width*height*4</c> bytes,
-    /// row-major). <paramref name="ColorSpace"/> is Unity's <c>m_ColorSpace</c> (0 linear, 1 sRGB) — it picks
-    /// the DXGI format, so it changes both the resource hash and the tag a replacement has to carry.</summary>
-    public readonly record struct TextureSpec(string Name, int Width, int Height, byte[] Rgba32, int ColorSpace = 0);
+    /// <summary>One Texture2D: <c>m_Name</c>, dimensions, and the stored pixel bytes, row-major, in
+    /// <paramref name="Format"/>'s layout — RGBA32 (<c>width*height*4</c>) unless another Unity texture
+    /// format is named. <paramref name="ColorSpace"/> is Unity's <c>m_ColorSpace</c> (0 linear, 1 sRGB) — it
+    /// picks the DXGI format, so it changes both the resource hash and the tag a replacement has to
+    /// carry.</summary>
+    /// <param name="Format">Unity's <c>m_TextureFormat</c>. 4 is RGBA32; 17 is RGBAHalf, the float layout a
+    /// toon ramp is stored in, whose bytes travel raw rather than through any codec.</param>
+    public readonly record struct TextureSpec(string Name, int Width, int Height, byte[] Pixels,
+        int ColorSpace = 0, int Format = Rgba32);
+
+    /// <summary>The serialized shading rows attached to one synthetic Material.</summary>
+    public sealed record MaterialShadingSpec(int ShaderFileId, long ShaderPathId,
+        IReadOnlyList<string> Keywords, IReadOnlyDictionary<string, float> Floats,
+        IReadOnlyDictionary<string, float[]> Colors);
+
+    /// <summary>Unity <c>m_TextureFormat</c> values these fixtures build.</summary>
+    public const int Rgba32 = 4, RgbaHalf = 17;
+
+    /// <summary>An fp16 image of <paramref name="width"/>×<paramref name="height"/>, four half-floats a
+    /// texel, values walked from <paramref name="seed"/> so two of them never share bytes. The shape a toon
+    /// ramp is stored in.</summary>
+    public static byte[] RgbaHalfPixels(int width, int height, int seed)
+    {
+        var px = new byte[width * height * 8];
+        for (int i = 0; i < width * height * 4; i++)
+            BitConverter.TryWriteBytes(px.AsSpan(i * 2, 2), (Half)(((i + seed) % 41) / 40f));
+        return px;
+    }
 
     /// <summary>A solid-colour RGBA32 fill — enough pixels for a real decode.</summary>
     public static byte[] SolidRgba32(int width, int height, byte r, byte g, byte b, byte a)
@@ -119,20 +143,24 @@ internal static class SyntheticBundle
     /// <summary>One inline Mesh. <paramref name="positions"/> is a flat <c>x,y,z</c> list (vertex count =
     /// length/3); <paramref name="triangles"/> is index triples into it. <paramref name="indexFormat"/>:
     /// 0 = uint16, 1 = uint32, for exercising the u16-only guards. Returns the mesh's path id.</summary>
+    /// <param name="sameNamedFirst">A DECOY Mesh of the SAME <c>m_Name</c>, written first at path id 1 with
+    /// this geometry; the real mesh then lands at path id 3 and is what the returned id names. Enemy and
+    /// prop bundles ship same-named copies, so a read that selects by name alone takes the decoy and a read
+    /// that selects by path id takes the mesh the renderer pinned.</param>
     public static long BuildOneMesh(string path, string name, float[] positions, int[] triangles,
-        string? bundleName = null, int indexFormat = 0)
+        string? bundleName = null, int indexFormat = 0,
+        (float[] Positions, int[] Triangles)? sameNamedFirst = null)
     {
-        var (bytes, id) = BuildSerializedMesh(name, positions, triangles, bundleName, indexFormat);
+        var (bytes, id) = BuildSerializedMesh(name, positions, triangles, bundleName, indexFormat,
+            sameNamedFirst);
         WriteBundle(path, bytes);
         return id;
     }
 
     private static (byte[] Bytes, long Id) BuildSerializedMesh(string name, float[] positions, int[] triangles,
-        string? bundleName, int indexFormat = 0)
+        string? bundleName, int indexFormat = 0,
+        (float[] Positions, int[] Triangles)? sameNamedFirst = null)
     {
-        if (positions.Length % 3 != 0) throw new ArgumentException("positions must be a flat x,y,z list");
-        int vertexCount = positions.Length / 3;
-
         var file = new AssetsFile
         {
             Header = new AssetsFileHeader { Version = SerializedVersion, Endianness = false, MetadataSize = 0, FileSize = 0, DataOffset = 0 },
@@ -146,55 +174,65 @@ internal static class SyntheticBundle
         };
         file.Metadata.TypeTreeTypes.Add(BuildMeshType());
 
-        var info = AssetFileInfo.Create(file, 1, ClassMesh, classDatabase: null, preferEditor: false)
-            ?? throw new InvalidOperationException("AssetFileInfo.Create returned null (Mesh type not registered)");
-        var tpl = new AssetTypeTemplateField();
-        tpl.FromTypeTree(file.Metadata.TypeTreeTypes[info.TypeIdOrIndex]);
-        var bf = ValueBuilder.DefaultValueFieldFromTemplate(tpl);
-
-        bf["m_Name"].AsString = name;
-        bf["m_IndexFormat"].AsInt = indexFormat;
-
-        // one Position channel: stream 0, offset 0, Float32 (format 0), dimension 3
-        var vd = bf["m_VertexData"];
-        vd["m_VertexCount"].AsUInt = (uint)vertexCount;
-        var chArray = vd["m_Channels"]["Array"];
-        chArray.Children = new List<AssetTypeValueField> { NewChannel(chArray, stream: 0, offset: 0, format: 0, dimension: 3) };
-        // the vertex blob = tightly-packed Float32×3 per vertex (stride 12)
-        var vbytes = new byte[vertexCount * 12];
-        Buffer.BlockCopy(positions, 0, vbytes, 0, vbytes.Length);
-        vd["m_DataSize"].AsByteArray = vbytes;
-
-        // one submesh: all triangles, index width per indexFormat
-        int step = indexFormat == 0 ? 2 : 4;
-        var ibytes = new byte[triangles.Length * step];
-        for (int i = 0; i < triangles.Length; i++)
-        {
-            if (indexFormat == 0) BitConverter.GetBytes((ushort)triangles[i]).CopyTo(ibytes, i * 2);
-            else BitConverter.GetBytes((uint)triangles[i]).CopyTo(ibytes, i * 4);
-        }
-        bf["m_IndexBuffer"]["Array"].AsByteArray = ibytes;
-
-        var smArray = bf["m_SubMeshes"]["Array"];
-        smArray.Children = new List<AssetTypeValueField>
-        {
-            NewSubMesh(smArray, firstByte: 0, indexCount: (uint)triangles.Length, baseVertex: 0,
-                firstVertex: 0, vertexCount: (uint)vertexCount),
-        };
-
-        // m_StreamData empty ⇒ inline mesh
-        bf["m_StreamData"]["offset"].AsULong = 0;
-        bf["m_StreamData"]["size"].AsUInt = 0;
-        bf["m_StreamData"]["path"].AsString = "";
-
-        info.SetNewData(bf);
-        file.Metadata.AssetInfos.Add(info);
-
+        // Objects are added in path-id order — decoy 1, the bundle object 2, the real mesh 3 — so a file
+        // carrying a same-named decoy reads like any other.
+        long meshPathId = sameNamedFirst is null ? 1 : 3;
+        AddMesh(1, sameNamedFirst?.Positions ?? positions, sameNamedFirst?.Triangles ?? triangles);
         if (bundleName is not null) AddAssetBundleObject(file, pathId: 2, bundleName);
+        if (sameNamedFirst is not null) AddMesh(meshPathId, positions, triangles);
 
         using var ms = new MemoryStream();
         using (var w = new AssetsFileWriter(ms)) file.Write(w);
-        return (ms.ToArray(), 1);
+        return (ms.ToArray(), meshPathId);
+
+        void AddMesh(long pathId, float[] pos, int[] tris)
+        {
+            if (pos.Length % 3 != 0) throw new ArgumentException("positions must be a flat x,y,z list");
+            int vertexCount = pos.Length / 3;
+            var info = AssetFileInfo.Create(file, pathId, ClassMesh, classDatabase: null, preferEditor: false)
+                ?? throw new InvalidOperationException("AssetFileInfo.Create returned null (Mesh type not registered)");
+            var tpl = new AssetTypeTemplateField();
+            tpl.FromTypeTree(file.Metadata.TypeTreeTypes[info.TypeIdOrIndex]);
+            var bf = ValueBuilder.DefaultValueFieldFromTemplate(tpl);
+
+            bf["m_Name"].AsString = name;
+            bf["m_IndexFormat"].AsInt = indexFormat;
+
+            // one Position channel: stream 0, offset 0, Float32 (format 0), dimension 3
+            var vd = bf["m_VertexData"];
+            vd["m_VertexCount"].AsUInt = (uint)vertexCount;
+            var chArray = vd["m_Channels"]["Array"];
+            chArray.Children = new List<AssetTypeValueField> { NewChannel(chArray, stream: 0, offset: 0, format: 0, dimension: 3) };
+            // the vertex blob = tightly-packed Float32×3 per vertex (stride 12)
+            var vbytes = new byte[vertexCount * 12];
+            Buffer.BlockCopy(pos, 0, vbytes, 0, vbytes.Length);
+            vd["m_DataSize"].AsByteArray = vbytes;
+
+            // one submesh: all triangles, index width per indexFormat
+            int step = indexFormat == 0 ? 2 : 4;
+            var ibytes = new byte[tris.Length * step];
+            for (int i = 0; i < tris.Length; i++)
+            {
+                if (indexFormat == 0) BitConverter.GetBytes((ushort)tris[i]).CopyTo(ibytes, i * 2);
+                else BitConverter.GetBytes((uint)tris[i]).CopyTo(ibytes, i * 4);
+            }
+            bf["m_IndexBuffer"]["Array"].AsByteArray = ibytes;
+
+            var smArray = bf["m_SubMeshes"]["Array"];
+            smArray.Children = new List<AssetTypeValueField>
+            {
+                NewSubMesh(smArray, firstByte: 0, indexCount: (uint)tris.Length, baseVertex: 0,
+                    firstVertex: 0, vertexCount: (uint)vertexCount),
+            };
+
+            // m_StreamData empty ⇒ inline mesh
+            bf["m_StreamData"]["offset"].AsULong = 0;
+            bf["m_StreamData"]["size"].AsUInt = 0;
+            bf["m_StreamData"]["path"].AsString = "";
+
+            info.SetNewData(bf);
+            file.Metadata.AssetInfos.Add(info);
+        }
     }
 
     // ---- a SKINNED Mesh ------------------------------------------------------------------------------
@@ -230,14 +268,17 @@ internal static class SyntheticBundle
     /// <c>.resS</c> this bundle doesn't carry. The channel table, the bone hashes and the skin rule all
     /// still read exactly as a sound mesh's — only reading the vertex bytes themselves fails, which is
     /// the shape a caller that measures weights meets past every layout check.</param>
+    /// <param name="submeshIndexCounts">How many of <paramref name="triangles"/>' indices each submesh takes,
+    /// in order — the shape a MULTI-MATERIAL part has, where the renderer binds one material per submesh.
+    /// Null (the default) writes one submesh over the whole index buffer.</param>
     public static long BuildOneSkinnedMesh(string path, string name, float[] positions, int[] triangles,
         uint[] boneHashes, string? bundleName = null, int blendShapes = 0, int skinWidth = 4,
         uint[]? tabledOnlyBones = null, bool implicitWeights = false, bool extraSkinChannel = false,
-        int uvSeed = 0, bool unresolvableStream = false)
+        int uvSeed = 0, bool unresolvableStream = false, int[]? submeshIndexCounts = null)
     {
         var file = NewMeshFile(blendShapes);
         AddSkinnedMesh(file, 1, name, positions, triangles, boneHashes, blendShapes, skinWidth, tabledOnlyBones,
-            implicitWeights, extraSkinChannel, uvSeed, unresolvableStream);
+            implicitWeights, extraSkinChannel, uvSeed, unresolvableStream, submeshIndexCounts);
         if (bundleName is not null) AddAssetBundleObject(file, pathId: 2, bundleName);
 
         using var ms = new MemoryStream();
@@ -269,7 +310,7 @@ internal static class SyntheticBundle
     private static void AddSkinnedMesh(AssetsFile file, long pathId, string name, float[] positions,
         int[] triangles, uint[] boneHashes, int blendShapes, int skinWidth, uint[]? tabledOnlyBones = null,
         bool implicitWeights = false, bool extraSkinChannel = false, int uvSeed = 0,
-        bool unresolvableStream = false)
+        bool unresolvableStream = false, int[]? submeshIndexCounts = null)
     {
         if (positions.Length % 3 != 0) throw new ArgumentException("positions must be a flat x,y,z list");
         if (boneHashes.Length == 0) throw new ArgumentException("a skinned mesh needs at least one bone");
@@ -293,11 +334,7 @@ internal static class SyntheticBundle
             bf["m_IndexBuffer"]["Array"].AsByteArray = ibytes;
 
             var smArray = bf["m_SubMeshes"]["Array"];
-            smArray.Children = new List<AssetTypeValueField>
-            {
-                NewSubMesh(smArray, firstByte: 0, indexCount: (uint)triangles.Length, baseVertex: 0,
-                    firstVertex: 0, vertexCount: (uint)vertexCount),
-            };
+            smArray.Children = SubMeshes(smArray, submeshIndexCounts, triangles.Length, vertexCount);
 
             var hashArray = bf["m_BoneNameHashes"]["Array"];
             var bindArray = bf["m_BindPose"]["Array"];
@@ -529,6 +566,32 @@ internal static class SyntheticBundle
         return c;
     }
 
+    /// <summary>The submesh rows for an index buffer: one per entry of <paramref name="indexCounts"/>, taken
+    /// in order out of the buffer, or one row over the whole buffer when none is given. Every row spans the
+    /// whole vertex pool, which is how the game's own parts are laid out — submeshes are ranges of the index
+    /// buffer, not separate vertex sets.</summary>
+    private static List<AssetTypeValueField> SubMeshes(AssetTypeValueField array, int[]? indexCounts,
+        int totalIndices, int vertexCount)
+    {
+        var rows = new List<AssetTypeValueField>();
+        if (indexCounts is not { Length: > 0 })
+        {
+            rows.Add(NewSubMesh(array, firstByte: 0, indexCount: (uint)totalIndices, baseVertex: 0,
+                firstVertex: 0, vertexCount: (uint)vertexCount));
+            return rows;
+        }
+        uint firstIndex = 0;
+        foreach (int count in indexCounts)
+        {
+            rows.Add(NewSubMesh(array, firstByte: firstIndex * 2, indexCount: (uint)count, baseVertex: 0,
+                firstVertex: 0, vertexCount: (uint)vertexCount));
+            firstIndex += (uint)count;
+        }
+        if (firstIndex != totalIndices)
+            throw new ArgumentException("submeshIndexCounts must add up to the index count");
+        return rows;
+    }
+
     private static AssetTypeValueField NewSubMesh(AssetTypeValueField array, uint firstByte, uint indexCount,
         uint baseVertex, uint firstVertex, uint vertexCount)
     {
@@ -638,14 +701,17 @@ internal static class SyntheticBundle
             tpl.FromTypeTree(file.Metadata.TypeTreeTypes[info.TypeIdOrIndex]);
             var bf = ValueBuilder.DefaultValueFieldFromTemplate(tpl);
 
-            if (spec.Rgba32.Length != spec.Width * spec.Height * 4)
+            int texelBytes = spec.Format == RgbaHalf ? 8 : 4;
+            if (spec.Pixels.Length != spec.Width * spec.Height * texelBytes)
                 throw new ArgumentException(
-                    $"texture '{spec.Name}': {spec.Rgba32.Length} pixel bytes, expected {spec.Width * spec.Height * 4} for {spec.Width}x{spec.Height} RGBA32");
+                    $"texture '{spec.Name}': {spec.Pixels.Length} pixel bytes, expected "
+                    + $"{spec.Width * spec.Height * texelBytes} for {spec.Width}x{spec.Height} "
+                    + $"in Unity format {spec.Format}");
 
             bf["m_Name"].AsString = spec.Name;
             bf["m_Width"].AsInt = spec.Width;
             bf["m_Height"].AsInt = spec.Height;
-            bf["m_TextureFormat"].AsInt = 4;   // RGBA32
+            bf["m_TextureFormat"].AsInt = spec.Format;
             bf["m_MipCount"].AsInt = 1;
             bf["m_MipMap"].AsBool = false;
             bf["m_IsReadable"].AsBool = false;
@@ -658,8 +724,8 @@ internal static class SyntheticBundle
             bf["m_TextureSettings"]["m_WrapV"].AsInt = 0;
             bf["m_LightmapFormat"].AsInt = 0;
             bf["m_ColorSpace"].AsInt = spec.ColorSpace;
-            bf["m_CompleteImageSize"].AsInt = spec.Rgba32.Length;
-            bf["image data"].AsByteArray = spec.Rgba32;
+            bf["m_CompleteImageSize"].AsInt = spec.Pixels.Length;
+            bf["image data"].AsByteArray = spec.Pixels;
 
             // m_StreamData present but empty ⇒ inline texture (size 0).
             bf["m_StreamData"]["offset"].AsULong = 0;
@@ -768,9 +834,14 @@ internal static class SyntheticBundle
 
     /// <summary>One Material (class 21) with the given <c>m_TexEnvs</c> slots, plus optionally one inline
     /// Texture2D (pathId 2) for local (fileId 0) references — the shape the renderer-first tier walks.</summary>
+    /// <param name="localTexture">One Texture2D beside the material, at path id 2.</param>
+    /// <param name="localTextures">Several Texture2Ds beside the material, at path ids 2, 3, … in order —
+    /// for the shape where one bundle ships SAME-NAMED textures and only the path id tells them apart.
+    /// Overrides <paramref name="localTexture"/> when both are given.</param>
     public static void BuildOneMaterial(string path, string bundleName, string materialName, long materialPathId,
         (string Slot, int FileId, long PathId)[] texEnvs, string[] externalCabs,
-        TextureSpec? localTexture = null, string? cabName = null)
+        TextureSpec? localTexture = null, string? cabName = null,
+        MaterialShadingSpec? shading = null, IReadOnlyList<TextureSpec>? localTextures = null)
     {
         var file = new AssetsFile
         {
@@ -794,6 +865,15 @@ internal static class SyntheticBundle
         AddObject(file, materialPathId, ClassMaterial, bf =>
         {
             bf["m_Name"].AsString = materialName;
+            bf["m_Shader"]["m_FileID"].AsInt = shading?.ShaderFileId ?? 0;
+            bf["m_Shader"]["m_PathID"].AsLong = shading?.ShaderPathId ?? 0;
+            var keywordArray = bf["m_ValidKeywords"]["Array"];
+            keywordArray.Children = (shading?.Keywords ?? Array.Empty<string>()).Select(keyword =>
+            {
+                var value = ValueBuilder.DefaultValueFieldFromArrayTemplate(keywordArray);
+                value.AsString = keyword;
+                return value;
+            }).ToList();
             var arr = bf["m_SavedProperties"]["m_TexEnvs"]["Array"];
             var els = new List<AssetTypeValueField>();
             foreach (var (slot, fid, pid) in texEnvs)
@@ -805,27 +885,56 @@ internal static class SyntheticBundle
                 els.Add(el);
             }
             arr.Children = els;
+            var floatArray = bf["m_SavedProperties"]["m_Floats"]["Array"];
+            floatArray.Children = (shading?.Floats
+                ?? new Dictionary<string, float>(StringComparer.Ordinal)).Select(pair =>
+            {
+                var value = ValueBuilder.DefaultValueFieldFromArrayTemplate(floatArray);
+                value["first"].AsString = pair.Key;
+                value["second"].AsFloat = pair.Value;
+                return value;
+            }).ToList();
+            var colorArray = bf["m_SavedProperties"]["m_Colors"]["Array"];
+            colorArray.Children = (shading?.Colors
+                ?? new Dictionary<string, float[]>(StringComparer.Ordinal)).Select(pair =>
+            {
+                if (pair.Value.Length != 4)
+                    throw new ArgumentException("a synthetic material color needs four components");
+                var value = ValueBuilder.DefaultValueFieldFromArrayTemplate(colorArray);
+                value["first"].AsString = pair.Key;
+                var color = value["second"];
+                color["r"].AsFloat = pair.Value[0];
+                color["g"].AsFloat = pair.Value[1];
+                color["b"].AsFloat = pair.Value[2];
+                color["a"].AsFloat = pair.Value[3];
+                return value;
+            }).ToList();
         });
 
-        if (localTexture is { } spec)
+        var locals = localTextures ?? (localTexture is { } one ? new[] { one } : Array.Empty<TextureSpec>());
+        if (locals.Count > 0)
         {
             file.Metadata.TypeTreeTypes.Add(BuildTexture2DType());
-            AddObject(file, 2, ClassTexture2D, bf =>
+            for (int i = 0; i < locals.Count; i++)
             {
-                bf["m_Name"].AsString = spec.Name;
-                bf["m_Width"].AsInt = spec.Width;
-                bf["m_Height"].AsInt = spec.Height;
-                bf["m_TextureFormat"].AsInt = 4;   // RGBA32
-                bf["m_MipCount"].AsInt = 1;
-                bf["m_IsReadable"].AsBool = true;
-                bf["m_ImageCount"].AsInt = 1;
-                bf["m_TextureDimension"].AsInt = 2;
-                bf["m_CompleteImageSize"].AsInt = spec.Rgba32.Length;
-                bf["image data"].AsByteArray = spec.Rgba32;
-                bf["m_StreamData"]["offset"].AsULong = 0;
-                bf["m_StreamData"]["size"].AsUInt = 0;
-                bf["m_StreamData"]["path"].AsString = "";
-            });
+                var spec = locals[i];
+                AddObject(file, 2 + i, ClassTexture2D, bf =>
+                {
+                    bf["m_Name"].AsString = spec.Name;
+                    bf["m_Width"].AsInt = spec.Width;
+                    bf["m_Height"].AsInt = spec.Height;
+                    bf["m_TextureFormat"].AsInt = spec.Format;
+                    bf["m_MipCount"].AsInt = 1;
+                    bf["m_IsReadable"].AsBool = true;
+                    bf["m_ImageCount"].AsInt = 1;
+                    bf["m_TextureDimension"].AsInt = 2;
+                    bf["m_CompleteImageSize"].AsInt = spec.Pixels.Length;
+                    bf["image data"].AsByteArray = spec.Pixels;
+                    bf["m_StreamData"]["offset"].AsULong = 0;
+                    bf["m_StreamData"]["size"].AsUInt = 0;
+                    bf["m_StreamData"]["path"].AsString = "";
+                });
+            }
         }
 
         AddAssetBundleObject(file, pathId: 90, bundleName);
@@ -840,6 +949,10 @@ internal static class SyntheticBundle
     {
         var b = new TreeBuilder(ClassMaterial, "Material");
         b.Str("m_Name", 1, align: true);
+        b.Struct("PPtr<Shader>", "m_Shader", 1);
+        b.Value("int", "m_FileID", 2, 4);
+        b.Value("SInt64", "m_PathID", 2, 8);
+        b.VectorOfString("m_ValidKeywords", 1);
         b.Struct("UnityPropertySheet", "m_SavedProperties", 1);
         b.VectorOfStruct("m_TexEnvs", "pair", 2, e =>
         {
@@ -848,6 +961,20 @@ internal static class SyntheticBundle
             e.Struct("PPtr<Texture>", "m_Texture", 6);
             e.Value("int", "m_FileID", 7, 4);
             e.Value("SInt64", "m_PathID", 7, 8);
+        });
+        b.VectorOfStruct("m_Floats", "pair", 2, e =>
+        {
+            e.Str("first", 5, align: true);
+            e.Value("float", "second", 5, 4);
+        });
+        b.VectorOfStruct("m_Colors", "pair", 2, e =>
+        {
+            e.Str("first", 5, align: true);
+            e.Struct("ColorRGBA", "second", 5);
+            e.Value("float", "r", 6, 4);
+            e.Value("float", "g", 6, 4);
+            e.Value("float", "b", 6, 4);
+            e.Value("float", "a", 6, 4);
         });
         return b.Build();
     }
@@ -1120,6 +1247,21 @@ internal static class SyntheticBundle
             Add("Array", "Array", (byte)(level + 1), byteSize: -1, TypeTreeNodeFlags.Array, meta: 0x4000u);
             Add("int", "size", (byte)(level + 2), byteSize: 4, TypeTreeNodeFlags.None, meta: 0);
             Add(elemType, "data", (byte)(level + 2), byteSize: elemSize, TypeTreeNodeFlags.None, meta: 0);
+            return this;
+        }
+
+        public TreeBuilder VectorOfString(string name, byte level)
+        {
+            Add("vector", name, level, byteSize: -1, TypeTreeNodeFlags.None, meta: 0x4000u);
+            Add("Array", "Array", (byte)(level + 1), byteSize: -1,
+                TypeTreeNodeFlags.Array, meta: 0x4000u);
+            Add("int", "size", (byte)(level + 2), byteSize: 4, TypeTreeNodeFlags.None, meta: 0);
+            Add("string", "data", (byte)(level + 2), byteSize: -1,
+                TypeTreeNodeFlags.None, meta: 0x4000u);
+            Add("Array", "Array", (byte)(level + 3), byteSize: -1,
+                TypeTreeNodeFlags.Array, meta: 0x4000u);
+            Add("int", "size", (byte)(level + 4), byteSize: 4, TypeTreeNodeFlags.None, meta: 0);
+            Add("char", "data", (byte)(level + 4), byteSize: 1, TypeTreeNodeFlags.None, meta: 0);
             return this;
         }
 

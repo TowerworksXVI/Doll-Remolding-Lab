@@ -32,10 +32,30 @@ public class RecentPreviewThumbTests : IDisposable
         return dir;
     }
 
+    private string SessionProject(string name, string preview)
+    {
+        var dir = Path.Combine(_root, name);
+        Directory.CreateDirectory(dir);
+        var project = new AuthoredProject { Info = { Name = name, Preview = preview } };
+        AuthoredProjectSerializer.Save(project, dir);
+        File.WriteAllBytes(Path.Combine(dir, preview), new byte[] { 1, 2, 3 });
+        return dir;
+    }
+
     [Fact]
     public void A_project_with_a_preview_on_disk_resolves_to_that_file()
     {
         var dir = Project("with", "preview.png", writeFile: true);
+
+        var path = MainWindowViewModel.RecentPreviewPath(dir);
+
+        Assert.Equal(Path.Combine(dir, "preview.png"), path);
+    }
+
+    [Fact]
+    public void A_schema_2_session_preview_is_read_without_the_schema_1_adapter()
+    {
+        var dir = SessionProject("session", "preview.png");
 
         var path = MainWindowViewModel.RecentPreviewPath(dir);
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using Remold.Core.Bundles;
@@ -33,7 +33,7 @@ public class StreamDumpGateTests : IDisposable
         Assert.NotNull(field);
         var reason = StreamDump.UnrecoverableSkinReason(field!);
         Assert.NotNull(reason);
-        Assert.Contains("skin stream", reason);
+        Assert.Contains("skin weights", reason);
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public class StreamDumpGateTests : IDisposable
 
         var e = Assert.Throws<InvalidDataException>(() =>
             StreamDump.Dump(File.ReadAllBytes(bundle), "rigid2", Path.Combine(_root, "out")));
-        Assert.Contains("palette recovery", e.Message);
+        Assert.Contains("can't be replaced", e.Message);
     }
 
     [Fact]
@@ -71,6 +71,6 @@ public class StreamDumpGateTests : IDisposable
         var field = new BundleReader().GetMeshField(File.ReadAllBytes(bundle), "rigid3");
 
         var e = Assert.Throws<InvalidDataException>(() => StreamDump.WeightedBoneHashes(field!));
-        Assert.Contains("skin stream", e.Message);
+        Assert.Contains("skin weights", e.Message);
     }
 }

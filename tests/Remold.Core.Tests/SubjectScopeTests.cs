@@ -63,6 +63,47 @@ public class SubjectScopeTests
         Assert.Empty(scope.Problems);
     }
 
+    [Fact]
+    public void Candidates_BreakARootNameTie_OnTheBundleId_NotOnTheClosureOrder()
+    {
+        // Two CLOSURE bundles carrying the same container root. The dedupe is first-wins, so the tie
+        // decides which prefab the whole subject is read out of — and until this it was broken by the
+        // packer's dependency array, which re-mints on any repack. The same two bundles listed the other
+        // way round must produce the same winner, or a subject's measurement moves on a patch that changed
+        // nothing about it.
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "hit.bundle", rootName: "TestySSR01",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_body_lod0", new[] { (0, 0L) }) },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>());
+        // same root name, two different bundles — the packer can and does ship both
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "twinA.bundle", rootName: "c_TestySSR01_slg_skin_model",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_propa_lod0", new[] { (0, 0L) }) },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>());
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('3', 32) + ".bundle"),
+            "twinB.bundle", rootName: "c_TestySSR01_slg_skin_model",
+            slots: new[] { new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_propb_lod0", new[] { (0, 0L) }) },
+            recipe: Array.Empty<(string, string)>(), externalCabs: Array.Empty<string>());
+
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var address = GameVfs.PrefabAddress("Character/Player", "TestySSR01");
+        var outfit = new Outfit(1071, "TestySSR01", OutfitKind.Base);
+
+        string WinnerWithClosure(params string[] deps) =>
+            SubjectScope.Build(
+                CatalogIndex.ForTest(new[] { (address, "hit.bundle") }, new[] { (address, deps) }),
+                deobfuscate, outfit)
+            .Candidates.Single(c => c.Root == "c_TestySSR01_slg_skin_model").Bundle;
+
+        // the bundle id is ordinal-least of the two, whichever way the closure happens to list them
+        Assert.Equal("twinA.bundle", WinnerWithClosure("hit.bundle", "twinA.bundle", "twinB.bundle"));
+        Assert.Equal("twinA.bundle", WinnerWithClosure("hit.bundle", "twinB.bundle", "twinA.bundle"));
+    }
+
     // ---- (b) BundleForCab: lazy, scope-bounded, cached; unknown CAB → null ----
     [Fact]
     public void BundleForCab_WalksTheScopeLazily_CachesPairs_UnknownCabIsNull()

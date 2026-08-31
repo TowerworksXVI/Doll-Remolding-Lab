@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
@@ -231,7 +231,7 @@ public class AuthoredDdsTests : IDisposable
         File.Copy(WritePng(8, 8), src);
         var ex = Assert.Throws<InvalidDataException>(() =>
             AuthoredDds.Encode(src, Path.Combine(_root, "out.dds"), srgb: true));
-        Assert.Contains("no DDS header", ex.Message);
+        Assert.Contains("is named .dds but is not a DDS file", ex.Message);
     }
 
     [Fact]
@@ -242,7 +242,7 @@ public class AuthoredDdsTests : IDisposable
         string absent = Path.Combine(_root, "absent.png");
         var ex = Assert.Throws<FileNotFoundException>(() =>
             AuthoredDds.Encode(absent, Path.Combine(_root, "out.dds"), srgb: true));
-        Assert.StartsWith($"texture not found: {absent}", ex.Message);
+        Assert.StartsWith($"'{Path.GetFileName(absent)}' is missing from the mod folder", ex.Message);
     }
 
     [Fact]
@@ -252,6 +252,6 @@ public class AuthoredDdsTests : IDisposable
         // for both, or the same deleted PNG reads two ways depending on which route the build took.
         string absent = Path.Combine(_root, "gone.png");
         var ex = Assert.Throws<FileNotFoundException>(() => AuthoredDds.SourceIdentity(absent));
-        Assert.StartsWith($"texture not found: {absent}", ex.Message);
+        Assert.StartsWith($"'{Path.GetFileName(absent)}' is missing from the mod folder", ex.Message);
     }
 }

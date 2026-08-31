@@ -1,0 +1,169 @@
+{
+  "schema": 2,
+  "app_version": "0.4.0",
+  "info": {
+    "name": "Key group fixture",
+    "version": "1.0",
+    "author": "TestAuthor",
+    "include_repair_data": true
+  },
+  "authored_against": {
+    "catalog_version": "26109"
+  },
+  "project_assets": [
+    {
+      "id": "mesh-long",
+      "kind": "geometry",
+      "label": "Long body",
+      "file": "meshes/long.glb",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 73001,
+          "name": "body_mesh"
+        }
+      }
+    },
+    {
+      "id": "mesh-short",
+      "kind": "geometry",
+      "label": "Short body",
+      "file": "meshes/short.glb",
+      "source": {
+        "game_asset": {
+          "game_build": "26109",
+          "logical_bundle": "characters/vesna_ssr01",
+          "path_id": 73002,
+          "name": "body_mesh"
+        }
+      }
+    }
+  ],
+  "target_slots": [
+    {
+      "id": "slot-geometry",
+      "part": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "tier": "lod0",
+      "input": "geometry",
+      "renderer": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 70001,
+        "name": "c_vesna_body_lod0"
+      },
+      "mesh": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 72001,
+        "name": "body_mesh"
+      }
+    },
+    {
+      "id": "slot-hair-visibility",
+      "part": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_hair_lod0"
+      },
+      "input": "visibility",
+      "renderer": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 70002,
+        "name": "c_vesna_hair_lod0"
+      },
+      "mesh": {
+        "game_build": "26109",
+        "logical_bundle": "characters/vesna_ssr01",
+        "path_id": 72002,
+        "name": "hair_mesh"
+      }
+    }
+  ],
+  "edit_definitions": [
+    {
+      "id": "edit-long",
+      "target": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "label": "Long body",
+      "bindings": [
+        {
+          "slot_id": "slot-geometry",
+          "kind": "project_asset",
+          "project_asset_id": "mesh-long"
+        }
+      ]
+    },
+    {
+      "id": "edit-short",
+      "target": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_body_lod0"
+      },
+      "label": "Short body",
+      "bindings": [
+        {
+          "slot_id": "slot-geometry",
+          "kind": "project_asset",
+          "project_asset_id": "mesh-short"
+        }
+      ]
+    },
+    {
+      "id": "edit-hide-hair",
+      "kind": "hide",
+      "target": {
+        "subject": "Vesna",
+        "outfit": "VesnaSSR01",
+        "renderer_slot": "c_vesna_hair_lod0"
+      },
+      "label": "Hidden",
+      "bindings": [
+        {
+          "slot_id": "slot-hair-visibility",
+          "kind": "hidden"
+        }
+      ]
+    }
+  ],
+  "always": [],
+  "key_groups": [
+    {
+      "id": "key-0001",
+      "key": "F7",
+      "label": "Body length",
+      "states": [
+        {
+          "id": "state-long",
+          "label": "Long",
+          "active_edit_ids": [
+            "edit-long"
+          ]
+        },
+        {
+          "id": "state-short",
+          "label": "Short",
+          "active_edit_ids": [
+            "edit-short"
+          ]
+        },
+        {
+          "id": "state-stock",
+          "label": "Stock, hair up",
+          "active_edit_ids": [
+            "edit-hide-hair"
+          ]
+        }
+      ]
+    }
+  ]
+}

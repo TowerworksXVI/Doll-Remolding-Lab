@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -6,6 +6,7 @@ using System.Numerics;
 using AssetsTools.NET;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
+using Remold.Core.Skeleton;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -24,7 +25,11 @@ public class BindSpaceConversionTests : IDisposable
     public BindSpaceConversionTests() => Directory.CreateDirectory(_root);
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
 
-    private const uint A = 101, B = 102, C = 103, D = 104, E = 105;
+    private static readonly uint A = BoneTable.Hash("Hair01_L/Bone_M");
+    private static readonly uint B = BoneTable.Hash("Spine1_M");
+    private static readonly uint C = BoneTable.Hash("Spine2_M");
+    private static readonly uint D = BoneTable.Hash("Chest_M");
+    private static readonly uint E = BoneTable.Hash("Head_M");
 
     /// <summary>−90° about X, row-vector, exact — the measured shape of a face-down part's delta.</summary>
     private static readonly Matrix4x4 QuarterTurnX = new(
@@ -246,8 +251,44 @@ public class BindSpaceConversionTests : IDisposable
 
         var req = Request("tiershear", ad, bd, out _,
             new[] { new PoolTier("alpha", "alpha_lod1", "lod1", td, "aaaa0002") });
+        req = req with
+        {
+            Pipelines = new[]
+            {
+                req.Pipelines.Single() with
+                {
+                    BonePaths = new Dictionary<uint, string>
+                    {
+                        [A] = "Prefab/root/Root_M/Hair01_L/Bone_M",
+                    },
+                },
+            },
+        };
         var ex = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(req));
-        Assert.Contains("different bind pose than the part's lod0", ex.Message);
+        Assert.Contains("different bind pose than the lod0 of 'alpha' for bone 'Bone_M'", ex.Message);
+        Assert.DoesNotContain("Hair01_L/", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith("part's space. Remove this mesh edit", ex.Message);
+        Assert.DoesNotContain("0x", ex.Message, StringComparison.OrdinalIgnoreCase);
+        string diagnostic = Assert.Single(BuildLogDiagnostics.From(ex));
+        Assert.Contains($"'Hair01_L/Bone_M' (0x{A:x8})", diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unresolved_tier_bind_refusal_counts_the_unnamed_bone_without_a_hash()
+    {
+        var (ad, bd) = SingleSpacePool("tierunnamed");
+        var shear = Matrix4x4.Identity;
+        shear.M23 = 0.4f;
+        string td = Tier("tierunnamed", b => shear * b);
+        var req = Request("tierunnamed", ad, bd, out _,
+            new[] { new PoolTier("alpha", "alpha_lod1", "lod1", td, "aaaa0002") });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(req));
+
+        Assert.Contains("different bind pose than the lod0 of 'alpha' for 1 bone this install's files do not name",
+            ex.Message);
+        Assert.EndsWith("part's space. Remove this mesh edit", ex.Message);
+        Assert.DoesNotContain("0x", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     // ---- operator cache ----------------------------------------------------------------------------

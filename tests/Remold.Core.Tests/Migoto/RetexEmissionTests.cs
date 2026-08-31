@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Remold.Core.Migoto;
+using Remold.Core.Project;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -24,6 +26,68 @@ public class RetexEmissionTests : IDisposable
         string p = Path.Combine(_root, name);
         FlatDds.Write(p, (90, 90, 90, 255));
         return p;
+    }
+
+    /// <summary>One entry, several images. Route: MigotoEmitter.BuildOverlaysOnly, the overlay-only
+    /// emission of the retexture sections. The hash owns one section, so the images are told apart inside
+    /// it — one gated rebind each, in the order the entry lists them — and every key an image gates on is
+    /// declared, since an overlay-only mod has nowhere else to declare one.</summary>
+    [Fact]
+    public void An_entry_rebinds_once_per_image_under_that_images_own_gate()
+    {
+        string outDir = Path.Combine(_root, "out-images");
+        new MigotoEmitter().BuildOverlaysOnly(outDir, new[]
+        {
+            new RetexEntry("ilse_face_a", "3ff9db6d", new[]
+            {
+                new RetexImage(Dds("red_a.dds"), new KeyRef("F7", 0)),
+                new RetexImage(Dds("blue_a.dds"), new KeyRef("F7", 2)),
+            }),
+        }, hideHashes: null);
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains("[Resource_Rtx0]\nfilename = red_a.dds\n", ini);
+        Assert.Contains("[Resource_Rtx1]\nfilename = blue_a.dds\n", ini);
+        Assert.Contains("[TextureOverride_Retex_ilse_face_a]\nhash = 3ff9db6d\nmatch_priority = 0\n"
+            + "if $zz_key_f7 == 0\nthis = Resource_Rtx0\nendif\n"
+            + "if $zz_key_f7 == 2\nthis = Resource_Rtx1\nendif\n", ini);
+        Assert.Contains("$zz_key_f7", ini[..ini.IndexOf("[TextureOverride", StringComparison.Ordinal)]);
+    }
+
+    /// <summary>An entry with nothing to bind. Route: the same. It would emit a section that claims the
+    /// stock hash and then leaves it alone, which is a caller bug rather than a mod.</summary>
+    [Fact]
+    public void An_entry_carrying_no_image_refuses_by_name()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().BuildOverlaysOnly(
+            Path.Combine(_root, "out-empty"),
+            new[] { new RetexEntry("ilse_face_a", "3ff9db6d", Array.Empty<RetexImage>()) },
+            hideHashes: null));
+
+        Assert.Equal("retexture 'ilse_face_a' on texture hash 3ff9db6d carries no image", ex.Message);
+    }
+
+    [Fact]
+    public void Two_scoped_entries_on_one_stock_hash_are_an_internal_inconsistency()
+    {
+        string hash = "3ff9db6d";
+        var ex = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().BuildOverlaysOnly(
+            Path.Combine(_root, "out-duplicate-scoped"), entries: null, scopedEntries: new[]
+            {
+                new ScopedRetexEntry("detail_color", hash, new[]
+                {
+                    new ScopedRetexImage(Dds("detail.dds"),
+                        new[] { new ScopedAnchor("aaaa1111", "body") }),
+                }),
+                new ScopedRetexEntry("detail_mask", hash, new[]
+                {
+                    new ScopedRetexImage(Dds("mask.dds"),
+                        new[] { new ScopedAnchor("aaaa1111", "body") }),
+                }),
+            }));
+
+        Assert.Equal("draw-scoped retexture entries 'detail_color' and 'detail_mask' both override texture "
+            + $"hash {hash}; one scoped entry per stock hash is required", ex.Message);
     }
 
     [Fact]
@@ -259,7 +323,7 @@ public class RetexEmissionTests : IDisposable
     {
         Assert.Equal(MigotoEmitter.RetexTag(TagTwin1), MigotoEmitter.RetexTag(TagTwin2));
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AuthoredRefusalException>(() =>
             new MigotoEmitter().BuildOverlaysOnly(Path.Combine(_root, "tagdupe"), entries: null,
                 scopedEntries: new[]
                 {
@@ -282,63 +346,111 @@ public class RetexEmissionTests : IDisposable
         Assert.EndsWith("Leave one row's new textures out of the build.", ex.Message);
     }
 
+    /// <summary>One hash owns one TextureOverride section, and a hidden mesh a scoped retexture also
+    /// anchors on needs both the skip and the repaint. The retexture hands its body to the hide's section
+    /// rather than minting a second one the ini parse would drop — the same fold a capture unit's and a
+    /// rigid replacement's sections already take. The two never contradict each other: while the skip
+    /// stands there is no draw left to repaint.</summary>
     [Fact]
-    public void A_hidden_mesh_claimed_as_a_scoped_anchor_refuses_on_the_overlay_route()
+    public void A_hidden_mesh_claimed_as_a_scoped_anchor_carries_both_in_one_section()
     {
-        // both verbs want a TextureOverride on the same ib hash, and the ini parse would keep only one:
-        // the mesh either still draws or its retexture never fires, decided by section order. Refuse.
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            new MigotoEmitter().BuildOverlaysOnly(Path.Combine(_root, "hidescope"), entries: null,
-                hideHashes: new[] { "abcd1234" },
-                scopedEntries: new[]
+        string outDir = Path.Combine(_root, "hidescope");
+        new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
+            hideHashes: new[] { "abcd1234" },
+            scopedEntries: new[]
+            {
+                new ScopedRetexEntry("skin_d", "f0f0f0f0", new[]
                 {
-                    new ScopedRetexEntry("skin_d", "f0f0f0f0", new[]
-                    {
-                        new ScopedRetexImage(Dds("hs.dds"),
-                            new[] { new ScopedAnchor("abcd1234", "vesna_body_lod0") }),
-                    }),
-                }));
+                    new ScopedRetexImage(Dds("hs.dds"),
+                        new[] { new ScopedAnchor("abcd1234", "vesna_body_lod0") }),
+                }),
+            });
 
-        Assert.Contains("'vesna_body_lod0' is hidden", ex.Message);
-        Assert.Contains("'skin_d' is retextured on its draws", ex.Message);
-        Assert.Contains("Drop the Hide or that texture edit", ex.Message);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Single(Regex.Matches(ini, Regex.Escape("hash = abcd1234")));
+        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        string section = Section(ini, "[TextureOverride_Hide_0]");
+        Assert.Contains("handling = skip\n", section);
+        Assert.Contains("= Resource_Rtx0\n", section);
+        // the saves come before the binds and the restores after, exactly as in a section of its own
+        Assert.True(section.IndexOf("Resource_RtxSave", StringComparison.Ordinal)
+            < section.IndexOf("= Resource_Rtx0", StringComparison.Ordinal));
+        Assert.Contains("post ps-t", section);
     }
 
     [Fact]
-    public void A_hidden_mesh_claimed_as_a_scoped_anchor_refuses_on_the_pooled_route()
+    public void A_scoped_blend_retexture_probes_the_shipped_t9_and_t10_registers()
+    {
+        string outDir = Path.Combine(_root, "blend-upper-slots");
+        new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
+            scopedEntries: new[]
+            {
+                new ScopedRetexEntry("body_b", "f0f0f0f0", new[]
+                {
+                    new ScopedRetexImage(Dds("blend.dds"),
+                        new[] { new ScopedAnchor("abcd1234", "body") }),
+                }, "Effect map on body"),
+            });
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        string section = Section(ini, "[TextureOverride_RetexScope_body]");
+        foreach (int slot in new[] { 9, 10 })
+        {
+            Assert.Contains($"Resource_RtxSave{slot} = ref ps-t{slot}\n", section);
+            Assert.Contains($"$zz_rt = ps-t{slot}\n", section);
+            Assert.Contains($"ps-t{slot} = Resource_Rtx0\n", section);
+            Assert.Contains($"post ps-t{slot} = Resource_RtxSave{slot}\n", section);
+        }
+    }
+
+    /// <inheritdoc cref="A_hidden_mesh_claimed_as_a_scoped_anchor_carries_both_in_one_section"/>
+    [Fact]
+    public void A_hidden_mesh_claimed_as_a_scoped_anchor_folds_on_the_pooled_route_too()
     {
         string dumps = Path.Combine(_root, "hidescopedumps");
         SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64, boneHashes: new uint[] { 101, 102 });
         string donor = Path.Combine(_root, "hidescopedonor");
         SyntheticPool.WriteDonor(donor, verts: 6, unionBones: 2);
+        string outDir = Path.Combine(_root, "hidescopeout");
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            new MigotoEmitter().Build(new PoolBuildRequest
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            HideHashes = new[] { "abcd1234" },
+            Pipelines = new[]
             {
-                OutDir = Path.Combine(_root, "hidescopeout"),
-                HideHashes = new[] { "abcd1234" },
-                Pipelines = new[]
+                new ReplacePipeline
                 {
-                    new ReplacePipeline
-                    {
-                        Suffix = "swap",
-                        Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")) },
-                        DonorDir = donor,
-                        CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111" },
-                    },
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")) },
+                    DonorDir = donor,
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111" },
                 },
-                ScopedRetextures = new[]
+            },
+            ScopedRetextures = new[]
+            {
+                new ScopedRetexEntry("skin_d", "f0f0f0f0", new[]
                 {
-                    new ScopedRetexEntry("skin_d", "f0f0f0f0", new[]
-                    {
-                        new ScopedRetexImage(Dds("hsp.dds"),
-                            new[] { new ScopedAnchor("abcd1234", "vesna_body_lod0") }),
-                    }),
-                },
-            }));
+                    new ScopedRetexImage(Dds("hsp.dds"),
+                        new[] { new ScopedAnchor("abcd1234", "vesna_body_lod0") }),
+                }),
+            },
+        });
 
-        Assert.Contains("'vesna_body_lod0' is hidden", ex.Message);
-        Assert.Contains("Drop the Hide or that texture edit", ex.Message);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Single(Regex.Matches(ini, Regex.Escape("hash = abcd1234")));
+        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        string section = Section(ini, "[TextureOverride_Hide_0]");
+        Assert.Contains("handling = skip\n", section);
+        Assert.Contains("= Resource_Rtx0\n", section);
+    }
+
+    /// <summary>A section body, up to the blank line that ends it.</summary>
+    private static string Section(string ini, string header)
+    {
+        int at = ini.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"{header} is not in the emitted ini");
+        return ini[at..(ini.IndexOf("\n\n", at, StringComparison.Ordinal) + 1)];
     }
 
     [Fact]
@@ -351,7 +463,7 @@ public class RetexEmissionTests : IDisposable
         string donor = Path.Combine(_root, "tagdonor");
         SyntheticPool.WriteDonor(donor, verts: 6, unionBones: 2);
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AuthoredRefusalException>(() =>
             new MigotoEmitter().Build(new PoolBuildRequest
             {
                 OutDir = Path.Combine(_root, "tagout"),
@@ -387,7 +499,7 @@ public class RetexEmissionTests : IDisposable
         // The guard's tag section carries a value derived the same way a scoped retexture's does. Sharing
         // one value would let the scoped texture identify the wrong sibling, so the walk that refuses over
         // the other tag families covers this one too.
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AuthoredRefusalException>(() =>
             new MigotoEmitter().BuildOverlaysOnly(Path.Combine(_root, "tagtwinguard"), entries: null,
                 hideHashes: new[] { "aaaa1111" },
                 scopedEntries: new[]
@@ -415,7 +527,7 @@ public class RetexEmissionTests : IDisposable
     {
         // A caller with no labels (a synthetic build, a fixture) gets the same three arms without them: the
         // refusal degrades to the hashes rather than to a sentence with a hole in it.
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AuthoredRefusalException>(() =>
             new MigotoEmitter().BuildOverlaysOnly(Path.Combine(_root, "tagnolabel"), entries: null,
                 scopedEntries: new[]
                 {
@@ -441,7 +553,7 @@ public class RetexEmissionTests : IDisposable
         string donor = Path.Combine(_root, "tagmixdonor");
         SyntheticPool.WriteDonor(donor, verts: 6, unionBones: 2);
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AuthoredRefusalException>(() =>
             new MigotoEmitter().Build(new PoolBuildRequest
             {
                 OutDir = Path.Combine(_root, "tagmixout"),

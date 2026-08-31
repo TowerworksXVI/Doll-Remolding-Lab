@@ -57,6 +57,7 @@ public static class TextureHash
         ATTextureFormat.BGRA32 or ATTextureFormat.BGRA32Old => srgb ? 91u : 87u,    // B8G8R8A8_UNORM(_SRGB)
         ATTextureFormat.Alpha8 or ATTextureFormat.R8 => 61u,                        // R8_UNORM
         ATTextureFormat.R16 => 56u,                                                 // R16_UNORM
+        ATTextureFormat.RGBAHalf => 10u,                                            // R16G16B16A16_FLOAT
         _ => null,
     };
 
@@ -93,6 +94,7 @@ public static class TextureHash
 
     static int BytesPerPixel(uint dxgi) => dxgi switch
     {
+        10 => 8,                     // R16G16B16A16_FLOAT
         28 or 29 or 87 or 91 => 4,   // R8G8B8A8 / B8G8R8A8
         56 => 2,                     // R16_UNORM
         61 => 1,                     // R8_UNORM

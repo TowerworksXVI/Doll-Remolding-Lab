@@ -1,10 +1,12 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 using Remold.Core.Model;
+using Remold.Core.Project;
+using Remold.Core.Skeleton;
 using Xunit;
 using static Remold.Core.Tests.Support.PoolFixtures;
 
@@ -82,15 +84,16 @@ public class PoolDeriveTests
     public void Orphan_bones_fail_loudly()
     {
         var e = Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(Donor(10, 999), Roster));
-        Assert.Contains("owned by no part", e.Message);
-        Assert.Contains("0x000003e7", e.Message);
+        Assert.Contains("that no part of this item has", e.Message);
+        Assert.Contains(Remold.Core.Migoto.BuildLogDiagnostics.From(e),
+            d => d.Contains("0x000003e7", StringComparison.Ordinal));
     }
 
     [Fact]
     public void Unweighted_donor_fails_loudly()
     {
         var p = MeshApply.Payload.Geometry(new UnityMesh { Name = "donor", VertexCount = 1 });
-        var e = Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(p, Roster));
+        var e = Assert.Throws<AuthoredRefusalException>(() => PoolDerive.Derive(p, Roster));
         Assert.Contains("no skin", e.Message);
     }
 
@@ -104,7 +107,7 @@ public class PoolDeriveTests
             JointWeights = new[] { 1f, 0f, 0f, 0f },
             SkinJointHashes = new uint[] { 0 },
         };
-        Assert.Throws<InvalidDataException>(() => PoolDerive.Derive(p, Roster));
+        Assert.Throws<AuthoredRefusalException>(() => PoolDerive.Derive(p, Roster));
     }
 
     // ---- the replaced part: candidacy of a narrow part, and the anchor tie ------------------------
@@ -174,7 +177,7 @@ public class PoolDeriveTests
         var (candidates, excluded) = PoolDerive.PoolCandidates(NarrowHairRoster, "body");
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 30), candidates, missingParts: excluded, replacedPart: "body"));
-        Assert.Contains("Left out of the pool: 'hair' · it stores one influence per vertex", e.Message);
+        Assert.Contains("Left out: 'hair' · it stores one influence per vertex", e.Message);
         Assert.DoesNotContain("different armature", e.Message);
     }
 
@@ -182,21 +185,21 @@ public class PoolDeriveTests
     public void A_narrow_part_is_no_tier_coverage_carrier_for_another_part()
     {
         // The body's lod1 poses hash 30, which only the narrow hair carries. Ranking it as a carrier would
-        // pool it for the body's Replace by the back door, so the tier refuses instead.
+        // pool it for the body's Replace by the back door, so the row is classified MERGED instead.
         var (candidates, _) = PoolDerive.PoolCandidates(NarrowHairRoster, "body");
         var derived = PoolDerive.Derive(Donor(10, 11, 12), candidates, replacedPart: "body");
         var tiers = TiersOf(
             Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 30)),
             Draws("hair", new uint[] { 30 }, Tier("hair_lod1", "h1", 30)));
 
-        var e = Assert.Throws<InvalidDataException>(() =>
-            PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8));
-
-        Assert.Contains("poses bone 0x0000001e that no part of this outfit can supply", e.Message);
+        var classified = PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8,
+            replacedPart: "body", readableRoster: NarrowHairRoster);
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 30, "body_lod1", "hair");
         // the same tier over the whole roster is covered, so it is candidacy that decided this
         Assert.Equal(new[] { "body", "hair" },
             PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), NarrowHairRoster),
-                NarrowHairRoster, tiers, maxParts: 8).Pool);
+                NarrowHairRoster, tiers, maxParts: 8, replacedPart: "body",
+                readableRoster: NarrowHairRoster).Pool);
     }
 
     // ---- candidacy of a part outside the shadow pass ----------------------------------------------
@@ -244,7 +247,7 @@ public class PoolDeriveTests
         var (candidates, excluded) = PoolDerive.PoolCandidates(ShadowOffHairRoster, "body");
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 30), candidates, missingParts: excluded, replacedPart: "body"));
-        Assert.Contains("Left out of the pool: 'hair' · it casts no shadow", e.Message);
+        Assert.Contains("Left out: 'hair' · it casts no shadow", e.Message);
         Assert.DoesNotContain("different armature", e.Message);
     }
 
@@ -259,14 +262,14 @@ public class PoolDeriveTests
             Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 30)),
             Draws("hair", new uint[] { 30 }, Tier("hair_lod1", "h1", 30)));
 
-        var e = Assert.Throws<InvalidDataException>(() =>
-            PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8));
-
-        Assert.Contains("poses bone 0x0000001e that no part of this outfit can supply", e.Message);
+        var classified = PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8,
+            replacedPart: "body", readableRoster: ShadowOffHairRoster);
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 30, "body_lod1", "hair");
         // the same tier over the whole roster is covered, so it is candidacy that decided this
         Assert.Equal(new[] { "body", "hair" },
             PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), ShadowOffHairRoster),
-                ShadowOffHairRoster, tiers, maxParts: 8).Pool);
+                ShadowOffHairRoster, tiers, maxParts: 8, replacedPart: "body",
+                readableRoster: ShadowOffHairRoster).Pool);
     }
 
     [Fact]
@@ -336,7 +339,7 @@ public class PoolDeriveTests
             PoolDerive.PoolCandidates(WithheldCoatRoster(VisibilityOverride.LobbyHidden), "body");
         var e = Assert.Throws<InvalidDataException>(() =>
             PoolDerive.Derive(Donor(10, 30), candidates, missingParts: excluded, replacedPart: "body"));
-        Assert.Contains("Left out of the pool: 'coat' · the game hides it on the crew deck", e.Message);
+        Assert.Contains("Left out: 'coat' · the game hides it on the crew deck", e.Message);
         Assert.DoesNotContain("different armature", e.Message);
     }
 
@@ -352,14 +355,13 @@ public class PoolDeriveTests
             Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 30)),
             Draws("coat", new uint[] { 30 }, Tier("coat_lod1", "c1", 30)));
 
-        var e = Assert.Throws<InvalidDataException>(() =>
-            PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8));
-
-        Assert.Contains("poses bone 0x0000001e that no part of this outfit can supply", e.Message);
+        var classified = PoolDerive.CoverTierBones(derived, candidates, tiers, maxParts: 8,
+            replacedPart: "body", readableRoster: roster);
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 30, "body_lod1", "coat");
         // the same tier over the whole roster is covered, so it is candidacy that decided this
         Assert.Equal(new[] { "body", "coat" },
             PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), roster),
-                roster, tiers, maxParts: 8).Pool);
+                roster, tiers, maxParts: 8, replacedPart: "body", readableRoster: roster).Pool);
     }
 
     [Fact]
@@ -437,7 +439,18 @@ public class PoolDeriveTests
 
     private static PoolDerive.Result Cover(PoolDerive.Result derived,
         Func<string, PoolDerive.PartTiers> tiers, int maxParts = 8) =>
-        PoolDerive.CoverTierBones(derived, Roster, tiers, maxParts);
+        PoolDerive.CoverTierBones(derived, Roster, tiers, maxParts,
+            replacedPart: "body", readableRoster: Roster);
+
+    private static void AssertTierVerdict(PoolDerive.Result result, PoolDerive.TierBoneClass classification,
+        uint bone, string tier, params string[] owners)
+    {
+        var verdict = Assert.Single(result.TierBoneVerdicts);
+        Assert.Equal(classification, verdict.Classification);
+        Assert.Equal(bone, verdict.Bone);
+        Assert.Equal(tier, verdict.Tier);
+        Assert.Equal(owners, verdict.OwningParts);
+    }
 
     [Fact]
     public void A_pool_whose_tiers_the_union_already_covers_is_left_alone()
@@ -517,7 +530,8 @@ public class PoolDeriveTests
             Draws("body", new uint[] { 10, 11, 12 }, Tier("body_lod1", "b1", 20, 21, 30)),
             Draws("cloth", new uint[] { 20, 21 }, Tier("cloth_lod1", "c1", 20, 21)),
             Draws("hair", new uint[] { 30 }, Tier("hair_lod1", "h1", 30)),
-            Draws("sash", new uint[] { 20, 21, 30 }, Tier("sash_lod1", "s1", 20, 21, 30))), maxParts: 8);
+            Draws("sash", new uint[] { 20, 21, 30 }, Tier("sash_lod1", "s1", 20, 21, 30))), maxParts: 8,
+            replacedPart: "body", readableRoster: roster);
         Assert.Equal(new[] { "body", "sash" }, covered.Pool);
     }
 
@@ -553,12 +567,61 @@ public class PoolDeriveTests
     {
         // Union ownership goes to the pooled part with the most summed weight on a bone. A part that
         // tables the bone and poses none of it takes the slot and leaves the row unwritten, which is a
-        // silent identity pose at that tier — refuse instead.
-        var e = Assert.Throws<InvalidDataException>(() => Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
+        // silent identity pose at that tier. It neither covers the row nor counts as merged geometry.
+        var roster = Roster.Select(p => p.Mesh == "cloth"
+            ? p with { PosedBones = new HashSet<uint> { 21 } }
+            : p).ToArray();
+        var classified = PoolDerive.CoverTierBones(PoolDerive.Derive(Donor(10, 11, 12), roster), roster,
             TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 20)),
-                    Draws("cloth", new uint[] { 21 }, Tier("cloth_lod1", "c1")))));
-        Assert.Contains("body_lod1", e.Message);
-        Assert.Contains("0x00000014", e.Message);
+                    Draws("cloth", new uint[] { 21 }, Tier("cloth_lod1", "c1"))),
+            maxParts: 8, replacedPart: "body", readableRoster: roster);
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Lod1Only, 20, "body_lod1");
+    }
+
+    [Theory]
+    [InlineData(true, PoolDerive.TierBoneClass.Merged)]
+    [InlineData(false, PoolDerive.TierBoneClass.Lod1Only)]
+    public void The_same_sibling_posing_or_only_tabling_the_bone_classifies_merged_or_lod1_only(
+        bool siblingPoses, PoolDerive.TierBoneClass expected)
+    {
+        var clothPosed = siblingPoses ? new uint[] { 20, 21 } : new uint[] { 21 };
+        var roster = new[]
+        {
+            Part("body", 10, 11, 12),
+            new PoolDerive.PartBones("cloth", new HashSet<uint> { 20, 21 },
+                PosedBones: clothPosed.ToHashSet()),
+        };
+        var classified = PoolDerive.CoverTierBones(
+            PoolDerive.Derive(Donor(10, 11, 12), roster, replacedPart: "body"), roster,
+            TiersOf(
+                Draws("body", new uint[] { 10, 11, 12 }, Tier("body_lod1", "b1", 20)),
+                Draws("cloth", clothPosed)),
+            maxParts: 8, replacedPart: "body", readableRoster: roster);
+
+        AssertTierVerdict(classified, expected, 20, "body_lod1",
+            siblingPoses ? new[] { "cloth" } : Array.Empty<string>());
+    }
+
+    [Fact]
+    public void A_tabling_sibling_is_not_named_beside_a_posing_owner()
+    {
+        var roster = new[]
+        {
+            Part("body", 10, 11, 12),
+            new PoolDerive.PartBones("cloth", new HashSet<uint> { 20 },
+                PosedBones: new HashSet<uint> { 20 }),
+            new PoolDerive.PartBones("sash", new HashSet<uint> { 20, 21 },
+                PosedBones: new HashSet<uint> { 21 }),
+        };
+        var classified = PoolDerive.CoverTierBones(
+            PoolDerive.Derive(Donor(10, 11, 12), roster, replacedPart: "body"), roster,
+            TiersOf(
+                Draws("body", new uint[] { 10, 11, 12 }, Tier("body_lod1", "b1", 20)),
+                Draws("cloth", new uint[] { 20 }),
+                Draws("sash", new uint[] { 21 })),
+            maxParts: 8, replacedPart: "body", readableRoster: roster);
+
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 20, "body_lod1", "cloth");
     }
 
     [Fact]
@@ -566,11 +629,10 @@ public class PoolDeriveTests
     {
         // The tier chain pairs pool parts by LOD label. A part with nothing at the asking label falls back
         // to its lod0 recovery, whose capture never fires in a frame that draws only the far tier.
-        var e = Assert.Throws<InvalidDataException>(() => Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
+        var classified = Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
             TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 20)),
-                    Draws("cloth", new uint[] { 20, 21 }))));
-        Assert.Contains("body_lod1", e.Message);
-        Assert.Contains("0x00000014", e.Message);
+                    Draws("cloth", new uint[] { 20, 21 })));
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 20, "body_lod1", "cloth");
     }
 
     [Fact]
@@ -579,12 +641,12 @@ public class PoolDeriveTests
         // _Dorm and _Fight are distinct garments, not detail levels: the Dorm cloth never draws in the
         // frames the plain lod1 draws in, so its capture can't feed that tier's recovery.
         var roster = new[] { Part("body_lod0", 10, 11, 12), Part("cloth_lod0_Dorm", 20, 21) };
-        var e = Assert.Throws<InvalidDataException>(() => PoolDerive.CoverTierBones(
+        var classified = PoolDerive.CoverTierBones(
             PoolDerive.Derive(Donor(10, 11, 12), roster), roster, TiersOf(
                 Draws("body_lod0", new uint[] { 10, 11, 12 }, Tier("body_lod1", "b1", 20)),
                 Draws("cloth_lod0_Dorm", new uint[] { 20, 21 }, Tier("cloth_lod1_Dorm", "c1", 20))),
-            maxParts: 8));
-        Assert.Contains("body_lod1", e.Message);
+            maxParts: 8, replacedPart: "body_lod0", readableRoster: roster);
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 20, "body_lod1", "cloth_lod0_Dorm");
     }
 
     [Fact]
@@ -596,31 +658,96 @@ public class PoolDeriveTests
             PoolDerive.Derive(Donor(10, 11, 12), roster), roster, TiersOf(
                 Draws("body_lod0_Dorm", new uint[] { 10, 11, 12 }, Tier("body_lod1_Dorm", "b1", 20)),
                 Draws("cloth_lod0_Dorm", new uint[] { 20, 21 }, Tier("cloth_lod1_Dorm", "c1", 20))),
-            maxParts: 8);
+            maxParts: 8, replacedPart: "body_lod0_Dorm", readableRoster: roster);
         Assert.Equal(new[] { "body_lod0_Dorm", "cloth_lod0_Dorm" }, covered.Pool);
     }
 
     [Fact]
-    public void A_tier_bone_no_poolable_part_carries_refuses_naming_the_tier_and_the_bone()
+    public void A_tier_bone_no_readable_sibling_tables_is_classified_lod1_only()
     {
-        var e = Assert.Throws<InvalidDataException>(() => Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
-            TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 999)))));
-        Assert.Contains("body_lod1", e.Message);
-        Assert.Contains("0x000003e7", e.Message);
-        Assert.Contains("can supply", e.Message);
+        var classified = Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
+            TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 999))));
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Lod1Only, 999, "body_lod1");
     }
 
     [Fact]
-    public void A_carrier_whose_matching_tier_does_not_pose_the_bone_refuses()
+    public void A_carrier_whose_matching_tier_does_not_pose_the_bone_classifies_merged()
     {
         // The cloth has a lod1 of the right label and variant, but that tier does not pose bone 20 — the
         // draw a far frame recovers the row from would leave it unwritten exactly when it is read.
-        var e = Assert.Throws<InvalidDataException>(() => Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
+        var classified = Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
             TiersOf(
                 Draws("body", BodyPosed, Tier("body_lod1", "b1", 10, 20)),
-                Draws("cloth", new uint[] { 20, 21 }, Tier("cloth_lod1", "c1", 21)))));
-        Assert.Contains("body_lod1", e.Message);
-        Assert.Contains("can supply", e.Message);
+                Draws("cloth", new uint[] { 20, 21 }, Tier("cloth_lod1", "c1", 21))));
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.Merged, 20, "body_lod1", "cloth");
+    }
+
+    [Fact]
+    public void A_pool_mates_uncovered_tier_row_is_classified_mate_tier_first()
+    {
+        var derived = PoolDerive.Derive(Donor(10, 20), Roster, replacedPart: "body");
+        var classified = PoolDerive.CoverTierBones(derived, Roster, TiersOf(
+            Draws("body", BodyPosed),
+            Draws("cloth", new uint[] { 20, 21 }, Tier("cloth_lod1", "c1", 999))),
+            maxParts: 8, replacedPart: "body", readableRoster: Roster);
+
+        AssertTierVerdict(classified, PoolDerive.TierBoneClass.MateTier, 999, "cloth_lod1");
+    }
+
+    [Fact]
+    public void A_shared_tier_capture_mints_one_verdict_for_each_asking_part()
+    {
+        var roster = new[]
+        {
+            Part("mate", 30),
+            Part("body", 10),
+            Part("cloth", 20),
+        };
+        var derived = PoolDerive.Derive(Donor(30, 10), roster, replacedPart: "body");
+        var classified = PoolDerive.CoverTierBones(derived, roster, TiersOf(
+            Draws("mate", new uint[] { 30 }, Tier("mate_lod1", "shared", 20)),
+            Draws("body", new uint[] { 10 },
+                Tier("body_lod1", "shared", 20), Tier("body_lod1", "shared", 20)),
+            Draws("cloth", new uint[] { 20 })),
+            maxParts: 8, replacedPart: "body", readableRoster: roster);
+
+        Assert.Collection(classified.TierBoneVerdicts,
+            mate =>
+            {
+                Assert.Equal("mate", mate.TierPart);
+                Assert.Equal("mate_lod1", mate.Tier);
+                Assert.Equal(20u, mate.Bone);
+                Assert.Equal(PoolDerive.TierBoneClass.MateTier, mate.Classification);
+            },
+            own =>
+            {
+                Assert.Equal("body", own.TierPart);
+                Assert.Equal("body_lod1", own.Tier);
+                Assert.Equal(20u, own.Bone);
+                Assert.Equal(PoolDerive.TierBoneClass.Merged, own.Classification);
+                Assert.Equal(new[] { "cloth" }, own.OwningParts);
+            });
+    }
+
+    [Fact]
+    public void An_own_tier_classifies_each_residual_row_independently()
+    {
+        var classified = Cover(PoolDerive.Derive(Donor(10, 11, 12), Roster),
+            TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 20, 999))));
+
+        Assert.Collection(classified.TierBoneVerdicts,
+            merged =>
+            {
+                Assert.Equal(20u, merged.Bone);
+                Assert.Equal(PoolDerive.TierBoneClass.Merged, merged.Classification);
+                Assert.Equal(new[] { "cloth" }, merged.OwningParts);
+            },
+            lod1Only =>
+            {
+                Assert.Equal(999u, lod1Only.Bone);
+                Assert.Equal(PoolDerive.TierBoneClass.Lod1Only, lod1Only.Classification);
+                Assert.Empty(lod1Only.OwningParts);
+            });
     }
 
     [Fact]
@@ -630,7 +757,71 @@ public class PoolDeriveTests
             TiersOf(Draws("body", BodyPosed, Tier("body_lod1", "b1", 20, 30)),
                     Draws("cloth", new uint[] { 20, 21 }, Tier("cloth_lod1", "c1", 20)),
                     Draws("hair", new uint[] { 30 }, Tier("hair_lod1", "h1", 30))), maxParts: 2));
-        Assert.Contains("more than 2 pooled parts", e.Message);
+        Assert.Contains("more than 2 parts at this detail level", e.Message);
         Assert.Contains("body_lod1", e.Message);
+        Assert.Contains("1 bone this install's files do not name", e.Message);
+        Assert.Contains("'hair'", e.Message);
+        Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            "Pool-cap refusal: tier 'body_lod1' uses no matching chain suffix (0x0000001e) from 'hair'.",
+            Assert.Single(BuildLogDiagnostics.From(e)));
+    }
+
+    [Fact]
+    public void Pool_cap_refusal_names_the_bone_and_its_owning_part_when_resolved()
+    {
+        const string suffix = "Hair01_R/Bone_M";
+        uint mirrored = BoneTable.Hash(suffix);
+        var roster = new[] { Part("body", 10), Part("shoes", mirrored) };
+        var derived = PoolDerive.Derive(Donor(10), roster, replacedPart: "body");
+
+        var e = Assert.Throws<InvalidDataException>(() => PoolDerive.CoverTierBones(
+            derived, roster, TiersOf(
+                Draws("body", new uint[] { 10 }, Tier("body_lod1", "b1", mirrored)),
+                Draws("shoes", new[] { mirrored }, Tier("shoes_lod1", "s1", mirrored))),
+            maxParts: 1, replacedPart: "body", readableRoster: roster,
+            bonePaths: new Dictionary<uint, string>
+            {
+                [mirrored] = "Prefab/root/Root_M/Hair01_R/Bone_M",
+            }));
+
+        Assert.Contains("bone 'Bone_M' from 'shoes'", e.Message);
+        Assert.DoesNotContain("Hair01_R/", e.Message, StringComparison.Ordinal);
+        Assert.Contains("more than 1 part at this detail level", e.Message);
+        Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            $"Pool-cap refusal: tier 'body_lod1' uses '{suffix}' (0x{mirrored:x8}) from 'shoes'.",
+            Assert.Single(BuildLogDiagnostics.From(e)));
+    }
+
+    [Fact]
+    public void Pool_cap_refusal_pairs_the_winning_carrier_with_a_bone_it_can_cover()
+    {
+        uint glove = BoneTable.Hash("Hand_L/Glove49");
+        uint boot = BoneTable.Hash("Foot_L/Boot_L");
+        uint sole = BoneTable.Hash("Foot_L/Sole_L");
+        var roster = new[]
+        {
+            Part("body", 10),
+            Part("glove", glove),
+            Part("shoes", boot, sole),
+        };
+        var derived = PoolDerive.Derive(Donor(10), roster, replacedPart: "body");
+
+        var e = Assert.Throws<InvalidDataException>(() => PoolDerive.CoverTierBones(
+            derived, roster, TiersOf(
+                Draws("body", new uint[] { 10 }, Tier("body_lod1", "b1", glove, boot, sole)),
+                Draws("glove", new[] { glove }, Tier("glove_lod1", "g1", glove)),
+                Draws("shoes", new[] { boot, sole }, Tier("shoes_lod1", "s1", boot, sole))),
+            maxParts: 1, replacedPart: "body", readableRoster: roster,
+            bonePaths: new Dictionary<uint, string>
+            {
+                [glove] = "Prefab/root/Hand_L/Glove49",
+                [boot] = "Prefab/root/Foot_L/Boot_L",
+                [sole] = "Prefab/root/Foot_L/Sole_L",
+            }));
+
+        Assert.Contains("bone 'Sole_L' from 'shoes'", e.Message);
+        Assert.DoesNotContain("Glove49' from 'shoes'", e.Message);
     }
 }

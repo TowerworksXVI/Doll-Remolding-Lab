@@ -6,7 +6,10 @@
 /// </summary>
 internal static class LabAcceptableUse
 {
-    public const string Title = "Read This Before Making Mods.";
+    // The TEXT below is the accepted terms and is exempt from the UI text style by owner ruling — its
+    // voice is deliberate, and editing it re-prompts every user. The title is UI chrome and is not
+    // part of the acceptance stamp.
+    public const string Title = "Read this before making mods";
 
     public const string Text =
         "** Don't Bite The Hand That Feeds\n" +

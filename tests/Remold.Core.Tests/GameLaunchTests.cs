@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using Remold.App.ViewModels;
 using Remold.Core;
 using Remold.Core.Migoto;
+using Remold.Core.Project;
 using Remold.Core.Tests.Support;
 using Xunit;
 
@@ -14,10 +16,7 @@ namespace Remold.Core.Tests;
 /// sits relative to the 3DMigoto loader, and whether an install launches through Steam or straight off its
 /// exe. Starting the processes is thin glue over the OS and is exercised live, not here.
 /// </summary>
-// Serialized with every other settings.json reader/writer — one file, one bin dir. Nothing here EDITS
-// settings, but constructing the view-model does: the Build pane's author field is the default-author
-// setting, and seeding it from a settings file that has no author yet is a change, which saves. A save
-// racing another class's snapshot of that file is a torn read on either side.
+// Serialized with every other settings.json reader/writer — one file, one bin dir.
 [Collection("Dispatcher")]
 public class GameLaunchTests
 {
@@ -38,11 +37,11 @@ public class GameLaunchTests
     }
 
     [Fact]
-    public void An_unset_or_missing_loader_reports_the_install_gates_remedy()
+    public void An_unset_or_missing_loader_reports_the_shared_loader_remedy()
     {
-        Assert.Equal(InstallGate.NoLoader, LaunchGate.Reason(true, null, false));
-        Assert.Equal(InstallGate.NoLoader, LaunchGate.Reason(true, "   ", false));
-        Assert.Equal(InstallGate.LoaderNotFound(@"C:\gone\Run.exe"),
+        Assert.Equal(LoaderGate.NoLoader, LaunchGate.Reason(true, null, false));
+        Assert.Equal(LoaderGate.NoLoader, LaunchGate.Reason(true, "   ", false));
+        Assert.Equal(LoaderGate.LoaderNotFound(@"C:\gone\Run.exe"),
             LaunchGate.Reason(true, @"C:\gone\Run.exe", false));
     }
 
@@ -55,29 +54,6 @@ public class GameLaunchTests
         Assert.Null(LaunchGate.Reason(true, @"C:\ssmt\GF2\Run.exe", true));
     }
 
-    [Fact]
-    public void Install_still_asks_for_the_mods_folder_beside_the_loader()
-    {
-        var exe = @"C:\ssmt\GF2\Run.exe";
-        Assert.Equal(InstallGate.NoModsFolder(exe),
-            InstallGate.Reason(hasBuild: true, exe, loaderExists: true, modsFolder: null, Hooked));
-        Assert.Null(InstallGate.Reason(true, exe, true, @"C:\ssmt\GF2\Mods", Hooked));
-    }
-
-    /// <summary>A mod fires through the host's texture hook, so a 3DMigoto that doesn't carry one takes an
-    /// install that does nothing. The reason names the hosts that do rather than a setting to edit.</summary>
-    [Fact]
-    public void Install_refuses_a_3DMigoto_that_carries_no_texture_hook()
-    {
-        var exe = @"C:\ssmt\GF2\Run.exe";
-        var mods = @"C:\ssmt\GF2\Mods";
-
-        Assert.Equal(InstallGate.NoLoaderIni(exe),
-            InstallGate.Reason(true, exe, true, mods, default));
-        Assert.Equal(InstallGate.NoTextureHook,
-            InstallGate.Reason(true, exe, true, mods, new MigotoIniFacts(true, false, false)));
-        Assert.Null(InstallGate.Reason(true, exe, true, mods, Hooked));
-    }
 
     // ---- the status bar's 3DMigoto cell ---------------------------------------
 
@@ -88,8 +64,7 @@ public class GameLaunchTests
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains("not set", f.Text);
-        // the scope is the point: nothing but Install and Launch wants the loader
-        Assert.Contains("Install and Launch only", f.Detail);
+        Assert.Contains("Launch and Install", f.Detail);
     }
 
     [Fact]
@@ -99,7 +74,7 @@ public class GameLaunchTests
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains(@"C:\gone\Run.exe", f.Detail);
-        Assert.Contains("Install and Launch only", f.Detail);
+        Assert.Contains("Launch and Install", f.Detail);
     }
 
     [Fact]
@@ -108,7 +83,9 @@ public class GameLaunchTests
         var f = MainWindowViewModel.MigotoFacet(@"C:\tools\Run.exe", loaderExists: true, modsFolder: null, Hooked);
 
         Assert.Equal("⚠", f.Glyph);
-        Assert.Contains("no Mods folder", f.Text);
+        // the label says what the state costs; the Mods folder itself is named in the detail
+        Assert.Contains("can't install mods", f.Text);
+        Assert.Contains("Mods folder", f.Detail);
         Assert.Contains("Launch still works", f.Detail);
     }
 
@@ -639,47 +616,6 @@ public class GameLaunchTests
             MainWindowViewModel.ExitReRead(loadEndedBlocked: true, rescanMustWait: true));
     }
 
-    [Fact]
-    public void A_queued_re_read_says_the_game_closed_instead_of_leaving_the_running_notice_up()
-    {
-        // The blocked load's notice ("the game is running") is standing over a game that just closed, and the
-        // re-read that answers it can't run yet. Left alone the modder reads a state that ended.
-        var vm = new MainWindowViewModel(startLoad: false)
-        {
-            IsScanning = false,
-            GameRescanOffered = true,   // the load ended blocked on the game's files
-            IsModBuilding = true,       // …and a build is holding what the reload would drop
-            NoticeStatus = StatusFacet.Warn("The game is running",
-                "Can't read the game's files while it's open. Close the game, then Rescan."),
-        };
-
-        vm.RefreshAfterGameExit();
-
-        Assert.Equal(MainWindowViewModel.GameClosedNotice, vm.NoticeStatus.Text);
-        Assert.Equal(MainWindowViewModel.RescanQueuedDetail, vm.NoticeStatus.Detail);
-    }
-
-    /// <summary>The notice cell's Rescan waits on the same holds the exit re-read waits on. The reload drops
-    /// the VFS a build is reading, so a click under one used to pull it out from underneath.</summary>
-    [Fact]
-    public void Rescan_WhileSomethingHoldsTheRoster_IsQueuedInsteadOfRunUnderIt()
-    {
-        var vm = new MainWindowViewModel(startLoad: false)
-        {
-            IsScanning = false,
-            GameRescanOffered = true,   // the load ended blocked, so the cell offers Rescan
-            IsModBuilding = true,       // …and a build is reading what the reload would drop
-            SearchText = "vesna",
-        };
-
-        vm.ReloadRosterCommand.Execute(null);
-
-        Assert.False(vm.IsScanning);            // ReloadRoster sets it
-        Assert.Equal("vesna", vm.SearchText);   // ReloadRoster clears it
-        Assert.True(vm.GameRescanOffered);      // the blocked state stands until the re-read really happens
-        Assert.Equal(MainWindowViewModel.RescanQueuedNotice, vm.NoticeStatus.Text);
-        Assert.Equal(MainWindowViewModel.RescanQueuedDetail, vm.NoticeStatus.Detail);
-    }
 
     [Fact]
     public void An_exit_with_nothing_to_re_read_writes_no_notice_at_all()
@@ -695,6 +631,153 @@ public class GameLaunchTests
         vm.RefreshAfterGameExit();
 
         Assert.Equal(quiet, vm.NoticeStatus);
+    }
+
+    [Fact]
+    public void Notice_merges_dedupe_by_identity_not_rendered_text()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "same-cause", "first wording", "first detail"));
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "same-cause", "updated wording", "updated detail"));
+
+        Assert.Equal("updated wording", vm.NoticeStatus.Text);
+        Assert.Equal("updated detail", vm.NoticeStatus.Detail);
+    }
+
+    [Fact]
+    public void A_merged_notice_uses_its_highest_member_severity_and_an_honest_label()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "warning", "warning", "warning detail"));
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "another-warning", "another warning", "another warning detail"));
+
+        Assert.Equal("2 warnings", vm.NoticeStatus.Text);
+
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "error", "error", "error detail",
+            Severity: MainWindowViewModel.NoticeSeverity.Error));
+
+        Assert.Equal("✗", vm.NoticeStatus.Glyph);
+        Assert.Equal(StatusFacet.Danger, vm.NoticeStatus.Color);
+        Assert.Equal("3 notices", vm.NoticeStatus.Text);
+        Assert.Contains("warning detail", vm.NoticeStatus.Detail);
+        Assert.Contains("error detail", vm.NoticeStatus.Detail);
+    }
+
+    [Fact]
+    public void Load_finalize_replaces_only_load_notices_and_preserves_project_migration()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            MainWindowViewModel.ProjectMigrationNoticeId, "Project updated", "migration detail",
+            ProjectScoped: true, Severity: MainWindowViewModel.NoticeSeverity.Info));
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "game.locate", "Locate the game", "stale load detail"));
+
+        vm.ReplaceLoadNotices(new[]
+        {
+            new MainWindowViewModel.NoticeMessage(
+                "game.files-missing", "1 game file missing", "load detail"),
+        });
+
+        Assert.Equal("2 notices", vm.NoticeStatus.Text);
+        Assert.Contains("migration detail", vm.NoticeStatus.Detail);
+        Assert.Contains("load detail", vm.NoticeStatus.Detail);
+        Assert.DoesNotContain("stale load detail", vm.NoticeStatus.Detail);
+
+        vm.ReplaceLoadNotices(Array.Empty<MainWindowViewModel.NoticeMessage>());
+
+        Assert.Equal("Project updated", vm.NoticeStatus.Text);
+        Assert.Equal("migration detail", vm.NoticeStatus.Detail);
+        Assert.Equal("✓", vm.NoticeStatus.Glyph);
+    }
+
+    [Fact]
+    public void A_project_switch_clears_project_notices_and_preserves_app_notices()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "settings", "settings warning", "settings detail"));
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            MainWindowViewModel.AuthoredAgainstNoticeId, "made for a different game version",
+            "stale project detail", ProjectScoped: true));
+
+        vm.NewMod();
+
+        Assert.Equal("settings warning", vm.NoticeStatus.Text);
+        Assert.Equal("settings detail", vm.NoticeStatus.Detail);
+    }
+
+    [Fact]
+    public void Retiring_the_authored_against_notice_preserves_unrelated_notices()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            "game", "game warning", "game detail"));
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            MainWindowViewModel.AuthoredAgainstNoticeId, "made for a different game version",
+            "stale project detail", ProjectScoped: true));
+
+        vm.RemoveNotice(MainWindowViewModel.AuthoredAgainstNoticeId);
+
+        Assert.Equal("game warning", vm.NoticeStatus.Text);
+        Assert.Equal("game detail", vm.NoticeStatus.Detail);
+    }
+
+    [Fact]
+    public async Task A_project_switch_between_the_build_task_and_continuation_stamps_nothing()
+    {
+        using var game = new TempGame();
+        string root = game.At("switchable-mod");
+        Directory.CreateDirectory(root);
+        var project = AuthoredEditFixtures.Golden();
+        project.RootDir = root;
+        project.AuthoredAgainst = null;
+        AuthoredProjectSerializer.Save(project, root);
+        var vm = new MainWindowViewModel(startLoad: false, pageDispatch: work => work());
+        Assert.True(await vm.OpenModAsync(root));
+        var builtSession = vm.EditSession;
+        long builtRevision = builtSession.Revision;
+        var buildTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continuation = buildTask.Task.ContinueWith(_ =>
+            vm.StampSuccessfulBuild(builtSession, builtRevision, "26109"));
+
+        vm.NewMod();
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            MainWindowViewModel.AuthoredAgainstNoticeId, "current notice", "current detail",
+            ProjectScoped: true));
+        var currentNotice = vm.NoticeStatus;
+        buildTask.SetResult();
+
+        Assert.Equal(builtRevision, await continuation);
+        Assert.Null(builtSession.Snapshot().AuthoredAgainst);
+        Assert.Null(AuthoredProjectSerializer.Load(root).AuthoredAgainst);
+        Assert.Equal(currentNotice, vm.NoticeStatus);
+    }
+
+    [Fact]
+    public void An_unknown_live_catalog_neither_stamps_nor_retires_the_notice()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        var session = vm.EditSession;
+        session.SetAuthoredAgainst("24535");
+        long revision = session.Revision;
+        vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
+            MainWindowViewModel.AuthoredAgainstNoticeId, "made for a different game version",
+            "stale project detail", ProjectScoped: true));
+        var notice = vm.NoticeStatus;
+
+        long builtRevision = vm.StampSuccessfulBuild(session, revision, GameInfo.UnknownVersion);
+
+        Assert.Equal(revision, builtRevision);
+        Assert.Equal(revision, session.Revision);
+        Assert.Equal("24535", session.Snapshot().AuthoredAgainst?.CatalogVersion);
+        Assert.Equal(notice, vm.NoticeStatus);
     }
 
     // ---- what the exit puts back on the header --------------------------------
@@ -770,7 +853,6 @@ public class GameLaunchTests
         {
             IsScanning = false,
             GameRescanOffered = false,   // the load read the install fine
-            IsModBuilding = true,        // and a build is reading what the reload would drop
             SearchText = "vesna",
         };
 
@@ -778,7 +860,6 @@ public class GameLaunchTests
 
         Assert.Equal("vesna", vm.SearchText);   // ReloadRoster clears it
         Assert.False(vm.IsScanning);            // ReloadRoster sets it
-        Assert.True(vm.IsModBuilding);
     }
 
     // ---- what the header keeps ------------------------------------------------

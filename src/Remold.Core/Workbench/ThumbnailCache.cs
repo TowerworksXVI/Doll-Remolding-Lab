@@ -15,7 +15,7 @@ namespace Remold.Core.Workbench;
 /// The persistent, async preview cache for the Outfit Workbench: a decoded Texture2D (base mip, BGRA)
 /// downscaled to fit <see cref="MaxDim"/>×<see cref="MaxDim"/> and written as a PNG under
 /// <c>%LOCALAPPDATA%\DollRemoldingLab\thumbs\&lt;catalogVersion&gt;\&lt;bundleId&gt;\&lt;textureName&gt;.png</c>.
-/// Recipe mesh previews share that version directory under <c>meshes5\&lt;bundleId&gt;\&lt;meshName&gt;.png</c>,
+/// Recipe mesh previews share that version directory under <c>meshes6\&lt;bundleId&gt;\&lt;meshName&gt;.png</c>,
 /// with a vertex-count sidecar so a cache hit can populate the inspector without reopening the game bundle.
 ///
 /// <para><b>Keying.</b> catalog version + source bundle + asset name — the same (bundle, name) identity the
@@ -74,16 +74,40 @@ public sealed class ThumbnailCache
         return File.Exists(p) ? p : null;
     }
 
+    /// <summary>A texture thumbnail plus the source texture's dimensions. The dimensions travel beside the
+    /// thumbnail because the cached PNG is downscaled and cannot answer the card's size line.</summary>
+    public readonly record struct TextureThumb(string Path, int Width, int Height);
+
+    private string TextureDimensionsPathFor(string bundleId, string textureName, string catalogVersion) =>
+        Path.ChangeExtension(PathFor(bundleId, textureName, catalogVersion), ".dimensions");
+
+    public TextureThumb? TryGetCachedTexture(string bundleId, string textureName, string catalogVersion)
+    {
+        string path = PathFor(bundleId, textureName, catalogVersion);
+        string dimensions = TextureDimensionsPathFor(bundleId, textureName, catalogVersion);
+        if (!File.Exists(path) || !File.Exists(dimensions)) return null;
+        try
+        {
+            var pieces = File.ReadAllText(dimensions).Split('x');
+            if (pieces.Length == 2 && int.TryParse(pieces[0], out int width) && width > 0
+                && int.TryParse(pieces[1], out int height) && height > 0)
+                return new TextureThumb(path, width, height);
+        }
+        catch { /* incomplete or unreadable metadata is a cache miss */ }
+        return null;
+    }
+
     /// <summary>The cached mesh-preview PNG and the original mesh's vertex count.</summary>
     public readonly record struct MeshThumb(string Path, int VertexCount);
 
     /// <summary>The on-disk PNG path for a recipe mesh. Bundle identity is part of the key because the game
-    /// carries same-named mesh copies in different bundles. The directory name doubles as the render-format
-    /// discriminator ("meshes5" = textured, Blender-handed, scene-rest-uprighted like the export): bumping it
-    /// orphans older-format entries instead of serving them as this version's truth. A non-zero
-    /// <paramref name="pathId"/> joins the key, since smr-body parts select by exact path id.</summary>
+    /// carries same-named mesh copies in different bundles. The <c>meshes6</c> directory is the render-format
+    /// discriminator: textured, Blender-handed and scene-rest-uprighted like the export. It supersedes
+    /// <c>meshes5</c>, whose count-only read could cache untextured renders; the bump orphans those entries
+    /// instead of serving them as textured. A non-zero <paramref name="pathId"/> joins the key, since
+    /// smr-body parts select by exact path id.</summary>
     public string MeshPathFor(string bundleId, string meshName, string catalogVersion, long pathId = 0) =>
-        Path.Combine(_root, Sanitize(catalogVersion), "meshes5", Sanitize(bundleId),
+        Path.Combine(_root, Sanitize(catalogVersion), "meshes6", Sanitize(bundleId),
             Sanitize(meshName) + (pathId != 0 ? "." + pathId.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") + ".png");
 
     private string MeshCountPathFor(string bundleId, string meshName, string catalogVersion, long pathId = 0) =>
@@ -130,6 +154,20 @@ public sealed class ThumbnailCache
             if (render is not { } r) return null;
             using var image = r.Image;
             return WriteMeshThumb(image, bundleId, meshName, catalogVersion, r.VertexCount, pathId);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The vertex count of a bundled mesh, decoded WITHOUT rendering and WITHOUT touching the
+    /// persisted cache in either direction. The route for a caller that needs only the number: a render
+    /// would have to run untextured here, and caching that under the game-identity key would serve an
+    /// untextured picture to every later textured ask. Null when the bundle carries no such mesh.</summary>
+    public static int? MeshVertexCount(byte[] deobfuscatedBundle, string meshName, long pathId = 0)
+    {
+        try
+        {
+            var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, pathId);
+            return field is null ? null : UnityMesh.Decode(field).VertexCount;
         }
         catch { return null; }
     }
@@ -196,8 +234,14 @@ public sealed class ThumbnailCache
     /// <paramref name="bundleId"/> scopes the cache path only; the decode uses the supplied bytes. Returns
     /// the PNG path, or null if the texture is absent or won't decode.</summary>
     public string? EnsureThumb(byte[] deobfuscatedBundle, string bundleId, string textureName, string catalogVersion)
+        => EnsureTextureThumb(deobfuscatedBundle, bundleId, textureName, catalogVersion)?.Path;
+
+    /// <summary>The batch form: ensures both pixels and source dimensions from bytes the caller already
+    /// deobfuscated once for every missing texture in the bundle.</summary>
+    public TextureThumb? EnsureTextureThumb(byte[] deobfuscatedBundle, string bundleId,
+        string textureName, string catalogVersion)
     {
-        var hit = TryGetCachedPath(bundleId, textureName, catalogVersion);
+        var hit = TryGetCachedTexture(bundleId, textureName, catalogVersion);
         if (hit is not null) return hit;
 
         try
@@ -205,7 +249,8 @@ public sealed class ThumbnailCache
             var dec = new BundleReader().GetTexture(deobfuscatedBundle, textureName);
             if (dec is null) return null;   // texture not in this bundle — not cached
             // GetTexture returns Unity's native bottom-up rows; flip to top-down like TextureExport does.
-            return WriteThumb(dec.Value.Bgra, dec.Value.Width, dec.Value.Height, flip: true, bundleId, textureName, catalogVersion);
+            return WriteTextureThumb(dec.Value.Bgra, dec.Value.Width, dec.Value.Height, flip: true,
+                bundleId, textureName, catalogVersion);
         }
         catch { return null; }   // decode fault — never cached
     }
@@ -215,20 +260,23 @@ public sealed class ThumbnailCache
 
     // ---- pixels → downscaled PNG on disk ----
 
-    private string WriteThumb(byte[] bgra, int width, int height, bool flip, string bundleId, string textureName, string catalogVersion)
+    private TextureThumb WriteTextureThumb(byte[] bgra, int width, int height, bool flip,
+        string bundleId, string textureName, string catalogVersion)
     {
         using var image = Image.LoadPixelData<Bgra32>(bgra, width, height);
         if (flip) image.Mutate(x => x.Flip(FlipMode.Vertical));
-        return WriteThumb(image, bundleId, textureName, catalogVersion);
+        return WriteTextureThumb(image, width, height, bundleId, textureName, catalogVersion);
     }
 
-    private string WriteThumb(Image<Bgra32> image, string bundleId, string textureName, string catalogVersion)
+    private TextureThumb WriteTextureThumb(Image<Bgra32> image, int sourceWidth, int sourceHeight,
+        string bundleId, string textureName, string catalogVersion)
     {
         var (w, h) = FitWithin(image.Width, image.Height, MaxDim);
         if (w != image.Width || h != image.Height)
             image.Mutate(x => x.Resize(w, h));
 
         var path = PathFor(bundleId, textureName, catalogVersion);
+        var dimensionsPath = TextureDimensionsPathFor(bundleId, textureName, catalogVersion);
         var dir = Path.GetDirectoryName(path)!;
         Directory.CreateDirectory(dir);
         // first write into this version dir: clear any orphaned temps a killed process left
@@ -236,16 +284,21 @@ public sealed class ThumbnailCache
         // Atomic publish: encode to a unique temp, then move over the target, so a parallel reader never
         // observes a half-written PNG.
         var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var dimensionsTmp = dimensionsPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             image.SaveAsPng(tmp, TextureExport.FastPng);
+            File.WriteAllText(dimensionsTmp, sourceWidth.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "x" + sourceHeight.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            File.Move(dimensionsTmp, dimensionsPath, overwrite: true);
             File.Move(tmp, path, overwrite: true);
         }
         finally
         {
             if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* best-effort temp cleanup */ } }
+            if (File.Exists(dimensionsTmp)) { try { File.Delete(dimensionsTmp); } catch { } }
         }
-        return path;
+        return new TextureThumb(path, sourceWidth, sourceHeight);
     }
 
     private MeshThumb WriteMeshThumb(Image<Rgba32> image, string bundleId, string meshName,
