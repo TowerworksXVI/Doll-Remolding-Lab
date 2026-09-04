@@ -170,4 +170,15 @@ public static class RestBake
         if (Snap(m) is null) { refused = true; return null; }
         return m;
     }
+
+    /// <summary>The rest a part's workspace is baked by: what its project record states where one
+    /// exists (a converted 0.3.x project), else <paramref name="derived"/> — the scene rig's own
+    /// uprighting, read from the game. One rule for the open and the build, so the file Blender is
+    /// handed and the un-bake at package build state the same space. A record <see cref="Snap"/>
+    /// refuses answers null with <paramref name="refused"/> set: that file sits in bind space.</summary>
+    public static Matrix4x4? Effective(IReadOnlyList<float>? recorded, Matrix4x4? derived, out bool refused)
+    {
+        if (recorded is null) { refused = false; return derived; }
+        return FromList(recorded, out refused);
+    }
 }

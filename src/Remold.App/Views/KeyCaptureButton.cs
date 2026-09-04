@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Threading;
+using Remold.Core.Project;
 
 namespace Remold.App.Views;
 
@@ -157,7 +158,8 @@ public sealed class KeyCaptureButton : Button
     private void UpdateContent()
     {
         _flashTimer?.Stop();
-        Content = _capturing ? CapturingLabel : (string.IsNullOrWhiteSpace(BoundKey) ? EmptyLabel : BoundKey);
+        // the binding holds the ini token; the field shows the keycap's own reading of it
+        Content = _capturing ? CapturingLabel : ModKeys.Display(BoundKey, EmptyLabel);
     }
 
     private static bool IsModifierKey(Key k) => k
@@ -178,8 +180,12 @@ public sealed class KeyCaptureButton : Button
         return sb.Append(name).ToString();
     }
 
-    /// <summary>The key's own token: letters, digits, F1..F24 and the few named keys worth binding. Anything
-    /// else is unnamed here on purpose — the list only grows with keys confirmed to bind.</summary>
+    /// <summary>The key's own token, spelled exactly as <see cref="Remold.Core.Project.ModKeys"/> keeps it:
+    /// every name here is a canonical token of the same key table the emitted <c>key =</c> line is parsed
+    /// against, so a captured key and a loaded spelling of it are one binding. A key outside the table is
+    /// unnamed on purpose — an unnameable key stays out of the emitted ini, where it would silently fail to
+    /// bind. Escape, Delete and Backspace never reach here: they are the field's own leave/clear
+    /// gestures, though their spelled names still bind when a saved project carries one.</summary>
     private static string? KeyName(Key key)
     {
         if (key is >= Key.A and <= Key.Z) return key.ToString();
@@ -190,6 +196,7 @@ public sealed class KeyCaptureButton : Button
         {
             Key.Space => "SPACE",
             Key.Tab => "TAB",
+            Key.Enter => "ENTER",
             Key.Home => "HOME",
             Key.End => "END",
             Key.Insert => "INSERT",
@@ -199,7 +206,56 @@ public sealed class KeyCaptureButton : Button
             Key.Right => "RIGHT",
             Key.Up => "UP",
             Key.Down => "DOWN",
+            Key.Pause => "PAUSE",
+            Key.CapsLock => "CAPS_LOCK",
+            Key.NumLock => "NUMLOCK",
+            Key.Scroll => "SCROLL",
+            Key.PrintScreen => "PRINT_SCREEN",
+            Key.Apps => "APPS",
+            Key.Help => "HELP",
+            Key.Cancel => "CANCEL",
+            Key.Clear => "CLEAR",
+            Key.Select => "SELECT",
+            Key.Print => "PRINT",
+            Key.Execute => "EXECUTE",
+            Key.Sleep => "SLEEP",
+            Key.Multiply => "MULTIPLY",
+            Key.Add => "ADD",
+            Key.Separator => "SEPARATOR",
+            Key.Subtract => "SUBTRACT",
+            Key.Decimal => "DECIMAL",
+            Key.Divide => "DIVIDE",
+            Key.OemSemicolon => "SEMICOLON",
+            Key.OemPlus => "EQUALS",
+            Key.OemComma => "COMMA",
+            Key.OemMinus => "MINUS",
+            Key.OemPeriod => "PERIOD",
+            Key.OemQuestion => "SLASH",
             Key.OemTilde => "VK_OEM_3",
+            Key.OemOpenBrackets => "VK_OEM_4",
+            Key.OemPipe => "BACKSLASH",
+            Key.OemCloseBrackets => "VK_OEM_6",
+            Key.OemQuotes => "QUOTE",
+            Key.Oem8 => "VK_OEM_8",
+            Key.OemBackslash => "VK_OEM_102",
+            Key.BrowserBack => "BROWSER_BACK",
+            Key.BrowserForward => "BROWSER_FORWARD",
+            Key.BrowserRefresh => "BROWSER_REFRESH",
+            Key.BrowserStop => "BROWSER_STOP",
+            Key.BrowserSearch => "BROWSER_SEARCH",
+            Key.BrowserFavorites => "BROWSER_FAVORITES",
+            Key.BrowserHome => "BROWSER_HOME",
+            Key.VolumeMute => "VOLUME_MUTE",
+            Key.VolumeDown => "VOLUME_DOWN",
+            Key.VolumeUp => "VOLUME_UP",
+            Key.MediaNextTrack => "MEDIA_NEXT_TRACK",
+            Key.MediaPreviousTrack => "MEDIA_PREV_TRACK",
+            Key.MediaStop => "MEDIA_STOP",
+            Key.MediaPlayPause => "MEDIA_PLAY_PAUSE",
+            Key.LaunchMail => "LAUNCH_MAIL",
+            Key.SelectMedia => "LAUNCH_MEDIA_SELECT",
+            Key.LaunchApplication1 => "LAUNCH_APP1",
+            Key.LaunchApplication2 => "LAUNCH_APP2",
             _ => null,
         };
     }

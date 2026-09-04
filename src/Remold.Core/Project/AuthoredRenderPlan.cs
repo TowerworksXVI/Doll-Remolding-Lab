@@ -366,17 +366,25 @@ internal static class AuthoredRenderPlanValidator
                             if (!string.Equals(contract.MaterialLayout, patch.Layout,
                                     StringComparison.Ordinal))
                                 errors.Add($"{at} material patch disagrees with render contract '{contractId}'");
-                            foreach (var write in patch.Writes ?? Array.Empty<MaterialPatchWrite>())
+                            // A multi-component field writes one float per component, contiguously
+                            // from the declared offset, so the proof is per SEMANTIC over the whole
+                            // component run — a per-write offset compare proves only component 0.
+                            foreach (var group in (patch.Writes ?? Array.Empty<MaterialPatchWrite>())
+                                .GroupBy(write => write.Semantic, StringComparer.Ordinal))
                             {
                                 var fields = contract.MaterialValueFields?.Where(field =>
-                                    string.Equals(field.Semantic, write.Semantic,
+                                    string.Equals(field.Semantic, group.Key,
                                         StringComparison.Ordinal)).ToList()
                                     ?? new List<BuildMaterialValueField>();
+                                int floats = MaterialValueCatalog.Field(group.Key)?.Floats ?? 1;
+                                var wrote = group.Select(write => write.ByteOffset)
+                                    .OrderBy(offset => offset).ToList();
                                 if (fields.Count != 1
                                     || fields[0].ConstantBufferSlot != patch.ConstantBufferSlot
-                                    || fields[0].ByteOffset != write.ByteOffset)
+                                    || !wrote.SequenceEqual(Enumerable.Range(0, floats)
+                                        .Select(i => fields[0].ByteOffset + sizeof(float) * i)))
                                     errors.Add($"{at} material patch is not proved by render contract "
-                                        + $"'{contractId}' for '{write.Semantic}'");
+                                        + $"'{contractId}' for '{group.Key}'");
                             }
                         }
                     }

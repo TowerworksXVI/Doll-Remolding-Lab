@@ -125,6 +125,53 @@ public class PartSkinGateTests : IDisposable
     }
 
     [Fact]
+    public void ACollapsedPointsMeshRefusesBlenderEditingButNotReplacement()
+    {
+        // Every triangle zero-area (all corners on one point): a billboard cloud a game shader inflates.
+        // Blender cannot carry its authored normals, so the Blender-edit answer refuses — while Blocked
+        // stays null, because REPLACEMENT (the drop route, the build) still works on such a mesh.
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "pearl.bundle"), "pearl",
+            new float[] { 1, 2, 3, 1, 2, 3, 1, 2, 3 }, TriIndices, Bones);
+
+        Assert.True(PartSkinGate.TryBlenderEditAnswers(Bundles("b_pearl", "pearl.bundle"), "b_pearl",
+            "pearl", 0, out var refusal, out bool collapsed));
+        Assert.Null(refusal);
+        Assert.True(collapsed);
+        Assert.Null(PartSkinGate.Blocked(Bundles("b_pearl", "pearl.bundle"), "b_pearl", "pearl"));
+    }
+
+    [Fact]
+    public void ARefusalBeatsTheCollapsedQuestion_AndItsGeometryIsNeverConsulted()
+    {
+        // Spring-chain bone table over collapsed positions: the refusal answers the whole question, so
+        // the geometry half stays false and nothing that read could throw can disturb the refusal.
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "springpearl.bundle"), "springpearl",
+            new float[] { 1, 2, 3, 1, 2, 3, 1, 2, 3 }, TriIndices, new uint[] { 0x9e3779b9, 0x05f0c65f });
+
+        Assert.True(PartSkinGate.TryBlenderEditAnswers(Bundles("b_sp", "springpearl.bundle"), "b_sp",
+            "springpearl", 0, out var refusal, out bool collapsed));
+        Assert.Equal(StreamDump.SkinRefusal.SpringRig, refusal);
+        Assert.False(collapsed);
+    }
+
+    [Fact]
+    public void AnOrdinaryMeshIsNotCalledCollapsed_AndAnUnreachableReadSettlesNothing()
+    {
+        SyntheticBundle.BuildOneSkinnedMesh(Path.Combine(_root, "body_real.bundle"), "body_real",
+            TriPositions, TriIndices, Bones);
+
+        Assert.True(PartSkinGate.TryBlenderEditAnswers(Bundles("b_real", "body_real.bundle"), "b_real",
+            "body_real", 0, out var refusal, out bool collapsed));
+        Assert.Null(refusal);
+        Assert.False(collapsed);
+
+        // an unreadable bundle is not an answer: the caller must not memoize it
+        Assert.False(PartSkinGate.TryBlenderEditAnswers(_ => null, "b_gone", "body_real", 0,
+            out _, out bool unreadCollapsed));
+        Assert.False(unreadCollapsed);
+    }
+
+    [Fact]
     public void TheBuildLogPhrasingComesFromTheSameAnswer()
     {
         // One rule, two renderings: the build log's sentence must not be able to drift from the branch the

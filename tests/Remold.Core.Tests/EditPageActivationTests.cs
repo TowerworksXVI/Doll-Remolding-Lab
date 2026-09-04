@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -1437,6 +1437,60 @@ public class EditPageActivationTests
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
 
+    /// <summary>A replacement's outputs are per submesh, and several submeshes can fold onto one installed
+    /// material. The renderer samples by submesh, so the plan is laid out by submesh whenever outputs exist:
+    /// the submesh that kept the original draws the game's map for its material, and the one the modder
+    /// answered draws their file. Planned by material position, both submeshes shared one entry and the
+    /// added submesh's picture landed on submesh 0 while submesh 1 drew nothing.</summary>
+    [Fact]
+    public async Task A_replacements_plan_is_laid_out_by_submesh_not_by_installed_material()
+    {
+        using var settings = new SettingsSnapshot();
+        string root = Path.Combine(Path.GetTempPath(), "remold-submeshplan-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = AuthoredEditFixtures.Saved();
+            var ramp = project.TargetSlots.Single(slot => slot.Id == "slot-ramp");
+            ramp.ShaderProperty = "_RampMap";
+            var baseSlot = new TargetSlot
+            {
+                Id = "slot-base", Part = ramp.Part, Tier = ramp.Tier, SubmeshIndex = 0, MaterialSlotIndex = 0,
+                Input = TargetInputKind.BaseColor, ShaderProperty = "_BaseMap", Renderer = ramp.Renderer,
+                Material = ramp.Material,
+            };
+            project.TargetSlots.Add(baseSlot);
+            project.EditDefinitions.Single(edit => edit.Id == "edit-long").Bindings.Add(
+                new Binding { SlotId = baseSlot.Id, Kind = BindingKind.TargetGameValue });
+            Assert.Empty(AuthoredProjectValidator.Errors(project));
+            var (vm, session) = await MappedWindowAsync(root, project);
+
+            // a two-submesh replacement over the one-material part; the added submesh gets its own picture
+            session.RecordReplacementOutputs("edit-long", 2);
+            var added = session.Snapshot().TargetSlots.Single(slot => slot.Domain == TargetSlotDomain.EditOutput
+                && slot.SubmeshIndex == 1 && slot.Input == TargetInputKind.BaseColor);
+            string source = Path.Combine(root, "painted.png");
+            Directory.CreateDirectory(root);
+            using (var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(2, 2))
+                SixLabors.ImageSharp.ImageExtensions.SaveAsPng(image, source);
+            var ingress = ProjectAssetIngress.Begin(session.Snapshot(), "edit-long", added.Id, source);
+            string assetId = session.PublishAssetForBinding(ingress, ProjectAssetKind.Picture, "Painted",
+                ProjectAssetIngress.Png).ProjectAssetId!;
+            // The window opened the fixture's own project, whose root is the one the publish writes under.
+            string sessionRoot = session.Snapshot().RootDir!;
+            string published = Path.GetFullPath(Path.Combine(sessionRoot,
+                session.Snapshot().ProjectAssets.Single(asset => asset.Id == assetId).File));
+
+            var plan = vm.SamplerPlan(MappedBody(), session.Slots("edit-long"), sessionRoot);
+
+            Assert.Equal(2, plan.Count);
+            Assert.False(plan[0].Own);
+            Assert.Equal(("characters/vesna_ssr01_textures", "body_base"), (plan[0].Bundle, plan[0].Texture));
+            Assert.True(plan[1].Own);
+            Assert.Equal(published, plan[1].File);
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
     /// <summary>A source that answers with no file of the mod's is not an answer, and the submesh draws the
     /// game's own map — the same fallback an unanswered slot takes.</summary>
     [Fact]
@@ -1461,8 +1515,9 @@ public class EditPageActivationTests
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
 
-    /// <summary>The direct answer is untouched, and it still outranks a borrowed one at the same material
-    /// position: edit-long binds the file itself AND borrows at position 0, and the plan is the file.</summary>
+    /// <summary>The direct answer is untouched and the borrowed one beside it resolves to the same file:
+    /// edit-long owns two submesh outputs at position 0, binds the file on the first and borrows it on the
+    /// second, and the plan — laid out by submesh, as the renderer samples — is that file on both.</summary>
     [Fact]
     public async Task A_direct_binding_plans_its_own_file()
     {
@@ -1474,10 +1529,14 @@ public class EditPageActivationTests
             Directory.CreateDirectory(Path.Combine(root, "textures"));
             File.WriteAllBytes(Path.Combine(root, "textures", "skin.png"), new byte[] { 1, 2, 3 });
 
-            var sampled = Assert.Single(vm.SamplerPlan(MappedBody(), session.Slots("edit-long"), root));
+            var plan = vm.SamplerPlan(MappedBody(), session.Slots("edit-long"), root);
 
-            Assert.True(sampled.Own);
-            Assert.Equal(Path.GetFullPath(Path.Combine(root, "textures", "skin.png")), sampled.File);
+            Assert.Equal(2, plan.Count);
+            Assert.All(plan, sampled =>
+            {
+                Assert.True(sampled.Own);
+                Assert.Equal(Path.GetFullPath(Path.Combine(root, "textures", "skin.png")), sampled.File);
+            });
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }

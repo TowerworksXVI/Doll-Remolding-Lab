@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -14,7 +14,7 @@ namespace Remold.Core.Tests;
 
 /// <summary>
 /// The ② Edit page's view-model side: the tree the settled surface contract describes — subject → part →
-/// edits, with the material level gone into the inspector — and the verbs that act on it.
+/// edits, each edit's own materials as its closed-by-default child rows — and the verbs that act on it.
 ///
 /// <para>Every project here is built through <see cref="AuthoredEditSession"/> from the pinned fixtures, so
 /// the page is always reading a project the validator accepts. The shell is a recorder: nothing touches the
@@ -1266,8 +1266,145 @@ public class EditPageVmTests
 
         Assert.Equal(new[] { "Long body", "Short body" }, part.Children.Select(n => n.Title));
         Assert.All(part.Children, n => Assert.Equal(EditNodeKind.Edit, n.Kind));
-        // The material level is gone from the tree: an edit row is a leaf.
-        Assert.All(part.Children, n => Assert.Empty(n.Children));
+        // Each edit's materials are its child rows — one per group of the edit's own pane, in pane order,
+        // and the branch starts closed.
+        Assert.All(part.Children, n =>
+        {
+            Assert.Equal(n.MapGroups.Select(group => group.Title),
+                n.Children.Select(child => child.Title));
+            Assert.All(n.Children, child => Assert.Equal(EditNodeKind.Material, child.Kind));
+            if (n.Children.Count > 0) Assert.False(n.IsExpanded);
+        });
+    }
+
+    [Fact]
+    public void An_edit_grows_a_closed_material_row_per_material_of_its_own_pane()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        // A replacement's pane lists ITS materials — here three unfolded submesh positions — not a stock
+        // enumeration, and the child rows follow the pane.
+        session.RecordReplacementOutputs("edit-long", 3);
+        var (vm, _) = On(session);
+
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        Assert.Equal(3, edit.MapGroups.Count);
+        Assert.False(edit.IsExpanded);
+        Assert.Equal(edit.MapGroups.Select(group => group.Title),
+            edit.Children.Select(child => child.Title));
+        for (int i = 0; i < edit.Children.Count; i++)
+        {
+            var material = edit.Children[i];
+            Assert.Equal(EditNodeKind.Material, material.Kind);
+            Assert.Equal(i, material.MaterialOrdinal);
+            Assert.Equal("edit-long", material.EditDefinitionId);
+            // The child's pane is the edit's own group, not a copy: same cards, same shading row, so a
+            // thumb or busy state landing on one surface is on both.
+            Assert.Same(edit.MapGroups[i], Assert.Single(material.MapGroups));
+            // None of the edit-level surfaces ride along: the row is the material's controls alone.
+            Assert.False(material.IsRenameable);
+            Assert.False(material.ShowsMeshPreview);
+            Assert.False(material.IsContentEdit);
+            // The seam form still addresses the OWNING edit by its own label.
+            Assert.Equal("Long body", material.Edit!.Label);
+        }
+    }
+
+    [Fact]
+    public void A_material_selection_and_its_open_branch_survive_the_rebuild_a_change_causes()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        session.RecordReplacementOutputs("edit-long", 3);
+        var (vm, _) = On(session);
+
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        edit.IsExpanded = true;
+        vm.SelectedNode = edit.Children[1];
+
+        session.RenameEdit("edit-long", "Renamed");
+
+        var selected = vm.SelectedNode!;
+        Assert.Equal(EditNodeKind.Material, selected.Kind);
+        Assert.Equal(1, selected.MaterialOrdinal);
+        Assert.Equal("edit-long", selected.EditDefinitionId);
+        Assert.Equal("Renamed", selected.Edit!.Label);
+        // The re-drawn edit row is open again, so the selected material row is on screen.
+        Assert.True(PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long").IsExpanded);
+    }
+
+    [Fact]
+    public async Task Deleting_the_edit_under_a_selected_material_falls_back_to_the_part_row()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        session.RecordReplacementOutputs("edit-long", 2);
+        var (vm, _) = On(session);
+
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        edit.IsExpanded = true;
+        vm.SelectedNode = edit.Children[0];
+
+        await vm.DeleteEditCommand.ExecuteAsync(edit);
+
+        Assert.Equal(EditNodeKind.Part, vm.SelectedNode?.Kind);
+    }
+
+    /// <summary>A verb that invalidates a picture by name does so AFTER its change's rebuild has restored
+    /// the selection and started that row's preview loads — the invalidation cancels those in-flight
+    /// requests, and before the fix the row sat in its loading shimmer until the modder selected away and
+    /// back. The verb now asks again for what the selected row draws.</summary>
+    [Fact]
+    public async Task A_reverted_cards_preview_settles_without_selecting_away_and_back()
+    {
+        // A texture-only edit with an authored base colour: the one card shape whose Revert the pane
+        // offers. WithBorrowedSlot authors the base; unbinding the geometry makes the edit texture-only.
+        var session = new AuthoredEditSession(AuthoredEditFixtures.WithBorrowedSlot());
+        session.Compound(change => change.ChooseTargetGameValue("edit-long", "slot-geometry"));
+        var (vm, _) = On(session);
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        vm.SelectedNode = edit;
+        await vm.LoadPreviewsAsync(edit);
+        var card = edit.MapGroups[0].Cards.First(c => c.CanRevert);
+
+        vm.RevertCardCommand.Execute(card);
+
+        var reverted = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long")
+            .MapGroups[0].Cards.First(c => c.Slot.SlotId == card.Slot.SlotId);
+        for (int i = 0; i < 200 && reverted.IsThumbLoading; i++) await Task.Delay(5);
+        Assert.False(reverted.IsThumbLoading);
+    }
+
+    /// <inheritdoc cref="A_reverted_cards_preview_settles_without_selecting_away_and_back"/>
+    [Fact]
+    public async Task A_reverted_meshs_preview_settles_without_selecting_away_and_back()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        session.RecordReplacementOutputs("edit-long", 1);
+        var (vm, _) = On(session);
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        Assert.True(edit.HasMeshEdit);
+        vm.SelectedNode = edit;
+        await vm.LoadPreviewsAsync(edit);
+
+        await vm.RevertMeshCommand.ExecuteAsync(edit);
+
+        var reverted = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        for (int i = 0; i < 200 && reverted.IsMeshPreviewLoading; i++) await Task.Delay(5);
+        Assert.False(reverted.IsMeshPreviewLoading);
+    }
+
+    [Fact]
+    public void A_pending_rename_commit_from_a_material_row_does_not_blank_the_edits_name()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        session.RecordReplacementOutputs("edit-long", 2);
+        var (vm, shell) = On(session);
+        var edit = PartRow(vm).Children.Single(node => node.EditDefinitionId == "edit-long");
+        vm.SelectedNode = edit.Children[0];
+
+        // Any verb commits a pending rename first; from a material row there is nothing typed to commit.
+        vm.GoToBuildCommand.Execute(vm.SelectedNode);
+
+        Assert.Equal("Long body", EditsFor(session).Single(e => e.Id == "edit-long").Label);
+        Assert.Equal("Long body", shell.LastBuildEdit!.Label);
     }
 
     [Fact]
@@ -1318,6 +1455,8 @@ public class EditPageVmTests
         Assert.True(hide.IsHideEdit);
         Assert.Equal("hides this part", hide.Detail);
         Assert.Empty(hide.MapGroups);
+        // No materials, no material rows: a hide binds visibility and nothing else.
+        Assert.Empty(hide.Children);
         // The ✎ roll-up is about content: a part answered only by a hide has none.
         Assert.False(PartRow(vm).HasEditBadge);
     }
@@ -3440,6 +3579,71 @@ public class EditPageVmTests
             Assert.Empty(stripped.Emissions);
             Assert.Contains(plan.Warnings, warning =>
                 warning.Contains("will not take effect", StringComparison.Ordinal));
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
+    // ---- a float-format texture refuses every picture gesture by name ----
+
+    /// <summary>The header the size line reads also says whether an edit could be encoded back into the
+    /// slot's format. A float-format map cannot, so the card refuses drop, Browse and Open with one sentence
+    /// where an unmeasured texture refuses with its own. Until the header is read the card refuses nothing.</summary>
+    [Fact]
+    public void A_float_format_texture_refuses_drop_browse_and_open_by_name()
+    {
+        var (vm, _, _) = Page(Bare(), s => s.Resolve = part => Installed(part));
+        vm.SelectedNode = PartRow(vm);
+        var card = PartRow(vm).MapGroups[0].Cards
+            .Single(candidate => candidate.Slot.Input == TargetInputKind.BaseColor);
+        Assert.True(card.ShowsDropTarget);
+        Assert.True(card.CanBrowse);
+
+        card.SetThumb(null, "256\u00d716", authorable: false);
+
+        Assert.Equal(EditMapCardVm.FloatFormat, card.SharingRefusal);
+        Assert.False(card.ShowsDropTarget);
+        Assert.False(card.CanBrowse);
+        Assert.False(card.CanOpen);
+        Assert.Equal(EditMapCardVm.FloatFormat, card.DropHint);
+        Assert.Equal(EditMapCardVm.FloatFormat, card.BrowseHint);
+        Assert.Equal(EditMapCardVm.FloatFormat, card.OpenHint);
+    }
+
+    // ---- the drop confirm says when the picture is not the map's size ----
+
+    /// <summary>A picture that does not match the map still applies, stretched by the UVs; the confirm says
+    /// so before the picture is taken, with both sizes, and says nothing when they match.</summary>
+    [Fact]
+    public async Task A_first_edit_drop_confirm_names_a_size_that_differs_from_the_map()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "drl-size-note-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string dropped = Path.Combine(root, "dropped.png");
+            using (var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32>(4, 4))
+                SixLabors.ImageSharp.ImageExtensions.SaveAsPng(image, dropped);
+            var (vm, _, shell) = Page(Bare(), s =>
+            {
+                s.Resolve = part => Installed(part);
+                s.ConfirmResult = false;
+            });
+            vm.SelectedNode = PartRow(vm);
+            var card = PartRow(vm).MapGroups[0].Cards
+                .Single(candidate => candidate.Slot.Input == TargetInputKind.BaseColor);
+            card.SetThumb(null, "4096\u00d74096");
+
+            await vm.HandleDropAsync(new[] { dropped }, card);
+
+            Assert.Equal(1, shell.ConfirmCalls);
+            Assert.Contains("4\u00d74, the map is 4096\u00d74096. It still applies; UVs stretch it to fit.",
+                shell.LastConfirmBody);
+
+            card.SetThumb(null, "4\u00d74");
+            await vm.HandleDropAsync(new[] { dropped }, card);
+
+            Assert.Equal(2, shell.ConfirmCalls);
+            Assert.DoesNotContain("the map is", shell.LastConfirmBody);
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }

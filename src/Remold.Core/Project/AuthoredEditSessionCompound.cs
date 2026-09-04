@@ -178,12 +178,13 @@ public sealed partial class AuthoredEditSession
         /// transaction rather than one of its own.</summary>
         public ExactAssetPublishResult PublishAssetForBinding(ProjectAssetIngressSession ingress,
             ProjectAssetKind kind, string label, ProjectAssetNormalization normalization,
-            ProjectAssetSource? source = null, int? replacementSubmeshCount = null)
+            ProjectAssetSource? source = null, int? replacementSubmeshCount = null,
+            IReadOnlyList<float>? bakedRest = null)
         {
             ArgumentNullException.ThrowIfNull(ingress);
             ArgumentNullException.ThrowIfNull(normalization);
             var staged = StagePublish(_project, ingress, kind, label, normalization, source,
-                replacementSubmeshCount);
+                replacementSubmeshCount, bakedRest);
             if (staged is null)
                 return new ExactAssetPublishResult(ProjectAssetPublishResult.Unchanged, null, null);
             _files.Staging(staged.Staged);

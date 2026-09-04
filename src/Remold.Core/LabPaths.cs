@@ -177,10 +177,6 @@ public static class LabPaths
     /// <summary>The opt-in launch-timing log.</summary>
     public static string LaunchTimingLog => Path.Combine(CacheRoot, "launch_timing.log");
 
-    /// <summary>The always-on Blender-open timing log: one phase-timed block per open, fresh each app
-    /// launch. Diagnostic-only — nothing reads it back.</summary>
-    public static string BlenderOpenTimingLog => Path.Combine(CacheRoot, "blender_open_timing.log");
-
     // ---- shipped with the app (beside the assemblies) ----
 
     /// <summary>The shipped asset-sharing measurement, in the same format as

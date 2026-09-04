@@ -77,6 +77,13 @@ public sealed class ProjectAsset
     [JsonPropertyName("value")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ProjectAssetValue? Value { get; set; }
+    /// <summary>Geometry only: the scene-rest uprighting the file is baked by (<see cref="Mesh.RestBake"/>,
+    /// 16 floats), recorded from the session file the Blender return came back through. Absent where
+    /// nothing was recorded — a converted 0.3.x project states the space on its workspace record instead,
+    /// and a return taken before this field existed is bind-space geometry.</summary>
+    [JsonPropertyName("baked_rest")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<float>? BakedRest { get; set; }
 }
 
 /// <summary>A narrow semantic authored value. The semantic is the portable identity; a backend-specific
@@ -286,6 +293,12 @@ public sealed class KeyGroup
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Label { get; set; }
     [JsonPropertyName("states")] public List<KeyGroupState> States { get; set; } = new();
+
+    /// <summary>Whether the group's position survives a game restart. Opt-in: false is the per-session
+    /// reset every group had before the choice existed, and a manifest that names it not means false.</summary>
+    [JsonPropertyName("persist")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Persist { get; set; }
 }
 
 /// <summary>One stable, ordered position of a key group's cycle. Absence means the game's own draw.</summary>

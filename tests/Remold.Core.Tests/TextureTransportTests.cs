@@ -36,6 +36,10 @@ public class TextureTransportTests
         return path;
     }
 
+    private static TextureTransportSource Source(string property, MapKind kind, string png,
+        int? texCoord = null) => new("veil", 0, 0, property, kind, png, "shared", "bundle", 71, true,
+            TexCoord: texCoord);
+
     [Fact]
     public void Memoized_transport_is_byte_identical_to_independently_pretransformed_input()
     {
@@ -156,7 +160,7 @@ public class TextureTransportTests
             .GetProperty(GltfTextureTransport.ExtrasKey);
         var binding = carrier.GetProperty("bindings").EnumerateArray().Single();
 
-        Assert.Equal("rigged-build-spec-v2", AssetExporter.RiggedBuildSpec);
+        Assert.Equal("rigged-build-spec-v5", AssetExporter.RiggedBuildSpec);
         Assert.Equal(1, carrier.GetProperty("version").GetInt32());
         Assert.Equal(new[]
         {
@@ -244,6 +248,185 @@ public class TextureTransportTests
         TextureTransportSource Source(string property, MapKind kind, string png, int? texCoord = null) =>
             new("veil", 0, 0, property, kind, png, "shared", "bundle", 71, true,
                 TexCoord: texCoord);
+    }
+
+    [Fact]
+    public void A_matching_hash_only_row_is_unchanged_without_returned_image_bytes()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        WriteHashOnlyRow(returned, outbound);
+
+        var carried = Assert.Single(GltfTextureTransport.Read(returned).Bindings);
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened);
+
+        Assert.Null(carried.Png);
+        Assert.Equal(outbound.OutboundHash, carried.OutboundHash);
+        var map = Assert.Single(maps).BaseColor;
+        Assert.Equal(MapOrigin.Vanilla, map.Origin);
+        Assert.Equal(Path.GetFullPath(stock), map.StockPng);
+        Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+    }
+
+    [Fact]
+    public void Hash_only_and_byte_returns_reexport_the_same_stock_map_and_outbound_row()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string byteReturned = game.At("byte-returned.glb");
+        string hashReturned = game.At("hash-returned.glb");
+        string byteResplit = game.At("byte-resplit.glb");
+        string hashResplit = game.At("hash-resplit.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        var changed = Patch();
+        changed.Channels["Vertex"][0] = 0.5f;
+        MeshGltf.ExportGlb(changed, byteReturned);
+        GltfTextureTransport.Write(byteReturned, new[] { Source("_BaseMap", MapKind.BaseColor, stock) });
+        MeshGltf.ExportGlb(changed, hashReturned);
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        WriteHashOnlyRow(hashReturned, outbound);
+
+        MeshGltf.ReexportPartGlb(byteReturned, "veil", byteResplit, recordGlb: opened);
+        MeshGltf.ReexportPartGlb(hashReturned, "veil", hashResplit, recordGlb: opened);
+
+        var byteRow = Assert.Single(PreviewMaps.ReadTransportBindings(byteResplit));
+        var hashRow = Assert.Single(PreviewMaps.ReadTransportBindings(hashResplit));
+        Assert.Equal(byteRow, hashRow);
+        Assert.Equal(Path.GetFullPath(stock), hashRow.Source);
+        var byteImage = Assert.Single(GltfTextureTransport.Read(byteResplit).Bindings).Png;
+        var hashImage = Assert.Single(GltfTextureTransport.Read(hashResplit).Bindings).Png;
+        Assert.NotNull(byteImage);
+        Assert.Equal(byteImage, hashImage);
+    }
+
+    [Fact]
+    public void A_hash_only_row_without_a_map_record_is_refused_instead_of_losing_its_source()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        File.Delete(PreviewMaps.SidecarPath(opened));
+        MeshGltf.ExportGlb(Patch(), returned);
+        WriteHashOnlyRow(returned, outbound);
+
+        var refusal = Assert.Throws<AuthoredRefusalException>(() =>
+            MeshGltf.ReadSubmeshMaps(returned, "veil", opened));
+
+        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
+            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+    }
+
+    [Fact]
+    public void A_hash_only_row_with_no_readable_outbound_record_is_refused()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string source = game.At("source.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), source, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(source));
+        MeshGltf.ExportGlb(Patch(), returned);
+        WriteHashOnlyRow(returned, outbound);
+
+        var refusal = Assert.Throws<AuthoredRefusalException>(() =>
+            MeshGltf.ReadSubmeshMaps(returned, "veil", game.At("missing-record.glb")));
+
+        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
+            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+    }
+
+    [Fact]
+    public void A_mismatched_hash_only_row_is_refused_instead_of_guessing_the_picture()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        WriteHashOnlyRow(returned, outbound with { OutboundHash = new string('b', 64) });
+
+        var refusal = Assert.Throws<AuthoredRefusalException>(() =>
+            MeshGltf.ReadSubmeshMaps(returned, "veil", opened));
+
+        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
+            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+    }
+
+    [Fact]
+    public void A_siblings_hash_only_row_does_not_move_a_byte_carrying_part_off_its_legacy_read()
+    {
+        // The record-glb fallback is scoped to the part being read: with no sidecar record, a part whose
+        // rows all carry bytes keeps the legacy standard-channel classification even when a sibling part
+        // of the same return sent hash-only rows.
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        File.Delete(PreviewMaps.SidecarPath(opened));
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)stock, (string?)null, (string?)null) });
+        WriteHashOnlyRow(returned, outbound with { Mesh = "sibling" });
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened);
+
+        // With no record at all, the legacy read classifies the returned picture as authored — the same
+        // answer this fixture gets before hash-only rows existed. The pin is that the sibling's marker
+        // neither refuses this part nor invents exact rows for it.
+        Assert.Equal(MapOrigin.Authored, Assert.Single(maps).BaseColor.Origin);
+        Assert.Null(Assert.Single(maps).Textures);
+    }
+
+    [Fact]
+    public void A_hash_only_row_for_a_slot_the_open_never_sent_is_skipped_silently()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        WriteHashOnlyRow(returned, outbound with { ShaderProperty = "_MaskTex" });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Single(maps);
+        Assert.Empty(notes);
     }
 
     [Fact]
@@ -420,8 +603,142 @@ public class TextureTransportTests
         Assert.Null(Assert.Single(maps).Textures);
     }
 
+    // ------------------------------------------------ standard channels in a keyed session
+    //
+    // Production always opens a part with exact-property transport (AssetExporter.ResolveTextureTransport),
+    // so every return is a keyed session. A material built by hand in Blender, or a replacement mesh that
+    // arrived textured, carries no tagged node: its pictures sit on Blender's own base colour / normal / ORM
+    // channels, which the glTF exporter writes as the standard material channels and nothing else. The
+    // returns below are built with perSubmesh only — standard channels, no carrier — over a keyed open.
+
+    private static TextureTransportSource[] BaseAndNormalSlots(string stockBase, string stockNormal,
+        string mesh = "veil") => new[]
+    {
+        new TextureTransportSource(mesh, 0, 0, "_BaseMap", MapKind.BaseColor, stockBase, "base", "bundle", 71, true),
+        new TextureTransportSource(mesh, 0, 0, "_NormalMap", MapKind.Normal, stockNormal, "normal", "bundle", 72,
+            false),
+    };
+
     [Fact]
-    public void A_carrier_session_never_falls_back_to_an_unkeyed_standard_channel()
+    public void A_hand_built_material_returns_its_standard_channel_pictures_as_the_slots_own_edits()
+    {
+        using var game = new TempGame();
+        string stockBase = Png(game.At("stock-base.png"), 20);
+        string stockNormal = Png(game.At("stock-normal.png"), 128);
+        string paintedBase = Png(game.At("painted-base.png"), 90);
+        string paintedNormal = Png(game.At("painted-normal.png"), 140);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: BaseAndNormalSlots(stockBase, stockNormal));
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)paintedBase, (string?)paintedNormal, (string?)null) });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        var incoming = Assert.Single(maps);
+        Assert.Empty(notes);
+        Assert.Equal(MapOrigin.Authored, incoming.BaseColor.Origin);
+        Assert.Equal(MapOrigin.Authored, incoming.Normal.Origin);
+        var textures = Assert.IsAssignableFrom<IReadOnlyList<IncomingTexture>>(incoming.Textures);
+        var baseSlot = Assert.Single(textures, t => t.ShaderProperty == "_BaseMap");
+        Assert.Equal(MapOrigin.Authored, baseSlot.Map.Origin);
+        Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(baseSlot.Map.AuthoredPng!));
+        Assert.Equal(MapOrigin.Authored, Assert.Single(textures, t => t.ShaderProperty == "_NormalMap").Map.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
+        Assert.Equal(SlotOrigin.Authored, row.NormalAsk);
+        Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(row.Albedo!));
+    }
+
+    [Fact]
+    public void A_standard_channel_still_showing_what_the_session_sent_is_not_an_ask()
+    {
+        using var game = new TempGame();
+        string stockBase = Png(game.At("stock-base.png"), 20);
+        string stockNormal = Png(game.At("stock-normal.png"), 128);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: BaseAndNormalSlots(stockBase, stockNormal));
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)stockBase, (string?)stockNormal, (string?)null) });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Empty(notes);
+        var incoming = Assert.Single(maps);
+        Assert.Equal(MapOrigin.Vanilla, incoming.BaseColor.Origin);
+        Assert.Equal(MapOrigin.Vanilla, incoming.Normal.Origin);
+        Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+    }
+
+    [Fact]
+    public void Another_slots_stock_picture_on_a_standard_channel_is_a_link_and_ships_for_that_slot()
+    {
+        using var game = new TempGame();
+        string stockA = Png(game.At("stock-a.png"), 10);
+        string stockB = Png(game.At("stock-b.png"), 80);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(TwoSubmeshPatch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockA, "a", "bundle", 71, true),
+            new TextureTransportSource("veil", 1, 1, "_BaseMap", MapKind.BaseColor, stockB, "b", "bundle", 72, true),
+        });
+        MeshGltf.ExportGlb(TwoSubmeshPatch(), returned, perSubmesh: new[]
+        {
+            ((string?)stockB, (string?)null, (string?)null),
+            ((string?)stockB, (string?)null, (string?)null),
+        });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Empty(notes);
+        Assert.Equal(2, maps.Count);
+        Assert.Equal(MapOrigin.Authored, maps[0].BaseColor.Origin);
+        Assert.Equal(new Rgba32(80, 81, 82, 255), FirstPixel(maps[0].BaseColor.AuthoredPng!));
+        Assert.Equal(MapOrigin.Vanilla, maps[1].BaseColor.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(0, row.Submesh);
+    }
+
+    [Fact]
+    public void A_tagged_node_that_came_back_edited_keeps_its_slot_and_names_the_other_picture()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string onTaggedNode = Png(game.At("on-tagged-node.png"), 90);
+        string onChannel = Png(game.At("on-channel.png"), 160);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stock, "base", "bundle", 71, true),
+        });
+        // the tagged node carries one edited picture; Blender's base colour channel another
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)onChannel, (string?)null, (string?)null) },
+            textureTransport: new[]
+            {
+                new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, onTaggedNode, "base",
+                    "bundle", 71, true),
+            });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        var incoming = Assert.Single(maps);
+        Assert.Equal(MapOrigin.Authored, incoming.BaseColor.Origin);
+        Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(incoming.BaseColor.AuthoredPng!));
+        string note = Assert.Single(notes);
+        Assert.Contains("on-channel_base", note);
+        Assert.Contains("already has an edited Base color image", note);
+    }
+
+    [Fact]
+    public void A_tagged_node_and_the_channel_showing_the_same_edited_picture_say_nothing()
     {
         using var game = new TempGame();
         string stock = Png(game.At("stock.png"), 20);
@@ -430,19 +747,52 @@ public class TextureTransportTests
         string returned = game.At("returned.glb");
         MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
         {
-            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stock,
-                "base", "bundle", 71, true),
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stock, "base", "bundle", 71, true),
         });
         MeshGltf.ExportGlb(Patch(), returned,
-            perSubmesh: new[] { ((string?)painted, (string?)null, (string?)null) });
+            perSubmesh: new[] { ((string?)painted, (string?)null, (string?)null) },
+            textureTransport: new[]
+            {
+                new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, painted, "base",
+                    "bundle", 71, true),
+            });
+        var notes = new List<string>();
 
-        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened);
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
 
-        Assert.Equal(MapOrigin.None, Assert.Single(maps).BaseColor.Origin);
+        Assert.Empty(notes);
+        Assert.Equal(MapOrigin.Authored, Assert.Single(maps).BaseColor.Origin);
     }
 
     [Fact]
-    public void A_bindingless_part_in_a_keyed_session_accepts_geometry_without_classifying_standard_channels()
+    public void A_picture_on_a_channel_the_part_has_no_slot_for_is_ignored_by_name()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string paintedNormal = Png(game.At("painted-normal.png"), 140);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stock, "base", "bundle", 71, true),
+        });
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)null, (string?)paintedNormal, (string?)null) });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        string note = Assert.Single(notes);
+        Assert.Contains("painted-normal_nrm", note);
+        Assert.Contains("has no Normal map slot", note);
+        var incoming = Assert.Single(maps);
+        Assert.Equal(MapOrigin.None, incoming.Normal.Origin);
+        Assert.Equal(MapOrigin.None, incoming.BaseColor.Origin);
+        Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+    }
+
+    [Fact]
+    public void A_part_the_session_never_opened_has_its_pictures_ignored_by_name()
     {
         using var game = new TempGame();
         string stock = Png(game.At("stock.png"), 20);
@@ -456,12 +806,271 @@ public class TextureTransportTests
         });
         MeshGltf.ExportGlb(Patch("bindingless"), returned,
             perSubmesh: new[] { ((string?)painted, (string?)null, (string?)null) });
+        var notes = new List<string>();
 
-        var maps = MeshGltf.ReadSubmeshMaps(returned, "bindingless", opened);
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "bindingless", opened, notes.Add);
 
+        string note = Assert.Single(notes);
+        Assert.Contains("painted_base", note);
+        Assert.Contains("has no Base color slot", note);
         Assert.Equal(MapOrigin.None, Assert.Single(maps).BaseColor.Origin);
         Assert.Null(Assert.Single(maps).Textures);
     }
+
+    /// <summary>Blender's exporter composes the ORM channel afresh from the Separate Color links, so the
+    /// channel never carries the session's own bytes even when the RMO node was never touched. A returned
+    /// tagged RMO node is the whole answer for its slot; the channel beside it says nothing.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_returned_tagged_rmo_node_is_the_whole_answer_whatever_the_orm_channel_carries(bool edited)
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock-rmo.png"), 20);
+        string painted = Png(game.At("painted-rmo.png"), 90);
+        string composed = Png(game.At("composed-orm.png"), 160);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_RMOMap", MapKind.Rmo, stock, "rmo", "bundle", 71, false),
+        });
+        MeshGltf.ExportGlb(Patch(), returned,
+            perSubmesh: new[] { ((string?)null, (string?)null, (string?)composed) },
+            textureTransport: new[]
+            {
+                new TextureTransportSource("veil", 0, 0, "_RMOMap", MapKind.Rmo, edited ? painted : stock, "rmo",
+                    "bundle", 71, false),
+            });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Empty(notes);
+        var incoming = Assert.Single(maps);
+        Assert.Equal(edited ? MapOrigin.Authored : MapOrigin.Vanilla, incoming.Rmo.Origin);
+        if (edited) Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(incoming.Rmo.AuthoredPng!));
+    }
+
+    // ------------------------------------------------ more submeshes than the part has materials
+    //
+    // The game draws a part once per material; a replacement's extra submeshes draw at the last drawable
+    // material's fire and the edit's cards slot them there. The outbound inventory, the re-split and the
+    // return's join all apply that one fold (MaterialFold), so a picture for such a submesh returns.
+
+    [Fact]
+    public void The_outbound_inventory_folds_extra_primitives_onto_the_last_drawable_material()
+    {
+        using var game = new TempGame();
+        string texDir = game.At("textures");
+        Directory.CreateDirectory(texDir);
+        var first = new TexTarget("first", "bundle", false, false, "renderer", PathId: 71);
+        var second = new TexTarget("second", "bundle", false, false, "renderer", PathId: 72);
+        var materials = new[]
+        {
+            new MaterialTextureBindings(0, "cloth", new[] { new BoundTexture("_BaseMap", first) }),
+            new MaterialTextureBindings(1, "trim", new[] { new BoundTexture("_BaseMap", second) }),
+        };
+        var part = new PartTextures(PartTextureResolver.ExportInventory(materials),
+            new[] { new SubmeshMaps(null, null), new SubmeshMaps(null, null) }, Materials: materials);
+        Png(Path.Combine(texDir, TextureExport.BundleScopedName("bundle", "first", "subject")), 30);
+        Png(Path.Combine(texDir, TextureExport.BundleScopedName("bundle", "second", "subject")), 180);
+
+        // a four-submesh replacement over two drawable materials: the trailing two fold onto the last
+        var folded = AssetExporter.ResolveTextureTransport(texDir, "subject", "veil", part,
+            primitiveCount: 4, stockIndexCounts: new[] { 3, 3 });
+        Assert.Equal(new int?[] { 0 }, folded.Where(r => r.MaterialIndex == 0).Select(r => r.PrimitiveIndex));
+        Assert.Equal(new int?[] { 1, 2, 3 }, folded.Where(r => r.MaterialIndex == 1).Select(r => r.PrimitiveIndex));
+        Assert.All(folded, row => Assert.True(row.Drawable));
+
+        // the second material's stock submesh has no indices, so it never fires: every submesh draws under
+        // the first, and the second rides along as surplus inventory
+        var undrawable = AssetExporter.ResolveTextureTransport(texDir, "subject", "veil", part,
+            primitiveCount: 4, stockIndexCounts: new[] { 3, 0 });
+        Assert.Equal(new int?[] { 0, 1, 2, 3 },
+            undrawable.Where(r => r.MaterialIndex == 0).Select(r => r.PrimitiveIndex));
+        var surplus = Assert.Single(undrawable, r => r.MaterialIndex == 1);
+        Assert.Null(surplus.PrimitiveIndex);
+        Assert.False(surplus.Drawable);
+    }
+
+    [Fact]
+    public void A_record_refolds_onto_any_primitive_count_and_keeps_a_materials_drawability()
+    {
+        PreviewMaps.TransportBinding Row(int material, int? primitive, bool? drawable) => new("veil", material,
+            primitive, "_BaseMap", MapKind.BaseColor, "stock.png", "hash", new PreviewMaps.TransportStock("s", "b", 1),
+            Drawable: drawable);
+        var record = new[] { Row(0, 0, true), Row(1, 1, true) };
+
+        // fewer submeshes: the second material keeps a primitive-less row, still drawable
+        var narrowed = MaterialFold.FoldOntoPrimitives(record, 1);
+        Assert.Equal(0, Assert.Single(narrowed, r => r.MaterialIndex == 0).PrimitiveIndex);
+        var kept = Assert.Single(narrowed, r => r.MaterialIndex == 1);
+        Assert.Null(kept.PrimitiveIndex);
+        Assert.True(kept.Drawable);
+
+        // ...so a later, wider send still folds its extras onto it rather than onto the first material
+        var widened = MaterialFold.FoldOntoPrimitives(narrowed.ToList(), 3);
+        Assert.Equal(new int?[] { 1, 2 }, widened.Where(r => r.MaterialIndex == 1).Select(r => r.PrimitiveIndex));
+
+        // a material recorded as never drawing takes no primitive, whatever the count
+        var closed = MaterialFold.FoldOntoPrimitives(new[] { Row(0, 0, true), Row(1, null, false) }, 3);
+        Assert.Equal(new int?[] { 0, 1, 2 }, closed.Where(r => r.MaterialIndex == 0).Select(r => r.PrimitiveIndex));
+        Assert.Null(Assert.Single(closed, r => r.MaterialIndex == 1).PrimitiveIndex);
+
+        // the older record shape, written without the flag, reads as drawable
+        var legacy = MaterialFold.FoldOntoPrimitives(new[] { Row(0, 0, null), Row(1, 1, null) }, 3);
+        Assert.Equal(new int?[] { 1, 2 }, legacy.Where(r => r.MaterialIndex == 1).Select(r => r.PrimitiveIndex));
+    }
+
+    [Fact]
+    public void A_return_with_more_submeshes_than_the_record_joins_the_extras_to_the_last_material()
+    {
+        using var game = new TempGame();
+        string stockA = Png(game.At("stock-a.png"), 10);
+        string stockB = Png(game.At("stock-b.png"), 80);
+        string painted = Png(game.At("painted.png"), 200);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        string stockRmoB = Png(game.At("stock-rmo-b.png"), 40);
+        MeshGltf.ExportGlb(SubmeshPatch(2), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockA, "a", "bundle", 71, true,
+                Drawable: true),
+            new TextureTransportSource("veil", 1, 1, "_BaseMap", MapKind.BaseColor, stockB, "b", "bundle", 72, true,
+                Drawable: true),
+            new TextureTransportSource("veil", 1, 1, "_RMOMap", MapKind.Rmo, stockRmoB, "rmo-b", "bundle", 73, false,
+                Drawable: true),
+        });
+        // what came back: a three-submesh replacement, its third submesh carrying its own picture
+        MeshGltf.ExportGlb(SubmeshPatch(3), returned, perSubmesh: new[]
+        {
+            ((string?)stockA, (string?)null, (string?)null),
+            ((string?)stockB, (string?)null, (string?)null),
+            ((string?)painted, (string?)null, (string?)null),
+        });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Empty(notes);
+        Assert.Equal(3, maps.Count);
+        Assert.Equal(MapOrigin.Vanilla, maps[0].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Vanilla, maps[1].BaseColor.Origin);
+        Assert.Equal(MapOrigin.Authored, maps[2].BaseColor.Origin);
+        var extra = Assert.Single(maps[2].Textures!, t => t.ShaderProperty == "_BaseMap");
+        Assert.Equal((1, 2, "_BaseMap"), (extra.MaterialIndex, extra.PrimitiveIndex, extra.ShaderProperty));
+        Assert.Equal(new Rgba32(200, 201, 202, 255), FirstPixel(extra.Map.AuthoredPng!));
+        // the folded submesh knows which RMO its emissive mask is rebuilt over, though the record's
+        // per-submesh RMO rows stop at the two it was written for
+        Assert.Equal(Path.GetFullPath(stockRmoB), maps[2].RmoStockSource);
+        Assert.Null(maps[0].RmoStockSource);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(2, row.Submesh);
+    }
+
+    [Fact]
+    public void A_resplit_projects_the_record_over_the_returned_submeshes_with_each_primitives_own_picture()
+    {
+        using var game = new TempGame();
+        string stockA = Png(game.At("stock-a.png"), 10);
+        string stockB = Png(game.At("stock-b.png"), 80);
+        string paintedB = Png(game.At("painted-b.png"), 120);
+        string paintedC = Png(game.At("painted-c.png"), 200);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        string resplit = game.At("resplit.glb");
+        MeshGltf.ExportGlb(SubmeshPatch(2), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockA, "a", "bundle", 71, true,
+                Drawable: true),
+            new TextureTransportSource("veil", 1, 1, "_BaseMap", MapKind.BaseColor, stockB, "b", "bundle", 72, true,
+                Drawable: true),
+        });
+        MeshGltf.ExportGlb(SubmeshPatch(3), returned);
+
+        // two submeshes drawn under one material, each with its own authored picture
+        MeshGltf.ReexportPartGlb(returned, "veil", resplit, recordGlb: opened, authoredTextures: new[]
+        {
+            new TextureTransportOverride(1, "_BaseMap", paintedB, MapKind.BaseColor, PrimitiveIndex: 1),
+            new TextureTransportOverride(1, "_BaseMap", paintedC, MapKind.BaseColor, PrimitiveIndex: 2,
+                Label: "Painted C"),
+        });
+
+        var record = PreviewMaps.ReadTransportBindings(resplit);
+        Assert.Equal(new int?[] { 0, 1, 2 }, record.Select(r => r.PrimitiveIndex).OrderBy(p => p));
+        Assert.Equal(Path.GetFullPath(stockA), Assert.Single(record, r => r.PrimitiveIndex == 0).Source);
+        Assert.Equal(Path.GetFullPath(paintedB), Assert.Single(record, r => r.PrimitiveIndex == 1).Source);
+        Assert.Equal(Path.GetFullPath(paintedC), Assert.Single(record, r => r.PrimitiveIndex == 2).Source);
+        Assert.All(record.Where(r => r.PrimitiveIndex != 0), r => Assert.Equal(MapOrigin.Authored, r.Origin));
+        // and the file itself carries the third primitive's picture, tagged for its own slot
+        var carried = GltfTextureTransport.Read(resplit).Bindings;
+        var third = Assert.Single(carried, r => r.PrimitiveIndex == 2);
+        Assert.Equal(new Rgba32(200, 201, 202, 255), FirstPixel(third.Png));
+        // Blender lists the modder's picture under its project label, on the tagged node and the material alike
+        Assert.Equal("Painted C", third.ImageName);
+        using var json = ReadGlbJson(resplit);
+        Assert.Contains(json.RootElement.GetProperty("images").EnumerateArray(),
+            image => image.GetProperty("name").GetString() == "Painted C");
+    }
+
+    /// <summary>"Plug the neutral" is a gesture on every normal slot, including one whose outbound picture is
+    /// the modder's own authored normal. That picture lives in the project, where no neutral_n.png sits,
+    /// so the neutral has to come from the session record; the record names it beside any stock binding.
+    /// Blender exports the plugged file as it is, so the return carries the neutral's own bytes.</summary>
+    [Fact]
+    public void The_neutral_normal_plugged_over_an_authored_normal_still_blanks_the_slot()
+    {
+        using var game = new TempGame();
+        string texDir = game.At("textures");
+        PreviewMaps.WriteNeutrals(texDir);
+        string neutral = Path.Combine(texDir, PreviewMaps.NeutralN);
+        string stockBase = Png(Path.Combine(texDir, "stock-base.png"), 20);
+        Directory.CreateDirectory(game.At("project"));
+        string authoredNormal = Png(game.At(Path.Combine("project", "authored-normal.png")), 140);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        var normalSlot = new TextureTransportSource("veil", 0, 0, "_NormalMap", MapKind.Normal, authoredNormal,
+            "normal", "bundle", 72, false, Origin: MapOrigin.Authored);
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockBase, "base", "bundle", 71,
+                true),
+            normalSlot,
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        byte[] plugged = File.ReadAllBytes(neutral);
+        GltfTextureTransport.WriteTransformed(returned, new[]
+        {
+            new TransformedTextureTransportSource(normalSlot with { Png = neutral }, plugged,
+                PreviewMaps.Hash(plugged)),
+        });
+        var notes = new List<string>();
+
+        var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
+
+        Assert.Empty(notes);
+        Assert.Equal(MapOrigin.Neutral, Assert.Single(maps).Normal.Origin);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(SlotOrigin.ExplicitNeutral, row.NormalAsk);
+    }
+
+    private static UnityMesh TwoSubmeshPatch(string name = "veil") => SubmeshPatch(2, name);
+
+    /// <summary>A patch of <paramref name="count"/> disjoint triangles, one submesh each.</summary>
+    private static UnityMesh SubmeshPatch(int count, string name = "veil") => new()
+    {
+        Name = name,
+        VertexCount = count * 3,
+        Channels = new()
+        {
+            ["Vertex"] = Enumerable.Range(0, count)
+                .SelectMany(s => new float[] { 2 * s, 0, 0, 2 * s + 1, 0, 0, 2 * s, 1, 0 }).ToArray(),
+            ["TexCoord0"] = Enumerable.Range(0, count).SelectMany(_ => new float[] { 0, 0, 1, 0, 0, 1 }).ToArray(),
+        },
+        Dims = new() { ["Vertex"] = 3, ["TexCoord0"] = 2 },
+        Submeshes = Enumerable.Range(0, count).Select(s => new[] { 3 * s, 3 * s + 1, 3 * s + 2 }).ToList(),
+    };
 
     [Fact]
     public void BaseMap_and_MainTex_publish_without_ambiguity_and_round_trip_their_own_pictures()
@@ -599,10 +1208,64 @@ public class TextureTransportTests
         return image[0, 0];
     }
 
-    private static Rgba32 FirstPixel(byte[] png)
+    private static Rgba32 FirstPixel(byte[]? png)
     {
+        Assert.NotNull(png);
         using var image = SixLabors.ImageSharp.Image.Load<Rgba32>(png);
         return image[0, 0];
+    }
+
+    /// <summary>Stamp a return glb with the one carrier row the new add-on sends for an untouched
+    /// picture: the binding's identity and outbound hash, no image.</summary>
+    private static void WriteHashOnlyRow(string glb, PreviewMaps.TransportBinding binding)
+    {
+        RewriteGlbJson(glb, root =>
+        {
+            var owner = new JsonObject
+            {
+                ["mesh"] = binding.Mesh,
+                ["material"] = binding.MaterialIndex,
+            };
+            if (binding.PrimitiveIndex is { } primitive) owner["primitive"] = primitive;
+            var row = new JsonObject
+            {
+                ["owner"] = owner,
+                ["property"] = binding.ShaderProperty,
+                ["semantic"] = binding.Kind switch
+                {
+                    MapKind.BaseColor => "baseColor",
+                    MapKind.Normal => "normal",
+                    MapKind.Rmo => "rmo",
+                    MapKind.Blend => "blend",
+                    _ => "texture",
+                },
+                ["outbound_hash"] = binding.OutboundHash,
+                ["stock"] = new JsonObject
+                {
+                    ["name"] = binding.Stock.Name,
+                    ["bundle"] = binding.Stock.Bundle,
+                    ["path_id"] = binding.Stock.PathId,
+                },
+                ["origin"] = binding.Origin.ToString().ToLowerInvariant(),
+            };
+            if (binding.Srgb is { } srgb) row["srgb"] = srgb;
+            if (binding.TexCoord is { } texCoord) row["texCoord"] = texCoord;
+            var extras = root["extras"] as JsonObject ?? new JsonObject();
+            root["extras"] = extras;
+            if (extras[GltfTextureTransport.ExtrasKey] is JsonObject carrier
+                && carrier["bindings"] is JsonArray existing)
+            {
+                existing.Add(row);
+            }
+            else
+            {
+                extras[GltfTextureTransport.ExtrasKey] = new JsonObject
+                {
+                    ["version"] = GltfTextureTransport.Version,
+                    ["bindings"] = new JsonArray(row),
+                };
+            }
+        });
     }
 
     private static JsonDocument ReadGlbJson(string path)

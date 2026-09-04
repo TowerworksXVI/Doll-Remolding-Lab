@@ -14,8 +14,9 @@ namespace Remold.Core.Tests;
 
 /// <summary>
 /// <see cref="PoolDerive"/> — the recovery pool from the donor's weights: roster-order pool
-/// membership, which roster parts a Replace may pool at all, the dominant-part anchor (ties → the replaced
-/// part, else last), the anchor override, and the loud failures (unweighted donor, orphan bones).
+/// membership, which roster parts a Replace may pool at all, the anchor (the replaced part whenever it
+/// poses a donor-used bone, else the dominant part with ties → last), the anchor override, and the loud
+/// failures (unweighted donor, orphan bones).
 /// </summary>
 public class PoolDeriveTests
 {
@@ -379,19 +380,37 @@ public class PoolDeriveTests
     }
 
     [Fact]
-    public void The_replaced_part_takes_a_tie_for_the_anchor()
+    public void The_replaced_part_posing_a_donor_bone_hosts_the_draw()
     {
-        // hash 2 lives in face AND body, one used bone each — the tie the roster order would give to body
+        // hash 2 lives in face AND body — the anchor roster order alone would give to body
         var r = PoolDerive.Derive(Donor(2), Roster, replacedPart: "face");
         Assert.Equal(new[] { "face", "body" }, r.Pool);
         Assert.Equal("face", r.Anchor);
     }
 
     [Fact]
-    public void A_replaced_part_short_of_dominant_leaves_the_roster_rule_alone()
+    public void The_replaced_part_hosts_the_draw_even_short_of_dominant()
     {
-        // cloth owns two used bones to hair's one, so the dominant part hosts the draw whoever is replaced
+        // cloth owns two used bones to hair's one, but the donor renders in the anchor's material and
+        // only the replaced part carries the right one — dominance decides nothing while hair can pose
         var r = PoolDerive.Derive(Donor(20, 21, 30), Roster, replacedPart: "hair");
+        Assert.Equal("hair", r.Anchor);
+    }
+
+    [Fact]
+    public void A_replaced_part_posing_no_donor_bone_leaves_the_draw_to_the_dominant_part()
+    {
+        // hair TABLES bone 30 (it pools) but poses nothing — an anchor with no recoverable row of its
+        // own cannot supply the draw-space constants recovery converts through, so the dominant part
+        // hosts (and ModBuilder owes the foreign-material warning)
+        var roster = new[]
+        {
+            Part("cloth", 20, 21, 30),   // poses everything it tables, 30 included
+            new PoolDerive.PartBones("hair", new HashSet<uint> { 30 },
+                PosedBones: new HashSet<uint>()),
+        };
+        var r = PoolDerive.Derive(Donor(20, 21, 30), roster, replacedPart: "hair");
+        Assert.Equal(new[] { "cloth", "hair" }, r.Pool);
         Assert.Equal("cloth", r.Anchor);
     }
 

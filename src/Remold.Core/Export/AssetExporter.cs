@@ -22,7 +22,8 @@ namespace Remold.Core.Export;
 /// re-resolve the name (which can hit a duplicate stub). <see cref="OriginalPath"/> is the pristine copy
 /// under <c>originals/</c>, so edit-tolerance (delta, outline restore) survives a restart and a game
 /// update. <see cref="BakedRest"/> (mesh only) is the scene-rest uprighting baked into the glb
-/// (<see cref="Mesh.RestBake"/>), undone at package build; null = nothing baked.
+/// (<see cref="Mesh.RestBake"/>), undone at package build; null = nothing recorded, and the export
+/// then bakes the scene rig's own uprighting (<see cref="Mesh.RestBake.Effective"/>).
 /// <see cref="TextureMeta"/> (texture only) is the live target's format/dimensions/mip count captured at
 /// export so the package build can pre-encode offline.</summary>
 public readonly record struct ExportedFile(string Kind, string AssetName, string Path, bool Ok, string? Note,
@@ -61,7 +62,13 @@ public sealed class ExportReport
 /// </summary>
 public static class AssetExporter
 {
-    public const string RiggedBuildSpec = "rigged-build-spec-v2";
+    // v3: the outbound texture inventory records each material position's drawability and folds every
+    // primitive onto a drawable material, so a cached part's record must be the one this build writes.
+    // v4: a part with no recorded rest is baked by its scene rig's own uprighting, and the record beside
+    // the glb says so.
+    // v5: no exported rest world carries a reflection, and duplicate faces ship on split vertex copies so
+    // Blender keeps them.
+    public const string RiggedBuildSpec = "rigged-build-spec-v5";
 
     /// <summary>Filename of the optional whole-outfit combined glb (all skinned parts, one union-skeleton
     /// armature) written alongside the per-part glbs in <c>meshes/</c>. Deterministic so the Edit pane can
@@ -718,31 +725,30 @@ public static class AssetExporter
                     catch { /* unmeasured here ⇒ the gap pass measures it, degraded reporting and all */ }
                 }
                 var skin = MeshSkin.Decode(field);
-                // A recorded rest that is not an axis-aligned rotation cannot be un-baked by transpose, so
-                // the export skips it and the part lands in bind space rather than a skewed one.
-                var recordedRest = RestBake.FromList(bakedRest, out bool restRefused);
-                // scene rig for NAMES/parenting; the bake replays the target's record, so this rebuild
-                // lands in the same space the Add put the workspace in. The mesh-bundle read comes first
-                // (classes whose own bundle carries the scene), selected by the path id where there is
-                // one — the recorded name is the slot's and need not name the mesh object. smr-body
-                // parts fall back to the assembly prefab, keyed by the slot's mesh reference. Read ONCE
-                // per part: an edited part needs it too, for the map and for its connectors.
+                // scene rig for NAMES/parenting and for the part's own uprighting. The mesh-bundle read
+                // comes first (classes whose own bundle carries the scene), selected by the path id where
+                // there is one — the recorded name is the slot's and need not name the mesh object.
+                // smr-body parts fall back to the assembly prefab, keyed by the slot's mesh reference.
+                // Read ONCE per part: an edited part needs it too, for the map and for its connectors.
                 SceneRig? sceneRig = null;
                 if (skin is { IsSkinned: true })
-                {
                     sceneRig = SceneRig.TryRead(dec, meshName, skin, pathId)
                         ?? (pathId != 0 && scope.Candidates.Count > 0
                             ? SceneRig.TryReadForMeshRef(scope.Candidates[0].Dec, pathId, skin)
                             : null);
-                    // the rig's paths are in GAME bone order, so they pair with this part's game skin
-                    unionParts.Add((skin, sceneRig?.BonePaths, recordedRest));
-                }
+                // The space this part's workspace sits in: the rest its project record states where one
+                // exists (a converted 0.3.x project), else the scene rig's own uprighting — so a body
+                // that ships lying down stands up in Blender whether or not anything was ever recorded
+                // for it, and the build un-bakes by the same rule. A recorded rest that is not an
+                // axis-aligned rotation cannot be un-baked by transpose, so it is refused and the part
+                // lands in bind space rather than a skewed one.
+                var partRest = RestBake.Effective(bakedRest, sceneRig?.Uprighting, out bool restRefused);
+                // the rig's paths are in GAME bone order, so they pair with this part's game skin
+                if (skin is { IsSkinned: true }) unionParts.Add((skin, sceneRig?.BonePaths, partRest));
                 // A part this run writes no glb for has already given what it was read for — its share of
                 // the subject's skeleton. Decoding its geometry and resolving its textures would buy
                 // nothing, so a rig-only part costs one bundle read rather than a whole part export.
                 if (glbOut is null && combinedOut is null) continue;
-                // A recorded rest that is not an axis-aligned rotation cannot be un-baked by transpose, so
-                // the export skips it and the part lands in bind space rather than a skewed one.
                 if (restRefused)
                     log?.Report($"{part} opens in bind pose: its rest pose can't be applied.");
                 // Named by the RECORDED name, which is the renderer slot's; on some enemy/prop slots the
@@ -763,34 +769,41 @@ public static class AssetExporter
                 // named to the caller, never silently dropped
                 var (baseColorPng, normalPng, perSubmesh) =
                     ResolvePartPngs(texDir, subjectSlug, partTex, missedTextures);
-                var textureTransport = ResolveTextureTransport(texDir, subjectSlug, meshName, partTex,
-                    workspaceSrgb, missedTextures);
+                var stockIndexCounts = mesh.Submeshes.Select(indices => indices.Length).ToList();
+                var partAuthored = authoredMaps is null ? null : authoredMaps.GetValueOrDefault(part);
+                var partAuthoredTextures = authoredTextureMaps is null
+                    ? null : authoredTextureMaps.GetValueOrDefault(part);
                 // The modder's OWN maps take their material positions from the stock ones, exactly as the
                 // lone route's re-export does, so an open-all session shows the work they painted rather than
                 // the game texture under it.
-                var partAuthored = authoredMaps is null ? null : authoredMaps.GetValueOrDefault(part);
                 perSubmesh = OverlayAuthoredMaps(perSubmesh, partAuthored);
-                if (partAuthored is not null)
+                // The outbound inventory, projected over the primitives the session OPENS: the stock mesh's,
+                // or an edited part's own, whose extra submeshes fold onto the last drawable material exactly
+                // as the build draws them and the edit's cards slot them. The modder's pictures ride the same
+                // rows, each on the primitive it was authored for.
+                IReadOnlyList<TextureTransportSource> Transport(int primitiveCount, bool reportMissed)
                 {
-                    var fixedOverrides = partAuthored.SelectMany((maps, material) => new[]
+                    var rows = ResolveTextureTransport(texDir, subjectSlug, meshName, partTex, workspaceSrgb,
+                        reportMissed ? missedTextures : null, primitiveCount, stockIndexCounts);
+                    if (partAuthored is not null)
                     {
-                        maps.Base is null ? default(TextureTransportOverride?)
-                            : new TextureTransportOverride(material, "", maps.Base, MapKind.BaseColor),
-                        maps.Normal is null ? default(TextureTransportOverride?)
-                            : new TextureTransportOverride(material, "", maps.Normal, MapKind.Normal),
-                        maps.Rmo is null ? default(TextureTransportOverride?)
-                            : new TextureTransportOverride(material, "", maps.Rmo, MapKind.Rmo),
-                    }).OfType<TextureTransportOverride>().ToList();
-                    textureTransport = OverlayAuthoredTextures(textureTransport, fixedOverrides,
-                        markAuthored: false);
+                        var fixedOverrides = partAuthored.SelectMany((maps, submesh) => new[]
+                        {
+                            maps.Base is null ? default(TextureTransportOverride?)
+                                : new TextureTransportOverride(submesh, "", maps.Base, MapKind.BaseColor, submesh),
+                            maps.Normal is null ? default(TextureTransportOverride?)
+                                : new TextureTransportOverride(submesh, "", maps.Normal, MapKind.Normal, submesh),
+                            maps.Rmo is null ? default(TextureTransportOverride?)
+                                : new TextureTransportOverride(submesh, "", maps.Rmo, MapKind.Rmo, submesh),
+                        }).OfType<TextureTransportOverride>().ToList();
+                        rows = OverlayAuthoredTextures(rows, fixedOverrides, markAuthored: false);
+                    }
+                    return OverlayAuthoredTextures(rows, partAuthoredTextures, markAuthored: false);
                 }
-                var partAuthoredTextures = authoredTextureMaps is null
-                    ? null : authoredTextureMaps.GetValueOrDefault(part);
-                textureTransport = OverlayAuthoredTextures(textureTransport, partAuthoredTextures,
-                    markAuthored: false);
+                var textureTransport = Transport(mesh.Submeshes.Count, reportMissed: true);
                 if (skin is { IsSkinned: true })
                 {
-                    var uprighting = recordedRest;
+                    var uprighting = partRest;
                     // The modder's own geometry wins for an edited part: its workspace glb holds the authored
                     // mesh AND skin, so the session opens on what they last sent rather than the game copy
                     // their next send would overwrite. It already sits in the space the Add put it in, so it
@@ -816,7 +829,10 @@ public static class AssetExporter
                             editedParts.Add((rigged.Count, e.Skin));
                             rigged.Add(new MeshGltf.RiggedPart(e.Mesh, e.Skin, baseColorPng, normalPng,
                                 ConnectorRests: Composed(sceneRig?.ConnectorRests, uprighting),
-                                PerSubmesh: perSubmesh, TextureTransport: textureTransport));
+                                PerSubmesh: perSubmesh,
+                                TextureTransport: e.Mesh.Submeshes.Count == mesh.Submeshes.Count
+                                    ? textureTransport
+                                    : Transport(e.Mesh.Submeshes.Count, reportMissed: false)));
                             riggedSlots.Add(meshName);
                             done.Add(part);
                             continue;
@@ -847,7 +863,7 @@ public static class AssetExporter
                 }
                 else if (glbOut is not null)   // rigid prop: no rig, but still upgrade its bare Add glb to textured
                 {
-                    MeshGltf.ExportGlb(mesh, glbOut, baseColorPng, normalPng, perSubmesh, recordedRest,
+                    MeshGltf.ExportGlb(mesh, glbOut, baseColorPng, normalPng, perSubmesh, partRest,
                         onUnreadableMap: MapWouldNotDecode, textureTransport: textureTransport);
                     done.Add(part);
                 }
@@ -997,14 +1013,19 @@ public static class AssetExporter
         return stock.Select(binding =>
         {
             var replacement = authored.FirstOrDefault(candidate =>
-                candidate.MaterialIndex == binding.MaterialIndex
+                candidate.Covers(binding.MaterialIndex, binding.PrimitiveIndex)
                 && string.Equals(candidate.ShaderProperty, binding.ShaderProperty, StringComparison.Ordinal));
             if (replacement.Png is not { Length: > 0 })
                 replacement = authored.FirstOrDefault(candidate =>
-                    candidate.MaterialIndex == binding.MaterialIndex && candidate.ShaderProperty.Length == 0
-                    && candidate.Kind == binding.Kind);
+                    candidate.Covers(binding.MaterialIndex, binding.PrimitiveIndex)
+                    && candidate.ShaderProperty.Length == 0 && candidate.Kind == binding.Kind);
             return replacement.Png is { Length: > 0 } png
-                ? binding with { Png = png, Origin = markAuthored ? MapOrigin.Authored : MapOrigin.Vanilla }
+                ? binding with
+                {
+                    Png = png,
+                    Origin = markAuthored ? MapOrigin.Authored : MapOrigin.Vanilla,
+                    Label = replacement.Label ?? binding.Label,
+                }
                 : binding;
         }).ToList();
     }
@@ -1150,10 +1171,13 @@ public static class AssetExporter
     /// <c>bone_&lt;hash8&gt;</c>) so one bone reaches one armature node however many parts pose it.
     ///
     /// <para>Bind poses are the placement source, and the first part to name a bone fixes both its path and
-    /// its rest — but only while the subject AGREES about it. A bone two parts bind in different places has
-    /// no one rest to stand at, so it is dropped from the skeleton entirely and named in
-    /// <paramref name="disagreeing"/>: it still poses the parts that own it, it just never joins another
-    /// part's armature. An armature stick in the wrong place is worse than an absent one.</para>
+    /// its rest — but only while the subject AGREES about it. Agreement is judged in SCENE space, each part's
+    /// bind rest composed with its own uprighting: a subject whose body ships lying down while its hair
+    /// ships upright binds the head in two bind spaces and one scene place, and that is one bone. A bone
+    /// two parts place differently in the scene has no one rest to stand at, so it is dropped from the
+    /// skeleton entirely and named in <paramref name="disagreeing"/>: it still poses the parts that own
+    /// it, it just never joins another part's armature. An armature stick in the wrong place is worse
+    /// than an absent one.</para>
     /// </summary>
     internal static IReadOnlyList<SubjectBone> SubjectSkeleton(
         IReadOnlyList<(MeshSkin Skin, IReadOnlyList<string>? BonePaths, Matrix4x4? Uprighting)> parts,
@@ -1173,8 +1197,10 @@ public static class AssetExporter
                 if (!Matrix4x4.Invert(skin.BindPoses[i], out var rest)) continue;   // no placement, no bone
                 if (byHash.TryGetValue(hash, out var at))
                 {
-                    if (RestBake.RotationDiff(rest, bones[at].BindRest) <= RestBake.RotationTol
-                        && RestBake.TranslationDiff(rest, bones[at].BindRest) <= PlacementAgreementTol)
+                    var placed = uprighting is { } g ? rest * g : rest;
+                    var held = bones[at].Uprighting is { } hg ? bones[at].BindRest * hg : bones[at].BindRest;
+                    if (RestBake.RotationDiff(placed, held) <= RestBake.RotationTol
+                        && RestBake.TranslationDiff(placed, held) <= PlacementAgreementTol)
                         continue;
                     names.Add(bones[at].Path);
                     bones.RemoveAt(at);
@@ -1591,23 +1617,41 @@ public static class AssetExporter
     /// <summary>Resolve the full installed material inventory to property-keyed transport rows. Primitive
     /// projection follows the renderer rule without truncating the inventory: a short material list repeats
     /// its last position across remaining primitives, while surplus positions carry a null primitive.</summary>
+    /// <param name="primitiveCount">The primitives the session opens — an edited part's own submesh count,
+    /// which may exceed the stock material list; null projects over the stock mesh's submeshes.</param>
+    /// <param name="stockIndexCounts">The stock mesh's index count per submesh, which says which material
+    /// positions draw at all; null treats every stock position as drawable.</param>
     internal static IReadOnlyList<TextureTransportSource> ResolveTextureTransport(string texDir,
         string subjectSlug, string meshName, PartTextures partTex,
-        IReadOnlyDictionary<string, bool?>? srgb = null, ICollection<string>? missed = null)
+        IReadOnlyDictionary<string, bool?>? srgb = null, ICollection<string>? missed = null,
+        int? primitiveCount = null, IReadOnlyList<int>? stockIndexCounts = null)
     {
         var materials = partTex.Materials ?? Array.Empty<MaterialTextureBindings>();
         if (materials.Count == 0) return Array.Empty<TextureTransportSource>();
-        int primitiveCount = partTex.Submeshes.Count;
-        var result = new List<TextureTransportSource>();
-        for (int materialIndex = 0; materialIndex < materials.Count; materialIndex++)
+        int stockSubmeshCount = partTex.Submeshes.Count;
+        int materialCount = materials.Max(material => material.MaterialIndex) + 1;
+        // A material position fires only where the stock mesh gives it a submesh with indices; past the
+        // stock submesh table it is surplus inventory. Unknown counts keep the older answer: every stock
+        // position draws.
+        bool Drawable(int position) => position < stockSubmeshCount
+            && (stockIndexCounts is null || position >= stockIndexCounts.Count || stockIndexCounts[position] > 0);
+        // Every primitive the session opens lands on one material position by the shared fold (see
+        // MaterialFold): its own below the material count, the last drawable one past it.
+        var primitivesByMaterial = new Dictionary<int, List<int?>>();
+        for (int primitive = 0; primitive < (primitiveCount ?? stockSubmeshCount); primitive++)
         {
-            var material = materials[materialIndex];
-            var primitives = new List<int?>();
-            if (materialIndex < primitiveCount) primitives.Add(materialIndex);
-            else primitives.Add(null);
-            if (materialIndex == materials.Count - 1 && materials.Count < primitiveCount)
-                for (int primitive = materials.Count; primitive < primitiveCount; primitive++)
-                    primitives.Add(primitive);
+            int position = MaterialFold.MaterialPosition(primitive, materialCount, Drawable);
+            if (position < 0) continue;
+            if (!primitivesByMaterial.TryGetValue(position, out var owned))
+                primitivesByMaterial[position] = owned = new List<int?>();
+            owned.Add(primitive);
+        }
+        var result = new List<TextureTransportSource>();
+        foreach (var material in materials)
+        {
+            if (!primitivesByMaterial.TryGetValue(material.MaterialIndex, out var primitives))
+                primitives = new List<int?> { null };
+            bool drawable = Drawable(material.MaterialIndex);
 
             foreach (var binding in material.Textures)
             {
@@ -1626,7 +1670,7 @@ public static class AssetExporter
                 foreach (var primitive in primitives)
                     result.Add(new TextureTransportSource(meshName, material.MaterialIndex, primitive,
                         binding.ShaderProperty, kind, png, texture.Name, texture.Bundle, texture.PathId,
-                        colorSpace, TexCoord: UvGuide.TexCoordIndex(input)));
+                        colorSpace, TexCoord: UvGuide.TexCoordIndex(input), Drawable: drawable));
             }
         }
         return result;

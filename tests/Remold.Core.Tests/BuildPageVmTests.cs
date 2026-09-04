@@ -42,6 +42,8 @@ public class BuildPageVmTests
         public int LoaderPickCalls;
         public int PreviewSetCalls;
         public int PreviewRemoveCalls;
+        public int PreviewDecodeCalls;
+        public TaskCompletionSource<Bitmap?>? PreviewDecodeHold;
         public bool ConfirmResult = true;
         public string LastConfirmTitle = "";
         public string LastConfirmBody = "";
@@ -95,7 +97,11 @@ public class BuildPageVmTests
                 : new BuildPreviewState(null, null, false, "none");
         }
 
-        public Task<Bitmap?> LoadPreviewAsync(string path, int decodeWidth) => Task.FromResult<Bitmap?>(null);
+        public Task<Bitmap?> LoadPreviewAsync(string path, int decodeWidth)
+        {
+            PreviewDecodeCalls++;
+            return PreviewDecodeHold?.Task ?? Task.FromResult<Bitmap?>(null);
+        }
         public Task<string?> PickPreviewAsync() => Task.FromResult<string?>(null);
 
         public void SetPreviewFrom(AuthoredEditSession session, string sourceFile)
@@ -139,6 +145,28 @@ public class BuildPageVmTests
         vm.Load(session);
         await vm.ReplanAsync();
         return (vm, session, shell);
+    }
+
+    /// <summary>Every board change refreshes the page, and the preview picture must survive that: the
+    /// bitmap is re-decoded only when the picture's own content stamp changed, or a checkbox click blanks
+    /// the image for the decode's length on every unrelated edit.</summary>
+    [Fact]
+    public async Task An_unchanged_preview_picture_is_not_redecoded_by_a_board_refresh()
+    {
+        var project = AuthoredEditFixtures.Golden();
+        project.Info.Preview = "cover.png";
+        var (vm, _, shell) = await Page(project,
+            arrange => arrange.PreviewDecodeHold = new TaskCompletionSource<Bitmap?>());
+        Assert.Equal(1, shell.PreviewDecodeCalls);
+
+        vm.Rebuild();
+        vm.Rebuild();
+        Assert.Equal(1, shell.PreviewDecodeCalls);
+
+        // a genuinely different picture (same name, new content stamp) is re-read
+        shell.PreviewOverride = new BuildPreviewState("cover.png", @"C:\mod\cover.png", false, "stamp:new");
+        vm.Rebuild();
+        Assert.Equal(2, shell.PreviewDecodeCalls);
     }
 
     // ---- the invalidation matrix, ③'s half: which changes the plan is re-derived from ----

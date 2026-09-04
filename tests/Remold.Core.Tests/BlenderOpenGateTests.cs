@@ -30,8 +30,10 @@ public sealed class BlenderOpenGateTests
     private const string OutfitStem = "GateTestSSR01";
     private const string BlockedSlot = "c_gatetest_face_lod0";
     private const string AllowedSlot = "c_gatetest_body_lod0";
+    private const string PearlSlot = "c_gatetest_pearl_lod0";
     private const string BlockedBundle = "characters/gatetest_face.bundle";
     private const string AllowedBundle = "characters/gatetest_body.bundle";
+    private const string PearlBundle = "characters/gatetest_pearl.bundle";
     private static readonly float[] Positions = { 0, 0, 0, 1, 0, 0, 1, 1, 0 };
     private static readonly int[] Triangles = { 0, 1, 2 };
     private static readonly uint[] Bones = { 11u, 22u, 33u };
@@ -178,6 +180,51 @@ public sealed class BlenderOpenGateTests
         Assert.Equal(editsBefore, session.Snapshot().EditDefinitions.Count);
     }
 
+    [Fact]
+    public async Task A_collapsed_points_lone_open_reports_its_own_refusal_and_mints_nothing()
+    {
+        using var settings = new SettingsSnapshot();
+        using var game = new TempGame();
+        var install = PearlInstall(game);
+        var seed = AuthoredProjectDocument.New().Session;
+        seed.EnsurePartSlots(install.BlockedPart, _ => AuthoredParts.Resolve(install.BlockedPart));
+        var (vm, session, root) = await Window(game, install, seed.Snapshot());
+        long revision = session.Revision;
+        var status = new CapturedProgress();
+
+        await vm.OpenPartInBlenderAsync(install.BlockedPart, withReferences: false, status);
+
+        Assert.Equal(PartSkinGate.CollapsedBillboardRefusal, status.Value);
+        Assert.Equal(revision, session.Revision);
+        Assert.Empty(Directory.GetFiles(root, "*.gf2session.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Open_all_keeps_a_collapsed_points_slot_out_of_writes_while_a_sibling_proceeds()
+    {
+        using var settings = new SettingsSnapshot();
+        using var game = new TempGame();
+        var install = PearlInstall(game);
+        var seed = AuthoredProjectDocument.New().Session;
+        seed.EnsurePartSlots(install.BlockedPart, _ => AuthoredParts.Resolve(install.BlockedPart));
+        seed.EnsurePartSlots(install.AllowedPart, _ => AuthoredParts.Resolve(install.AllowedPart));
+        var (vm, session, root) = await Window(game, install, seed.Snapshot());
+        var status = new CapturedProgress();
+
+        await vm.OpenSubjectInBlenderAsync(CharacterName, OutfitStem, status);
+
+        string sessionFile = Assert.Single(Directory.GetFiles(root, "*.gf2session.json",
+            SearchOption.AllDirectories));
+        string opened = sessionFile[..^".gf2session.json".Length] + ".glb";
+        var parts = BlenderBridge.ReadSessionDocument(opened)!.Parts;
+        Assert.False(Assert.Single(parts, part => part.Name == PearlSlot).IsWritable);
+        Assert.True(Assert.Single(parts, part => part.Name == AllowedSlot).IsWritable);
+
+        string returned = Path.Combine(Path.GetDirectoryName(opened)!, AssetExporter.SessionSendGlbName);
+        var target = Assert.Single(BlenderBridge.ReadReturnTargets(returned));
+        Assert.Equal(AllowedSlot, target.Part);
+    }
+
     private static HashSet<string> SessionFiles(string root) =>
         Directory.GetFiles(root, "*.gf2session.json", SearchOption.AllDirectories)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -246,6 +293,44 @@ public sealed class BlenderOpenGateTests
         var character = new Character(1, CharacterName, "GateTestSSR", 100, 0,
             new List<Outfit> { outfit });
         return new GateInstall(vfs, model, character, blocked, allowed);
+    }
+
+    /// <summary>Like <see cref="Install"/> but the blocked part is a collapsed-points billboard (every
+    /// corner of its one triangle on a single position) with a healthy skin — refused by the
+    /// collapsed-points answer, not by <see cref="PartSkinGate.Blocked"/>.</summary>
+    private static GateInstall PearlInstall(TempGame game)
+    {
+        const string pearlHash = "33333333333333333333333333333333";
+        const string allowedHash = "44444444444444444444444444444444";
+        string abw = Path.Combine(game.Root, "AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+        long pearlPath = SyntheticBundle.BuildOneSkinnedMesh(
+            Path.Combine(abw, pearlHash + ".bundle"), PearlSlot,
+            new float[] { 1, 2, 3, 1, 2, 3, 1, 2, 3 }, Triangles, Bones);
+        long allowedPath = SyntheticBundle.BuildOneSkinnedMesh(
+            Path.Combine(abw, allowedHash + ".bundle"), AllowedSlot, Positions, Triangles, Bones);
+        var vfs = TestVfs.Create(game.Root,
+            Array.Empty<(string Address, string OwnerBundle)>(), null,
+            (PearlBundle, pearlHash), (AllowedBundle, allowedHash));
+        var pearl = new TargetPart
+        {
+            Subject = CharacterName, Outfit = OutfitStem, RendererSlot = PearlSlot,
+        };
+        var allowed = new TargetPart
+        {
+            Subject = CharacterName, Outfit = OutfitStem, RendererSlot = AllowedSlot,
+        };
+        var model = new SubjectModel(CharacterName, OutfitStem, SubjectSource.Prefab, new[]
+        {
+            new SubjectPart("pearl", PearlSlot, "", Array.Empty<SubjectMaterial>(),
+                MeshBundle: PearlBundle, MeshPathId: pearlPath),
+            new SubjectPart("body", AllowedSlot, "", Array.Empty<SubjectMaterial>(),
+                MeshBundle: AllowedBundle, MeshPathId: allowedPath),
+        }, Skeleton: null, Problems: Array.Empty<string>());
+        var outfit = new Outfit(100, OutfitStem, OutfitKind.Base);
+        var character = new Character(1, CharacterName, "GateTestSSR", 100, 0,
+            new List<Outfit> { outfit });
+        return new GateInstall(vfs, model, character, pearl, allowed);
     }
 
     private static object? GetField(MainWindowViewModel vm, string name) =>

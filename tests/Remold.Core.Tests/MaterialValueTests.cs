@@ -830,6 +830,28 @@ public sealed class MaterialValueTests : IDisposable
             .Split("material_state.Store(").Length - 1);
     }
 
+    // The emission test above proves the four writes are built. These prove the render-plan
+    // validation ACCEPTS them: the proof is per semantic over the whole component run, so a
+    // colour's components 1..3 are not each measured against the field's base offset.
+    [Theory]
+    [InlineData("_StockingCenterColor", "0.5 0.25 1 1")]
+    [InlineData("_StockingFalloffColor", "0.1 0.2 0.3 1")]
+    [InlineData("_Anisotropy", "2.5")]
+    public void A_material_value_patch_is_proved_by_its_render_contract(string semantic, string value)
+    {
+        var request = ProjectValueRequest(semantic, value);
+        var resolution = MaterialValueBuildSupport.Resolve(request,
+            Render(request.CurrentSlot, MaterialValueCatalog.UnityPerMaterial544,
+                semantic: semantic));
+
+        Assert.Equal(BuildPlanVerdict.Resolved, resolution.Decision.Verdict);
+        var errors = AuthoredRenderPlanValidator.OperationErrors(resolution,
+            BuildEmissionKind.MaterialValuePatch, BuildEmissionGate.Unconditional,
+            requireComplete: true);
+
+        Assert.Empty(errors);
+    }
+
     [Fact]
     public void A_field_absent_from_the_active_layout_refuses()
     {
@@ -1163,6 +1185,82 @@ public sealed class MaterialValueTests : IDisposable
     }
 
     [Fact]
+    public void One_colour_value_does_not_conflict_with_its_own_components_at_plan_scope()
+    {
+        var project = SourceProject();
+        var target = project.TargetSlots.Single(slot => slot.Id == "slot-gi");
+        target.Semantic = "_StockingCenterColor";
+        project.ProjectAssets.Add(ValueAsset("asset-colour", "values/colour.json",
+            "0.5 0.25 1 1", target.Semantic));
+        Directory.CreateDirectory(Path.Combine(_root, "values"));
+        File.WriteAllText(Path.Combine(_root, "values", "colour.json"), "0.5 0.25 1 1");
+        project.EditDefinitions[0].Bindings = new List<Binding>
+        {
+            AssetBinding("slot-geometry", "asset-geometry"),
+            AssetBinding(target.Id, "asset-colour"),
+        };
+
+        var plan = AuthoredBuildPlanner.Plan(project,
+            new MaterialBackend(MaterialValueCatalog.UnityPerMaterial544,
+                new MaterialFamilyValueReader())
+            {
+                RenderFactory = request => Render(request.CurrentSlot,
+                    MaterialValueCatalog.UnityPerMaterial544,
+                    semantic: request.CurrentSlot.Semantic!),
+            });
+
+        Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
+        Assert.DoesNotContain(plan.Conflicts,
+            conflict => conflict.Contains("has conflicting values", StringComparison.Ordinal));
+        var patch = Assert.IsType<MaterialConstantBufferPatch>(Assert.Single(plan.RuntimeEmissions,
+            emission => emission.Emission.Kind == BuildEmissionKind.MaterialValuePatch)
+            .Emission.MaterialPatch);
+        Assert.Equal(4, patch.Writes.Count);
+    }
+
+    [Theory]
+    [InlineData("0.5 0.25 1 1", false)]
+    [InlineData("0.5 0.25 0.75 1", true)]
+    public void Colour_values_on_one_draw_conflict_only_where_a_component_differs(
+        string secondValue, bool conflicts)
+    {
+        var project = SourceProject(new[] { 3, 3 });
+        var target = project.TargetSlots.Single(slot => slot.Id == "slot-gi");
+        target.Semantic = "_StockingCenterColor";
+        var second = Slot("slot-colour-second", target.Part, 1001, "body_skinuber",
+            target.Semantic);
+        second.SubmeshIndex = second.MaterialSlotIndex = 1;
+        project.TargetSlots.Add(second);
+        project.ProjectAssets.AddRange(new[]
+        {
+            ValueAsset("asset-first", "values/first.json", "0.5 0.25 1 1", target.Semantic),
+            ValueAsset("asset-second", "values/second.json", secondValue, target.Semantic),
+        });
+        Directory.CreateDirectory(Path.Combine(_root, "values"));
+        File.WriteAllText(Path.Combine(_root, "values", "first.json"), "0.5 0.25 1 1");
+        File.WriteAllText(Path.Combine(_root, "values", "second.json"), secondValue);
+        project.EditDefinitions[0].Bindings = new List<Binding>
+        {
+            AssetBinding("slot-geometry", "asset-geometry"),
+            AssetBinding(target.Id, "asset-first"),
+            AssetBinding(second.Id, "asset-second"),
+        };
+        var backend = new MaterialBackend(MaterialValueCatalog.UnityPerMaterial544,
+            new MaterialFamilyValueReader())
+        {
+            RenderFactory = request => Render(request.CurrentSlot,
+                MaterialValueCatalog.UnityPerMaterial544, contractId: request.RowId,
+                carrierSlot: target, semantic: request.CurrentSlot.Semantic!),
+        };
+
+        var plan = AuthoredBuildPlanner.Plan(project, backend);
+
+        Assert.Equal(conflicts, plan.Conflicts.Any(conflict =>
+            conflict.Contains("has conflicting values", StringComparison.Ordinal)));
+        Assert.Equal(!conflicts, plan.CanBuild);
+    }
+
+    [Fact]
     public void Shared_backend_contract_labels_do_not_conflict_across_distinct_draws()
     {
         var project = SourceProject(new[] { 3, 3 });
@@ -1395,15 +1493,17 @@ public sealed class MaterialValueTests : IDisposable
         ProjectAssetId = asset,
     };
 
-    private static ProjectAsset ValueAsset(string id, string file, string value) => new()
+    private static ProjectAsset ValueAsset(string id, string file, string value,
+        string semantic = MaterialValueSemantics.UseGiFlatten) => new()
     {
         Id = id,
         Kind = ProjectAssetKind.StructuredValue,
-        Label = "GI flatten " + value,
+        Label = semantic == MaterialValueSemantics.UseGiFlatten
+            ? "GI flatten " + value : semantic + " " + value,
         File = file,
         Value = new ProjectAssetValue
         {
-            Semantic = MaterialValueSemantics.UseGiFlatten,
+            Semantic = semantic,
             Value = value,
         },
     };

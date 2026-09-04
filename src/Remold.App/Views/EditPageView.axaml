@@ -334,7 +334,8 @@
               <!-- content edit: the map cards, grouped by material. The workbench's cards, at the new grain:
                    on an edit with vanilla geometry they address the game's own material, and once geometry is
                    replaced they address the replacement's own slots. A bare part's original maps come through
-                   the same template — same grain, same rule line, no verbs. -->
+                   the same template — same grain, same rule line, no verbs — and so does an edit's material
+                   row, whose MapGroups is its one group of the edit's pane. -->
               <ItemsControl ItemsSource="{Binding SelectedNode.MapGroups}"
                             IsVisible="{Binding SelectedNode.HasMapGroups}">
                 <ItemsControl.ItemTemplate>

@@ -9,19 +9,21 @@ using Remold.Core.Workbench;
 
 namespace Remold.App.ViewModels.EditPage;
 
-/// <summary>Drives which inspector shows, and the row glyph. The material level the workbench tree carried is
-/// gone: its cards live on the edit's inspector now, which is the whole point of the rework.</summary>
+/// <summary>Drives which inspector shows, and the row glyph. An edit's cards live on its own inspector;
+/// each of its materials is also a child row of the edit, whose inspector is that one material's slice of
+/// the same cards and shading row.</summary>
 public enum EditNodeKind
 {
     Subject,
     Part,
     Edit,
+    Material,
     Skeleton,
 }
 
-/// <summary>One row of the ② Edit tree — <b>subject → part → edits</b> — carrying that kind's inspector
-/// payload, so the tree is one template and the inspector one set of panels switched on
-/// <see cref="Kind"/>. The workbench's node idiom, at the new grain.</summary>
+/// <summary>One row of the ② Edit tree — <b>subject → part → edits → the edit's materials</b> — carrying
+/// that kind's inspector payload, so the tree is one template and the inspector one set of panels switched
+/// on <see cref="Kind"/>. The workbench's node idiom, at the new grain.</summary>
 public sealed partial class EditNodeVm : ObservableObject
 {
     public required EditNodeKind Kind { get; init; }
@@ -57,9 +59,18 @@ public sealed partial class EditNodeVm : ObservableObject
     public string Subject { get; init; } = "";
     public string Outfit { get; init; } = "";
 
-    /// <summary>This edit, in the form every seam call takes. Null on every other kind.</summary>
+    /// <summary>The edit this row addresses, in the form every seam call takes — the row itself on an edit,
+    /// the OWNING edit on one of its material rows. Null on every other kind.</summary>
     public EditRef? Edit => Part is not null && EditDefinitionId is not null
-        ? new EditRef(Part, EditDefinitionId, Title) : null;
+        ? new EditRef(Part, EditDefinitionId, EditRefLabel ?? Title) : null;
+
+    /// <summary>The owning edit's label, set on a material row — whose own <see cref="Title"/> is the
+    /// material's name, not the edit's. Null on an edit row, where the title IS the label.</summary>
+    public string? EditRefLabel { get; init; }
+
+    /// <summary>Which of the edit's material groups this row is, in pane order. Set on material rows so a
+    /// rebuild can put the selection back on the same material; -1 on every other kind.</summary>
+    public int MaterialOrdinal { get; init; } = -1;
 
     // ---- badges ----
 
@@ -199,6 +210,7 @@ public sealed partial class EditNodeVm : ObservableObject
     public bool IsSubject => Kind == EditNodeKind.Subject;
     public bool IsPart => Kind == EditNodeKind.Part;
     public bool IsEdit => Kind == EditNodeKind.Edit;
+    public bool IsMaterial => Kind == EditNodeKind.Material;
     public bool IsSkeleton => Kind == EditNodeKind.Skeleton;
 
     /// <summary>A hide edit carries no cards and no mesh of its own. Everything an edit's inspector says
@@ -228,11 +240,13 @@ public sealed partial class EditNodeVm : ObservableObject
     public bool ShowsMeshPreview => IsContentEdit || IsPart;
 
     /// <summary>The row glyph — a type marker, not a status badge. <c>✎</c> for a content edit, <c>∅</c> for
-    /// a hide edit, the workbench's own markers for a part and the skeleton.</summary>
+    /// a hide edit, <c>▧</c> for one of an edit's materials, the workbench's own markers for a part and the
+    /// skeleton.</summary>
     public string Glyph => Kind switch
     {
         EditNodeKind.Part => "◇",
         EditNodeKind.Edit => EditKind == EditDefinitionKind.Hide ? "∅" : "✎",
+        EditNodeKind.Material => "▧",
         EditNodeKind.Skeleton => "⌇",
         _ => "",
     };

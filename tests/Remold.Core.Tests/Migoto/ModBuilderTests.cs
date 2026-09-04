@@ -2929,6 +2929,35 @@ public class ModBuilderTests : IDisposable
             .GetProperty("key").GetString());
     }
 
+    /// <summary>A group that opted into persistence declares its key <c>persist</c> in the emitted ini —
+    /// the mod key too when the mod opted in — and the repair record carries the choice, so a read-back
+    /// can restore it. The rest of the build's keys stay per-session.</summary>
+    [Fact]
+    public void An_opted_in_group_builds_a_persist_key_and_records_the_choice()
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv(clothWearer: true));
+        var p = NewProject("RepairPersist");
+        AddEditedTexture(p);
+
+        var r = ModBuilder.Build(Authored(p, env, project =>
+            {
+                LongCycle(project, Slot("c_vesna01_body_lod0"), "F7");
+                project.KeyGroups.Single(group => ModKeys.SameKey(group.Key, "F7")).Persist = true;
+                project.Info.ToggleKey = "F6";
+                project.Info.PersistToggleKey = true;
+            }),
+            env, _out, zip: false);
+
+        var ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Contains("global persist $zz_key_f7 = 0\n", ini);
+        Assert.Contains("global persist $zz_key_f6 = 0\n", ini);
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "repair.json")));
+        var change = Assert.Single(doc.RootElement.GetProperty("changes").EnumerateArray());
+        var group = Assert.Single(change.GetProperty("key_groups").EnumerateArray());
+        Assert.True(group.GetProperty("persist").GetBoolean());
+    }
+
     /// <summary>A section body, up to the blank line that ends it. The header may be a prefix, for the
     /// sections whose name carries a generated part token.</summary>
     private static string IniSection(string ini, string header)
@@ -5867,7 +5896,7 @@ public class ModBuilderTests : IDisposable
     public void A_one_influence_part_still_pools_for_a_replace_on_itself()
     {
         // The rule is about whose pool it may join, not whether it can be replaced: its own Replace derives
-        // and builds exactly as any other pooled target, and the tie for the anchor goes to it.
+        // and builds exactly as any other pooled target, and the replaced part hosts the draw.
         var env = MakeSkinnedEnv(narrowAccessory: true);
         var p = NewProject("SwapNarrowSelf");
         WriteDonorGlb(bones: AccessoryBones);
@@ -5876,7 +5905,7 @@ public class ModBuilderTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, lines.Add, zip: false);
 
-        // the body tables the shared bone too, so both pool — and the tie lands on the replaced part
+        // the body tables the shared bone too, so both pool — and the draw lands on the replaced part
         Assert.Contains("pool (vesna_acc): c_vesna01_body_lod0, c_vesna01_acc_lod0 (anchor c_vesna01_acc_lod0)",
             r.Diagnostics);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
@@ -5884,6 +5913,28 @@ public class ModBuilderTests : IDisposable
         AssertEveryReferencedFileShips(ini, r.OutDir);
         Assert.Contains("CustomShaderConvert_vesna_acc", ini);
         Assert.DoesNotContain("Rigid", ini);
+    }
+
+    [Fact]
+    public void A_replacement_hosted_away_from_its_part_warns_about_the_foreign_material()
+    {
+        // The donor's weights reach only the body-exclusive bone, so the accessory's own Replace pools
+        // the body alone and the draw hosts there — the replacement renders in the body's material, and
+        // the modder hears it as a warning, never as a silently repainted mesh in game.
+        var env = MakeSkinnedEnv(narrowAccessory: true);
+        var p = NewProject("SwapForeignAnchor");
+        WriteDonorGlb(bones: new[] { 0x00000102u });
+        AddReplaceTarget(p, "c_vesna01_acc_lod0");
+
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        Assert.Contains("pool (vesna_acc): c_vesna01_body_lod0 (anchor c_vesna01_body_lod0)",
+            r.Diagnostics);
+        var warning = Assert.Single(r.Warnings, w => w.Contains("original material"));
+        Assert.Equal("The new mesh for 'c_vesna01_acc_lod0' uses no bone that part moves, so it is "
+            + "drawn as part of 'c_vesna01_body_lod0' and shows that part's original material. To use "
+            + "the edited part's own material, weight the new mesh to bones that 'c_vesna01_acc_lod0' "
+            + "moves.", warning);
     }
 
     [Theory]

@@ -179,7 +179,8 @@ public class TierEmissionTests : IDisposable
 
         var map = File.ReadAllBytes(Path.Combine(outDir, "alpha_lod1_map_swap.buf"));
         Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 4));
-        Assert.Empty(result.Warnings);
+        // the sentinel itself warns of nothing; the tier lacking B is the tier tie's warning, not this one's
+        Assert.All(result.Warnings, w => Assert.Contains("moves less naturally", w));
     }
 
     [Fact]
@@ -265,7 +266,7 @@ public class TierEmissionTests : IDisposable
 
         var result = new MigotoEmitter().Build(req);
 
-        string warning = Assert.Single(result.Warnings);
+        string warning = Assert.Single(result.Warnings, w => w.Contains("does not show some geometry"));
         Assert.Equal(
             "'cloth1' does not show some geometry from 'shoes', 'hair', and 2 more parts at longer view distances. "
             + "The build log names the bones.",
@@ -312,7 +313,7 @@ public class TierEmissionTests : IDisposable
         Assert.Equal(
             "'cloth1' does not show some geometry from 'shoes' at longer view distances. "
             + "The build log names the bones.",
-            Assert.Single(result.Warnings));
+            Assert.Single(result.Warnings, w => w.Contains("does not show some geometry")));
         string diagnostic = Assert.Single(result.Diagnostics,
             d => d.StartsWith("MERGED tier geometry:", StringComparison.Ordinal));
         Assert.Contains("affected part 'cloth1'; tier mesh 'cloth1_lod1'; owning parts 'shoes'", diagnostic);

@@ -10,14 +10,17 @@ namespace Remold.Core.Migoto;
 
 /// <summary>
 /// Derives a Replace verb's recovery <b>pool</b> from the donor's weights: the outfit parts owning the
-/// bones the donor actually uses. Which mesh gets <i>replaced</i> decides membership nowhere; it breaks a
-/// tie for the anchor, and it is what <see cref="PoolCandidates"/> admits a narrow part for.
+/// bones the donor actually uses. Which mesh gets <i>replaced</i> decides membership nowhere; it takes
+/// the anchor when it can, and it is what <see cref="PoolCandidates"/> admits a narrow part for.
 ///
 /// <para>Pool order is ROSTER order, because the union bone order is built first-seen over the pool
 /// (<see cref="SwapCompile.BuildUnionOrder"/>) and a stable input order is what makes rebuilds
-/// reproducible. The anchor (hosts convert+skin+draw) defaults to the pool part owning the most
-/// donor-used bones, ties to the replaced part when it is one of them and to the LAST in roster order
-/// otherwise; an explicit override wins. A donor bone owned by NO roster part fails loudly — silently
+/// reproducible. The anchor (hosts convert+skin+draw) is the REPLACED part whenever it poses any
+/// donor-used bone: the donor renders in the anchor's material — shader, blend state, stock maps, toon
+/// ramp — and only the part the author edited carries the one they picked. A target outside its own
+/// pool, or posing none of the donor's bones, leaves the draw to the pool part owning the most
+/// donor-used bones, ties to the LAST in roster order — a foreign-material draw its caller owes the
+/// modder a warning for. An explicit override wins over both. A donor bone owned by NO roster part fails loudly — silently
 /// dropping influences would deform the donor — and so does one every owner merely TABLES, since a bone
 /// no pooled part poses has no sound palette row for the donor's vertices to ride. A bone a coverage GROUP
 /// certifies answers both refusals: it rides an appended palette slot of its own outside the union, written
@@ -538,21 +541,29 @@ public static class PoolDerive
                     $"anchor override '{anchorOverride}' is not a pool part (pool: {string.Join(", ", pool)})");
             anchor = pool.First(p => string.Equals(p, anchorOverride, StringComparison.OrdinalIgnoreCase));
         }
+        // The REPLACED part hosts the draw whenever it can feed recovery at all. The anchor's draw is the
+        // one the donor renders in — shader, blend state, stock maps, toon ramp — and only the part the
+        // author edited carries the material they picked; a sibling anchor repaints the replacement in a
+        // foreign material with nothing on screen saying so (the Leva legs drawn as stocking glass,
+        // 2026-08-30). Bone counts rank nothing here: anchor-preferred ownership
+        // (PoolMath.PreferAnchorOwnership) re-owns every soundly recovered row to whichever part anchors,
+        // so the count a ranking would read is an artifact of the pick, not a reason for it. POSING one
+        // donor-used bone is the eligibility floor — recovery converts every foreign row through the
+        // anchor's own captured constants, and a target with no recoverable row of its own would refuse
+        // at emission as an anchor without draw-space constants.
+        else if (replacedPart is not null
+            && pooled.FirstOrDefault(p => string.Equals(p.Mesh, replacedPart, StringComparison.OrdinalIgnoreCase))
+               is { } target
+            && used.Any(target.Posed.Contains))
+            anchor = target.Mesh;
         else
         {
-            // dominant part; ties → last in roster order
+            // dominant part; ties → last in roster order. Reached only for a target outside its own pool
+            // (or posing none of the donor's bones): the draw hosts at a sibling, whose material the
+            // replacement wears — the caller owes the modder that disclosure (ModBuilder warns).
             anchor = pool[0];
             foreach (var p in pool)
                 if (counts[p] >= counts[anchor]) anchor = p;
-            // …except that the REPLACED part takes a tie it is in. The anchor hosts the donor's draw, so a
-            // tie resolved onto a sibling sends the replacement to a mesh the author didn't pick — and where
-            // the two are mutually exclusive draws it lands where nothing renders. A donor riding one bone
-            // ties with every part tabling it, which is how often this decides nothing else.
-            if (replacedPart is not null
-                && pool.FirstOrDefault(p => string.Equals(p, replacedPart, StringComparison.OrdinalIgnoreCase))
-                   is { } target
-                && counts[target] == counts[anchor])
-                anchor = target;
         }
         return new Result(pool, anchor, counts) { GroupCovered = admitted };
     }

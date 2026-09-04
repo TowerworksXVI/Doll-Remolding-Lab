@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -201,6 +201,15 @@ public sealed partial class EditPageVm : ObservableObject
         var keepKind = SelectedNode?.Kind;
         string keepSubject = SelectedNode?.Subject ?? "";
         string keepOutfit = SelectedNode?.Outfit ?? "";
+        int keepMaterial = SelectedNode?.MaterialOrdinal ?? -1;
+        // Which edits' material branches are open. An edit row starts collapsed — the material level is a
+        // drill-down, not the tree's resting shape — so an open one is the modder's own doing and survives
+        // the redraw, the way the selection does.
+        var openEdits = Flatten(Nodes)
+            .Where(node => node.IsEdit && node.IsExpanded && node.Children.Count > 0
+                && node.Part is not null && node.EditDefinitionId is not null)
+            .Select(node => EditBusy(node.Part!, node.EditDefinitionId!))
+            .ToHashSet(StringComparer.Ordinal);
 
         foreach (var node in Nodes) node.Release();
         Nodes.Clear();
@@ -218,13 +227,26 @@ public sealed partial class EditPageVm : ObservableObject
 
         IsEmpty = Nodes.Count == 0;
         OnPropertyChanged(nameof(HasNodes));
+        foreach (var node in Flatten(Nodes))
+            if (node.IsEdit && node.Children.Count > 0
+                && openEdits.Contains(EditBusy(node.Part!, node.EditDefinitionId!)))
+                node.IsExpanded = true;
         ApplyFilter();
         ShowBusy();
-        RestoreSelection(keepPart, keepEdit, keepKind, keepSubject, keepOutfit);
+        RestoreSelection(keepPart, keepEdit, keepKind, keepSubject, keepOutfit, keepMaterial);
     }
 
-    private void Reselect(TargetPart part, string? editId, EditNodeKind? kind) =>
+    private void Reselect(TargetPart part, string? editId, EditNodeKind? kind)
+    {
+        // A verb run from one of the edit's material rows leaves the modder on it. The verbs name the EDIT
+        // because that is what they write through; the material row is the same edit at one material, and
+        // the rebuild's own restore has already put the selection back there.
+        if (kind == EditNodeKind.Edit && SelectedNode is { IsMaterial: true, Part: { } onPart } material
+            && onPart.SameAs(part)
+            && string.Equals(material.EditDefinitionId, editId, StringComparison.Ordinal))
+            return;
         RestoreSelection(part, editId, kind, "", "");
+    }
 
     /// <summary>Select one part's row from ANOTHER surface — ③ Build's row → Edit hop. The tree is a fresh
     /// read of the session and is rebuilt whenever the step is entered, so the row is found by identity here
@@ -261,27 +283,44 @@ public sealed partial class EditPageVm : ObservableObject
     /// dropped the row it was on means; a hop asked for from another surface keeps what is there instead and
     /// reports, which is why the search itself is <see cref="Locate"/>.</summary>
     private void RestoreSelection(TargetPart? part, string? editId, EditNodeKind? kind, string subject,
-        string outfit)
+        string outfit, int materialOrdinal = -1)
     {
         // Marked as the page's own doing, not the modder's: a rebuild puts the selection back on the row it
         // was on, and anything that treats that as arriving on the row would run again on the redraw its
         // own work causes. What the modder selecting a row is allowed to do is in OnSelectedNodeChanged.
         _restoringSelection = true;
-        try { SelectedNode = Locate(part, editId, kind, subject, outfit); }
+        try
+        {
+            SelectedNode = Locate(part, editId, kind, subject, outfit, materialOrdinal);
+            // A selection landed on a material row is under its edit's expander; a restore that left the
+            // branch closed would select a row the tree does not show.
+            if (SelectedNode is { IsMaterial: true, Part: { } onPart } material)
+                Flatten(Nodes).FirstOrDefault(n => n.IsEdit && n.Part is not null && n.Part.SameAs(onPart)
+                        && string.Equals(n.EditDefinitionId, material.EditDefinitionId,
+                            StringComparison.Ordinal))
+                    ?.IsExpanded = true;
+        }
         finally { _restoringSelection = false; }
     }
 
     private bool _restoringSelection;
 
-    /// <summary>The row one identity names, or null. A part or edit is found by its own identity; a subject
-    /// or its skeleton row by which subject's branch it belongs to, since neither carries a part.</summary>
+    /// <summary>The row one identity names, or null. A part or edit is found by its own identity, an edit's
+    /// material row by its place in the edit's pane; a subject or its skeleton row by which subject's branch
+    /// it belongs to, since neither carries a part. A material the edit no longer has falls back to the edit
+    /// row, and a gone edit to its part — the nearest surface that still exists.</summary>
     private EditNodeVm? Locate(TargetPart? part, string? editId, EditNodeKind? kind, string subject,
-        string outfit)
+        string outfit, int materialOrdinal = -1)
     {
         var rows = Flatten(Nodes).ToList();
         if (part is not null)
             return rows.FirstOrDefault(n => n.Kind == kind && n.Part is not null && n.Part.SameAs(part)
-                    && string.Equals(n.EditDefinitionId, editId, StringComparison.Ordinal))
+                    && string.Equals(n.EditDefinitionId, editId, StringComparison.Ordinal)
+                    && (kind != EditNodeKind.Material || n.MaterialOrdinal == materialOrdinal))
+                ?? (kind == EditNodeKind.Material
+                    ? rows.FirstOrDefault(n => n.IsEdit && n.Part is not null && n.Part.SameAs(part)
+                        && string.Equals(n.EditDefinitionId, editId, StringComparison.Ordinal))
+                    : null)
                 ?? rows.FirstOrDefault(n => n.IsPart && n.Part is not null && n.Part.SameAs(part));
         return kind is EditNodeKind.Subject or EditNodeKind.Skeleton
             ? rows.FirstOrDefault(n => n.Kind == kind
@@ -501,6 +540,34 @@ public sealed partial class EditPageVm : ObservableObject
             // The edit inspector carries the same two Blender opens, so it carries the same gate.
             node.MeshEditBlock = _meshEditBlocks.TryGetValue(Key(part), out string? meshBlock)
                 ? meshBlock : null;
+
+            // Each of the edit's own materials is also a child row, closed by default, whose inspector is
+            // that one material's slice of the pane above: the SAME group object, so its cards, thumbs and
+            // shading row are the edit's rather than copies of them. The materials are the edit's — the
+            // groups its pane draws — not a stock enumeration, so a replacement lists what its ranges fold
+            // onto. The branch starts collapsed; RebuildLocked re-opens the rows the modder had open.
+            for (int m = 0; m < node.MapGroups.Count; m++)
+            {
+                var group = node.MapGroups[m];
+                var material = new EditNodeVm
+                {
+                    Kind = EditNodeKind.Material,
+                    Title = group.Title,
+                    Part = part,
+                    EditDefinitionId = edit.Id,
+                    EditKind = edit.Kind,
+                    EditRefLabel = edit.Label,
+                    MaterialOrdinal = m,
+                    Subject = part.Subject,
+                    Outfit = part.Outfit,
+                    InspectorHeader = $"{Token(part)} · {edit.Label} · {group.Title}",
+                };
+                material.InspectorDetail =
+                    $"material {m + 1} of {node.MapGroups.Count} on {edit.Label}";
+                material.MapGroups.Add(group);
+                node.Children.Add(material);
+            }
+            if (node.Children.Count > 0) node.IsExpanded = false;
         }
         return node;
     }
@@ -1309,6 +1376,17 @@ public sealed partial class EditPageVm : ObservableObject
             if (card.PreviewKey.StartsWith(prefix, StringComparison.Ordinal)) card.ReleaseThumb();
     }
 
+    /// <summary>Ask again for whatever the selected row draws. The verbs that invalidate a picture BY NAME
+    /// do it after their session change — whose event has already rebuilt the tree, restored the selection
+    /// and started that row's preview loads — so the invalidation lands on the restored row and cancels
+    /// those in-flight requests. Without this the row sits in its loading shimmer until the modder selects
+    /// away and back. Every load is memoized behind its row's request id, so a picture the invalidation did
+    /// not touch costs a no-op.</summary>
+    private void ReloadSelectedPreviews()
+    {
+        if (SelectedNode is { } showing) _ = LoadPreviewsAsync(showing);
+    }
+
     partial void OnSelectedNodeChanged(EditNodeVm? value)
     {
         if (value is null) return;
@@ -1454,8 +1532,13 @@ public sealed partial class EditPageVm : ObservableObject
             else
                 await _shell.OpenInBlenderAsync(edit, withReferences, _progress);
             // A session that came home may have changed this edit's geometry, so its render is dropped rather
-            // than kept as the answer to a question that has moved on.
-            if (edit is not null) InvalidateMesh(part, edit.EditDefinitionId);
+            // than kept as the answer to a question that has moved on — and re-asked for right away, since
+            // the row is still on screen.
+            if (edit is not null)
+            {
+                InvalidateMesh(part, edit.EditDefinitionId);
+                ReloadSelectedPreviews();
+            }
         }
         catch (Exception e) { Status = AuthoredRefusal.ForScreen(e,
             node.IsPart ? "open this part in Blender" : "open this edit in Blender"); }
@@ -1487,6 +1570,7 @@ public sealed partial class EditPageVm : ObservableObject
                     change.ChooseTargetGameValue(edit.EditDefinitionId, slotId);
             });
             InvalidateMesh(part, edit.EditDefinitionId);
+            ReloadSelectedPreviews();
             return $"{edit.Label} is back to the original mesh.";
         });
     }
@@ -1556,7 +1640,10 @@ public sealed partial class EditPageVm : ObservableObject
     [RelayCommand]
     private void CommitRename(EditNodeVm? node)
     {
-        if (_session is null || node?.Edit is not { } edit || node.Part is null) return;
+        // Only an edit row owns the rename box. A material row also addresses its edit, but its EditLabel
+        // is nothing anyone typed — committing it would blank the edit's name.
+        if (_session is null || node is not { IsRenameable: true } || node.Edit is not { } edit
+            || node.Part is null) return;
         if (string.Equals(node.EditLabel, edit.Label, StringComparison.Ordinal)) return;
         var part = node.Part;
         Mutate(part, EditBusy(part, edit.EditDefinitionId), EditIsBusy(part, edit.EditDefinitionId),
@@ -1779,10 +1866,12 @@ public sealed partial class EditPageVm : ObservableObject
                 {
                     _session.ChooseInheritedCarrier(slot.Edit.EditDefinitionId, slot.SlotId);
                     InvalidateThumbs(slot.SlotId);
+                    ReloadSelectedPreviews();
                     return "Cleared the toon ramp choice. The replacement uses the original part's toon ramp again.";
                 }
                 _session.ChooseTargetGameValue(slot.Edit.EditDefinitionId, slot.SlotId);
                 InvalidateThumbs(slot.SlotId);
+                ReloadSelectedPreviews();
                 return $"{card.MapLabel} is back to the original.";
             },
             after: () => Reselect(slot.Edit.Part, slot.Edit.EditDefinitionId, EditNodeKind.Edit));
@@ -1831,6 +1920,7 @@ public sealed partial class EditPageVm : ObservableObject
                     slot.GameMaterialSlotIndex ?? slot.MaterialSlotIndex ?? 0));
         InvalidateThumbs(slot.SlotId);
         Reselect(slot.Edit.Part, slot.Edit.EditDefinitionId, EditNodeKind.Edit);
+        ReloadSelectedPreviews();
         Status = KeptGameOwnRamp;
     }
 
@@ -2148,11 +2238,15 @@ public sealed partial class EditPageVm : ObservableObject
         string consequence = card.Sharing == EditTextureSharing.Shared
             ? "\n\n" + EditMapCardVm.SharedConsequence(card.SharingUses!.Value)
             : "";
+        // The sizes come off the card's own line and the dropped file's header, so a picture that does not
+        // match the map is said before it is taken, never after.
+        string size = EditMapCardVm.SizeNote(Remold.Core.Textures.PngInfo.TryPngSize(path),
+            EditMapCardVm.ParseDimensions(card.Dimensions)) is { } note ? " " + note : "";
         bool confirmed;
         try
         {
             confirmed = await _shell.ConfirmAsync($"Apply {name}?",
-                $"{name} becomes this part's {map}. {AddsFirstEdit}{consequence}", "Apply");
+                $"{name} becomes this part's {map}. {AddsFirstEdit}{size}{consequence}", "Apply");
         }
         catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "apply this image"); return; }
         if (!confirmed) return;
@@ -2218,6 +2312,7 @@ public sealed partial class EditPageVm : ObservableObject
         slot = produced.Target ?? slot;
         InvalidateThumbs(slot.SlotId);
         Reselect(slot.Edit.Part, slot.Edit.EditDefinitionId, EditNodeKind.Edit);
+        ReloadSelectedPreviews();
         // Named exactly as the question that led here named it — the map, on its material.
         string name = string.IsNullOrWhiteSpace(produced.Label)
             ? Path.GetFileName(produced.ProjectRelativeFile) : produced.Label.Trim();

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
@@ -625,6 +625,11 @@ public class SessionRiggedGlbCacheTests
                 new TextureTransportOverride(1, "_Mask", mapB, MapKind.Rmo),
             } },
             plan with { TextureMaps = plan.TextureMaps!.Reverse().ToArray() },
+            // the primitive a replacement's picture is authored for, and the label Blender lists it under
+            plan with { TextureMaps = plan.TextureMaps!.Select((row, index) =>
+                index == 0 ? row with { PrimitiveIndex = 1 } : row).ToArray() },
+            plan with { TextureMaps = plan.TextureMaps!.Select((row, index) =>
+                index == 0 ? row with { Label = "Painted" } : row).ToArray() },
         };
         int miss = 0;
         foreach (var mutation in planMutations)
@@ -648,7 +653,7 @@ public class SessionRiggedGlbCacheTests
                 g.At(Path.Combine("misses", (++miss).ToString(), "body.glb"))));
         }
         string otherSpec = MainWindowViewModel.PreparedPartArtifactKey(identity, plan,
-            "prepared-part-workspace-v2")!;
+            "prepared-part-workspace-other")!;
         Assert.NotEqual(baseline, otherSpec);
         Assert.False(cache.TryServePrepared(identity, current, otherSpec,
             g.At(Path.Combine("misses", (++miss).ToString(), "body.glb"))));

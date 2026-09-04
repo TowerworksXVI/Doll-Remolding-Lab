@@ -16,19 +16,22 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class PackedNormalExportTests
 {
-    /// <summary>2 verts, Normal stored 4-wide with DISTINCT 4th components, so a mis-stride visibly
-    /// corrupts vertex 1's normal — (7,1,0) instead of (1,0,0) under a stride-3 read.</summary>
+    /// <summary>3 verts, Normal stored 4-wide with DISTINCT 4th components, so a mis-stride visibly
+    /// corrupts vertex 1's normal — (7,1,0) instead of (1,0,0) under a stride-3 read. The triangle is a
+    /// real one (three distinct vertices): a face naming a vertex twice would be re-pointed at split
+    /// copies on export (<see cref="MeshGltf.SplitDuplicateFaces"/>), which is not this test's
+    /// subject.</summary>
     private static UnityMesh PackedNormalMesh() => new()
     {
         Name = "c_packed_export",
-        VertexCount = 2,
+        VertexCount = 3,
         Channels = new Dictionary<string, float[]>
         {
-            ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 },
-            ["Normal"] = new float[] { 0, 1, 0, 7, /*v1*/ 1, 0, 0, 9 },
+            ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0, 0, 10, 0 },
+            ["Normal"] = new float[] { 0, 1, 0, 7, /*v1*/ 1, 0, 0, 9, /*v2*/ 0, 0, 1, 5 },
         },
         Dims = new Dictionary<string, int> { ["Vertex"] = 3, ["Normal"] = 4 },
-        Submeshes = new List<int[]> { new[] { 0, 1, 0 } },
+        Submeshes = new List<int[]> { new[] { 0, 1, 2 } },
     };
 
     [Fact]
@@ -64,10 +67,11 @@ public class PackedNormalExportTests
             var model = ModelRoot.Load(path);
             var normals = model.LogicalMeshes[0].Primitives[0].GetVertexAccessor("NORMAL")!.AsVector3Array();
 
-            // AxisConvention.Normal negates X then normalizes; both inputs are already unit here.
-            Assert.Equal(2, normals.Count);
+            // AxisConvention.Normal negates X then normalizes; all inputs are already unit here.
+            Assert.Equal(3, normals.Count);
             AssertVec(new Vector3(0, 1, 0), normals[0]);
             AssertVec(new Vector3(-1, 0, 0), normals[1]);   // a stride-3 read would export ~(-0.99, 0.14, 0) garbage here
+            AssertVec(new Vector3(0, 0, 1), normals[2]);
         }
         finally { try { File.Delete(path); } catch { } }
     }

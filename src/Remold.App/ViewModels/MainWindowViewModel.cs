@@ -123,6 +123,10 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>Tier-1 toggle key for the whole mod. Null = no key, always on.</summary>
     [ObservableProperty] private string? _packageToggleKey;
 
+    /// <summary>Whether the whole-mod on/off position survives a game restart. Shown only while a key is
+    /// set; the choice is kept when the key is cleared, so re-binding one does not forget it.</summary>
+    [ObservableProperty] private bool _packagePersistToggleKey;
+
     /// <summary>Whether a future build should ship the record that lets this project be imported again.
     /// Defaults on, and a project saved before the option existed loads on.</summary>
     [ObservableProperty] private bool _packageIncludesRepairData = true;
@@ -319,6 +323,7 @@ public partial class MainWindowViewModel : ObservableObject
         PackageVersion = "1.0";
         PackageAuthor = _settings.Author;
         PackageToggleKey = null;
+        PackagePersistToggleKey = false;
         PackageIncludesRepairData = _settings.IncludeRepairData;
         _loadingIdentityForm = false;
         BuildPage.IdentityChanged();
@@ -418,6 +423,7 @@ public partial class MainWindowViewModel : ObservableObject
         PackageDescription = info.Description ?? "";
         PackageVersion = string.IsNullOrWhiteSpace(info.Version) ? "1.0" : info.Version;
         PackageToggleKey = ModKeys.Normalize(info.ToggleKey);
+        PackagePersistToggleKey = info.PersistToggleKey;
         PackageIncludesRepairData = info.IncludeRepairData;
         _loadingIdentityForm = false;
         BuildPage.IdentityChanged();
@@ -950,12 +956,13 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>The identity form reduced to what the project serializes: blanks take defaults, the rest
     /// trimmed, and the key normalized.</summary>
     private (string Name, string Version, string? Author, string? Description, string? ToggleKey,
-        bool IncludeRepairData) IdentityForm() => (
+        bool PersistToggleKey, bool IncludeRepairData) IdentityForm() => (
         ProjectName,
         string.IsNullOrWhiteSpace(PackageVersion) ? "1.0" : PackageVersion.Trim(),
         string.IsNullOrWhiteSpace(PackageAuthor) ? null : PackageAuthor.Trim(),
         string.IsNullOrWhiteSpace(PackageDescription) ? null : PackageDescription.Trim(),
         ModKeys.Normalize(PackageToggleKey),
+        PackagePersistToggleKey,
         PackageIncludesRepairData);
 
     /// <summary>Copy the mod-identity form into the project's own <see cref="ProjectInfo"/>.</summary>
@@ -970,12 +977,14 @@ public partial class MainWindowViewModel : ObservableObject
             && string.Equals(info.Author, form.Author, StringComparison.Ordinal)
             && string.Equals(info.Description, form.Description, StringComparison.Ordinal)
             && string.Equals(info.ToggleKey, form.ToggleKey, StringComparison.Ordinal)
+            && info.PersistToggleKey == form.PersistToggleKey
             && info.IncludeRepairData == form.IncludeRepairData
             && string.Equals(info.Character, character, StringComparison.Ordinal)
             && string.Equals(info.Outfit, outfit, StringComparison.Ordinal))
             return;
         EditProject(session => session.SetIdentity(form.Name, form.Version, form.Author,
-            form.Description, form.ToggleKey, form.IncludeRepairData, character, outfit));
+            form.Description, form.ToggleKey, form.IncludeRepairData, character, outfit,
+            form.PersistToggleKey));
     }
 
     /// <summary>Autosave after a meaningful step, once a folder exists. A failure must NOT pass silently:
@@ -1038,6 +1047,8 @@ public partial class MainWindowViewModel : ObservableObject
     partial void OnPackageIncludesRepairDataChanged(bool value)
         => OnIdentityEdited();
     partial void OnPackageToggleKeyChanged(string? value)
+        => OnIdentityEdited();
+    partial void OnPackagePersistToggleKeyChanged(bool value)
         => OnIdentityEdited();
 
     /// <summary>An identity field changed: re-run the naming preview, mark dirty and autosave through the

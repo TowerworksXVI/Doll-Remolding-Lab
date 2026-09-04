@@ -452,4 +452,36 @@ void main(uint3 tid : SV_DispatchThreadID){
     /// <summary>Stamp the skin shader with the body vertex count.</summary>
     public static string EmitSkin(int vcount) =>
         Lf(SkinTemplate).Replace("%(VCOUNT)d", vcount.ToString());
+
+    public const string TierTieFillTemplate =
+@"// The tier tie for one LOD level of a pipeline. Each PAIR row is a donor-weighted union row that the
+// tier chain at this level writes NOTHING for: the level's mesh does not rig the bone (or its recovery
+// there sentinelled to lod0), so the row would otherwise stand at whatever the last lod0-tier frame
+// recovered, or at the identity seed. It is filled with a verbatim copy of a row this level DOES write,
+// the co-riding bone chosen at build time — palette rows are combined bind->posed affines, so a copy is
+// the rigid ride. Runs after the witness convert and before the skin in this level's chain only.
+// Source rows are read from a COPY of the converted palette, never the UAV (cs_5_0 has no
+// 4-component typed UAV load).
+StructuredBuffer<float4> palIn  : register(t0);   // the CONVERTED palette, pre-fill
+RWStructuredBuffer<float4> palOut : register(u1);
+static const uint PAIRS=%(P)d;
+static const uint2 PAIR[%(PT)d] = { %(PAIRLIST)s };   // x = tied union slot, y = source union slot
+[numthreads(64,1,1)]
+void main(uint3 tid : SV_DispatchThreadID){
+    uint i=tid.x; if(i>=PAIRS*4) return;
+    uint p=i>>2, comp=i&3;
+    palOut[(PAIR[p].x<<2)|comp]=palIn[(PAIR[p].y<<2)|comp];
+}
+";
+
+    /// <summary>Stamp one LOD level's tier-tie shader: (tied, source) union-slot pairs in ascending tied-slot
+    /// order. Never stamped empty — a level with no orphan row gets no shader and no run.</summary>
+    public static string EmitTierTieFill(IReadOnlyList<(uint Tied, uint Source)> pairs)
+    {
+        if (pairs.Count == 0) throw new ArgumentException("a tier tie needs at least one pair", nameof(pairs));
+        return Lf(TierTieFillTemplate)
+            .Replace("%(PAIRLIST)s", string.Join(", ", pairs.Select(p => $"uint2({p.Tied},{p.Source})")))
+            .Replace("%(PT)d", pairs.Count.ToString())
+            .Replace("%(P)d", pairs.Count.ToString());
+    }
 }

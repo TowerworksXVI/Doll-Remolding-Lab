@@ -317,6 +317,11 @@ public sealed record PoolBuildRequest
     /// on. See <see cref="ModKeys"/>.</summary>
     public string? ToggleKey { get; init; }
 
+    /// <summary>Whether the whole-mod on/off position survives a game restart: the mod key's variable is
+    /// declared <c>persist</c>, so the runtime saves it on exit and restores it at the next launch.
+    /// Meaningless without <see cref="ToggleKey"/>.</summary>
+    public bool PersistToggleKey { get; init; }
+
     /// <summary>Per-hide toggle keys, by the hide's own ib hash (tier 2) — the OR-list of key positions
     /// demanding that draw suppressed, one guarded <c>handling = skip</c> each. A hash with no entry hides
     /// unconditionally.</summary>
@@ -1020,6 +1025,7 @@ public sealed partial class MigotoEmitter
         IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? SuppressWhen,
         List<GroupMemberEmission> GroupMembers,
         List<GroupMemberClaim> GroupClaims, List<(string Part, int Pairs)> Ties,
+        IReadOnlyDictionary<string, int> TierTies,
         IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes, DrawShapeSet? AnchorShapes);
 
     /// <summary>One wardrobe-group member draw the ini carries a fused section for: the emission name its
@@ -1177,6 +1183,109 @@ public sealed partial class MigotoEmitter
             ties.Add((parts[owner], pairs.Count + seeds.Count));
         }
         return ties;
+    }
+
+    /// <summary>One tier's orphan rows and their copy sources. An orphan is a donor-WEIGHTED union row the
+    /// tier's part owns that the tier writes no row for: its scatter map names no bone for it, because the
+    /// tier's rig lacks the bone or the bone's recovery there fell back to the sentinel. The source is a
+    /// row the same tier DOES write into the union, chosen on the part's lod0 skin — the co-riding bone
+    /// with the most shared weight, else the nearest by weighted support centroid, else the tier's first
+    /// written row — so the fill is the rigid ride the game's own lower-detail mesh approximates. Rows
+    /// redirected to a reserved witness slot are not sources: the chain writes the slot, not the row.
+    /// Pairs are (tied, source) compact union rows in ascending tied order.</summary>
+    static List<(uint Tied, uint Source)> TierOrphanTies(string tierName, uint[] scatter,
+        PoolMath.UnionResult union, int owner, HashSet<int> donorRows, StreamsLoad lod0, uint[] lod0Hashes,
+        List<string> diagnostics)
+    {
+        int ub = union.UnionHashes.Length;
+        var written = new SortedSet<int>();
+        foreach (uint s in scatter)
+            if (s != PoolMath.Sentinel && s < (uint)ub) written.Add((int)s);
+        var pairs = new List<(uint, uint)>();
+        if (written.Count == 0) return pairs;
+
+        int n = lod0.P.GetLength(0);
+        // lod0-local bone of each written row (a row the lod0 rig lacks has no co-weight and no support)
+        var localOf = new Dictionary<int, int>();
+        foreach (int s in written)
+        {
+            int ls = Array.IndexOf(lod0Hashes, union.UnionHashes[s]);
+            if (ls >= 0) localOf[s] = ls;
+        }
+        double[,]? centroid = null;
+        double[]? wsum = null;
+        void Support()
+        {
+            if (centroid is not null) return;
+            centroid = new double[lod0.Nb, 3];
+            wsum = new double[lod0.Nb];
+            for (int v = 0; v < n; v++)
+                for (int k = 0; k < 4; k++)
+                {
+                    double w = lod0.W[v, k];
+                    if (w <= 0) continue;
+                    int b = lod0.BI[v, k];
+                    wsum[b] += w;
+                    for (int j = 0; j < 3; j++) centroid[b, j] += w * lod0.P[v, j];
+                }
+            for (int b = 0; b < lod0.Nb; b++)
+                if (wsum[b] > 0)
+                    for (int j = 0; j < 3; j++) centroid[b, j] /= wsum[b];
+        }
+
+        for (int u = 0; u < ub; u++)
+        {
+            if (union.Owner[u] != owner || !donorRows.Contains(u) || written.Contains(u)) continue;
+            uint hash = union.UnionHashes[u];
+            int local = Array.IndexOf(lod0Hashes, hash);
+            var co = new Dictionary<int, double>();
+            if (local >= 0)
+                for (int v = 0; v < n; v++)
+                {
+                    double wb = 0;
+                    for (int k = 0; k < 4; k++)
+                        if (lod0.BI[v, k] == local && lod0.W[v, k] > wb) wb = lod0.W[v, k];
+                    if (wb <= 0) continue;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        if (lod0.W[v, k] <= 0 || lod0.BI[v, k] == local) continue;
+                        foreach (var (s, ls) in localOf)
+                            if (ls == lod0.BI[v, k]) co[s] = co.GetValueOrDefault(s) + wb * lod0.W[v, k];
+                    }
+                }
+            int best = -1;
+            double bestScore = 0;
+            foreach (int s in written)
+                if (co.GetValueOrDefault(s) > bestScore) { bestScore = co[s]; best = s; }
+            string how;
+            if (best >= 0 && bestScore >= TieCoWeightFloor) how = "co-riding";
+            else
+            {
+                best = -1;
+                Support();
+                if (local >= 0 && wsum![local] > 0)
+                {
+                    double bestD = double.MaxValue;
+                    foreach (var (s, ls) in localOf)
+                    {
+                        if (wsum[ls] <= 0) continue;
+                        double d = 0;
+                        for (int j = 0; j < 3; j++)
+                        {
+                            double dd = centroid![local, j] - centroid[ls, j];
+                            d += dd * dd;
+                        }
+                        if (d < bestD) { bestD = d; best = s; }
+                    }
+                }
+                if (best >= 0) how = "nearest";
+                else { best = written.Min; how = "first written"; }
+            }
+            pairs.Add(((uint)u, (uint)best));
+            diagnostics.Add($"{tierName}: bone 0x{hash:x8} has no row at this tier — its converted row copies "
+                + $"{how} bone 0x{union.UnionHashes[best]:x8} at this tier's draws");
+        }
+        return pairs;
     }
 
     /// <summary>Move a compiled donor's group-bone indices off the dense continuation of the union and onto
@@ -1817,17 +1926,15 @@ public sealed partial class MigotoEmitter
                         diagnostics.Add($"{t.Name}: bone 0x{tierHashes[b]:x8} is too weakly supported in this tier — "
                             + "its lod0 recovery is reused for draws at this tier");
                     }
-                // Anchor-preferred ownership widens what the ANCHOR's tiers are asked to serve; a bone
-                // the preference took on the lod0 verdict that this tier doesn't carry at all is served
-                // by nobody in this tier's chain — its lod0 row simply stands. Named so the class is
-                // visible if a decimated anchor tier ever drops a bone another part poses live.
-                if (pi == anchorIdx)
+                // A bone this part owns that this tier's rig does not carry at all is written by nobody in
+                // this tier's chain. Donor-weighted rows of that class are filled by the tier tie below
+                // (see TierOrphanTies); a donor-unweighted one moves nothing and is only named here.
                 {
                     var tierSet = new HashSet<uint>(tierHashes);
                     for (int u2 = 0; u2 < union.UnionHashes.Length; u2++)
-                        if (union.Owner[u2] == anchorIdx && !tierSet.Contains(union.UnionHashes[u2]))
-                            diagnostics.Add($"{t.Name}: this anchor tier does not carry bone "
-                                + $"0x{union.UnionHashes[u2]:x8} — its lod0 row stands at this tier's draws");
+                        if (union.Owner[u2] == pi && !tierSet.Contains(union.UnionHashes[u2]))
+                            diagnostics.Add($"{t.Name}: this tier does not carry bone "
+                                + $"0x{union.UnionHashes[u2]:x8}");
                 }
                 bool active = plan.TierSources.Contains((t.Name, t.DumpDir));
                 if (active)
@@ -2103,6 +2210,40 @@ public sealed partial class MigotoEmitter
                 }
             }
 
+            // ---- tier ties: donor-weighted rows a tier chain writes nothing for -----------------------
+            // Computed after the witness reservations so a row redirected to a reserved slot is never a
+            // copy source. One shader per LOD level (suffix): the anchor's chain at that level runs every
+            // part's same-level tier, so the level's orphan rows across parts fill together.
+            var tierTiePairs = new Dictionary<string, List<(uint Tied, uint Source)>>(StringComparer.Ordinal);
+            {
+                var donorRows = new HashSet<int>();
+                foreach (int old in plan.SkinUnionRows)
+                    if (compact.OldToCompact[old] >= 0) donorRows.Add(compact.OldToCompact[old]);
+                foreach (var (name, pi, scatter, _) in tierWork)
+                {
+                    var tier = (pipe.Tiers ?? Array.Empty<PoolTier>()).First(x => x.Name == name);
+                    var pairs = TierOrphanTies(name, scatter, union, pi, donorRows,
+                        Load(pipe.Parts[pi].DumpDir), unionInputs[pi].Hashes, diagnostics);
+                    if (pairs.Count == 0) continue;
+                    if (!tierTiePairs.TryGetValue(tier.Suffix, out var list))
+                        tierTiePairs[tier.Suffix] = list = new List<(uint, uint)>();
+                    list.AddRange(pairs);
+                    string display = tier.PartDisplayNames is not null
+                        && tier.PartDisplayNames.TryGetValue(tier.Part, out var shown) ? shown : tier.Part;
+                    warnings.Add($"'{display}' moves less naturally at longer view distances: its "
+                        + $"lower-detail mesh does not use {pairs.Count} bone{(pairs.Count == 1 ? "" : "s")} "
+                        + "the replacement mesh uses. The build log names the bones.");
+                }
+            }
+            var tierTies = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var (suffix, pairs) in tierTiePairs.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                var ordered = pairs.OrderBy(p => p.Tied).ToList();
+                File.WriteAllText(Path.Combine(req.OutDir, $"tiertie_{suffix}_{sfx}.hlsl"),
+                    ComputeTemplates.EmitTierTieFill(ordered));
+                tierTies[suffix] = ordered.Count;
+            }
+
             if (partMeta[anchorIdx].Rows == 0
                 && (union.Owner.Any(owner => owner != anchorIdx) || groupSections.Any(m => m.AtDraw)))
                 throw new InvalidOperationException($"{sfx}: live recovery requires the anchor's draw-space "
@@ -2231,7 +2372,7 @@ public sealed partial class MigotoEmitter
                 pipe.NoSkipParts is { Count: > 0 } ns ? new HashSet<string>(ns, StringComparer.Ordinal) : null,
                 tierMeta, lod0WitnessConvert, pipe.ToggleKey, pipe.Latch, pipe.HideWhenOff, pipe.HiddenBy,
                 pipe.ShownBy, pipe.SuppressWhen,
-                groupSections, groupClaims, ties,
+                groupSections, groupClaims, ties, tierTies,
                 pipe.PresenceHashes, pipe.AnchorShapes));
         }
 
@@ -2418,7 +2559,7 @@ public sealed partial class MigotoEmitter
             req.ToggleKey, req.HideKeys, req.Retextures ?? Array.Empty<RetexEntry>(),
             req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), allLatches, req.HideLatches,
             req.KeysStartingOff, guards, req.StockRamps, materialPatches, req.KeyCycles,
-            req.HiddenFlags, hideScope, req.ShownFlags) + retexIni;
+            req.HiddenFlags, hideScope, req.ShownFlags, req.PersistToggleKey) + retexIni;
         File.WriteAllText(Path.Combine(req.OutDir, "mod.ini"), ini);
 
         foreach (var grouped in mergedTierWarnings.GroupBy(w => (w.AffectedPart, w.Tier)))
@@ -2455,7 +2596,8 @@ public sealed partial class MigotoEmitter
         IReadOnlyList<TwinSighting>? twinSightings = null,
         IReadOnlyList<StockRampBind>? stockRamps = null,
         IReadOnlyList<KeyCycle>? keyCycles = null,
-        IReadOnlyList<ShownFlag>? shownFlags = null)
+        IReadOnlyList<ShownFlag>? shownFlags = null,
+        bool persistToggleKey = false)
     {
         var retex = entries ?? Array.Empty<RetexEntry>();
         var shown = shownFlags ?? Array.Empty<ShownFlag>();
@@ -2516,8 +2658,16 @@ public sealed partial class MigotoEmitter
             // one per change answering more than one position of its key group, recomputed right below
             // so a session opens with the answer its launch positions imply
             foreach (var flag in shown) P.Append($"global ${ShownVar(flag.Name)} = 0\n");
-            P.Append(KeyDeclarations(declared, modKey, keysStartingOff, keyCycles));
-            if (shown.Count > 0) P.Append($"run = {SectionRecomputeHidden}\n");
+            P.Append(KeyDeclarations(declared, modKey, keysStartingOff, keyCycles, persistToggleKey));
+            if (shown.Count > 0)
+            {
+                P.Append($"run = {SectionRecomputeHidden}\n");
+                // a persist key's saved position arrives from the runtime's user config, which is loaded
+                // last — after this run — so the flags it implies are recomputed once more post-restore
+                if (declared.Any(k =>
+                        CycleFor(k, modKey, keysStartingOff, keyCycles, persistToggleKey).Persist))
+                    P.Append($"post run = {SectionRecomputeHidden}\n");
+            }
             P.Append("\n");
             P.Append(RecomputeHiddenIni(Array.Empty<HiddenFlag>(), shown));
         }
@@ -2803,6 +2953,8 @@ public sealed partial class MigotoEmitter
                     }
                     chain.Add($"run = CustomShaderConvertW_{sfx}");
                     MemberRuns(chain, pipe, sfx);
+                    if (pipe.TierTies.TryGetValue(t.Suffix, out int tierPairs) && tierPairs > 0)
+                        chain.Add($"run = CustomShaderTierTie_{t.Suffix}_{sfx}");
                     TieRuns(chain, pipe, sfx);
                     chain.Add($"run = CustomShaderSkin_{sfx}");
                     chain.Add($"$zz_done_{sfx}_{t.Suffix} = 1");
@@ -3401,7 +3553,7 @@ public sealed partial class MigotoEmitter
         IReadOnlyList<KeyCycle>? keyCycles = null,
         IReadOnlyList<HiddenFlag>? hiddenFlags = null,
         IReadOnlyDictionary<string, List<string>>? hideScope = null,
-        IReadOnlyList<ShownFlag>? shownFlags = null)
+        IReadOnlyList<ShownFlag>? shownFlags = null, bool persistModKey = false)
     {
         var P = new StringBuilder();
         var guards = twinGuards ?? new Dictionary<string, TwinGuard>(StringComparer.Ordinal);
@@ -3454,7 +3606,8 @@ public sealed partial class MigotoEmitter
                 || stockRamps is { Count: > 0 },
             stockRamps is { Count: > 0 }, keyCycles, hiddenFlags, shownFlags,
             pipes.Select(p => p.SubMaps).Concat(rigids.Select(r => r.SubMaps))
-                .Any(m => m.Any(x => x is not null && !x.Blend.IsInherit)), propertyTags));
+                .Any(m => m.Any(x => x is not null && !x.Blend.IsInherit)), propertyTags,
+            persistModKey));
 
         // resource declarations: per-pipeline blocks; shared per-part resources declared by the first
         // pipeline that pools the part
@@ -3750,6 +3903,15 @@ public sealed partial class MigotoEmitter
                        + $"cs-t1 = Resource_{name}_Cpinv\ncs-t2 = Resource_{name}_Map_{sfx}\n"
                        + (slimParts.Contains(name) ? $"cs-t3 = Resource_{name}_Sel\ncs-t4 = Resource_{name}_Off\n" : "")
                        + $"Dispatch = {(rows + 63) / 64}, 1, 1\nResource_Palette_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
+
+            // one LOD level's tier tie: copies the chosen source rows over the level's orphan rows in the
+            // converted palette, read through a copy (see the tie underlay's sections below)
+            foreach (var (suffix, pairs) in pipe.TierTies.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                P.Append($"[CustomShaderTierTie_{suffix}_{sfx}]\ncs = tiertie_{suffix}_{sfx}.hlsl\n"
+                       + $"cs-t0 = copy Resource_PaletteConv_{sfx}\n"
+                       + $"cs-u1 = copy Resource_PaletteConv_{sfx}\n"
+                       + $"Dispatch = {(4 * pairs + 63) / 64}, 1, 1\n"
+                       + $"Resource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
             P.Append($"[CustomShaderConvert_{sfx}]\ncs = convert_cs_{sfx}.hlsl\n"
                    + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_Palette_{sfx}\ncs-t1 = Resource_OwnerPart_{sfx}\n");
@@ -4427,15 +4589,20 @@ public sealed partial class MigotoEmitter
 
     /// <summary>The <c>[Constants]</c> declaration of every distinct key — the ONE place a key variable is
     /// declared, so both build routes start a key the same way. A key is declared at the position its cycle
-    /// launches in. A toggle is PER-SESSION: this runs at every load, so the value written here is where the
-    /// next session starts.</summary>
+    /// launches in. A toggle is PER-SESSION unless its cycle opts out: the declared value is where a
+    /// session starts, and a <c>persist</c> key's saved position, restored from the runtime's user config
+    /// after this section's declarations, then overrides it.</summary>
     static string KeyDeclarations(IReadOnlyList<string> keys, string? modKey,
-        IReadOnlyCollection<string>? startingOff, IReadOnlyList<KeyCycle>? cycles)
+        IReadOnlyCollection<string>? startingOff, IReadOnlyList<KeyCycle>? cycles,
+        bool persistModKey = false)
     {
         var P = new StringBuilder();
         foreach (var k in keys)
-            P.Append($"global ${ModKeys.VariableFor(k)} = "
-                   + $"{CycleFor(k, modKey, startingOff, cycles).StartState}\n");
+        {
+            var cycle = CycleFor(k, modKey, startingOff, cycles, persistModKey);
+            P.Append($"global {(cycle.Persist ? "persist " : "")}${ModKeys.VariableFor(k)} = "
+                   + $"{cycle.StartState}\n");
+        }
         return P.ToString();
     }
 
@@ -4445,13 +4612,18 @@ public sealed partial class MigotoEmitter
     /// same key; a change sharing the mod's key then reads the same variable at the same position as the mod
     /// gate does, rather than one asking for 1 while the other asks for 0. Every other key belongs to a key
     /// group and cycles that group's positions; a key no cycle names is a two-state group, launching at 0
-    /// unless it starts off, which is where a released two-state project lands.</summary>
+    /// unless it starts off, which is where a released two-state project lands.
+    ///
+    /// <para>The mod's own key persists when the mod opts in OR when a group sharing that key does: the two
+    /// tiers read one variable, so either owner's choice keeps it.</para></summary>
     static KeyCycle CycleFor(string key, string? modKey, IReadOnlyCollection<string>? startingOff,
-        IReadOnlyList<KeyCycle>? cycles)
+        IReadOnlyList<KeyCycle>? cycles, bool persistModKey = false)
     {
         bool off = (startingOff ?? Array.Empty<string>()).Any(k => ModKeys.SameKey(k, key));
-        if (ModKeys.SameKey(key, modKey)) return new KeyCycle(key, 2, off ? 1 : 0);
-        if (cycles?.FirstOrDefault(c => ModKeys.SameKey(c.Key, key)) is { } named) return named;
+        var named = cycles?.FirstOrDefault(c => ModKeys.SameKey(c.Key, key));
+        if (ModKeys.SameKey(key, modKey))
+            return new KeyCycle(key, 2, off ? 1 : 0, persistModKey || named?.Persist == true);
+        if (named is not null) return named;
         return new KeyCycle(key, 2, off ? 1 : 0);
     }
 
@@ -4551,7 +4723,7 @@ public sealed partial class MigotoEmitter
         bool rampTexed = false, bool stockRamped = false,
         IReadOnlyList<KeyCycle>? keyCycles = null, IReadOnlyList<HiddenFlag>? hiddenFlags = null,
         IReadOnlyList<ShownFlag>? shownFlags = null, bool blendTexed = false,
-        IReadOnlyList<StockPropertyTag>? propertyTags = null)
+        IReadOnlyList<StockPropertyTag>? propertyTags = null, bool persistModKey = false)
     {
         var hidden = hiddenFlags ?? Array.Empty<HiddenFlag>();
         var shown = shownFlags ?? Array.Empty<ShownFlag>();
@@ -4587,8 +4759,15 @@ public sealed partial class MigotoEmitter
         // one per change answering more than one position, declared beside the hider flags and recomputed
         // in the same place: both answer to the positions the keys currently stand in
         foreach (var flag in shown) P.Append($"global ${ShownVar(flag.Name)} = 0\n");
-        P.Append(KeyDeclarations(keys, modKey, keysStartingOff, keyCycles));
-        if (hidden.Count + shown.Count > 0) P.Append($"run = {SectionRecomputeHidden}\n");
+        P.Append(KeyDeclarations(keys, modKey, keysStartingOff, keyCycles, persistModKey));
+        if (hidden.Count + shown.Count > 0)
+        {
+            P.Append($"run = {SectionRecomputeHidden}\n");
+            // a persist key's saved position arrives from the runtime's user config, which is loaded
+            // last — after this run — so the flags it implies are recomputed once more post-restore
+            if (keys.Any(k => CycleFor(k, modKey, keysStartingOff, keyCycles, persistModKey).Persist))
+                P.Append($"post run = {SectionRecomputeHidden}\n");
+        }
         P.Append("\n");
         P.Append(RecomputeHiddenIni(hidden, shown));
         if (perFrameFlags is { Count: > 0 } || latches is { Count: > 0 })

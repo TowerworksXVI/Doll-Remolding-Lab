@@ -28,6 +28,9 @@ public sealed partial class BuildPageVm : ObservableObject
     private int _planGeneration;
     private CancellationTokenSource? _planCancellation;
     private int _previewGeneration;
+    /// <summary>The stamp of the picture the current bitmap (or in-flight decode) belongs to, so a refresh
+    /// that changed nothing about the picture leaves the shown bitmap alone.</summary>
+    private string? _shownPreviewStamp;
     private bool _footerHeld;
     private IReadOnlyList<string>? _runWarnings;
     private IReadOnlyList<string>? _runInfos;
@@ -934,8 +937,17 @@ public sealed partial class BuildPageVm : ObservableObject
         OnPropertyChanged(nameof(PreviewMissing));
         OnPropertyChanged(nameof(HasPreview));
         OnPropertyChanged(nameof(HasNoPreview));
+        // every board change lands here, and the stamp is the picture's content identity: the shown
+        // bitmap stands unless the picture itself changed, since a release-and-redecode of the same
+        // file blanks the image for the decode's length on every unrelated edit
+        bool decodable = Preview.FullPath is not null && !Preview.Missing;
+        if (decodable && string.Equals(_shownPreviewStamp, Preview.Stamp, StringComparison.Ordinal)
+            && (PreviewImage is not null || PreviewDecoding))
+            return;
         ReleasePreview();
-        if (Preview.FullPath is not { } path || Preview.Missing) return;
+        _shownPreviewStamp = null;
+        if (Preview.FullPath is not { } path || !decodable) return;
+        _shownPreviewStamp = Preview.Stamp;
         int generation = _previewGeneration;
         PreviewDecoding = true;
         _ = DecodePreviewAsync(generation, path);
@@ -1104,10 +1116,15 @@ public sealed partial class BuildPageVm : ObservableObject
         string? groupId, string? stateId) => TogglePlacement(editId, target, kind, groupId, stateId, false);
 
     internal void SetGroupKey(string groupId, string? key) =>
-        Mutate(() => _session?.SetGroupKey(groupId, key), key is null ? "Key cleared." : $"Key set to {key}.");
+        Mutate(() => _session?.SetGroupKey(groupId, key),
+            key is null ? "Key cleared." : $"Key set to {ModKeys.Display(key)}.");
 
     internal void RenameGroup(string groupId, string? label) =>
         Mutate(() => _session?.RenameGroup(groupId, label), "Key group renamed.");
+
+    // no status line: the checkbox itself is the whole statement
+    internal void SetGroupPersistence(string groupId, bool persist) =>
+        Mutate(() => _session?.SetGroupPersistence(groupId, persist), "");
 
     internal void RenameState(string groupId, string stateId, string? label) =>
         Mutate(() => _session?.RenameState(groupId, stateId, label), "State renamed.");
@@ -1605,16 +1622,18 @@ public sealed partial class BuildGroupVm : ObservableObject
     private bool _ready;
     internal BuildGroupVm(BuildPageVm page, KeyGroupOutline group)
     {
-        _page = page; Id = group.Id; _key = group.Key; _label = group.Label ?? ""; _ready = true;
+        _page = page; Id = group.Id; _key = group.Key; _label = group.Label ?? "";
+        _persistAfterRestart = group.Persist; _ready = true;
     }
     public string Id { get; }
     public bool IsMarked => _page.MarkedTarget?.Matches(this) == true;
     public string DisplayName => !string.IsNullOrWhiteSpace(Label) ? Label.Trim()
-        : !string.IsNullOrWhiteSpace(Key) ? $"Key {Key}" : "Unnamed key group";
+        : !string.IsNullOrWhiteSpace(Key) ? $"Key {ModKeys.Display(Key)}" : "Unnamed key group";
     public bool IsKeyless => string.IsNullOrWhiteSpace(Key);
     public ObservableCollection<BuildStateVm> States { get; } = new();
     [ObservableProperty] private string? _key;
     [ObservableProperty] private string _label;
+    [ObservableProperty] private bool _persistAfterRestart;
     [ObservableProperty] private string _collisionTip = "";
     public bool HasCollision => CollisionTip.Length > 0;
     partial void OnKeyChanged(string? value)
@@ -1626,6 +1645,10 @@ public sealed partial class BuildGroupVm : ObservableObject
     {
         OnPropertyChanged(nameof(DisplayName));
         if (_ready) _page.RenameGroup(Id, value);
+    }
+    partial void OnPersistAfterRestartChanged(bool value)
+    {
+        if (_ready) _page.SetGroupPersistence(Id, value);
     }
     partial void OnCollisionTipChanged(string value) => OnPropertyChanged(nameof(HasCollision));
     [RelayCommand] private Task Delete() => _page.DeleteGroupAsync(this);

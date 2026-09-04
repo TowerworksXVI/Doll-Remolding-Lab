@@ -1867,10 +1867,10 @@ def test_higher_uv_sets_survive_the_real_bpy_round_trip_in_numeric_order():
         assert _uv_sets(returned[0]) == expected, _uv_sets(returned[0])
 
 
-def test_property_keyed_images_survive_the_real_bpy_round_trip():
-    """Effect and generic bindings share one stock resource but remain two tagged Blender images. Neither
-    is wired into a made-up game-shader graph; both return through the exact extras identity, including the
-    reserved future parameter container."""
+def test_unchanged_property_rows_return_hash_only_through_the_real_bpy_round_trip():
+    """Effect and generic bindings remain exact rows, but their clean installed images are never
+    exported: each returns as its row with the app-stamped hash and no bytes, and the returned glb
+    carries no images at all."""
     with tempfile.TemporaryDirectory() as d:
         src = _build_source_glb([PART_A], os.path.join(d, "combined.glb"))
         image = bpy.data.images.new("transport fixture", width=2, height=2, alpha=True)
@@ -1904,6 +1904,125 @@ def test_property_keyed_images_survive_the_real_bpy_round_trip():
         assert [row["property"] for row in returned] == ["_BlendTex", "_TurbulenceTex"], returned
         assert all(row["stock"]["path_id"] == 71 for row in returned), returned
         assert all(row["parameters"]["keywords"] == ["FUTURE"] for row in returned), returned
+        assert all("png" not in row and "image" not in row for row in returned), returned
+        sent_json = _glb_json(sent[0])
+        assert "images" not in sent_json, "the exporter or carrier embedded an unchanged image"
+        empties = [key for key, value in sent_json.items() if isinstance(value, list) and not value]
+        assert not empties, f"the sent glb carries empty top-level arrays the app's reader refuses: {empties}"
+
+
+def test_painted_image_still_dirty_at_send_returns_bytes_and_stays_on_the_byte_route():
+    """Paint marks the image dirty; the send ships its bytes and stamps it touched, so a later send —
+    after the send's own save cleared Blender's flag — ships the bytes again rather than a hash-only
+    row under a hash the app never recorded."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _build_source_glb([PART_A], os.path.join(d, "painted.glb"))
+        image = bpy.data.images.new("paint fixture", width=2, height=2, alpha=True)
+        image.pixels = [0.2, 0.4, 0.6, 1.0] * 4
+        png = rb._gf2_image_png(image)
+        bpy.data.images.remove(image)
+        rb._gf2_append_texture_transport(src, [{
+            "owner": {"mesh": PART_A, "material": 0, "primitive": 0},
+            "property": "_BaseMap",
+            "semantic": "baseColor",
+            "stock": {"name": "base", "bundle": "bundle", "path_id": 71},
+            "srgb": True,
+            "origin": "vanilla",
+            "png": png,
+            "image_name": "_BaseMap",
+        }])
+
+        _reset()
+        imported, _arms = rb.gf2_import(src)
+        tagged = next(node for node in imported[0].data.materials[0].node_tree.nodes
+                      if isinstance(node.get(rb.TEXTURE_TRANSPORT_NODE), str))
+        installed = tagged.image
+        painted = list(installed.pixels)
+        painted[0] = 0.9
+        installed.pixels = painted
+        installed.update()
+        # The detector's load-bearing assumption: a paint leaves the image dirty until something saves it.
+        assert installed.is_dirty, "painting did not mark the image dirty; the touch tracking is blind"
+
+        out, _sent = _send("painted-return")
+        returned = rb._gf2_read_texture_transport(os.path.join(out, "painted-return.glb"))
+        assert len(returned) == 1 and "png" in returned[0] and "image" in returned[0], returned
+        assert installed.get(rb.TEXTURE_TRANSPORT_IMAGE_TOUCHED), "the send did not stamp the paint"
+        assert not installed.is_dirty, "the send's own save was expected to clear Blender's dirty flag"
+
+        out2, _sent2 = _send("painted-return-2")
+        second = rb._gf2_read_texture_transport(os.path.join(out2, "painted-return-2.glb"))
+        assert len(second) == 1 and "png" in second[0], second
+
+
+def test_paint_saved_to_the_install_path_returns_bytes():
+    """A save between paint and Send clears Blender's dirty flag, but the file reappearing at the
+    image's install path is the save's own trace, and the send ships the bytes."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _build_source_glb([PART_A], os.path.join(d, "saved.glb"))
+        image = bpy.data.images.new("save fixture", width=2, height=2, alpha=True)
+        image.pixels = [0.2, 0.4, 0.6, 1.0] * 4
+        png = rb._gf2_image_png(image)
+        bpy.data.images.remove(image)
+        rb._gf2_append_texture_transport(src, [{
+            "owner": {"mesh": PART_A, "material": 0, "primitive": 0},
+            "property": "_BaseMap",
+            "semantic": "baseColor",
+            "stock": {"name": "base", "bundle": "bundle", "path_id": 71},
+            "srgb": True,
+            "origin": "vanilla",
+            "png": png,
+            "image_name": "_BaseMap",
+        }])
+
+        _reset()
+        imported, _arms = rb.gf2_import(src)
+        tagged = next(node for node in imported[0].data.materials[0].node_tree.nodes
+                      if isinstance(node.get(rb.TEXTURE_TRANSPORT_NODE), str))
+        installed = tagged.image
+        painted = list(installed.pixels)
+        painted[0] = 0.9
+        installed.pixels = painted
+        installed.update()
+        installed.save()
+        assert not installed.is_dirty, "the save was expected to clear Blender's dirty flag"
+        assert os.path.exists(installed.filepath_raw), "the save left no file at the install path"
+
+        out, _sent = _send("saved-return")
+        returned = rb._gf2_read_texture_transport(os.path.join(out, "saved-return.glb"))
+        assert len(returned) == 1 and "png" in returned[0], returned
+
+
+def test_untagged_shipping_material_image_returns_on_its_standard_channel():
+    """A hand-built material keeps its image even though the geometry exporter carries no images."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _build_source_glb([PART_A], os.path.join(d, "hand-built.glb"))
+        _reset()
+        imported, _arms = rb.gf2_import(src)
+        mesh = imported[0]
+        material = bpy.data.materials.new(name="Hand built")
+        material.use_nodes = True
+        mesh.data.materials.append(material)
+        principled = next(node for node in material.node_tree.nodes if node.type == "BSDF_PRINCIPLED")
+        image = bpy.data.images.new("Hand painted base", width=2, height=2, alpha=True)
+        image.pixels = [0.1, 0.3, 0.7, 1.0] * 4
+        expected = rb._gf2_image_png(image)
+        node = material.node_tree.nodes.new("ShaderNodeTexImage")
+        node.image = image
+        material.node_tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
+
+        out, _sent = _send("hand-built-return")
+        returned_path = os.path.join(out, "hand-built-return.glb")
+        root, binary = rb._gf2_glb_read(returned_path)
+        empties = [key for key, value in root.items() if isinstance(value, list) and not value]
+        assert not empties, f"the sent glb carries empty top-level arrays the app's reader refuses: {empties}"
+        primitive = root["meshes"][0]["primitives"][0]
+        material_row = root["materials"][primitive["material"]]
+        texture = material_row["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+        image_index = root["textures"][texture]["source"]
+        assert rb._gf2_image_bytes(root, binary, image_index) == expected
+        assert rb._gf2_read_texture_transport(returned_path) == [], \
+            "an untagged image was mislabeled as exact-property transport"
 
 
 def test_explicit_texture_coordinates_pin_images_without_wiring_effect_shading():
@@ -1964,6 +2083,55 @@ def test_explicit_texture_coordinates_pin_images_without_wiring_effect_shading()
         returned = rb._gf2_read_texture_transport(os.path.join(out, "coordinate-return.glb"))
         assert [(row["property"], row.get("texCoord")) for row in returned] == [
             ("_BaseMap", 0), ("_BlendTex", 1), ("_TurbulenceTex", None)], returned
+
+
+def test_missing_explicit_texture_coordinate_keeps_transport_without_active_uv_preview():
+    """A tagged image whose requested set is absent remains available for exact-property Send, but it
+    has no vector or shading links that could quietly sample Blender's active UV map."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _build_source_glb([PART_A], os.path.join(d, "missing-uv.glb"), uv_sets=1)
+        image = bpy.data.images.new("missing coordinate fixture", width=2, height=2, alpha=True)
+        image.pixels = [0.2, 0.4, 0.6, 1.0] * 4
+        png = rb._gf2_image_png(image)
+        bpy.data.images.remove(image)
+        rb._gf2_append_texture_transport(src, [{
+            "owner": {"mesh": PART_A, "material": 0, "primitive": 0},
+            "property": "_BaseMap",
+            "semantic": "baseColor",
+            "texCoord": 1,
+            "stock": {"name": "base", "bundle": "bundle", "path_id": 71},
+            "srgb": True,
+            "origin": "vanilla",
+            "png": png,
+            "image_name": "_BaseMap",
+        }])
+
+        _reset()
+        popups = []
+        original_popup = rb._popup
+        rb._popup = lambda title, lines, icon: popups.append((title, list(lines), icon))
+        try:
+            imported, _arms = rb.gf2_import(src)
+        finally:
+            rb._popup = original_popup
+        material = imported[0].data.materials[0]
+        tagged = next(node for node in material.node_tree.nodes
+                      if isinstance(node.get(rb.TEXTURE_TRANSPORT_NODE), str))
+        principled = next(node for node in material.node_tree.nodes
+                          if node.type == "BSDF_PRINCIPLED")
+
+        assert not tagged.inputs["Vector"].links, "the missing set fell back to active UV sampling"
+        assert all(not output.links for output in tagged.outputs), \
+            "the unpinned image was connected into the material preview"
+        assert all(link.from_node != tagged for link in principled.inputs["Base Color"].links), \
+            "the unpinned image replaced the safe imported preview"
+        assert popups and popups[0][0] == "Texture Preview Warnings", popups
+        assert "without a material preview" in popups[0][1][1], popups
+
+        out, _sent = _send("missing-uv-return")
+        returned = rb._gf2_read_texture_transport(os.path.join(out, "missing-uv-return.glb"))
+        assert [(row["property"], row.get("texCoord")) for row in returned] == [
+            ("_BaseMap", 1)], returned
 
 
 def test_headless_send_to_honours_the_session_description():

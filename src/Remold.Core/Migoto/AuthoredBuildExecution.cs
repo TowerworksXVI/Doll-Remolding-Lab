@@ -326,7 +326,8 @@ public sealed class AuthoredBuildExecution
         (project.KeyGroups ?? new List<KeyGroup>())
             .Where(group => group.Key is not null && ModKeys.Normalize(group.Key) is not null
                 && group.States is { Count: > 0 })
-            .Select(group => new KeyCycle(ModKeys.Normalize(group.Key)!, group.States.Count, 0))
+            .Select(group => new KeyCycle(ModKeys.Normalize(group.Key)!, group.States.Count, 0,
+                group.Persist))
             .ToArray();
 
     /// <summary>The released two-state key answer of every change that has one, by the edit definition it
@@ -390,9 +391,10 @@ public sealed class AuthoredBuildExecution
                 // otherwise ship one state's pictures and one state's submesh layout twice
                 Textures = AuthoredDonorRows.Rows(rows),
                 DonorMaterials = AuthoredDonorRows.MaterialNames(rows),
-                // the recorded uprighting and vertex count are facts of the TARGET mesh, not of what a
-                // state answers
-                BakedRest = workspace.BakedRestOf(part.Target),
+                // the space the donor file sits in is the asset's own record (marked when its return was
+                // taken), else the target's workspace record (a converted 0.3.x project); the vertex count
+                // is a fact of the TARGET mesh, not of what a state answers
+                BakedRest = geometryAsset.BakedRest ?? workspace.BakedRestOf(part.Target),
                 OriginalVerts = workspace.OriginalVerticesOf(part.Target),
                 Gate = collapsible
                     ? gate with { HiddenWhen = Array.Empty<KeyRef>(), SuppressesInEveryState = true }

@@ -56,6 +56,11 @@ public sealed partial class AuthoredEditSession
     public void RenameGroup(string keyGroupId, string? label) =>
         Change(project => RequiredGroup(project, keyGroupId).Label = Trimmed(label));
 
+    /// <summary>Choose whether the group's position survives a game restart. False is the per-session
+    /// reset every group starts with.</summary>
+    public void SetGroupPersistence(string keyGroupId, bool persist) =>
+        Change(project => RequiredGroup(project, keyGroupId).Persist = persist);
+
     public void RenameState(string keyGroupId, string stateId, string? label) => Change(project =>
         RequiredState(RequiredGroup(project, keyGroupId), stateId).Label = Trimmed(label));
 
@@ -281,7 +286,7 @@ public sealed partial class AuthoredEditSession
                 edit.ReturnWarning)).ToArray();
             var groups = _project.KeyGroups.Select(group => new KeyGroupOutline(group.Id, group.Key,
                 group.Label, group.States.Select(state => new KeyGroupStateOutline(state.Id, state.Label,
-                    state.ActiveEditIds.ToArray())).ToArray())).ToArray();
+                    state.ActiveEditIds.ToArray())).ToArray(), group.Persist)).ToArray();
             var knownParts = _project.TargetSlots.Select(slot => slot.Part)
                 .Concat(_project.EditDefinitions.Select(edit => edit.Target))
                 .Concat(_project.WorkspaceIndex?.Records.Select(record => record.Part)
@@ -387,6 +392,6 @@ public sealed record EditPlacementOutline(string? KeyGroupId, string? StateId, i
 }
 
 public sealed record KeyGroupOutline(string Id, string? Key, string? Label,
-    IReadOnlyList<KeyGroupStateOutline> States);
+    IReadOnlyList<KeyGroupStateOutline> States, bool Persist = false);
 
 public sealed record KeyGroupStateOutline(string Id, string? Label, IReadOnlyList<string> ActiveEditIds);

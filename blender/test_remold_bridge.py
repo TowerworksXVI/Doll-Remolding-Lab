@@ -58,6 +58,38 @@ class TextureTransportCarrierTests(unittest.TestCase):
         self.assertIsNone(rb._gf2_uv_layer_name(mesh, -1))
         self.assertIsNone(rb._gf2_uv_layer_name(mesh, True))
 
+    def test_coordinate_pin_refuses_an_image_without_a_vector_socket(self):
+        class UvNode:
+            bl_idname = "ShaderNodeUVMap"
+
+            def __init__(self):
+                self.name = ""
+                self.label = ""
+                self.outputs = {"UV": object()}
+                self.properties = {}
+
+            def get(self, name, default=None):
+                return self.properties.get(name, default)
+
+            def __setitem__(self, name, value):
+                self.properties[name] = value
+
+        class Nodes(list):
+            def new(self, node_type):
+                self.asserted_type = node_type
+                node = UvNode()
+                self.append(node)
+                return node
+
+        nodes = Nodes()
+        mesh = types.SimpleNamespace(data=types.SimpleNamespace(
+            uv_layers=[types.SimpleNamespace(name="Primary")]))
+        material = types.SimpleNamespace(node_tree=types.SimpleNamespace(nodes=nodes))
+        image = types.SimpleNamespace(name="GF2 _BaseMap", inputs={})
+
+        self.assertFalse(rb._gf2_pin_texture_coordinate(mesh, material, image, 0))
+        self.assertEqual(nodes, [])
+
     def test_two_properties_on_one_stock_resource_stay_two_exact_bindings(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "transport.glb")
@@ -321,6 +353,36 @@ class SessionAcknowledgmentTests(unittest.TestCase):
         self.assertEqual(rb.gf2_edit_targets([spec]), {"cloth1": "minted"})
         self.assertEqual(rb.gf2_selected_mesh_edit_labels(live, {"cloth1": "minted"}),
                          ["Hand Hem"])
+
+    def test_acknowledged_duplicate_name_uses_the_sole_app_minted_fallback(self):
+        opening = self._opening()
+        opening["parts"][0]["edits"].append(
+            {"id": "fresh", "label": "Fresh", "holdsAuthoredMesh": True})
+        snapshot = rb.gf2_send_snapshot(opening, {"cloth1": {"new": "fresh"}})
+        live = {"revision": 11, "parts": [{
+            "name": "cloth1", "defaultEditName": "Edit 3", "edits": [
+                *opening["parts"][0]["edits"],
+                {"id": "minted", "label": "Edit 2", "holdsAuthoredMesh": True}],
+        }]}
+
+        spec = rb.gf2_target_row_specs(live, ["cloth1"], acknowledged_snapshot=snapshot)[0]
+
+        self.assertEqual(spec["target"], "minted")
+        self.assertEqual(rb.gf2_edit_targets([spec]), {"cloth1": "minted"})
+
+    def test_renamed_new_edit_stays_new_when_the_acknowledgement_is_ambiguous(self):
+        opening = self._opening()
+        snapshot = rb.gf2_send_snapshot(opening, {"cloth1": {"new": "Taken Name"}})
+        live = {"revision": 11, "parts": [{
+            "name": "cloth1", "defaultEditName": "Edit 4", "edits": [
+                *opening["parts"][0]["edits"],
+                {"id": "candidate-a", "label": "Edit 2", "holdsAuthoredMesh": True},
+                {"id": "candidate-b", "label": "Edit 3", "holdsAuthoredMesh": True}],
+        }]}
+
+        spec = rb.gf2_target_row_specs(live, ["cloth1"], acknowledged_snapshot=snapshot)[0]
+
+        self.assertEqual(spec["target"], rb.NEW_EDIT_TARGET)
 
     def test_blank_new_edit_matches_the_pre_send_default_after_acknowledgment(self):
         opening = self._opening(default="Cloth Edit 2")
@@ -592,6 +654,77 @@ class ClaimedMeshTests(unittest.TestCase):
         session = {"part": None, "parts": [{"name": "hair", "edited": True},
                                            {"name": "cloth1", "edited": True}]}
         self.assertEqual(rb.gf2_claimed_meshes(session, ["DonorHair"]), {})
+
+
+class TransportCollectionTests(unittest.TestCase):
+    """The send reads tags off the materials a mesh draws with, says when one slot was claimed twice, and
+    the import finds a mesh whose name Blender suffixed."""
+
+    @staticmethod
+    def _tagged_node(mesh, material, primitive, prop):
+        class Node(dict):
+            pass
+        node = Node({rb.TEXTURE_TRANSPORT_NODE: json.dumps({
+            "owner": {"mesh": mesh, "material": material, "primitive": primitive},
+            "property": prop, "semantic": "texture",
+            "stock": {"name": "s", "bundle": "b", "path_id": 1}})})
+        node.image = types.SimpleNamespace(name=prop + " image")
+        node.name = "GF2 " + prop
+        return node
+
+    def _material(self, name, *nodes):
+        return types.SimpleNamespace(name=name, node_tree=types.SimpleNamespace(nodes=list(nodes)))
+
+    def test_an_object_linked_material_slot_is_read_the_way_the_checks_read_it(self):
+        data_material = self._material("data-side", self._tagged_node("body", 0, 0, "_MaskTex"))
+        object_material = self._material("object-side", self._tagged_node("body", 0, 0, "_BaseMap"))
+        mesh = types.SimpleNamespace(
+            name="body",
+            material_slots=[types.SimpleNamespace(material=object_material)],
+            data=types.SimpleNamespace(materials=[data_material]))
+
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"png"):
+            rows, duplicates = rb._gf2_collect_texture_transport([mesh])
+
+        self.assertEqual([row["property"] for row in rows], ["_BaseMap"])
+        self.assertEqual(duplicates, [])
+
+    def test_a_mesh_without_slots_falls_back_to_its_data_materials(self):
+        mesh = types.SimpleNamespace(
+            name="body",
+            data=types.SimpleNamespace(materials=[
+                self._material("m", self._tagged_node("body", 0, 0, "_BaseMap"))]))
+
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"png"):
+            rows, duplicates = rb._gf2_collect_texture_transport([mesh])
+
+        self.assertEqual([row["property"] for row in rows], ["_BaseMap"])
+
+    def test_a_slot_two_nodes_claim_sends_the_first_and_names_the_second(self):
+        first = self._tagged_node("body", 0, 0, "_BaseMap")
+        first.image = types.SimpleNamespace(name="first")
+        second = self._tagged_node("body", 0, 0, "_BaseMap")
+        second.image = types.SimpleNamespace(name="second")
+        mesh = types.SimpleNamespace(
+            name="body",
+            material_slots=[types.SimpleNamespace(material=self._material("cloth", first, second))])
+
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"png"):
+            rows, duplicates = rb._gf2_collect_texture_transport([mesh])
+
+        self.assertEqual([row["image_name"] for row in rows], ["first"])
+        self.assertEqual(duplicates, [("_BaseMap", "cloth", "body")])
+        self.assertEqual(rb.gf2_duplicate_tag_lines(duplicates),
+                         ["Two nodes carry '_BaseMap' on 'cloth' (body); the first one was sent."])
+
+    def test_the_import_finds_a_mesh_blender_suffixed_and_misses_by_name_otherwise(self):
+        suffixed = types.SimpleNamespace(name="body.001")
+        exact = types.SimpleNamespace(name="cloth")
+
+        self.assertIs(rb._gf2_transport_mesh([suffixed, exact], "cloth"), exact)
+        self.assertIs(rb._gf2_transport_mesh([suffixed, exact], "body"), suffixed)
+        self.assertIsNone(rb._gf2_transport_mesh([suffixed, exact], "hair"))
+        self.assertIsNone(rb._gf2_transport_mesh([suffixed, exact], None))
 
 
 class OverwriteWarningTests(unittest.TestCase):
@@ -976,21 +1109,46 @@ class ImportedAlphaPreparationTests(unittest.TestCase):
         self.assertEqual(remap.inputs["From Max"].default_value, 254.0 / 255.0)
         self.assertEqual(remap.inputs["Value"].links[0].from_socket.name, "Alpha")
 
-    def test_color_feed_is_not_remapped_but_settings_and_popup_degradation_are_applied(self):
+    def test_color_feed_falls_back_transactionally_and_reports_the_dithered_preview(self):
         material = types.SimpleNamespace(name="unexpected graph", surface_render_method="BLENDED",
-                                         use_backface_culling=True, node_tree=_AlphaTree("Color"))
+                                         use_backface_culling=True, use_transparency_overlap=True,
+                                         node_tree=_AlphaTree("Color"))
         popups = []
         with mock.patch.object(rb, "_popup", lambda title, lines, icon: popups.append((title, lines, icon))):
             got = rb.gf2_prepare_imported_alpha_materials([_AlphaObject(material)])
 
         self.assertEqual(got["remapped"], 0)
-        self.assertEqual(got["missing_overlap"], ("unexpected graph",))
+        self.assertEqual(got["missing_overlap"], ())
         self.assertEqual(got["missing_alpha_link"], ("unexpected graph",))
-        self.assertFalse(material.use_backface_culling)  # settings precede and survive graph rejection
+        self.assertEqual(material.surface_render_method, "DITHERED")
+        self.assertTrue(material.use_backface_culling)
+        self.assertTrue(material.use_transparency_overlap)
+        principled = next(node for node in material.node_tree.nodes
+                          if node.type == "BSDF_PRINCIPLED")
+        self.assertEqual(principled.inputs["Alpha"].links[0].from_socket.name, "Color")
+        self.assertFalse(any(node.get(rb.ALPHA_REMAP_TAG) for node in material.node_tree.nodes))
         self.assertEqual(len(popups), 1)
         self.assertEqual(popups[0][0], "Alpha Preview Warnings")
-        self.assertEqual(len(popups[0][1]), 2)
+        self.assertEqual(len(popups[0][1]), 1)
         self.assertTrue(all(line.startswith("⚠ ") for line in popups[0][1]))
+        self.assertTrue(all("dithered transparency" in line for line in popups[0][1]))
+
+    def test_missing_overlap_control_keeps_the_graph_and_uses_the_legacy_dithered_fallback(self):
+        material = types.SimpleNamespace(name="no overlap control", blend_method="BLEND",
+                                         use_backface_culling=True, node_tree=_AlphaTree())
+        popups = []
+        with mock.patch.object(rb, "_popup", lambda title, lines, icon: popups.append((title, lines, icon))):
+            got = rb.gf2_prepare_imported_alpha_materials([_AlphaObject(material)])
+
+        self.assertEqual(got["missing_overlap"], ("no overlap control",))
+        self.assertEqual(got["missing_alpha_link"], ())
+        self.assertEqual(material.blend_method, "HASHED")
+        self.assertTrue(material.use_backface_culling)
+        principled = next(node for node in material.node_tree.nodes
+                          if node.type == "BSDF_PRINCIPLED")
+        self.assertEqual(principled.inputs["Alpha"].links[0].from_socket.name, "Alpha")
+        self.assertFalse(any(node.get(rb.ALPHA_REMAP_TAG) for node in material.node_tree.nodes))
+        self.assertIn("dithered transparency", popups[0][1][0])
 
 
 class PartLabelTests(unittest.TestCase):
@@ -1027,6 +1185,270 @@ class PartLabelTests(unittest.TestCase):
             self.assertEqual(rb.gf2_label("c_X_slg_body_lod0"), "body")
         with mock.patch.object(rb, "bpy", second):
             self.assertEqual(rb.gf2_label("c_X_slg_body_lod0"), "P2_body")
+
+
+class UnchangedImageDetectorTests(unittest.TestCase):
+    """The send's unchanged test is touch tracking, never pixels: clean + still stamped for this row +
+    still packed at the deleted install path = hash-only; any doubt ships the bytes."""
+
+    ROW = {"outbound_hash": "a" * 64}
+
+    def setUp(self):
+        self.addCleanup(rb._GF2_DIRTY_SEEN.clear)
+
+    @staticmethod
+    def _installed(**overrides):
+        class Image(dict):
+            name = "Base image"
+            is_dirty = False
+            packed_file = object()
+            filepath_raw = "installed.png"
+        image = Image({rb.TEXTURE_TRANSPORT_IMAGE_HASH: "a" * 64,
+                       rb.TEXTURE_TRANSPORT_IMAGE_PATH: "installed.png"})
+        for key, value in overrides.items():
+            setattr(image, key, value)
+        return image
+
+    def test_the_clean_stamped_packed_image_is_unchanged(self):
+        self.assertTrue(rb._gf2_image_is_unchanged(self._installed(), self.ROW))
+
+    def test_dirty_now_is_changed(self):
+        self.assertFalse(rb._gf2_image_is_unchanged(self._installed(is_dirty=True), self.ROW))
+
+    def test_seen_dirty_earlier_is_changed_even_after_a_save_cleared_the_flag(self):
+        image = self._installed(as_pointer=lambda: 4711)
+        rb._GF2_DIRTY_SEEN.add(4711)
+        self.assertFalse(rb._gf2_image_is_unchanged(image, self.ROW))
+
+    def test_the_touched_stamp_is_changed(self):
+        image = self._installed()
+        image[rb.TEXTURE_TRANSPORT_IMAGE_TOUCHED] = True
+        self.assertFalse(rb._gf2_image_is_unchanged(image, self.ROW))
+
+    def test_an_unpacked_image_is_changed(self):
+        self.assertFalse(rb._gf2_image_is_unchanged(self._installed(packed_file=None), self.ROW))
+
+    def test_another_rows_stamp_is_changed(self):
+        self.assertFalse(rb._gf2_image_is_unchanged(self._installed(), {"outbound_hash": "b" * 64}))
+
+    def test_a_repathed_image_is_changed(self):
+        self.assertFalse(rb._gf2_image_is_unchanged(self._installed(filepath_raw="elsewhere.png"),
+                                                    self.ROW))
+
+    def test_a_file_reappearing_at_the_install_path_is_a_user_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "installed.png")
+            image = self._installed(filepath_raw=path)
+            image[rb.TEXTURE_TRANSPORT_IMAGE_PATH] = path
+            self.assertTrue(rb._gf2_image_is_unchanged(image, self.ROW))
+            with open(path, "wb") as f:
+                f.write(b"saved paint")
+            self.assertFalse(rb._gf2_image_is_unchanged(image, self.ROW))
+
+    def test_the_dirty_sweep_remembers_and_the_timer_pass_stamps(self):
+        image = self._installed(is_dirty=True, as_pointer=lambda: 4712)
+        stub = types.SimpleNamespace(data=types.SimpleNamespace(images=[image]))
+        with mock.patch.object(rb, "bpy", stub):
+            rb._gf2_note_dirty_images()
+        self.assertIn(4712, rb._GF2_DIRTY_SEEN)
+        self.assertNotIn(rb.TEXTURE_TRANSPORT_IMAGE_TOUCHED, image)
+        image.is_dirty = False
+        with mock.patch.object(rb, "bpy", stub):
+            rb._gf2_note_dirty_images(stamp=True)
+        self.assertTrue(image[rb.TEXTURE_TRANSPORT_IMAGE_TOUCHED])
+
+
+class HashOnlyCollectionTests(unittest.TestCase):
+    """Collect ships an untouched picture as its row alone, and the volatile dirty reason is stamped so
+    the send's own save cannot read the next send as clean."""
+
+    def setUp(self):
+        self.addCleanup(rb._GF2_DIRTY_SEEN.clear)
+
+    @staticmethod
+    def _tagged_node(prop, image):
+        class Node(dict):
+            pass
+        node = Node({rb.TEXTURE_TRANSPORT_NODE: json.dumps({
+            "owner": {"mesh": "body", "material": 0, "primitive": 0},
+            "property": prop, "semantic": "baseColor", "outbound_hash": "a" * 64,
+            "stock": {"name": "s", "bundle": "b", "path_id": 1}})})
+        node.image = image
+        node.name = "GF2 " + prop
+        return node
+
+    @staticmethod
+    def _mesh(*nodes):
+        material = types.SimpleNamespace(name="cloth",
+                                         node_tree=types.SimpleNamespace(nodes=list(nodes)))
+        return types.SimpleNamespace(name="body",
+                                     material_slots=[types.SimpleNamespace(material=material)])
+
+    def test_the_clean_installed_image_returns_as_hash_only_and_is_never_encoded(self):
+        image = UnchangedImageDetectorTests._installed()
+        mesh = self._mesh(self._tagged_node("_BaseMap", image))
+        with mock.patch.object(rb, "_gf2_image_png",
+                               side_effect=AssertionError("image was encoded")):
+            rows, duplicates = rb._gf2_collect_texture_transport([mesh])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outbound_hash"], "a" * 64)
+        self.assertNotIn("png", rows[0])
+        self.assertNotIn("image", rows[0])
+        self.assertEqual(duplicates, [])
+
+    def test_a_dirty_image_ships_bytes_and_stays_on_the_byte_route_after_its_flag_clears(self):
+        image = UnchangedImageDetectorTests._installed(is_dirty=True)
+        mesh = self._mesh(self._tagged_node("_BaseMap", image))
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"painted picture"):
+            first, _ = rb._gf2_collect_texture_transport([mesh])
+        self.assertEqual(first[0]["png"], b"painted picture")
+        self.assertTrue(image[rb.TEXTURE_TRANSPORT_IMAGE_TOUCHED])
+        image.is_dirty = False   # what _gf2_image_png's save does to a painted image
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"painted picture"):
+            second, _ = rb._gf2_collect_texture_transport([mesh])
+        self.assertEqual(second[0]["png"], b"painted picture")
+
+
+class StandardChannelCollectionTests(unittest.TestCase):
+    """Untagged pictures on PBR routes ride the return as ordinary glTF channel references — the
+    hand-built-material and legacy-session route now that the exporter embeds nothing."""
+
+    @staticmethod
+    def _link(node, socket_name):
+        return types.SimpleNamespace(to_node=node,
+                                     to_socket=types.SimpleNamespace(name=socket_name))
+
+    @classmethod
+    def _image_node(cls, name, *links):
+        return types.SimpleNamespace(
+            name=name, type="TEX_IMAGE",
+            image=types.SimpleNamespace(name=name + " picture"),
+            outputs=[types.SimpleNamespace(links=list(links))])
+
+    @staticmethod
+    def _mesh(*nodes):
+        material = types.SimpleNamespace(name="handmade",
+                                         node_tree=types.SimpleNamespace(nodes=list(nodes)))
+        return types.SimpleNamespace(name="body",
+                                     material_slots=[types.SimpleNamespace(material=material)])
+
+    def _principled(self):
+        return types.SimpleNamespace(name="Principled BSDF", type="BSDF_PRINCIPLED", outputs=[])
+
+    def test_a_picture_reaches_its_channel_through_intermediate_nodes(self):
+        principled = self._principled()
+        # image -> mix -> mix2 -> Base Color: three hops, each with its own link objects.
+        mix2 = types.SimpleNamespace(name="mix2", type="MIX",
+                                     outputs=[types.SimpleNamespace(
+                                         links=[self._link(principled, "Base Color")])])
+        mix = types.SimpleNamespace(name="mix", type="MIX",
+                                    outputs=[types.SimpleNamespace(links=[self._link(mix2, "A")])])
+        node = self._image_node("painted", self._link(mix, "A"))
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"png"):
+            rows, warnings = rb._gf2_collect_standard_channels(
+                [self._mesh(node, mix, mix2, principled)])
+        self.assertEqual([(row["material"], row["channels"]) for row in rows],
+                         [("handmade", ["baseColor"])])
+        self.assertEqual(warnings, [])
+
+    def test_an_unreadable_picture_is_skipped_and_named(self):
+        principled = self._principled()
+        node = self._image_node("broken", self._link(principled, "Base Color"))
+        with mock.patch.object(rb, "_gf2_image_png", side_effect=RuntimeError("no file")):
+            rows, warnings = rb._gf2_collect_standard_channels([self._mesh(node, principled)])
+        self.assertEqual(rows, [])
+        self.assertEqual(warnings,
+                         ["'broken picture' on 'handmade' could not be read and was not sent."])
+
+    def test_two_pictures_on_one_channel_send_the_first_and_name_the_second(self):
+        principled = self._principled()
+        first = self._image_node("first", self._link(principled, "Base Color"))
+        second = self._image_node("second", self._link(principled, "Base Color"))
+        with mock.patch.object(rb, "_gf2_image_png", return_value=b"png"):
+            rows, warnings = rb._gf2_collect_standard_channels(
+                [self._mesh(first, second, principled)])
+        self.assertEqual([row["image_name"] for row in rows], ["first picture"])
+        self.assertEqual(warnings, ["Two pictures reach the baseColor channel on 'handmade'; "
+                                    "'first picture' was sent."])
+
+    def test_a_tagged_node_is_not_collected_as_a_standard_channel(self):
+        principled = self._principled()
+        tagged = HashOnlyCollectionTests._tagged_node(
+            "_BaseMap", types.SimpleNamespace(name="stock"))
+        tagged.type = "TEX_IMAGE"
+        tagged.outputs = [types.SimpleNamespace(links=[self._link(principled, "Base Color")])]
+        rows, warnings = rb._gf2_collect_standard_channels([self._mesh(tagged, principled)])
+        self.assertEqual(rows, [])
+        self.assertEqual(warnings, [])
+
+    def test_the_append_drops_a_picture_whose_material_the_export_did_not_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "return.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"},
+                                     "materials": [{"name": "written"}],
+                                     "buffers": [{"byteLength": 0}]}, b"")
+            rb._gf2_append_texture_transport(path, [], [
+                {"material": "unused-slot", "channels": ["baseColor"],
+                 "png": b"png", "image_name": "orphan"},
+                {"material": "written", "channels": ["normal"],
+                 "png": b"png", "image_name": "kept"}])
+            root, _ = rb._gf2_glb_read(path)
+        self.assertEqual(len(root.get("images", [])), 1)
+        self.assertEqual(root["materials"][0]["normalTexture"], {"index": 0})
+
+    def test_an_all_hash_only_append_leaves_no_empty_top_level_array(self):
+        # glTF forbids empty top-level arrays and the app's reader (SharpGLTF) refuses the whole file
+        # over one — the moved-parts-only send, where every picture is untouched, must stay openable.
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "moved-only.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"}, "buffers": [{"byteLength": 0}]}, b"")
+            rb._gf2_append_texture_transport(path, [{
+                "owner": {"mesh": "veil", "material": 0, "primitive": 0},
+                "property": "_BaseMap",
+                "semantic": "baseColor",
+                "stock": {"name": "base", "bundle": "bundle", "path_id": 71},
+                "outbound_hash": "a" * 64,
+            }])
+            root, _ = rb._gf2_glb_read(path)
+            empties = [key for key, value in root.items() if isinstance(value, list) and not value]
+            self.assertEqual(empties, [])
+            self.assertNotIn("images", root)
+            self.assertEqual(len(rb._gf2_read_texture_transport(path)), 1)
+
+    def test_the_no_append_sanitizer_drops_an_exporter_left_empty_array(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "hide.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"}, "images": [],
+                                     "buffers": [{"byteLength": 0}]}, b"")
+            rb._gf2_strip_empty_gltf_arrays(path)
+            root, _ = rb._gf2_glb_read(path)
+            self.assertNotIn("images", root)
+
+    def test_hash_only_rows_append_no_image_and_changed_duplicates_share_one_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "transport.glb")
+            rb._gf2_glb_write(path, {"asset": {"version": "2.0"}, "buffers": [{"byteLength": 0}]}, b"")
+            shared = b"one changed picture"
+            rows = [{
+                "owner": {"mesh": "veil", "material": 0, "primitive": index},
+                "property": "_BaseMap",
+                "semantic": "baseColor",
+                "stock": {"name": "base", "bundle": "bundle", "path_id": 71},
+                "outbound_hash": "a" * 64,
+            } for index in range(3)]
+            rows[1]["png"] = shared
+            rows[2]["png"] = shared
+
+            rb._gf2_append_texture_transport(path, rows)
+            root, _ = rb._gf2_glb_read(path)
+            returned = rb._gf2_read_texture_transport(path)
+
+            self.assertEqual(len(root.get("images", [])), 1)
+            self.assertNotIn("image", returned[0])
+            self.assertNotIn("png", returned[0])
+            self.assertEqual(returned[0]["outbound_hash"], "a" * 64)
+            self.assertEqual(returned[1]["image"], returned[2]["image"])
+            self.assertEqual(returned[1]["outbound_hash"], returned[2]["outbound_hash"])
 
 
 if __name__ == "__main__":

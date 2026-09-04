@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -206,8 +206,43 @@ public sealed partial class EditMapCardVm : ObservableObject
         _ => null,
     };
 
-    /// <summary>Why this card's game texture cannot be edited from here, or null when it can.</summary>
-    public string? SharingRefusal => Slot.HasDrawableCarrier ? RefusalFor(Sharing) : NoDrawableCarrier;
+    /// <summary>Why this card's game texture cannot be edited from here, or null when it can: the texture reach
+    /// gates first, then the texture's own format.</summary>
+    public string? SharingRefusal => Slot.HasDrawableCarrier
+        ? RefusalFor(Sharing) ?? (Authorable ? null : FloatFormat)
+        : NoDrawableCarrier;
+
+    /// <summary>Whether the game texture behind this card can take an edit at all. A float-format map cannot:
+    /// decoding it flattens it, and nothing could be encoded back. Read off the same header the size line is.
+    /// True until the preview answers, so a card never refuses a gesture on a texture it has not read.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SharingRefusal))]
+    [NotifyPropertyChangedFor(nameof(ShowsDropTarget))]
+    [NotifyPropertyChangedFor(nameof(DropHint))]
+    [NotifyPropertyChangedFor(nameof(CanBrowse))]
+    [NotifyPropertyChangedFor(nameof(BrowseHint))]
+    [NotifyPropertyChangedFor(nameof(CanOpen))]
+    [NotifyPropertyChangedFor(nameof(OpenHint))]
+    private bool _authorable = true;
+
+    public const string FloatFormat =
+        "This map is a float-format texture and cannot be edited here.";
+
+    /// <summary>The one sentence a drop confirm adds when the picture's size differs from the map it
+    /// replaces, or null when the sizes match or either is unknown.</summary>
+    public static string? SizeNote((int Width, int Height)? dropped, (int Width, int Height)? current) =>
+        dropped is { } d && current is { } c && (d.Width != c.Width || d.Height != c.Height)
+            ? $"{d.Width}×{d.Height}, the map is {c.Width}×{c.Height}. It still applies; UVs stretch it to fit."
+            : null;
+
+    /// <summary>The size a card's dimension line shows, as numbers; null while it is loading or unknown.</summary>
+    public static (int Width, int Height)? ParseDimensions(string? dimensions)
+    {
+        if (dimensions is null) return null;
+        var parts = dimensions.Split('×');
+        return parts.Length == 2 && int.TryParse(parts[0], out int w) && int.TryParse(parts[1], out int h)
+            ? (w, h) : null;
+    }
 
     /// <summary>The current install proves that this material position submits no draw. Its card remains in
     /// the material inventory, but opening or dropping a picture there would record an answer nothing can
@@ -611,11 +646,12 @@ public sealed partial class EditMapCardVm : ObservableObject
 
     public bool IsCurrentThumbRequest(int request) => request == _request;
 
-    public void SetThumb(Bitmap image, string dimensions)
+    public void SetThumb(Bitmap? image, string dimensions, bool authorable = true)
     {
         _forgotten = false;
         Thumbnail = image;
         Dimensions = dimensions;
+        Authorable = authorable;
         IsThumbLoading = false;
         IsThumbFailed = false;
         ThumbThrew = false;

@@ -305,6 +305,9 @@
                                        Foreground="{StaticResource HudErrorBrush}" FontSize="11"
                                        TextWrapping="Wrap" />
                           </Border>
+                          <CheckBox Content="Persist after restart" FontSize="11"
+                                    IsChecked="{Binding PersistAfterRestart, Mode=TwoWay}"
+                                    ToolTip.Tip="The state this group was left in is restored at the next game launch. Unchecked, the group starts over every launch." />
 
                           <ItemsControl ItemsSource="{Binding States}">
                             <ItemsControl.ItemTemplate>
@@ -472,10 +475,15 @@
                          AcceptsReturn="True" MinHeight="58" TextWrapping="Wrap" />
                 <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
                   <TextBlock Text="Key" Classes="sectionLabel" VerticalAlignment="Center" />
-                  <views:KeyCaptureButton Grid.Column="1"
-                                          BoundKey="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Mode=TwoWay}"
-                                          EmptyLabel="＋ Key" HorizontalAlignment="Left"
-                                          ToolTip.Tip="Turns the whole mod on and off. Delete or Backspace clears it." />
+                  <StackPanel Grid.Column="1" Spacing="4">
+                    <views:KeyCaptureButton BoundKey="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Mode=TwoWay}"
+                                            EmptyLabel="＋ Key" HorizontalAlignment="Left"
+                                            ToolTip.Tip="Turns the whole mod on and off. Delete or Backspace clears it." />
+                    <CheckBox Content="Persist after restart" FontSize="11"
+                              IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackagePersistToggleKey, Mode=TwoWay}"
+                              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                              ToolTip.Tip="Whether the mod was left on or off is restored at the next game launch. Unchecked, the mod starts on every launch." />
+                  </StackPanel>
                   <TextBlock Grid.Column="2" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
                              IsVisible="{Binding WholeModKeyCollisionTip, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
                              ToolTip.Tip="{Binding WholeModKeyCollisionTip}" VerticalAlignment="Center" />

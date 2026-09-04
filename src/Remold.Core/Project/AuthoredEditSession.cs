@@ -94,13 +94,15 @@ public sealed partial class AuthoredEditSession
     /// answer for which subject the package names itself after. Everything else the info block carries, the
     /// preview picture above all, is untouched: a form that does not show a field never clears it.</summary>
     public void SetIdentity(string name, string version, string? author, string? description,
-        string? toggleKey, bool includeRepairData, string? character, string? outfit) => Change(project =>
+        string? toggleKey, bool includeRepairData, string? character, string? outfit,
+        bool persistToggleKey = false) => Change(project =>
     {
         project.Info.Name = name;
         project.Info.Version = version;
         project.Info.Author = author;
         project.Info.Description = description;
         project.Info.ToggleKey = toggleKey;
+        project.Info.PersistToggleKey = persistToggleKey;
         project.Info.IncludeRepairData = includeRepairData;
         project.Info.Character = character;
         project.Info.Outfit = outfit;
@@ -873,16 +875,20 @@ public sealed partial class AuthoredEditSession
     /// <summary>Normalize returned bytes into a new immutable project asset and atomically bind only the
     /// addressed slot. Existing canonical assets are never overwritten: a changed shared binding therefore
     /// splits on its first mutation, while an unchanged return commits no authored transaction.</summary>
+    /// <param name="bakedRest">geometry only: the scene-rest uprighting the session file the return
+    /// came back through was baked by, so the asset states its own space (see
+    /// <see cref="ProjectAsset.BakedRest"/>).</param>
     public ExactAssetPublishResult PublishAssetForBinding(ProjectAssetIngressSession ingress,
         ProjectAssetKind kind, string label, ProjectAssetNormalization normalization,
-        ProjectAssetSource? source = null, int? replacementSubmeshCount = null)
+        ProjectAssetSource? source = null, int? replacementSubmeshCount = null,
+        IReadOnlyList<float>? bakedRest = null)
     {
         ArgumentNullException.ThrowIfNull(ingress);
         ArgumentNullException.ThrowIfNull(normalization);
         // Normalization is the expensive half and it holds no lock: only the record below is the
         // transaction, which is what lets a caller publish from a worker without stalling the window.
         var staged = StagePublish(Snapshot(), ingress, kind, label, normalization, source,
-            replacementSubmeshCount);
+            replacementSubmeshCount, bakedRest);
         try
         {
             if (staged is null) return new ExactAssetPublishResult(ProjectAssetPublishResult.Unchanged, null, null);
@@ -903,7 +909,8 @@ public sealed partial class AuthoredEditSession
     /// thing the project already holds, so there is no transaction to open.</summary>
     private static StagedPublish? StagePublish(AuthoredProject project,
         ProjectAssetIngressSession ingress, ProjectAssetKind kind, string label,
-        ProjectAssetNormalization normalization, ProjectAssetSource? source, int? replacementSubmeshCount)
+        ProjectAssetNormalization normalization, ProjectAssetSource? source, int? replacementSubmeshCount,
+        IReadOnlyList<float>? bakedRest)
     {
         if (project.RootDir is null) throw new InvalidOperationException("project has no root directory");
         var edit = RequiredEdit(project, ingress.EditDefinitionId);
@@ -919,6 +926,8 @@ public sealed partial class AuthoredEditSession
                 "a replacement cannot have a negative number of submeshes");
         if (replacementSubmeshCount is not null && slot.Input != TargetInputKind.Geometry)
             throw new InvalidOperationException("replacement output layout can only accompany geometry");
+        if (bakedRest is not null && slot.Input != TargetInputKind.Geometry)
+            throw new InvalidOperationException("a baked rest can only accompany geometry");
         ProjectAssetIngress.RequireUnchangedBinding(project, ingress);
         ProjectAssetIngress.RequireUnchangedSource(project, ingress);
 
@@ -964,7 +973,7 @@ public sealed partial class AuthoredEditSession
                 ? new ProjectAssetSource { ProjectAssetId = sourceId } : null;
         return new StagedPublish(ingress, kind,
             string.IsNullOrWhiteSpace(label) ? Path.GetFileName(relative) : label.Trim(),
-            assetId, relative, canonical, staged, lineage, replacementSubmeshCount, minted);
+            assetId, relative, canonical, staged, lineage, replacementSubmeshCount, minted, bakedRest);
     }
 
     /// <summary>One publish's MUTATION half: the staged bytes take their canonical place and the addressed
@@ -995,6 +1004,7 @@ public sealed partial class AuthoredEditSession
             Label = staged.Label,
             File = staged.Relative,
             Source = staged.Lineage,
+            BakedRest = staged.BakedRest?.ToList(),
         });
         SetBinding(project, edit.Id, new Binding
         {
@@ -1025,7 +1035,7 @@ public sealed partial class AuthoredEditSession
     private sealed record StagedPublish(ProjectAssetIngressSession Ingress, ProjectAssetKind Kind,
         string Label, string AssetId, string Relative, string Canonical, string Staged,
         ProjectAssetSource? Lineage, int? ReplacementSubmeshCount,
-        IReadOnlyList<string> MintedDirectories);
+        IReadOnlyList<string> MintedDirectories, IReadOnlyList<float>? BakedRest);
 
     /// <summary>Apply only the accepted binding rows from a reviewable material-source proposal. Dynamic
     /// and unsupported differences remain visible on the proposal and can never become guessed bindings.</summary>
@@ -1760,6 +1770,7 @@ public sealed partial class AuthoredEditSession
         Label = source.Label,
         File = source.File,
         Source = source.Source is null ? null : Clone(source.Source),
+        BakedRest = source.BakedRest?.ToList(),
         Value = source.Value is null ? null : new ProjectAssetValue
         {
             Semantic = source.Value.Semantic,

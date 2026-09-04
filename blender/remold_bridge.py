@@ -130,6 +130,34 @@ ALPHA_OPAQUE_CEILING = 254.0 / 255.0
 TEXTURE_TRANSPORT_EXTRAS = "gf2_texture_transport"
 TEXTURE_TRANSPORT_NODE = "gf2_texture_binding"
 TEXTURE_TRANSPORT_UV_NODE = "gf2_texture_tex_coord"
+# Stamped on each installed image so the send can tell an untouched picture without reading a pixel:
+# the row identity the app sent it under, the temp path it was loaded from (deleted right after, so a
+# file REAPPEARING there is a user save), and the sticky touched note (see _gf2_note_dirty_images).
+TEXTURE_TRANSPORT_IMAGE_HASH = "gf2_texture_transport_hash"
+TEXTURE_TRANSPORT_IMAGE_PATH = "gf2_texture_transport_path"
+TEXTURE_TRANSPORT_IMAGE_TOUCHED = "gf2_texture_transport_touched"
+
+# Images observed carrying unsaved edits at any point this session, by datablock pointer. Blender's
+# is_dirty clears on save, so the send's unchanged test needs the observation, not the flag. A stale
+# pointer after an undo or delete only ever re-ships bytes; it never marks work unchanged.
+_GF2_DIRTY_SEEN = set()
+
+
+def _gf2_note_dirty_images(stamp=False):
+    """Collect every image currently dirty. The depsgraph pass only collects — writing a datablock from
+    inside that handler re-enters it — while the timer pass also stamps the note onto the image, where
+    it survives a rename and rides the datablock through undo exactly as the paint does."""
+    try:
+        for image in bpy.data.images:
+            dirty = getattr(image, "is_dirty", False)
+            if dirty:
+                _GF2_DIRTY_SEEN.add(image.as_pointer())
+            if stamp and hasattr(image, "get") \
+                    and (dirty or image.as_pointer() in _GF2_DIRTY_SEEN) \
+                    and not image.get(TEXTURE_TRANSPORT_IMAGE_TOUCHED):
+                image[TEXTURE_TRANSPORT_IMAGE_TOUCHED] = True
+    except Exception as e:
+        print(f"GF2: dirty-image sweep failed: {e}")
 
 
 def _gf2_glb_read(path):
@@ -182,7 +210,7 @@ def _gf2_image_bytes(root, binary, image_index):
 
 
 def _gf2_read_texture_transport(path):
-    """Read carrier rows with their embedded PNG bytes. No extras means the legacy empty answer."""
+    """Read carrier rows and any embedded PNG bytes. No extras means the legacy empty answer."""
     root, binary = _gf2_glb_read(path)
     carrier = root.get("extras", {}).get(TEXTURE_TRANSPORT_EXTRAS, {})
     if carrier.get("version") != 1:
@@ -191,18 +219,23 @@ def _gf2_read_texture_transport(path):
     for row in carrier.get("bindings", []):
         try:
             copied = json.loads(json.dumps(row))
-            copied["png"] = _gf2_image_bytes(root, binary, row["image"])
-            copied["image_name"] = root.get("images", [])[row["image"]].get(
-                "name", "GF2 texture")
+            if "image" in row:
+                copied["png"] = _gf2_image_bytes(root, binary, row["image"])
+                copied["image_name"] = root.get("images", [])[row["image"]].get(
+                    "name", "GF2 texture")
             result.append(copied)
         except (KeyError, IndexError, TypeError):
             print("GF2: ignored a malformed texture-transport binding in the opened GLB.")
     return result
 
 
-def _gf2_append_texture_transport(path, rows):
-    """Append Blender images to a freshly exported GLB and stamp the exact property rows."""
-    if not rows:
+def _gf2_append_texture_transport(path, rows, standard_channels=None):
+    """Append the exact property rows to a freshly exported GLB: a changed picture embeds once per
+    distinct picture, an untouched one rides as its row with the app-stamped hash and no bytes, and an
+    untagged standard-channel picture (a hand-built material, a legacy session) is appended with ordinary
+    glTF texture references so the app's channel read still finds it."""
+    standard_channels = standard_channels or []
+    if not rows and not standard_channels:
         return
     root, old_binary = _gf2_glb_read(path)
     binary = bytearray(old_binary)
@@ -211,30 +244,90 @@ def _gf2_append_texture_transport(path, rows):
     buffers = root.setdefault("buffers", [{}])
     if not buffers:
         buffers.append({})
+    image_by_hash = {}
+    texture_by_image = {}
+
+    def append_image(png, image_name):
+        content_hash = hashlib.sha256(png).hexdigest()
+        image = image_by_hash.get(content_hash)
+        if image is None:
+            while len(binary) % 4:
+                binary.append(0)
+            start = len(binary)
+            binary.extend(png)
+            view = len(views)
+            views.append({"buffer": 0, "byteOffset": start, "byteLength": len(png)})
+            image = len(images)
+            images.append({"name": image_name, "mimeType": "image/png", "bufferView": view})
+            image_by_hash[content_hash] = image
+        return image, content_hash
+
     carrier_rows = []
-    for row in rows:
-        png = row.pop("png")
-        while len(binary) % 4:
-            binary.append(0)
-        start = len(binary)
-        binary.extend(png)
-        view = len(views)
-        views.append({"buffer": 0, "byteOffset": start, "byteLength": len(png)})
-        image = len(images)
-        images.append({"name": row.pop("image_name", "GF2 texture"), "mimeType": "image/png",
-                       "bufferView": view})
-        row["image"] = image
-        row["outbound_hash"] = hashlib.sha256(png).hexdigest()
+    for source in rows:
+        row = dict(source)
+        png = row.pop("png", None)
+        image_name = row.pop("image_name", "GF2 texture")
+        row.pop("image", None)
+        if png is not None:
+            image, content_hash = append_image(png, image_name)
+            row["image"] = image
+            row["outbound_hash"] = content_hash
         carrier_rows.append(row)
+
+    materials_by_name = {}
+    for material in root.get("materials", []):
+        materials_by_name.setdefault(material.get("name", ""), []).append(material)
+    textures = root.setdefault("textures", []) if standard_channels else []
+    for standard in standard_channels:
+        # A slot whose material the exporter wrote nothing for (an unused slot) draws nothing; its
+        # picture has nowhere to land and is dropped without failing the send.
+        material_rows = materials_by_name.get(standard["material"])
+        if not material_rows:
+            continue
+        image, _content_hash = append_image(standard["png"], standard["image_name"])
+        texture = texture_by_image.get(image)
+        if texture is None:
+            texture = len(textures)
+            textures.append({"source": image})
+            texture_by_image[image] = texture
+        info = {"index": texture}
+        for material in material_rows:
+            for channel in standard["channels"]:
+                if channel == "baseColor":
+                    material.setdefault("pbrMetallicRoughness", {})["baseColorTexture"] = dict(info)
+                elif channel == "normal":
+                    material["normalTexture"] = dict(info)
+                elif channel == "orm":
+                    material.setdefault("pbrMetallicRoughness", {})["metallicRoughnessTexture"] = dict(info)
+                    material["occlusionTexture"] = dict(info)
     buffers[0]["byteLength"] = len(binary)
-    extras = root.get("extras")
-    if not isinstance(extras, dict):
-        extras = {}
-        root["extras"] = extras
-    extras[TEXTURE_TRANSPORT_EXTRAS] = {
-        "version": 1, "bindings": carrier_rows,
-    }
+    if rows:
+        extras = root.get("extras")
+        if not isinstance(extras, dict):
+            extras = {}
+            root["extras"] = extras
+        extras[TEXTURE_TRANSPORT_EXTRAS] = {
+            "version": 1, "bindings": carrier_rows,
+        }
+    _gf2_drop_empty_gltf_arrays(root)
     _gf2_glb_write(path, root, binary)
+
+
+def _gf2_drop_empty_gltf_arrays(root):
+    """glTF forbids an empty top-level array, and the app's reader refuses the whole file over one. An
+    all-hash-only append leaves the 'images' list it prepared empty; drop that and any other empty
+    top-level list before writing."""
+    for key in [k for k, v in list(root.items()) if isinstance(v, list) and not v]:
+        del root[key]
+
+
+def _gf2_strip_empty_gltf_arrays(path):
+    """The no-append sanitizer for an image-less export: a send with nothing to append still must not
+    ship an empty top-level array the exporter may have left."""
+    root, binary = _gf2_glb_read(path)
+    if any(isinstance(v, list) and not v for v in root.values()):
+        _gf2_drop_empty_gltf_arrays(root)
+        _gf2_glb_write(path, root, binary)
 
 
 def _gf2_material_for_binding(mesh, row):
@@ -312,6 +405,11 @@ def _gf2_pin_texture_coordinate(mesh, material, image_node, tex_coord):
               "the required UV layer is absent.")
         return False
     tree = material.node_tree
+    vector = image_node.inputs.get("Vector")
+    if vector is None:
+        print(f"GF2: could not pin {getattr(image_node, 'name', 'a texture')} to TEXCOORD_{tex_coord}; "
+              "the image has no Vector input.")
+        return False
     uv_map = next((node for node in tree.nodes
                    if getattr(node, "bl_idname", "") == "ShaderNodeUVMap"
                    and node.get(TEXTURE_TRANSPORT_UV_NODE) == tex_coord), None)
@@ -321,25 +419,48 @@ def _gf2_pin_texture_coordinate(mesh, material, image_node, tex_coord):
         uv_map.label = f"GF2: TEXCOORD_{tex_coord}"
         uv_map[TEXTURE_TRANSPORT_UV_NODE] = tex_coord
     uv_map.uv_map = layer_name
-    vector = image_node.inputs.get("Vector")
     uv = uv_map.outputs.get("UV")
-    if vector is None or uv is None:
+    if uv is None:
+        print(f"GF2: could not pin {getattr(image_node, 'name', 'a texture')} to TEXCOORD_{tex_coord}; "
+              "the UV Map node has no UV output.")
         return False
     _gf2_replace_link(tree, uv, vector)
     return True
 
 
+def _gf2_transport_mesh(imported_meshes, name):
+    """The imported mesh a carrier row names, or None. Blender suffixes an imported object whose name the
+    startup scene already holds (`body.001`), so the exact name is tried first and the suffix-stripped one
+    second; a row that matches neither is the caller's to report."""
+    if not isinstance(name, str):
+        return None
+    for mesh in imported_meshes:
+        if mesh.name == name:
+            return mesh
+    for mesh in imported_meshes:
+        if _base_name(mesh.name) == name:
+            return mesh
+    return None
+
+
 def _gf2_install_texture_transport(glb_path, imported_meshes):
-    """Materialize every carrier row as a tagged Blender image node."""
+    """Materialize every carrier row as a tagged Blender image node. A row whose mesh is not in this
+    import is named in a popup rather than dropped: its textures cannot be edited from a node that was
+    never made, and nothing else would say so."""
     rows = _gf2_read_texture_transport(glb_path)
-    by_name = {mesh.name: mesh for mesh in imported_meshes}
     installed = 0
+    preview_warnings = []
+    missing = []
     for row in rows:
-        owner = row.get("owner", {})
-        mesh = by_name.get(owner.get("mesh"))
-        if mesh is None:
+        png = row.pop("png", None)
+        if png is None:
             continue
-        png = row.pop("png")
+        owner = row.get("owner", {})
+        mesh = _gf2_transport_mesh(imported_meshes, owner.get("mesh"))
+        if mesh is None:
+            if owner.get("mesh") not in missing:
+                missing.append(owner.get("mesh"))
+            continue
         image_name = row.pop("image_name", "GF2 texture")
         handle, temp_path = tempfile.mkstemp(suffix=".png")
         os.close(handle)
@@ -349,6 +470,8 @@ def _gf2_install_texture_transport(glb_path, imported_meshes):
             image = bpy.data.images.load(temp_path, check_existing=False)
             image.name = image_name
             image.pack()
+            image[TEXTURE_TRANSPORT_IMAGE_HASH] = row.get("outbound_hash", "")
+            image[TEXTURE_TRANSPORT_IMAGE_PATH] = image.filepath_raw
         finally:
             try:
                 os.remove(temp_path)
@@ -365,9 +488,25 @@ def _gf2_install_texture_transport(glb_path, imported_meshes):
         node.label = row.get("property", "texture")
         node[TEXTURE_TRANSPORT_NODE] = json.dumps(row, separators=(",", ":"))
         if "texCoord" in row:
-            _gf2_pin_texture_coordinate(mesh, material, node, row.get("texCoord"))
+            tex_coord = row.get("texCoord")
+            if not _gf2_pin_texture_coordinate(mesh, material, node, tex_coord):
+                preview_warnings.append((
+                    f"'{row.get('property', 'texture')}' on '{gf2_label(mesh.name)}' could not use "
+                    f"TEXCOORD_{tex_coord}.",
+                    "The image was imported without a material preview."))
+                continue
         _gf2_connect_static_semantic(material, node, row.get("semantic"))
         installed += 1
+    for name in missing:
+        shown = gf2_label(name) if isinstance(name, str) else str(name)
+        preview_warnings.append((
+            f"'{shown}' is not in this scene.",
+            "Its textures were not installed and cannot be edited here."))
+    for lead, detail in preview_warnings:
+        print("GF2: " + lead + " " + detail)
+    if preview_warnings:
+        lines = [line for lead, detail in preview_warnings for line in ("⚠ " + lead, detail)]
+        _popup("Texture Preview Warnings", lines, 'INFO')
     return installed
 
 
@@ -392,12 +531,146 @@ def _gf2_image_png(image):
             pass
 
 
-def _gf2_collect_texture_transport(meshes):
-    """Read exact-property tags only from materials owned by shipping meshes."""
-    rows = []
+def _gf2_shipping_materials(mesh):
+    """The materials a mesh object draws with, slot by slot: the object's own override where a slot is
+    linked to the object, the mesh data's material otherwise. The same read the baseline snapshot and the
+    slot check make, so a texture edited on an object-linked material is not invisible to the send."""
+    slots = getattr(mesh, "material_slots", None)
+    if slots is not None:
+        return [getattr(slot, "material", None) for slot in slots]
+    return list(mesh.data.materials)
+
+
+def _gf2_standard_image_channels(image_node):
+    """Standard glTF channels reached downstream from one untagged image node, walked through any
+    intermediate colour nodes. Visited nodes are keyed by name — unique per tree — because Blender
+    recreates the link wrapper objects between reads and their addresses collide."""
+    reached = set()
+    pending = [link for output in getattr(image_node, "outputs", [])
+               for link in getattr(output, "links", [])]
+    visited = set()
+    while pending:
+        link = pending.pop()
+        node = getattr(link, "to_node", None)
+        if node is None:
+            continue
+        marker = getattr(node, "name", None) or str(id(node))
+        if marker in visited:
+            continue
+        visited.add(marker)
+        socket = getattr(link, "to_socket", None)
+        if getattr(node, "type", None) == "BSDF_PRINCIPLED":
+            name = getattr(socket, "name", "")
+            if name == "Base Color":
+                reached.add("baseColor")
+            elif name == "Normal":
+                reached.add("normal")
+            elif name in {"Metallic", "Roughness"}:
+                reached.add("orm")
+            continue
+        for output in getattr(node, "outputs", []):
+            pending.extend(getattr(output, "links", []))
+    return [channel for channel in ("baseColor", "normal", "orm") if channel in reached]
+
+
+def _gf2_collect_standard_channels(meshes):
+    """Collect untagged image nodes on supported PBR routes, keyed by material name — the join the
+    exported glb offers. This is how a material built by hand, or a whole legacy session with no tagged
+    nodes, keeps its pictures now that the exporter itself embeds none. Returns the rows and the
+    warnings the send popup owes: a picture that could not be read, and a channel two pictures reach
+    (the first one seen is sent)."""
+    materials = []
     seen = set()
     for mesh in meshes:
-        for material in mesh.data.materials:
+        for material in _gf2_shipping_materials(mesh):
+            if material is None or id(material) in seen:
+                continue
+            seen.add(id(material))
+            materials.append(material)
+
+    rows = []
+    warnings = []
+    for material in materials:
+        tree = getattr(material, "node_tree", None)
+        if tree is None:
+            continue
+        claimed = {}
+        for node in tree.nodes:
+            if hasattr(node, "get") and node.get(TEXTURE_TRANSPORT_NODE) is not None:
+                continue
+            image = getattr(node, "image", None)
+            if image is None or getattr(node, "type", None) != "TEX_IMAGE":
+                continue
+            fresh = []
+            for channel in _gf2_standard_image_channels(node):
+                if channel in claimed:
+                    if claimed[channel] != image.name:
+                        warnings.append(f"Two pictures reach the {channel} channel on "
+                                        f"'{getattr(material, 'name', '')}'; "
+                                        f"'{claimed[channel]}' was sent.")
+                else:
+                    fresh.append(channel)
+            if not fresh:
+                continue
+            try:
+                png = _gf2_image_png(image)
+            except (TypeError, ValueError, OSError, RuntimeError) as error:
+                print(f"GF2: could not carry {image.name} back: {error}")
+                warnings.append(f"'{image.name}' on '{getattr(material, 'name', '')}' could not be "
+                                "read and was not sent.")
+                continue
+            for channel in fresh:
+                claimed[channel] = image.name
+            rows.append({"material": material.name, "channels": fresh,
+                         "png": png, "image_name": image.name})
+    return rows, warnings
+
+
+def _gf2_image_is_unchanged(image, row):
+    """Whether this is the clean, packed image datablock installed for this exact outbound row. Decided
+    from touch tracking, never from pixels: the image was never seen dirty this session, still carries
+    the install stamps for THIS row, still sits packed at its recorded (deleted) install path, and no
+    file has reappeared there — a reappeared file is a user save. Any doubt ships the bytes."""
+    if image is None or not hasattr(image, "get"):
+        return False
+    if getattr(image, "is_dirty", True):
+        return False
+    if image.get(TEXTURE_TRANSPORT_IMAGE_TOUCHED):
+        return False
+    if hasattr(image, "as_pointer") and image.as_pointer() in _GF2_DIRTY_SEEN:
+        return False
+    packed = getattr(image, "packed_file", None) is not None
+    if not packed:
+        try:
+            packed = len(image.packed_files) > 0
+        except (AttributeError, TypeError):
+            packed = False
+    if not packed:
+        return False
+    outbound_hash = row.get("outbound_hash")
+    if not (isinstance(outbound_hash, str) and outbound_hash):
+        return False
+    if image.get(TEXTURE_TRANSPORT_IMAGE_HASH) != outbound_hash:
+        return False
+    recorded_path = image.get(TEXTURE_TRANSPORT_IMAGE_PATH)
+    if recorded_path != getattr(image, "filepath_raw", None):
+        return False
+    if isinstance(recorded_path, str) and recorded_path and os.path.exists(recorded_path):
+        return False
+    return True
+
+
+def _gf2_collect_texture_transport(meshes):
+    """Read exact-property tags only from materials owned by shipping meshes. Returns the rows and the
+    duplicates: a tag two nodes carry (a duplicated node, a duplicated or copied material) names one slot
+    twice, the first one seen is sent, and the caller says so. An untouched picture ships as its row
+    alone; a touched one is stamped as touched — the send's own save clears Blender's dirty flag, and
+    without the stamp the NEXT send would read the picture as clean under a hash the app never saw."""
+    rows = []
+    seen = set()
+    duplicates = []
+    for mesh in meshes:
+        for material in _gf2_shipping_materials(mesh):
             tree = getattr(material, "node_tree", None) if material is not None else None
             if tree is None:
                 continue
@@ -412,14 +685,30 @@ def _gf2_collect_texture_transport(meshes):
                     key = (owner.get("mesh"), owner.get("material"), owner.get("primitive"),
                            row.get("property"))
                     if key in seen:
+                        duplicates.append((row.get("property", "texture"),
+                                           getattr(material, "name", "") or "",
+                                           getattr(mesh, "name", "") or ""))
                         continue
                     seen.add(key)
-                    row["png"] = _gf2_image_png(image)
-                    row["image_name"] = image.name
+                    row.pop("image", None)
+                    if not _gf2_image_is_unchanged(image, row):
+                        # Only dirt is volatile: the send's own save below clears Blender's flag, so it
+                        # is stamped here. Every other "changed" reason persists on the datablock.
+                        if getattr(image, "is_dirty", False) and hasattr(image, "get") \
+                                and not image.get(TEXTURE_TRANSPORT_IMAGE_TOUCHED):
+                            image[TEXTURE_TRANSPORT_IMAGE_TOUCHED] = True
+                        row["png"] = _gf2_image_png(image)
+                        row["image_name"] = image.name
                     rows.append(row)
                 except (TypeError, ValueError, OSError) as error:
                     print(f"GF2: could not carry {getattr(node, 'name', 'a texture')} back: {error}")
-    return rows
+    return rows, duplicates
+
+
+def gf2_duplicate_tag_lines(duplicates):
+    """One line per slot two nodes claimed, in the words of the send popup."""
+    return [f"Two nodes carry '{prop}' on '{material}' ({gf2_label(mesh)}); the first one was sent."
+            for prop, material, mesh in duplicates]
 
 # The two empty-scope refusals, shared by the checks and the send choke point so a scene the send
 # would refuse never reads as ready. Nothing attributed is a layout mistake; every part deliberately
@@ -793,7 +1082,7 @@ def _snapshot_minted_edit(part, part_name, snapshot):
                if isinstance(match_name, str) and edit["label"] == match_name]
     if matches:
         return matches[0]
-    return new_edits[0] if not match_name and len(new_edits) == 1 else None
+    return new_edits[0] if len(new_edits) == 1 else None
 
 
 def gf2_target_row_specs(session, part_names=None, previous=None, acknowledged_snapshot=None):
@@ -801,7 +1090,8 @@ def gf2_target_row_specs(session, part_names=None, previous=None, acknowledged_s
 
     ``previous`` preserves panel choices across a live revision refresh. An acknowledged existing-id
     target never displaces that live choice; acknowledgement only promotes a sent New target to the newly
-    added inventory edit whose label matches the sent name (or the prior default for a blank name).
+    added inventory edit whose label matches the sent name (or the prior default for a blank name), or to
+    the sole new identity when the app had to replace that name.
     """
     session = session or {}
     if part_names is None:
@@ -1024,6 +1314,7 @@ def _prime_session_refresh(glb_path):
 
 def _session_refresh_tick():
     """Periodically adopt a changed session file without doing any work from panel draw."""
+    _gf2_note_dirty_images(stamp=True)
     try:
         scene = bpy.context.scene
         path = getattr(scene, "gf2_glb_path", "") or ""
@@ -1110,19 +1401,28 @@ def _gf2_new_objects(objects, object_type, pre_existing_names):
     return [obj for obj in objects if obj.type == object_type and obj.name not in pre_existing_names]
 
 
+def _gf2_use_dithered_transparency(material):
+    """Select the non-overlapping transparency fallback exposed by this Blender version."""
+    if getattr(material, "surface_render_method", None) is not None:
+        material.surface_render_method = "DITHERED"
+    else:
+        material.blend_method = "HASHED"
+
+
 def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_materials=()):
     """Apply the EEVEE preview contract to BLENDED materials owned by this import only.
 
     ``imported_objects`` and ``pre_existing_materials`` are explicit parameters so this helper never
     scans or mutates the wider scene. A material already present before the glTF operator is excluded
     even if an imported object happens to reference it. For each remaining BLENDED material, keep the
-    blended render method, keep both sides visible, disable same-material transparency overlap where
-    this Blender exposes the setting, and map texture alpha 0..254/255 to Principled alpha 0..1.
+    blended render method, keep both sides visible, disable same-material transparency overlap, and map
+    texture alpha 0..254/255 to Principled alpha 0..1.
 
     The standard glTF importer connects the base-colour image's Alpha directly to Principled Alpha when
-    the writer invariants documented at the shape check hold. A material with another graph still gets
-    the render/overlap/culling settings above, but its graph is left untouched and the degradation is
-    reported. A tagged node makes the graph operation idempotent even when its display name is occupied.
+    the writer invariants documented at the shape check hold. If the running Blender cannot provide the
+    overlap control or the graph does not have that safe shape, the material is switched to dithered
+    transparency without partially applying the blended-preview settings. A tagged node makes the graph
+    operation idempotent even when its display name is occupied.
     """
     excluded = {_data_identity(material) for material in pre_existing_materials}
     seen = set()
@@ -1146,28 +1446,24 @@ def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_material
     missing_alpha_link = []
     remapped = 0
     for material in blended:
-        method = getattr(material, "surface_render_method", None)
-        if method is not None:
-            material.surface_render_method = "BLENDED"
-        else:
-            material.blend_method = "BLEND"
-        if hasattr(material, "use_backface_culling"):
-            material.use_backface_culling = False
+        overlap_property = None
         if hasattr(material, "use_transparency_overlap"):
-            material.use_transparency_overlap = False
+            overlap_property = "use_transparency_overlap"
         elif hasattr(material, "show_transparent_back"):
-            material.show_transparent_back = False
+            overlap_property = "show_transparent_back"
         else:
             missing_overlap.append(material.name)
 
         tree = getattr(material, "node_tree", None)
         if tree is None:
             missing_alpha_link.append(material.name)
+            _gf2_use_dithered_transparency(material)
             continue
         principled = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
         alpha_input = principled.inputs.get("Alpha") if principled is not None else None
         if alpha_input is None or not alpha_input.links:
             missing_alpha_link.append(material.name)
+            _gf2_use_dithered_transparency(material)
             continue
 
         alpha_link = alpha_input.links[0]
@@ -1195,7 +1491,19 @@ def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_material
             source = None
         if source is None:
             missing_alpha_link.append(material.name)
+
+        if overlap_property is None or source is None:
+            _gf2_use_dithered_transparency(material)
             continue
+
+        method = getattr(material, "surface_render_method", None)
+        if method is not None:
+            material.surface_render_method = "BLENDED"
+        else:
+            material.blend_method = "BLEND"
+        if hasattr(material, "use_backface_culling"):
+            material.use_backface_culling = False
+        setattr(material, overlap_property, False)
 
         if remap is None:
             remap = tree.nodes.new("ShaderNodeMapRange")
@@ -1225,10 +1533,12 @@ def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_material
 
     warnings = []
     if missing_overlap:
-        warnings.append("The running Blender version exposes no transparency-overlap setting for: "
+        warnings.append("These materials were switched to dithered transparency because Blender cannot "
+                        "control overlapping transparent surfaces: "
                         + ", ".join(sorted(missing_overlap)) + ".")
     if missing_alpha_link:
-        warnings.append("The alpha-254 preview remap could not be installed on: "
+        warnings.append("These materials were switched to dithered transparency because their alpha "
+                        "inputs could not be prepared: "
                         + ", ".join(sorted(missing_alpha_link)) + ".")
     for warning in warnings:
         print("GF2: " + warning)
@@ -1259,10 +1569,16 @@ def gf2_import(glb_path):
 
     # FORTUNE points each bone's tip at its child = a readable connected skeleton (re-export keys
     # off the bone hash in the node name, not orientation, so this is display-only and safe).
+    # merge_vertices is pinned OFF rather than trusted as the default: the app ships the game's
+    # duplicate faces on split vertex copies precisely so Blender keeps them, and a merging import
+    # would weld the copies back together and silently delete those faces again.
     try:
-        bpy.ops.import_scene.gltf(filepath=glb_path, bone_heuristic="FORTUNE")
+        bpy.ops.import_scene.gltf(filepath=glb_path, bone_heuristic="FORTUNE", merge_vertices=False)
     except TypeError:
-        bpy.ops.import_scene.gltf(filepath=glb_path)
+        try:
+            bpy.ops.import_scene.gltf(filepath=glb_path, merge_vertices=False)
+        except TypeError:
+            bpy.ops.import_scene.gltf(filepath=glb_path)
 
     # The glTF operator has finished and these are exactly its meshes. Apply Blender-only BLEND
     # mitigation now, before any layout work, excluding every material the user's scene already owned.
@@ -1637,7 +1953,8 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
 
     # The export scope: the part collections' meshes plus the session armature, regardless of focus.
     shipping = mesh_objs + arms
-    texture_transport = _gf2_collect_texture_transport(mesh_objs)
+    texture_transport, duplicate_tags = _gf2_collect_texture_transport(mesh_objs)
+    standard_channels, standard_warnings = _gf2_collect_standard_channels(mesh_objs)
 
     want = dict(
         filepath=out_glb, export_format="GLB",
@@ -1646,10 +1963,10 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
         export_texcoords=True,       # every UV layer rides as TEXCOORD_0..N in Blender layer order
         export_skins=True,           # authored weights ride along; the app compiles them onto the target
         export_extras=True,          # keep object/material extras; exact node identity is re-stamped below
-        export_image_format="AUTO",  # keep each image's own format. an untouched texture is identified
-                                     #   by its CONTENT, so a re-encode (which a user preference or a
-                                     #   future default could otherwise impose) would read as an edit
-                                     #   and ship a redundant copy of a stock map.
+        export_image_format="NONE",  # the appended exact-property rows and standard-channel appends are
+                                     #   the return's only image carriers: an untouched picture rides as
+                                     #   a hash-only row, so the exporter must not re-embed every image
+                                     #   the preview graphs reference.
         export_apply=True,           # bake modifiers (Mirror/Subsurf/etc.) into the mesh — OFF by
                                      #   default, so without this a modifier silently vanishes on Send.
                                      #   Safe for rigged parts: the glTF exporter exempts the Armature
@@ -1657,7 +1974,14 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
                                      #   pose). Its other caveat, shape keys, is not in our pipeline.
         use_selection=True,
     )
-    valid = {p.identifier for p in bpy.ops.export_scene.gltf.get_rna_type().properties}
+    properties = list(bpy.ops.export_scene.gltf.get_rna_type().properties)
+    valid = {p.identifier for p in properties}
+    # A version whose exporter cannot skip images would silently fall back to embedding them all under
+    # whatever format it defaults to — refuse instead of shipping an unbounded return.
+    image_format = next((p for p in properties if p.identifier == "export_image_format"), None)
+    image_formats = {item.identifier for item in image_format.enum_items} if image_format is not None else set()
+    if "NONE" not in image_formats:
+        raise RuntimeError("GF2: The running Blender version cannot export a geometry-only GLB.")
     opts = {k: v for k, v in want.items() if k in valid}
     dropped = [k for k in want if k not in valid]
     hidden = []
@@ -1693,9 +2017,13 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
         for o, was_hidden in hidden:
             _set_hidden(o, was_hidden)
 
-    # Blender does not export node custom properties. Re-append the exact property records and current
-    # image pixels after its geometry writer has produced the valid GLB.
-    _gf2_append_texture_transport(out_glb, texture_transport)
+    # Blender does not export node custom properties. Re-append the exact property records — changed
+    # pixels, or a hash-only marker per untouched picture — after its geometry writer has produced the
+    # valid GLB, together with any untagged standard-channel pictures the image-less export left behind.
+    if texture_transport or standard_channels:
+        _gf2_append_texture_transport(out_glb, texture_transport, standard_channels)
+    else:
+        _gf2_strip_empty_gltf_arrays(out_glb)
 
     # Tripwire: a skinned scene must never send a skinless glb — that failure is silent otherwise.
     # Structural check on the written bytes, so an export-option or Blender behavior drift is caught
@@ -1723,10 +2051,17 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
     # An option this Blender's glTF exporter does not carry was filtered out of the export above. The mesh
     # still ships; what it ships WITHOUT is only knowable here, so it is said where the send is read rather
     # than on a console the modder never opens.
+    warning_lines = []
     if dropped:
-        line = gf2_dropped_options_line(dropped)
-        print("GF2: " + line)
-        _popup("Sent With Warnings", ["⚠ " + line], 'INFO')
+        warning_lines.append(gf2_dropped_options_line(dropped))
+    # A slot two nodes claimed sent one of them; which one is not the modder's choice, so it is named.
+    warning_lines.extend(gf2_duplicate_tag_lines(duplicate_tags))
+    # An untagged picture the send skipped or could not read — silence would read as a clean send.
+    warning_lines.extend(standard_warnings)
+    if warning_lines:
+        for line in warning_lines:
+            print("GF2: " + line)
+        _popup("Sent With Warnings", ["⚠ " + line for line in warning_lines], 'INFO')
 
     # The sidecar is the write-complete sentinel (written last) that the watcher fires on, and it
     # carries the one intent the glb cannot express: which parts were emptied. An absent mesh is never
@@ -1938,7 +2273,9 @@ def gf2_cheap_checks(mesh_objs, armature):
     for mo in shipping:
         old = (base.get("slots") or {}).get(mo.name)
         cur = [ms.material.name if ms.material else "" for ms in mo.material_slots]
-        if old is not None and cur != old:
+        # Slots appended after the imported ones are new submeshes the app takes; only the imported
+        # slots have face ranges that a reorder, rename or removal would move.
+        if old is not None and cur[:len(old)] != old:
             issues.append(("SOFT", f"'{mo.name}' material slots changed since import, so face ranges "
                                    "may now use different materials. Restore the imported slot order "
                                    "if the change was not intended."))
@@ -2186,6 +2523,7 @@ def _gf2_depsgraph_update(scene, depsgraph):
     re-enter the depsgraph from inside its own handler."""
     if _SOLVING:
         return               # the weight solve's throwaway duplicate is not scene state worth reporting
+    _gf2_note_dirty_images()
     try:
         if time.monotonic() - _LIVE["ran"] < _LIVE_INTERVAL:
             if not _LIVE["pending"]:

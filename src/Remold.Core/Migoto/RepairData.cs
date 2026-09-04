@@ -132,7 +132,9 @@ public static class RepairData
         [property: JsonPropertyName("state_count")] int StateCount,
         [property: JsonPropertyName("start_state")] int StartState,
         [property: JsonPropertyName("state_index")] int StateIndex,
-        [property: JsonPropertyName("states")] IReadOnlyList<KeyGroupStateRecord> States);
+        [property: JsonPropertyName("states")] IReadOnlyList<KeyGroupStateRecord> States,
+        [property: JsonPropertyName("persist")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Persist = false);
 
     /// <summary>A tier-2 key binding, whole: an off state and a start state travel with the key.</summary>
     public sealed record KeyBinding(

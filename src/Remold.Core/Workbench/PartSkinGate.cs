@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Remold.Core.Bundles;
+using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 
 namespace Remold.Core.Workbench;
@@ -35,9 +36,23 @@ public static class PartSkinGate
     /// null as <see cref="Blocked"/>, but identifies an unreadable bundle or a throwing mesh parse so a
     /// caller must not memoize that momentary answer.</summary>
     internal static bool TryBlocked(Func<string, byte[]?> tryDeobfuscate, string bundle,
-        string meshName, long pathId, out StreamDump.SkinRefusal? refusal, BundleReader? reader = null)
+        string meshName, long pathId, out StreamDump.SkinRefusal? refusal, BundleReader? reader = null) =>
+        TryBlenderEditAnswers(tryDeobfuscate, bundle, meshName, pathId, out refusal, out _, reader,
+            readGeometry: false);
+
+    /// <summary>Both per-mesh answers the Blender-edit surfaces need, from ONE bundle read: the
+    /// replaceability refusal (<see cref="Blocked"/>) and whether the mesh is drawn from COLLAPSED POINTS —
+    /// every triangle exactly zero-area, a billboard cloud a game shader inflates at draw time. Blender
+    /// cannot carry such a mesh's authored normals, so editing it there is meaningless and the Open verbs
+    /// refuse; replacement itself stays possible, which is why this answer deliberately never joins
+    /// <see cref="Blocked"/> — the Build plan's question. Same settled-read contract as
+    /// <see cref="TryBlocked"/>: false means nothing was read and nothing may be memoized.</summary>
+    internal static bool TryBlenderEditAnswers(Func<string, byte[]?> tryDeobfuscate, string bundle,
+        string meshName, long pathId, out StreamDump.SkinRefusal? refusal, out bool collapsedBillboard,
+        BundleReader? reader = null, bool readGeometry = true)
     {
         refusal = null;
+        collapsedBillboard = false;
         if (string.IsNullOrEmpty(bundle) || (string.IsNullOrEmpty(meshName) && pathId == 0)) return true;
         try
         {
@@ -50,10 +65,24 @@ public static class PartSkinGate
                 refusal = StreamDump.SkinRefusal.SpringRig;
             else if (StreamDump.Route(field) is null)
                 refusal = StreamDump.UnrecoverableSkin(field)?.Kind;
+            // The geometry decode is the one read here that can throw on data the header checks accept
+            // (an unknown vertex format, a truncated stream). It runs only when no refusal is settled —
+            // a refused part's geometry is never consulted — and its own failure reads as "not
+            // collapsed" IN ITS OWN CATCH, so it can never discard the refusal above: a corrupt vertex
+            // stream is not evidence the part is editable, and even less that it is a billboard.
+            if (readGeometry && refusal is null)
+                try { collapsedBillboard = MeshGltf.AllFacesZeroArea(UnityMesh.Decode(field)); }
+                catch { collapsedBillboard = false; }
             return true;
         }
         catch { return false; }
     }
+
+    /// <summary>The collapsed-points refusal as the ② Edit page says it — one home beside
+    /// <see cref="EditRefusal"/> for the disabled opens' hover reason and the refused click's status
+    /// line.</summary>
+    public const string CollapsedBillboardRefusal =
+        "This mesh is drawn from collapsed points and cannot be edited in Blender.";
 
     /// <summary>The refusal as the ② Edit page says it: the disabled opens' hover reason and the refused
     /// click's status line, one home so the two cannot drift apart. One short sentence — the live map,

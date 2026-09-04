@@ -506,11 +506,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal static (string? Path, string? Missing) GeometryFile(IReadOnlyList<EditSlotState>? slots,
         string? root)
     {
-        if (slots is null) return (null, null);
-        var geometry = slots.FirstOrDefault(state => state.Slot.Input == TargetInputKind.Geometry
-            && string.Equals(state.Slot.Tier, "lod0", StringComparison.OrdinalIgnoreCase))
-            ?? slots.FirstOrDefault(state => state.Slot.Input == TargetInputKind.Geometry
-                && state.Slot.Tier is null);
+        var geometry = GeometrySlot(slots);
         if (geometry?.Binding.Kind != BindingKind.ProjectAsset) return (null, null);
         if (geometry.ProjectAsset?.File is not { Length: > 0 } file) return (null, null);
         if (root is null) return (null, file);
@@ -521,6 +517,17 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         }
         catch { return (null, file); }
     }
+
+    /// <summary>The scene-rest uprighting the edit's own geometry file is baked by, as its asset records it
+    /// (see <see cref="ProjectAsset.BakedRest"/>); null where the asset says nothing.</summary>
+    internal static IReadOnlyList<float>? EditGeometryRest(IReadOnlyList<EditSlotState>? slots) =>
+        GeometrySlot(slots)?.ProjectAsset?.BakedRest;
+
+    private static EditSlotState? GeometrySlot(IReadOnlyList<EditSlotState>? slots) => slots is null ? null
+        : slots.FirstOrDefault(state => state.Slot.Input == TargetInputKind.Geometry
+            && string.Equals(state.Slot.Tier, "lod0", StringComparison.OrdinalIgnoreCase))
+            ?? slots.FirstOrDefault(state => state.Slot.Input == TargetInputKind.Geometry
+                && state.Slot.Tier is null);
 
     /// <summary>What a render says when the edit's own geometry file is gone from the mod folder. Names the
     /// file, because putting it back is the whole remedy.</summary>
@@ -543,12 +550,37 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal IReadOnlyList<(bool Own, string? File, string? Bundle, string? Texture)> SamplerPlan(
         SubjectPart part, IReadOnlyList<EditSlotState>? slots, string? root)
     {
+        // The renderer samples by SUBMESH of the geometry it draws. A replacement's own outputs are recorded
+        // per submesh, and several of them can fold onto one installed material, so an edit with outputs is
+        // planned submesh by submesh; a part or edit without them draws the game's geometry, whose submeshes
+        // are its material positions.
+        var outputs = slots?.Where(state => state.Slot.Domain == TargetSlotDomain.EditOutput
+            && state.Slot.Input == TargetInputKind.BaseColor && state.Slot.SubmeshIndex is not null).ToList();
+        if (outputs is { Count: > 0 })
+        {
+            int count = outputs.Max(state => state.Slot.SubmeshIndex!.Value) + 1;
+            var perSubmesh = new List<(bool Own, string? File, string? Bundle, string? Texture)>(count);
+            for (int submesh = 0; submesh < count; submesh++)
+            {
+                var here = outputs.Where(state => state.Slot.SubmeshIndex == submesh).ToList();
+                int position = here.FirstOrDefault()?.Slot.MaterialSlotIndex
+                    ?? Math.Min(submesh, part.Materials.Count - 1);
+                perSubmesh.Add(Entry(here, position));
+            }
+            return perSubmesh;
+        }
         var plan = new List<(bool Own, string? File, string? Bundle, string? Texture)>(part.Materials.Count);
         for (int i = 0; i < part.Materials.Count; i++)
         {
             int position = i;
-            var here = slots?.Where(state => state.Slot.Input == TargetInputKind.BaseColor
-                && state.Slot.MaterialSlotIndex == position).ToList();
+            plan.Add(Entry(slots?.Where(state => state.Slot.Input == TargetInputKind.BaseColor
+                && state.Slot.MaterialSlotIndex == position).ToList(), position));
+        }
+        return plan;
+
+        (bool Own, string? File, string? Bundle, string? Texture) Entry(IReadOnlyList<EditSlotState>? here,
+            int position)
+        {
             // A file bound here outranks a borrowed one: this edit's own answer for the position is the
             // nearer of the two, and reading it first leaves every plan that has one exactly as it was.
             string? relative = here?.FirstOrDefault(state =>
@@ -571,13 +603,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     }
                     catch { file = null; }
                 }
-                plan.Add((true, file, null, null));
-                continue;
+                return (true, file, null, null);
             }
-            var map = part.Materials[i].Maps.FirstOrDefault(m => MaterialResolver.IsBaseColor(m.Slot));
-            plan.Add((false, null, map?.BundleId, map?.TextureName));
+            var map = position >= 0 && position < part.Materials.Count
+                ? part.Materials[position].Maps.FirstOrDefault(m => MaterialResolver.IsBaseColor(m.Slot))
+                : null;
+            return (false, null, map?.BundleId, map?.TextureName);
         }
-        return plan;
     }
 
     /// <summary>The mod's own file one source-slot answer resolves to, or null for every other binding and
@@ -637,7 +669,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             if (thumb is null) return null;
             // The thumbnail is scaled down, so its own pixel size is not the texture's. The extent comes off
             // the game texture's header, which is what the shipped pane's size line reads too.
-            return DecodeCardPicture(thumb, rmo, GameTextureDimensions(map));
+            var probe = GameTextureProbe(map);
+            return DecodeCardPicture(thumb, rmo, probe.Dimensions, probe.Authorable);
         });
     }
 
@@ -714,7 +747,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         catch { return null; }
     }
 
-    private EditMapPreview? DecodeCardPicture(string path, bool rmo, string dimensions)
+    private EditMapPreview? DecodeCardPicture(string path, bool rmo, string dimensions, bool authorable = true)
     {
         try
         {
@@ -722,20 +755,41 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // not fail on the handle it holds.
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
-            return new EditMapPreview(EditPreviewService.DecodeMap(stream, rmo), dimensions);
+            return new EditMapPreview(EditPreviewService.DecodeMap(stream, rmo), dimensions,
+                Authorable: authorable);
         }
-        catch { return new EditMapPreview(null, dimensions); }
+        catch { return new EditMapPreview(null, dimensions, Authorable: authorable); }
     }
 
-    private string GameTextureDimensions(SubjectMap map)
+    /// <summary>What the game texture's header says: its size line, and whether an edit could be encoded
+    /// back into its format. An unreadable header answers the em dash and authorable, so a card never
+    /// refuses a gesture over a texture it could not read; the gesture's own read says what went wrong.</summary>
+    private (string Dimensions, bool Authorable) GameTextureProbe(SubjectMap map)
     {
         try
         {
             var bytes = TryDeobfuscateBundle(map.BundleId);
             var probe = bytes is null ? null : TextureExport.Probe(bytes, map.Ref);
-            return probe is { } p ? $"{p.Width}×{p.Height}" : EditMapCardVm.NoDimensions;
+            return probe is { } p ? ($"{p.Width}×{p.Height}", p.Authorable) : (EditMapCardVm.NoDimensions, true);
         }
-        catch { return EditMapCardVm.NoDimensions; }
+        catch { return (EditMapCardVm.NoDimensions, true); }
+    }
+
+    /// <summary>The one sentence that refuses a picture gesture on a slot whose game texture is in a float
+    /// format, or null. Asked by every route that would encode a picture into that slot (drop, Browse, Open),
+    /// so the refusal does not depend on the card having read its header first.</summary>
+    private string? FormatRefusalFor(EditSlotRef slot) =>
+        slot.ProjectRelativeFile is null && GameMapFor(slot) is { } map && !GameTextureProbe(map).Authorable
+            ? EditMapCardVm.FloatFormat : null;
+
+    /// <summary>The size of the picture a slot currently shows: the mod's own file where one is bound, else
+    /// the game texture's header. Null where neither can be read.</summary>
+    private (int Width, int Height)? CurrentPictureSize(EditSlotRef slot)
+    {
+        if (slot.ProjectRelativeFile is { Length: > 0 })
+            return Rooted(slot.ProjectRelativeFile, EditSession?.Snapshot().RootDir) is { } own
+                ? PngInfo.TryPngSize(own) : null;
+        return GameMapFor(slot) is { } map ? EditMapCardVm.ParseDimensions(GameTextureProbe(map).Dimensions) : null;
     }
 
     // ---- the external tools -------------------------------------------------------------------------
@@ -837,16 +891,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         var scope = BeginInteractiveRiggedGlbOpen();
         _ = Task.Run(() =>
         {
-            var watch = Stopwatch.StartNew();
-            bool stored = false;
-            try { stored = publish(); }
+            try { publish(); }
             catch { /* a failed store is only a lost optimization */ }
-            finally
-            {
-                scope.Dispose();
-                BlenderOpenTiming.WriteLine(
-                    $"{watch.ElapsedMilliseconds,9:N0} ms  {label} deferred{(stored ? "" : " (declined)")}");
-            }
+            finally { scope.Dispose(); }
         });
     }
 
@@ -1006,13 +1053,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         bool openAll = openAllMode != SessionBlenderOpenAll.None;
         using var interactivePriority = BeginInteractiveRiggedGlbOpen();
-        // The open's timing block, written only for an open that reached Blender. Sub-steps a helper timed
-        // itself land as "· " lines inside their phase's subtotal.
-        var openTiming = new List<string>();
-        var openWatch = Stopwatch.StartNew();
-        var totalWatch = Stopwatch.StartNew();
-        void TimeMark(string label, long ms) => openTiming.Add($"{ms,9:N0} ms  {label}");
-        void Phase(string label) { TimeMark(label, openWatch.ElapsedMilliseconds); openWatch.Restart(); }
         if (EditSession is not { } session || _vfs is not { } vfs
             || GameDir is not { Length: > 0 } gameDir
             || PickOutfit(subject, outfit) is not { } outfitModel)
@@ -1092,6 +1132,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)>();
         var pending = new List<(TargetPart Target, SubjectPart Model, RecipePart Recipe,
             SessionPartPlan Plan)>();
+        var workspaceFacts = new AuthoredWorkspaceFacts(snapshot);
         foreach (var part in model.Parts)
         {
             var recipe = part.ToRecipePart();
@@ -1106,6 +1147,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 : GeometryFile(session.Slots(sourceEdit), snapshot.RootDir);
             if (geometry.Missing is not null)
             { status.Report(GeometryFileMissing(geometry.Missing)); return; }
+            // The space the edit's file sits in — its own record, else the target's workspace record (a
+            // converted 0.3.x project) — so the prepare can stand a bind-space file up into this run's.
+            var editedRest = sourceEdit is null ? null
+                : EditGeometryRest(session.Slots(sourceEdit)) ?? workspaceFacts.BakedRestOf(target);
             bool show = displayed.Contains(part);
             string rigged = Path.Combine(partsDir, StorageName(part.SlotName) + ".rigged.glb");
             string prepared = Path.Combine(partsDir, StorageName(part.SlotName) + ".glb");
@@ -1123,7 +1168,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 null, recipe.MeshPathId, null));
             if (show)
                 pending.Add((target, part, recipe, new SessionPartPlan(part.Token,
-                    recipe.SlotName, rigged, prepared, part.IsStatic, maps, geometry.Path, textureMaps)));
+                    recipe.SlotName, rigged, prepared, part.IsStatic, maps, geometry.Path, textureMaps,
+                    editedRest)));
         }
         if (pending.Count == 0) { status.Report("No parts to open."); return; }
         var plans = pending.Select(item => item.Plan).ToList();
@@ -1139,7 +1185,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         bool earlyCombinedRestore = withReferences && !openAll && referenceTargetPlan is not null
             && (stockCombinedCandidate || authoredReferenceCandidate);
 
-        Phase("preflight (gates + plan walk)");
         using var preparing = BeginSessionBlenderPrepare(pending.Count > 1);
         status.Report(pending.Count == 1 ? "Preparing the part for Blender…" : "Preparing the parts for Blender…");
         // The parts whose OWN edited geometry could not be read; nothing is opened while it holds anything.
@@ -1191,7 +1236,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var restoredPrepared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool skipStaticPrepare = plans.Count > 1;
-        long earlyPreparationMilliseconds = 0;
         string? restoredCombined = null;
         string? authoredCombinedKey = null;
         try
@@ -1199,7 +1243,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             await Task.Run(() =>
             {
                 (roster, wardrobeUnreadable) = ExportRoster(vfs, gameDir, model);
-                Phase("roster + wardrobe read");
                 var cacheRoot = CacheRootFor();
                 var stockTextureRoot = LabPaths.StockTextureRootIn(cacheRoot);
                 try
@@ -1215,11 +1258,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 if (!wardrobeUnreadable && sessionRigCache is not null
                     && sessionRigIdentity is { } identity && sessionStockTextures is not null)
                     partsRestored = TryRestoreSessionRiggedParts(sessionRigCache, identity, vfs,
-                        sessionStockTextures, plans, runDir, out servedDependencies, validatedStock,
-                        (label, ms) => TimeMark("· " + label, ms));
+                        sessionStockTextures, plans, runDir, out servedDependencies, validatedStock);
                 if (partsRestored) preparedDependencies = servedDependencies;
                 if (!partsRestored) validatedStock.Clear();
-                Phase(partsRestored ? "parts restore (cache hit)" : "parts restore attempt (miss)");
 
                 if (!partsRestored)
                 {
@@ -1238,14 +1279,12 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                         && TryDescribeRiggedBuildDependencies(vfs, sessionStockTextures, diagnostics,
                             out var builtDependencies))
                         preparedDependencies = builtDependencies;
-                    Phase("parts build (cold)");
                 }
                 var cacheablePlans = plans.Where(plan => !skipStaticPrepare || !plan.Static).ToList();
                 var initialPlans = earlyCombinedRestore
                     ? cacheablePlans.Where(plan => string.Equals(plan.SlotName,
                         referenceTargetPlan!.Value.SlotName, StringComparison.OrdinalIgnoreCase)).ToList()
                     : cacheablePlans;
-                var prepareWatch = earlyCombinedRestore ? Stopwatch.StartNew() : null;
                 if (!wardrobeUnreadable && sessionRigCache is not null
                     && sessionRigIdentity is { } preparedIdentity)
                 {
@@ -1257,8 +1296,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     .Where(plan => !restoredPrepared.Contains(plan.Prepared)).ToList();
                 unreadableEdits = PrepareSessionParts(prepareMisses, gameSidePrepared,
                     previewMemo: previewMemo);
-                if (prepareWatch is null) Phase("prepare workspace files");
-                else earlyPreparationMilliseconds = prepareWatch.ElapsedMilliseconds;
             });
         }
         catch (IOException) { status.Report("The game is using these files. Close the game and try again."); return; }
@@ -1275,8 +1312,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         {
             if (EditRefusal(unreadableEdits) is { } earlyUnreadable)
             { status.Report(earlyUnreadable); return; }
-            var combinedMarks = new List<(string Label, long Milliseconds)>();
-            var combinedWatch = Stopwatch.StartNew();
             if (authoredReferenceCandidate && referenceTargetPlan is { } authoredTarget
                 && sessionRigIdentity is { } keyIdentity)
                 authoredCombinedKey = AuthoredCombinedArtifactKey(keyIdentity, authoredTarget, plans);
@@ -1286,17 +1321,14 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 if (stockCombinedCandidate && sessionStockTextures is not null)
                     restoredCombined = await Task.Run(() => TryRestoreSessionStockCombined(sessionRigCache,
                         earlyIdentity, vfs, sessionStockTextures, plans, runDir,
-                        partsRestored ? validatedStock : null,
-                        (label, ms) => combinedMarks.Add((label, ms))));
+                        partsRestored ? validatedStock : null));
                 else if (authoredCombinedKey is { } finalKey)
                     restoredCombined = await Task.Run(() => TryRestoreSessionAuthoredCombined(sessionRigCache,
                         earlyIdentity, vfs, finalKey, runDir));
             }
-            long combinedRestoreMilliseconds = combinedWatch.ElapsedMilliseconds;
 
             if (restoredCombined is null)
             {
-                var remainingWatch = Stopwatch.StartNew();
                 await Task.Run(() =>
                 {
                     var remaining = plans.Where(plan => !skipStaticPrepare || !plan.Static)
@@ -1312,14 +1344,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     if (unreadableReferences.Count > 0)
                         unreadableEdits = unreadableEdits.Concat(unreadableReferences).ToList();
                 });
-                earlyPreparationMilliseconds += remainingWatch.ElapsedMilliseconds;
             }
-            TimeMark("prepare workspace files", earlyPreparationMilliseconds);
-            foreach (var mark in combinedMarks) TimeMark("\u00b7 " + mark.Label, mark.Milliseconds);
-            TimeMark(restoredCombined is not null
-                ? "combined restore (cache hit)" : "combined restore attempt (miss)",
-                combinedRestoreMilliseconds);
-            openWatch.Restart();
         }
         var preparedToPublish = plans.Where(plan => (!skipStaticPrepare || !plan.Static)
                 && !restoredPrepared.Contains(plan.Prepared)
@@ -1377,10 +1402,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             {
                 restoredCombined = await Task.Run(() => TryRestoreSessionStockCombined(sessionRigCache,
                     combinedIdentity, vfs, sessionStockTextures, plans, runDir,
-                    partsRestored ? validatedStock : null,
-                    (label, ms) => TimeMark("· " + label, ms)));
-                Phase(restoredCombined is not null
-                    ? "combined restore (cache hit)" : "combined restore attempt (miss)");
+                    partsRestored ? validatedStock : null));
             }
 
             if (restoredCombined is not null)
@@ -1418,7 +1440,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 { status.Report("The game is using these files. Close the game and try again."); return; }
                 catch (Exception e)
                 { status.Report($"Couldn't build the combined Blender file: {Reason(e)}"); return; }
-                Phase("combined build (cold)");
                 if (!File.Exists(opened))
                 { status.Report("No parts could be opened together for this item."); return; }
                 // Every part joins the composition through its PREPARED file; one that could not be assembled
@@ -1480,12 +1501,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             if (notices.Count > 0) status.Report(string.Join(" ", notices));
         }
         catch (Exception e) { status.Report($"Couldn't start Blender: {Reason(e)}"); }
-        Phase("bridge write + Blender launch");
-        TimeMark("TOTAL", totalWatch.ElapsedMilliseconds);
-        BlenderOpenTiming.WriteBlock(
-            $"{subject}/{outfit} parts={pending.Count} "
-            + (openAll ? "open-all" : withReferences ? "with-references" : "single"),
-            openTiming);
     }
 
     /// <summary>One displayed part of a Blender open, as everything after the pending walk reads it: which
@@ -1496,11 +1511,16 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// <para><see cref="Static"/> is the slot's renderer class, which is what says whether the part can join
     /// a combined rigged session at all — a plain MeshRenderer slot is not posed and never reaches the
     /// shared armature, so its absence from a composition is that composition's shape and not a shortfall
-    /// (see <see cref="PartsMissingFromComposition"/>).</para></summary>
+    /// (see <see cref="PartsMissingFromComposition"/>).</para>
+    ///
+    /// <para><see cref="BakedRest"/> is the rest the EDIT's file is baked by — the asset's own record,
+    /// else the target's workspace record — and null for a file in bind space, which the prepare stands
+    /// up into this run's space.</para></summary>
     internal readonly record struct SessionPartPlan(string Token, string SlotName, string Rigged,
         string Prepared, bool Static,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? Maps, string? EditedGlb,
-        IReadOnlyList<TextureTransportOverride>? TextureMaps = null);
+        IReadOnlyList<TextureTransportOverride>? TextureMaps = null,
+        IReadOnlyList<float>? BakedRest = null);
 
     internal static SessionPart SessionPartForBlender(string slotName, bool edited, bool writable,
         bool unskinned, string? editId, IReadOnlyList<BlenderSessionEdit>? edits,
@@ -1510,7 +1530,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             Label: label);
 
     private const string StockCombinedArtifactPrefix = "\u0001stock-combined-v1:";
-    internal const string PreparedPartSpecVersion = "prepared-part-workspace-v1";
+    // v3: the prepared file records the space it is in, and an edit in bind space is stood up into the
+    // run's; the rigged build it re-splits carries that record.
+    // v4: duplicate faces ride split vertex copies, and no armature rest world carries a reflection.
+    internal const string PreparedPartSpecVersion = "prepared-part-workspace-v4";
     private const string PreparedPartArtifactPrefix = "\u0001prepared-part-v1:";
     private const string AuthoredCombinedArtifactPrefix = "\u0001authored-combined-v1:";
 
@@ -1556,6 +1579,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             Text(plan.Static ? "static" : "skinned");
             Text(FileHash(plan.Rigged));
             OptionalFile(plan.EditedGlb);
+            // The space the edit's file is in shapes the prepared file: a bind-space edit is stood up.
+            Text(plan.BakedRest is null ? "edit-rest-absent" : string.Join(",", plan.BakedRest.Select(
+                value => BitConverter.SingleToInt32Bits(value)
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture))));
 
             Text(plan.Maps is null ? "legacy-maps-absent" : "legacy-maps-present");
             if (plan.Maps is not null)
@@ -1578,6 +1605,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     Text(row.MaterialIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     Text(row.ShaderProperty);
                     Text(row.Kind?.ToString() ?? "kind-absent");
+                    // The primitive a replacement's picture was authored for and the label Blender lists it
+                    // under both shape the prepared file, so a change to either is a different artifact.
+                    Text(row.PrimitiveIndex?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        ?? "primitive-absent");
+                    Text(row.Label ?? "label-absent");
                     Text(FileHash(row.Png));
                 }
             }
@@ -1721,19 +1753,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal static string? TryRestoreSessionStockCombined(RiggedGlbCache cache,
         RiggedGlbCache.Identity identity, GameVfs vfs, StockTextureCache stockTextures,
         IReadOnlyList<SessionPartPlan> plans, string runDir,
-        IReadOnlyDictionary<string, RiggedGlbCache.StockTexture>? alreadyValidatedStock = null,
-        Action<string, long>? timing = null)
+        IReadOnlyDictionary<string, RiggedGlbCache.StockTexture>? alreadyValidatedStock = null)
     {
         if (!StockPlans(plans)) return null;
         string scratch = runDir + ".combined-rigcache." + Guid.NewGuid().ToString("N") + ".tmp";
         string committed = Path.Combine(runDir, "stock-combined");
-        var watch = timing is null ? null : Stopwatch.StartNew();
-        void Mark(string label)
-        {
-            if (watch is null) return;
-            timing!(label, watch.ElapsedMilliseconds);
-            watch.Restart();
-        }
         try
         {
             if (Directory.Exists(committed) || File.Exists(committed)) return null;
@@ -1748,9 +1772,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     scratch, out var dependencies)
                 || dependencies.RequiredBundleReads.Count == 0)
                 return null;
-            Mark("combined-serve");
 
-            int hashed = 0;
             foreach (var dependency in dependencies.StockTextures)
             {
                 string runTexture = Path.Combine(runDir, "textures", dependency.DestinationFileName);
@@ -1761,7 +1783,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     if (!File.Exists(runTexture)) return null;
                     continue;
                 }
-                hashed++;
                 var cached = stockTextures.TryGet(dependency.BundleContentId, dependency.TextureName,
                     dependency.PathId);
                 if (cached is null || !RiggedGlbCache.MatchesStockTexture(cached, dependency))
@@ -1772,7 +1793,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 }
                 if (!RiggedGlbCache.MatchesStockTexture(runTexture, dependency)) return null;
             }
-            Mark($"combined-textures ({hashed} of {dependencies.StockTextures.Count} maps hashed)");
 
             string staged = Path.Combine(scratch, "composition.glb");
             if (!File.Exists(staged)) return null;
@@ -1872,26 +1892,18 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal static bool TryRestoreSessionRiggedParts(RiggedGlbCache cache,
         RiggedGlbCache.Identity identity, GameVfs vfs, StockTextureCache stockTextures,
         IReadOnlyList<SessionPartPlan> plans, string runDir,
-        IDictionary<string, RiggedGlbCache.StockTexture>? validatedStock = null,
-        Action<string, long>? timing = null) => TryRestoreSessionRiggedParts(cache, identity, vfs,
-            stockTextures, plans, runDir, out _, validatedStock, timing);
+        IDictionary<string, RiggedGlbCache.StockTexture>? validatedStock = null) =>
+        TryRestoreSessionRiggedParts(cache, identity, vfs,
+            stockTextures, plans, runDir, out _, validatedStock);
 
     internal static bool TryRestoreSessionRiggedParts(RiggedGlbCache cache,
         RiggedGlbCache.Identity identity, GameVfs vfs, StockTextureCache stockTextures,
         IReadOnlyList<SessionPartPlan> plans, string runDir,
         out RiggedGlbCache.ServeDependencies servedDependencies,
-        IDictionary<string, RiggedGlbCache.StockTexture>? validatedStock = null,
-        Action<string, long>? timing = null)
+        IDictionary<string, RiggedGlbCache.StockTexture>? validatedStock = null)
     {
         servedDependencies = default;
         var staging = runDir + ".rigcache." + Guid.NewGuid().ToString("N") + ".tmp";
-        var watch = timing is null ? null : Stopwatch.StartNew();
-        void Mark(string label)
-        {
-            if (watch is null) return;
-            timing!(label, watch.ElapsedMilliseconds);
-            watch.Restart();
-        }
         try
         {
             IReadOnlyDictionary<string, string> current;
@@ -1907,7 +1919,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     out var dependencies)
                 || dependencies.RequiredBundleReads.Count == 0)
                 return false;
-            Mark($"parts-serve ({requests.Count} rigs)");
 
             var texturesDir = Path.Combine(staging, "textures");
             PreviewMaps.WriteNeutrals(texturesDir);
@@ -1933,7 +1944,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 }
                 if (validatedStock is not null) validatedStock[dependency.DestinationFileName] = dependency;
             }
-            Mark($"parts-textures ({dependencies.StockTextures.Count} maps)");
 
             if (Directory.Exists(runDir) || File.Exists(runDir)) return false;
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(runDir))!);
@@ -2175,7 +2185,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     // A fragment, not a sentence: the caller's own "Couldn't prepare the Blender file:" leads it.
                     throw new InvalidDataException($"{part.Token}'s mesh file was not written");
                 if (!PrepareSessionPartGlb(part.Rigged, part.EditedGlb, part.SlotName, part.Prepared,
-                        part.Maps, part.TextureMaps, previewMemo))
+                        part.Maps, part.TextureMaps, previewMemo, part.BakedRest))
                     unreadableResult[index] = true;
                 else if (part.EditedGlb is null && part.Maps is null && part.TextureMaps is null)
                     gameSideResult[index] = true;
@@ -2243,6 +2253,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// not. That is the same reduction the COMBINED route already applies to an edit it reads, so the two
     /// open routes now answer with the same armature for the same part.</para>
     ///
+    /// <para>The SPACE is this run's. A bare part's file is the rigged build's own; an edit whose file has
+    /// no recorded rest on a part that ships lying down (a return taken before the part opened upright)
+    /// is stood up on the way through. Both routes record the space beside the file, which is what the
+    /// send-back marks its asset with.</para>
+    ///
     /// <para>Returns false when the EDIT could not be read — a file that will not parse, will not open, does
     /// not carry the part, or carries it with no armature at all where <paramref name="rigged"/> is posed
     /// (the refusal the combined route already gives that file by name). The caller refuses the whole open
@@ -2260,14 +2275,23 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal static bool PrepareSessionPartGlb(string rigged, string? editedGlb, string slotName,
         string prepared, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps,
         IReadOnlyList<TextureTransportOverride>? authoredTextures = null,
-        PreviewBlobMemo? previewMemo = null)
+        PreviewBlobMemo? previewMemo = null, IReadOnlyList<float>? editedBakedRest = null)
     {
+        // The space this run's build of the game mesh sits in — the space every prepared file is handed
+        // to Blender in. Read HERE, outside the edit's answer below: the record is the run's own.
+        var partBakedRest = PreviewMaps.ReadBakedRest(rigged);
         if (editedGlb is null)
         {
             MeshGltf.ReexportPartGlb(rigged, slotName, prepared, recordGlb: rigged, authoredMaps: authoredMaps,
-                authoredTextures: authoredTextures, previewMemo: previewMemo);
+                authoredTextures: authoredTextures, previewMemo: previewMemo, bakedRest: partBakedRest);
             return true;
         }
+        // An edit's file sits in the space its record states. One with no record, or one whose record
+        // cannot be applied, is bind-space geometry and stands up here, armature and all, into the run's
+        // space; its next send-back then records that space on the asset.
+        var fileRest = RestBake.FromList(editedBakedRest, out _);
+        var standUp = fileRest is null ? RestBake.FromList(partBakedRest, out _) : null;
+        var preparedRest = fileRest is null ? partBakedRest : editedBakedRest;
         // Opened HERE, outside the answer below: this is the run's own build, and a failure to read it is
         // never the edit's to answer for.
         var offer = MeshGltf.ParsedGlb.Open(rigged);
@@ -2277,7 +2301,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             MeshGltf.ReexportPartGlb(editedGlb, slotName, prepared, recordGlb: rigged,
                 authoredMaps: authoredMaps, refitTo: offer,
                 afterSourceRead: () => readingTheEdit = false, authoredTextures: authoredTextures,
-                previewMemo: previewMemo);
+                previewMemo: previewMemo, uprighting: standUp, bakedRest: preparedRest);
             return true;
         }
         catch (Exception e) when (readingTheEdit && e is not OutOfMemoryException) { return false; }
@@ -2466,7 +2490,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             string property = state.Slot.ShaderProperty ?? "";
             if (kind == MapKind.Texture && property.Length == 0) continue;
             result.Add(new TextureTransportOverride(BlenderMapPosition(state.Slot)!.Value,
-                property, full, kind));
+                property, full, kind,
+                state.Slot.Domain == TargetSlotDomain.EditOutput ? state.Slot.SubmeshIndex : null,
+                Label: state.ProjectAsset!.Label));
         }
         return result.Count == 0 ? null : result;
     }
@@ -2609,8 +2635,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         var stockRmo = PreviewMaps.ReadSubmeshRmoSources(target.Workspace, target.Part);
         // A new-edit target has no edit id yet, so its staging folder is named by the part instead.
         string directory = Path.Combine(stagingRoot, StorageName(target.EditDefinitionId ?? target.Part));
+        // The record's per-submesh RMO rows cover the primitives it was written for; a replacement's
+        // submesh past them takes the alpha of the picture the session sent its folded RMO slot.
         var rows = BlenderMaterialReturn.Normalize(incoming, directory,
-            submesh => stockRmo.GetValueOrDefault(submesh), notes.Add);
+            submesh => stockRmo.GetValueOrDefault(submesh)
+                ?? (submesh < incoming.Count ? incoming[submesh].RmoStockSource : null), notes.Add);
         var bySubmesh = rows.ToDictionary(row => row.Submesh);
         if (rows.Any(row => row.AlbedoAsk == SlotOrigin.ExplicitNeutral))
             throw new InvalidDataException("a base color map cannot be blank");
@@ -2640,8 +2669,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 });
                 if (file is not null)
                 {
+                    // Labelled as Blender named the picture, which is what the publish labels it too.
                     authoredTextures.Add(new TextureTransportOverride(texture.MaterialIndex,
-                        texture.ShaderProperty, file, texture.Kind));
+                        texture.ShaderProperty, file, texture.Kind, texture.PrimitiveIndex,
+                        Label: texture.ImageName is { Length: > 0 } imageName
+                            ? Path.GetFileNameWithoutExtension(imageName) : null));
                     returnedMaps[Path.GetFullPath(file)] = new BlenderMapIdentity(texture.ImageName,
                         incoming[submesh].MaterialName);
                 }
@@ -2880,8 +2912,12 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// one part's refusal is the whole send's — and every sentence underneath here was written for a
     /// surface that already stands on a part. This one does not: fifteen parts went out, and the modder is
     /// owed which of them came back wrong.</summary>
-    internal static string BlenderPartReason(string part, string reason) =>
-        $"{reason.TrimEnd().TrimEnd('.')} ({part})";
+    internal static string BlenderPartReason(string part, string reason)
+    {
+        string clean = reason.TrimEnd().TrimEnd('.');
+        return clean.Contains($" on {part} ", StringComparison.OrdinalIgnoreCase)
+            ? clean : $"{clean} ({part})";
+    }
 
     /// <summary>Run one target's share of a return, so a failure carries the part it happened on. The
     /// refusal keeps its class: a sentence the model wrote for the modder stays one.</summary>
@@ -3344,7 +3380,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                                 ? new ProjectAssetSource { GameAsset = geometry.Slot.Mesh } : null);
                         var result = change.PublishAssetForBinding(ingress, ProjectAssetKind.Geometry,
                             item.Target.Part, ProjectAssetIngress.Binary, lineage,
-                            item.Payload.Submeshes.Count);
+                            item.Payload.Submeshes.Count,
+                            // the space the geometry came back in: the session file's own record
+                            bakedRest: File.Exists(item.Target.Workspace)
+                                ? PreviewMaps.ReadBakedRest(item.Target.Workspace) : null);
                         if (result.Result == ProjectAssetPublishResult.Published) published++;
                         int picturesBefore = pictures;
                         PublishBlenderMaps(change, editId,
@@ -4112,14 +4151,19 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         var launch = TextureSharingAt(slot);
         if (EditMapCardVm.RefusalFor(launch.Kind) is { } refused)
         { status.Report(refused); return null; }
+        if (await Task.Run(() => FormatRefusalFor(slot)) is { } format)
+        { status.Report(format); return null; }
         // The map AND its material, named exactly as the line that reports the result names them, so the
         // question and its answer are about the same thing — and so that the four base-colour cards of a
         // four-material part do not raise one identical dialog between them.
         string consequence = launch.Kind == EditTextureSharing.Shared
             ? "\n\n" + EditMapCardVm.SharedConsequence(launch.Uses!.Value)
             : "";
+        // A picture that does not match the map's size is said before it is taken, never after.
+        string size = await Task.Run(() => EditMapCardVm.SizeNote(PngInfo.TryPngSize(path),
+            CurrentPictureSize(slot))) is { } note ? " " + note : "";
         if (!confirmed && !await ConfirmAsync($"Apply {name}?",
-                $"{name} becomes this edit's {EditMapCardVm.MapInSentence(slot)}.{consequence}",
+                $"{name} becomes this edit's {EditMapCardVm.MapInSentence(slot)}.{size}{consequence}",
                 "Apply")) return null;
 
         TextureSharingSnapshot? shown = offered is { } cardOffer
@@ -4299,6 +4343,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         var launch = TextureSharingAt(slot);
         if (EditMapCardVm.RefusalFor(launch.Kind) is { } refused)
         { status.Report(refused); return null; }
+        if (await Task.Run(() => FormatRefusalFor(slot)) is { } format)
+        { status.Report(format); return null; }
         if (launch.Kind == EditTextureSharing.Shared
             && (!sharedConsent || offered is not { Kind: EditTextureSharing.Shared, Uses: { } shownUses }
                 || launch.Uses != shownUses))
@@ -4387,6 +4433,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         // names the app's own address for the game files it could not read.
         byte[] bytes = TryDeobfuscateBundle(map.BundleId)
             ?? throw new InvalidDataException("the game files behind it couldn't be read");
+        // A float-format texture would decode to a lossy flattening and could never be encoded back, so it is
+        // refused by name here rather than blamed on the game files below.
+        if (TextureExport.Probe(bytes, map.Ref) is { Authorable: false })
+            throw new InvalidDataException("it is a float-format texture and cannot be edited here");
         if (!TextureExport.ExportPng(new BundleReader(), bytes, map.TextureName, destination))
             throw new InvalidDataException("it isn't in the game files any more");
     }
@@ -4552,15 +4602,20 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
 
     /// <summary>Why one part's game mesh cannot be edited in Blender, in the page's own sentence, or null
     /// when it can — or when nothing about it can be read, which is a different failure with its own loud
-    /// route. Synchronous and bundle-reading: callers run it off the UI thread.</summary>
+    /// route. Covers both refusal families: a mesh whose geometry cannot be REPLACED, and a
+    /// collapsed-points billboard mesh Blender cannot meaningfully edit (replacement itself stays
+    /// possible, so the Build plan never sees that half). Synchronous and bundle-reading: callers run it
+    /// off the UI thread.</summary>
     private string? MeshEditBlockFor(GameVfs vfs, SubjectPart model)
     {
         var recipe = model.ToRecipePart();
         string? bundle = recipe.MeshBundle ?? (recipe.MeshAddress.Length == 0
             ? null : vfs.Catalog.ResolveAddress(recipe.MeshAddress));
         if (bundle is null) return null;
-        return MeshEditGateFor(vfs).Blocked(bundle, recipe.SlotName, recipe.MeshPathId) is { } why
-            ? PartSkinGate.EditRefusal(why) : null;
+        var (why, collapsed) = MeshEditGateFor(vfs)
+            .BlenderEditAnswers(bundle, recipe.SlotName, recipe.MeshPathId);
+        return why is { } refusal ? PartSkinGate.EditRefusal(refusal)
+            : collapsed ? PartSkinGate.CollapsedBillboardRefusal : null;
     }
 
     /// <summary>The ② Edit page's ask: the mesh-edit refusal for one part, read off the UI thread. Null

@@ -75,6 +75,49 @@ public class SendBackGeometryTests
         Assert.True(SendBackGeometry.SameContent(Payload(returnedMesh), Payload(baselineMesh)));
     }
 
+    /// <summary>A Blender round trip turns normals on zero-area faces by tens of degrees (their custom
+    /// normals have no base to anchor to) while touching nothing else, so those corners' normals are
+    /// outside the comparison — but ONLY those corners' normals: the same face's positions still compare,
+    /// and a real face's normals still compare.</summary>
+    [Fact]
+    public void NormalsOnAZeroAreaFace_AreOutsideTheComparison()
+    {
+        var baseline = Payload(StrayMesh());
+        var mangledStray = Payload(StrayMesh());
+        // all three corners of the collapsed face (verts 3..5) turned 90 degrees
+        for (int v = 3; v < 6; v++)
+        {
+            mangledStray.Channels["Normal"][v * 3] = 1f;
+            mangledStray.Channels["Normal"][v * 3 + 2] = 0f;
+        }
+        Assert.True(SendBackGeometry.SameContent(mangledStray, baseline));
+
+        var mangledReal = Payload(StrayMesh());
+        mangledReal.Channels["Normal"][0] = 1f;      // a REAL face's corner turned the same way
+        mangledReal.Channels["Normal"][2] = 0f;
+        Assert.False(SendBackGeometry.SameContent(mangledReal, baseline));
+
+        var movedStray = Payload(StrayMesh());
+        movedStray.Channels["Vertex"][3 * 3] += 0.5f;   // moving a collapsed face is still an edit
+        Assert.False(SendBackGeometry.SameContent(movedStray, baseline));
+    }
+
+    /// <summary>One real triangle plus a fully collapsed one — the corpus's stray-face shape (typically
+    /// a handful of zero-area faces among thousands of real ones).</summary>
+    private static UnityMesh StrayMesh() => new()
+    {
+        Name = "part",
+        VertexCount = 6,
+        Channels = new Dictionary<string, float[]>
+        {
+            ["Vertex"] = new float[] { 0, 0, 0,  1, 0, 0,  0, 1, 0,  4, 4, 4,  4, 4, 4,  4, 4, 4 },
+            ["Normal"] = new float[] { 0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 1, 0,  0, 1, 0,  0, 1, 0 },
+            ["TexCoord0"] = new float[] { 0, 0,  1, 0,  0, 1,  0.5f, 0.5f,  0.6f, 0.5f,  0.5f, 0.6f },
+        },
+        Dims = new Dictionary<string, int> { ["Vertex"] = 3, ["Normal"] = 3, ["TexCoord0"] = 2 },
+        Submeshes = new List<int[]> { new[] { 0, 1, 2, 3, 4, 5 } },
+    };
+
     private static MeshApply.Payload Payload(UnityMesh mesh) => MeshApply.Payload.Geometry(mesh);
 
     private static UnityMesh UvMesh() => new()

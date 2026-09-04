@@ -93,6 +93,29 @@ public sealed record BuildCaches(string OperatorDir, string TextureDir, string? 
 /// </summary>
 public static class ModBuilder
 {
+    /// <summary>The donor payload restated in the space the union is stated in. A scene-space union
+    /// wants scene-rest floats: a file baked by <paramref name="fileRest"/> already is, and one in bind
+    /// space takes the target's own uprighting <paramref name="targetRest"/>. An anchor-space union
+    /// wants bind space: a baked file takes its rest back off (the exact inverse of the workspace bake,
+    /// so an unedited round trip recovers the original floats) and a bind-space file is left alone.</summary>
+    internal static Mesh.MeshApply.Payload PayloadInUnionSpace(Mesh.MeshApply.Payload payload,
+        bool sceneUnion, System.Numerics.Matrix4x4? fileRest, System.Numerics.Matrix4x4? targetRest)
+    {
+        Mesh.UnityMesh? restated = null;
+        if (sceneUnion)
+        {
+            if (fileRest is null && targetRest is { } stand) restated = Mesh.RestBake.Apply(payload.Mesh, stand);
+        }
+        else if (fileRest is { } baked) restated = Mesh.RestBake.Unapply(payload.Mesh, baked);
+        return restated is null ? payload : new Mesh.MeshApply.Payload
+        {
+            Mesh = restated,
+            JointIndices = payload.JointIndices,
+            JointWeights = payload.JointWeights,
+            SkinJointHashes = payload.SkinJointHashes,
+        };
+    }
+
     /// <summary>What one build produced. <paramref name="Warnings"/> are user-facing and actionable (the
     /// Build pane lists and counts them). <paramref name="Infos"/> are user-facing disclosures with nothing
     /// to fix: an edit's reach beyond the picked subject, and how the build scoped it.
@@ -162,7 +185,7 @@ public static class ModBuilder
     {
         if (ModKeys.SameKey(kept, incoming)) return null;
         if (kept is null && incoming is null) return null;
-        return HideKeyCollisionMessage(meshName, kept);
+        return HideKeyCollisionMessage(meshName, kept is null ? null : ModKeys.Display(kept));
     }
 
     /// <summary>The same warning judged on the OR-LISTS the two claimants actually carry. A hide under a
@@ -176,7 +199,8 @@ public static class ModBuilder
         var keptKeys = HideKeyNames(kept);
         if (keptKeys.SetEquals(HideKeyNames(incoming))) return null;
         return HideKeyCollisionMessage(meshName, keptKeys.Count == 0
-            ? null : string.Join(", ", keptKeys.OrderBy(key => key, StringComparer.Ordinal)));
+            ? null : string.Join(", ", keptKeys.OrderBy(key => key, StringComparer.Ordinal)
+                .Select(key => ModKeys.Display(key))));
     }
 
     private static HashSet<string> HideKeyNames(IReadOnlyList<KeyRef>? terms)
@@ -841,7 +865,10 @@ public static class ModBuilder
                     int stateIndex = operation?.ActiveWhen.FirstOrDefault(condition =>
                         string.Equals(condition.GroupId, touch.GroupId, StringComparison.Ordinal))?.StateIndex ?? 0;
                     return new RepairData.KeyGroupRecord(touch.GroupId, touch.Key, touch.StateCount, 0,
-                        stateIndex, states);
+                        stateIndex, states,
+                        project.KeyGroups.FirstOrDefault(candidate =>
+                            string.Equals(candidate.Id, touch.GroupId, StringComparison.Ordinal))
+                            ?.Persist == true);
                 }).ToArray();
             }
 
@@ -963,6 +990,7 @@ public static class ModBuilder
             // One key = one emitted variable, so two changes on the same key switch together. Sharing one is
             // the author's call to make; the emission is the same either way.
             string? modKey = ModKeys.Normalize(project.Info.ToggleKey);
+            bool persistModKey = modKey is not null && project.Info.PersistToggleKey;
             // The mod's own key is the whole-mod switch, and the emission holds it to two positions — on at
             // 0, off at 1 — whatever else is bound to it. A group cycling further on that same key would
             // wrap at 2 and leave every position past the first two unreachable, so the states nobody could
@@ -2066,22 +2094,27 @@ public static class ModBuilder
                 // Build-log only: which parts the pool spans and which of them anchors it is bookkeeping in
                 // the build's own words, and the status line has the part's name for the modder instead.
                 diagnostics.Add($"pool ({sfx}): {string.Join(", ", pool.Pool)} (anchor {pool.Anchor})");
+                // …EXCEPT a foreign anchor, which is not bookkeeping: the replacement renders in the
+                // anchor's material — shader, blend state, and every texture slot left as original — so a
+                // draw hosted away from the edited part is a visible degradation the modder must hear
+                // about. The derivation only picks one when the new mesh's weights reach no bone the
+                // edited part moves.
+                if (!string.Equals(pool.Anchor, part.SlotName, StringComparison.OrdinalIgnoreCase))
+                    warnings.Add($"The new mesh for '{edit.Mesh}' uses no bone that part moves, so it is "
+                        + $"drawn as part of '{pool.Anchor}' and shows that part's original material. To "
+                        + "use the edited part's own material, weight the new mesh to bones that "
+                        + $"'{edit.Mesh}' moves.");
 
-                // The workspace glb sits in scene-rest space, and where the union is stated is decided by
-                // the anchor's measured rest — the same verdict the pool compile and the emitter read. A
-                // scene-space union takes the payload's floats as exported; an anchor-space union takes
-                // the recorded uprighting back off HERE — the one Unity-space boundary — so the compiled
-                // payload lands in bind space. Exact inverse: an unedited round trip recovers the
-                // original floats.
-                if (!SwapCompile.TrySceneDelta(partRests.GetValueOrDefault(pool.Anchor), out _)
-                    && recordedRest is { } uprighting)
-                    payload = new MeshApply.Payload
-                    {
-                        Mesh = Mesh.RestBake.Unapply(payload.Mesh, uprighting),
-                        JointIndices = payload.JointIndices,
-                        JointWeights = payload.JointWeights,
-                        SkinJointHashes = payload.SkinJointHashes,
-                    };
+                // Where the union is stated is decided by the anchor's measured rest — the same verdict
+                // the pool compile and the emitter read — and the donor file sits in the space its record
+                // states: scene-rest space where a rest was recorded, bind space where none was (a return
+                // taken before the open stood the part up). The payload is restated HERE, the one
+                // Unity-space boundary, so the compiled streams land in the union's space either way.
+                payload = PayloadInUnionSpace(payload,
+                    SwapCompile.TrySceneDelta(partRests.GetValueOrDefault(pool.Anchor), out _),
+                    recordedRest,
+                    partRests.GetValueOrDefault(part.SlotName) is { } targetMeasured
+                        ? Mesh.RestBake.Snap(targetMeasured) : null);
 
                 // dumps + capture hashes, in pool (roster) order
                 var poolParts = new List<PoolPart>();
@@ -3543,6 +3576,7 @@ public static class ModBuilder
                     Retextures = retex.Count > 0 ? retex : null,
                     ScopedRetextures = scopedRetex.Count > 0 ? scopedRetex : null,
                     ToggleKey = modKey,
+                    PersistToggleKey = persistModKey,
                     HideKeys = hideKeys.Count > 0 ? hideKeys : null,
                     HideLatches = hideLatches.Count > 0 ? hideLatches : null,
                     Latches = latchList.Count > 0 ? latchList : null,
@@ -3575,7 +3609,8 @@ public static class ModBuilder
                     twinSightings.Count > 0 ? twinSightings : null,
                     stockRampBinds.Count > 0 ? stockRampBinds : null,
                     keyCycles.Count > 0 ? keyCycles : null,
-                    shippedShownFlags.Count > 0 ? shippedShownFlags : null);
+                    shippedShownFlags.Count > 0 ? shippedShownFlags : null,
+                    persistModKey);
             }
             warnings.AddRange(emitted.Warnings);
             diagnostics.AddRange(emitted.Diagnostics);

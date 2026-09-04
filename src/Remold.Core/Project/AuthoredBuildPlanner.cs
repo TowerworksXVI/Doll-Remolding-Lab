@@ -1186,6 +1186,7 @@ public static class AuthoredBuildPlanner
                 {
                     Draw = DrawKey(contract),
                     write.Semantic,
+                    write.ByteOffset,
                     emission.Consumer,
                     emission.Emission.Gate,
                     Value = string.Join("|", emission.Emission.MaterialPatch.Layout,
@@ -1193,7 +1194,10 @@ public static class AuthoredBuildPlanner
                         emission.Emission.MaterialPatch.ByteWidth, write.ByteOffset,
                         BitConverter.SingleToInt32Bits(write.Value)),
                 }))).ToList();
-        foreach (var claim in patchClaims.GroupBy(row => row.Draw + "\u001f" + row.Semantic,
+        // Keyed by byte offset too: a multi-component field writes one row per component, so
+        // grouping on semantic alone compares a colour's own channels against each other.
+        foreach (var claim in patchClaims.GroupBy(row => row.Draw + "\u001f" + row.Semantic
+            + "\u001f" + row.ByteOffset.ToString(CultureInfo.InvariantCulture),
             StringComparer.Ordinal))
         {
             var rows = claim.OrderBy(row => row.Gate.ToString(), StringComparer.Ordinal)

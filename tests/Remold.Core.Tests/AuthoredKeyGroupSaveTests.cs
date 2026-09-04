@@ -63,6 +63,45 @@ public sealed class AuthoredKeyGroupSaveTests : IDisposable
         Assert.Contains("\"id\": \"state-0001\"", json, StringComparison.Ordinal);
     }
 
+    /// <summary>The per-group persistence choice round-trips, and a group that never made one writes no
+    /// field — a manifest from before the choice existed reads back as the per-session reset it always
+    /// had.</summary>
+    [Fact]
+    public void Round_trip_keeps_the_persistence_choice_and_omits_it_until_made()
+    {
+        var project = AuthoredEditFixtures.Golden();
+        project.KeyGroups.Add(new KeyGroup
+        {
+            Id = "key-1", Key = "F6", Persist = true,
+            States =
+            {
+                new KeyGroupState { Id = "state-0001", ActiveEditIds = { "edit-long" } },
+                new KeyGroupState { Id = "state-0002" },
+            },
+        });
+
+        AuthoredProjectSerializer.Save(project, _dir);
+        Assert.True(Assert.Single(AuthoredProjectSerializer.Load(_dir).KeyGroups).Persist);
+
+        project.KeyGroups[0].Persist = false;
+        Assert.DoesNotContain("\"persist\"", AuthoredProjectSerializer.Serialize(project),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Persistence_is_chosen_per_group_and_reads_back_on_the_outline()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        string group = session.CreateKeyGroup("F6", "edit-long");
+        Assert.False(Assert.Single(session.Outline().Groups).Persist);
+
+        session.SetGroupPersistence(group, true);
+        Assert.True(Assert.Single(session.Outline().Groups).Persist);
+
+        session.SetGroupPersistence(group, false);
+        Assert.False(Assert.Single(session.Outline().Groups).Persist);
+    }
+
     [Fact]
     public void Delete_group_then_save_keeps_edits_unplaced()
     {

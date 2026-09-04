@@ -112,6 +112,63 @@ public class MeshEditGateTests : IDisposable
     }
 
     [Fact]
+    public void BlenderAnswersSettleBothQuestionsFromOneRead()
+    {
+        // A collapsed-points (billboard) mesh: the Blender-edit ask answers collapsed with no
+        // replaceability refusal, one bundle read settles BOTH memos — a later Blocked() ask is free —
+        // and re-asking re-reads nothing.
+        string file = Path.Combine(_root, "pearl.bundle");
+        SyntheticBundle.BuildOneSkinnedMesh(file, "pearl",
+            new float[] { 1, 2, 3, 1, 2, 3, 1, 2, 3 }, TriIndices, Bones);
+        int reads = 0;
+        var gate = new MeshEditGate(_ => { reads++; return File.ReadAllBytes(file); });
+
+        Assert.Equal(((StreamDump.SkinRefusal?)null, true), gate.BlenderEditAnswers("b_pearl", "pearl"));
+        Assert.Equal(((StreamDump.SkinRefusal?)null, true), gate.BlenderEditAnswers("b_pearl", "pearl"));
+        Assert.Null(gate.Blocked("b_pearl", "pearl"));
+        Assert.Equal(1, reads);
+    }
+
+    [Fact]
+    public void ASettledRefusalShortCircuitsTheBlenderAsk_EvenWhileTheBundleIsUnreadable()
+    {
+        // The Build page settles Blocked() first; the Blender ask then answers from that memo with no
+        // second read — and keeps answering it while the game holds the file, because a refusal once
+        // read is a fact about the mesh, not about the moment.
+        string file = Path.Combine(_root, "face5.bundle");
+        SyntheticBundle.BuildOneSkinnedMesh(file, "face5", TriPositions, TriIndices, Bones, blendShapes: 4);
+        int reads = 0;
+        bool locked = false;
+        var gate = new MeshEditGate(_ =>
+        {
+            reads++;
+            return locked ? null : File.ReadAllBytes(file);
+        });
+
+        Assert.Equal(StreamDump.SkinRefusal.BlendShapes, gate.Blocked("b_face5", "face5"));
+        Assert.Equal((StreamDump.SkinRefusal.BlendShapes, false),
+            gate.BlenderEditAnswers("b_face5", "face5"));
+        Assert.Equal(1, reads);
+        locked = true;
+        Assert.Equal((StreamDump.SkinRefusal.BlendShapes, false),
+            gate.BlenderEditAnswers("b_face5", "face5"));
+    }
+
+    [Fact]
+    public void AnUnreadableBundleSettlesNoBlenderAnswerAndTheNextAskRetries()
+    {
+        string file = Path.Combine(_root, "pearl2.bundle");
+        SyntheticBundle.BuildOneSkinnedMesh(file, "pearl2",
+            new float[] { 4, 4, 4, 4, 4, 4, 4, 4, 4 }, TriIndices, Bones);
+        bool locked = true;
+        var gate = new MeshEditGate(_ => locked ? null : File.ReadAllBytes(file));
+
+        Assert.Equal(((StreamDump.SkinRefusal?)null, false), gate.BlenderEditAnswers("b_pearl2", "pearl2"));
+        locked = false;
+        Assert.Equal(((StreamDump.SkinRefusal?)null, true), gate.BlenderEditAnswers("b_pearl2", "pearl2"));
+    }
+
+    [Fact]
     public void TheSentencesNameEachRefusalInTheUsersWords()
     {
         // The Edit page's one short sentence is the disabled opens' hover reason and the refused click's
@@ -128,5 +185,9 @@ public class MeshEditGateTests : IDisposable
         Assert.Contains("expressions", PartSkinGate.EditRefusal(StreamDump.SkinRefusal.BlendShapes));
         Assert.Contains("expressions", PartSkinGate.PlanRefusal(StreamDump.SkinRefusal.BlendShapes));
         Assert.Contains("spring bones", PartSkinGate.PlanRefusal(StreamDump.SkinRefusal.SpringRig));
+        // the collapsed-points refusal is held to the same house rule as the enum's sentences
+        Assert.Contains("cannot be edited in Blender", PartSkinGate.CollapsedBillboardRefusal);
+        Assert.Single(PartSkinGate.CollapsedBillboardRefusal.TrimEnd('.').Split('.'));
+        Assert.Contains("collapsed points", PartSkinGate.CollapsedBillboardRefusal);
     }
 }

@@ -79,7 +79,18 @@ public static class SendBackGeometry
     /// already compared, and
     /// the transport recomputes them per split copy, so comparing them would report an edit on every seam of
     /// every untouched part. Vertex Color is out for the same reason it never travels — Blender does not
-    /// carry it.</para></summary>
+    /// carry it.</para>
+    ///
+    /// <para>Normals are also out on the corners of a ZERO-AREA face, judged from the held side's
+    /// positions per whole triangle. The game ships two kinds of such faces — pearl billboard clouds
+    /// (whole meshes, refused Blender editing outright) and stray collapsed triangles among real geometry
+    /// (measured on ~250 corpus meshes, typically a handful out of thousands) — and Blender cannot carry
+    /// an authored normal on either: its custom-normal storage anchors to the face's computed normal,
+    /// which a zero-area face does not have, so a round trip turns exactly those corners by tens of
+    /// degrees while touching nothing else. Comparing them would mint a spurious edit over a value that
+    /// draws nothing. The face's positions, UVs and weights still compare corner for corner, so moving or
+    /// re-weighting a degenerate face is still an edit — and a face moved OUT of degeneracy changes its
+    /// positions, which is caught before its normals would matter.</para></summary>
     internal static bool SameContent(MeshApply.Payload a, MeshApply.Payload b)
     {
         if (a.HasSkin != b.HasSkin) return false;
@@ -112,14 +123,32 @@ public static class SendBackGeometry
         {
             var ia = a.Submeshes[s];
             var ib = b.Submeshes[s];
+            bool zeroAreaFace = false;
             for (int k = 0; k < ia.Length; k++)
             {
                 int va = ia[k], vb = ib[k];
                 if (va < 0 || va >= ra.Count || vb < 0 || vb >= rb.Count) return false;
-                if (!SameCorner(ra, va, rb, vb, wa, wb)) return false;
+                // the face flag holds for its three corners; a malformed partial tail compares fully
+                if (k % 3 == 0)
+                    zeroAreaFace = k + 2 < ib.Length && ZeroAreaFace(rb, ib[k], ib[k + 1], ib[k + 2]);
+                if (!SameCorner(ra, va, rb, vb, wa, wb, zeroAreaFace)) return false;
             }
         }
         return true;
+    }
+
+    /// <summary>Whether the held side's face has EXACTLY zero area — the same exact-float-zero rule as
+    /// <see cref="MeshGltf.AllFacesZeroArea"/>, so the two answers can never disagree about a face. An
+    /// index outside the position channel answers false: the corner walk's own bounds check reads that
+    /// pair as changed, which takes the part — the safe direction.</summary>
+    private static bool ZeroAreaFace(in Reader r, int v0, int v1, int v2)
+    {
+        if (v0 < 0 || v1 < 0 || v2 < 0 || v0 >= r.Count || v1 >= r.Count || v2 >= r.Count) return false;
+        var p = r.Pos;
+        int a = v0 * r.PosDim, b = v1 * r.PosDim, c = v2 * r.PosDim;
+        float ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2];
+        float vx = p[c] - p[a], vy = p[c + 1] - p[a + 1], vz = p[c + 2] - p[a + 2];
+        return uy * vz - uz * vy == 0f && uz * vx - ux * vz == 0f && ux * vy - uy * vx == 0f;
     }
 
     /// <summary>How far a POSITION or a UV may move and still be the same value across the round trip. Every
@@ -176,10 +205,11 @@ public static class SendBackGeometry
     }
 
     private static bool SameCorner(in Reader a, int va, in Reader b, int vb,
-        Span<(uint Bone, float Weight)> wa, Span<(uint Bone, float Weight)> wb)
+        Span<(uint Bone, float Weight)> wa, Span<(uint Bone, float Weight)> wb, bool zeroAreaFace = false)
     {
         if (!SameVector(a.Pos, a.PosDim, va, b.Pos, b.PosDim, vb, 3)) return false;
-        if (a.Nrm is not null && !SameNormal(a.Nrm, a.NrmDim, va, b.Nrm!, b.NrmDim, vb)) return false;
+        if (a.Nrm is not null && !zeroAreaFace
+            && !SameNormal(a.Nrm, a.NrmDim, va, b.Nrm!, b.NrmDim, vb)) return false;
         for (int i = 0; i < a.Uvs.Count; i++)
             if (!SameVector(a.Uvs[i].Values, a.Uvs[i].Dim, va,
                     b.Uvs[i].Values, b.Uvs[i].Dim, vb, 2, flat: true)) return false;

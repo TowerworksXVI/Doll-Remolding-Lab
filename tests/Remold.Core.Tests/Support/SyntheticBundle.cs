@@ -386,10 +386,14 @@ internal static class SyntheticBundle
     }
 
     /// <summary>One transform of a self-rigged prop's scene: its GameObject name, the index of its parent in
-    /// the same array (-1 = a scene root) and its LOCAL position. Rotation is identity and scale is one, so
-    /// the rest world a chain composes is the running sum of these — the shape a prefab mount offset takes.
+    /// the same array (-1 = a scene root) and its LOCAL position. Scale is one and <see cref="Rotation"/>
+    /// defaults to identity, so the rest world a chain composes is the running sum of these — the shape a
+    /// prefab mount offset takes; a fixture that ships a part lying down sets the root's rotation.
     /// </summary>
-    public readonly record struct RigNode(string Name, int Parent, float X, float Y, float Z);
+    public readonly record struct RigNode(string Name, int Parent, float X, float Y, float Z)
+    {
+        public System.Numerics.Quaternion Rotation { get; init; } = System.Numerics.Quaternion.Identity;
+    }
 
     /// <summary>A skinned Mesh together with the rig that PLACES it: a SkinnedMeshRenderer pointing at the
     /// mesh and naming its bone Transforms in mesh bone order, plus a GameObject + Transform per node. This
@@ -426,8 +430,9 @@ internal static class SyntheticBundle
                 bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = goPid[bi];
                 bf["m_Father"]["m_FileID"].AsInt = 0;
                 bf["m_Father"]["m_PathID"].AsLong = nodes[bi].Parent >= 0 ? trPid[nodes[bi].Parent] : 0;
-                bf["m_LocalRotation"]["x"].AsFloat = 0; bf["m_LocalRotation"]["y"].AsFloat = 0;
-                bf["m_LocalRotation"]["z"].AsFloat = 0; bf["m_LocalRotation"]["w"].AsFloat = 1;
+                var rotation = nodes[bi].Rotation;
+                bf["m_LocalRotation"]["x"].AsFloat = rotation.X; bf["m_LocalRotation"]["y"].AsFloat = rotation.Y;
+                bf["m_LocalRotation"]["z"].AsFloat = rotation.Z; bf["m_LocalRotation"]["w"].AsFloat = rotation.W;
                 bf["m_LocalPosition"]["x"].AsFloat = nodes[bi].X;
                 bf["m_LocalPosition"]["y"].AsFloat = nodes[bi].Y;
                 bf["m_LocalPosition"]["z"].AsFloat = nodes[bi].Z;

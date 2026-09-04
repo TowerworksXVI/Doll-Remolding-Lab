@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Remold.Core.Mesh;
 
 namespace Remold.Core.Project;
 
@@ -65,17 +66,12 @@ public sealed partial class AuthoredEditSession
             .OrderBy(slot => slot.MaterialSlotIndex)
             .ThenBy(slot => slot.Id, StringComparer.Ordinal).ToList();
         int lastKnownPosition = game.Count == 0 ? -1 : game.Max(slot => slot.MaterialSlotIndex!.Value);
-        int MaterialPosition(int submesh)
-        {
-            if (anchor.MaterialIndexCounts is not { Count: > 0 } counts)
-                return lastKnownPosition < 0 ? -1 : Math.Min(submesh, lastKnownPosition);
-            int lastDrawable = -1;
-            for (int position = 0; position < counts.Count; position++)
-                if (counts[position] > 0) lastDrawable = position;
-            if (lastDrawable < 0) return -1;
-            int folded = Math.Min(submesh, counts.Count - 1);
-            return counts[folded] == 0 ? lastDrawable : folded;
-        }
+        // The one fold the outbound Blender inventory and the return's join also apply (MaterialFold), so a
+        // picture for a folded submesh reaches the same material through any of the three.
+        int MaterialPosition(int submesh) =>
+            anchor.MaterialIndexCounts is { Count: > 0 } counts
+                ? MaterialFold.MaterialPosition(submesh, counts.Count, position => counts[position] > 0)
+                : MaterialFold.MaterialPosition(submesh, lastKnownPosition + 1);
 
         var desired = new List<(int Submesh, int MaterialPosition, TargetInputKind Input,
             string? ShaderProperty)>();

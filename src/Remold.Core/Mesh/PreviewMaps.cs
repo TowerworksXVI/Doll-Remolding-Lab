@@ -116,10 +116,14 @@ public readonly record struct ResolvedMap(MapOrigin Origin, string? StockPng = n
 
 /// <summary>One submesh's resolved map slots, in the order the glb's primitives appear.
 /// <paramref name="MaterialName"/> is the returned primitive's own material name (what the modder sees
-/// in Blender's slot list), empty when it has none.</summary>
+/// in Blender's slot list), empty when it has none. <paramref name="RmoStockSource"/> is the picture the
+/// session sent this primitive's RMO slot — the stock map, or the modder's own — as the alpha an authored
+/// RMO is rebuilt over where the record's per-submesh RMO rows stop short (a replacement's submesh past
+/// the ones the record was written for).</summary>
 public readonly record struct IncomingMaps(ResolvedMap BaseColor, ResolvedMap Normal, ResolvedMap Rmo = default,
     string MaterialName = "", IReadOnlyList<IncomingTexture>? Textures = null,
-    string? BaseColorName = null, string? NormalName = null, string? RmoName = null);
+    string? BaseColorName = null, string? NormalName = null, string? RmoName = null,
+    string? RmoStockSource = null);
 
 /// <summary>One property-keyed image returned for a material/primitive owner. <see cref="ShaderProperty"/>
 /// is authoritative; <see cref="Kind"/> describes the transform only and never selects a slot.</summary>
@@ -251,7 +255,9 @@ public static class PreviewMaps
         [property: JsonPropertyName("parameters")]
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TransportParameters? Parameters = null,
         [property: JsonPropertyName("texCoord")]
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? TexCoord = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? TexCoord = null,
+        [property: JsonPropertyName("drawable")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Drawable = null);
 
     private sealed class Sidecar
     {
@@ -261,6 +267,11 @@ public static class PreviewMaps
         [JsonPropertyName("bindings")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<TransportBinding>? Bindings { get; set; }
+        /// <summary>The scene-rest uprighting the glb's geometry is baked by (<see cref="RestBake"/>,
+        /// 16 floats); absent on a file in bind space.</summary>
+        [JsonPropertyName("baked_rest")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<float>? BakedRest { get; set; }
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -321,6 +332,7 @@ public static class PreviewMaps
                 Slots = doc.Slots,
                 Bindings = doc.Bindings?.Select(binding => binding with
                     { Source = Content(binding.Source) }).ToList(),
+                BakedRest = doc.BakedRest,
             };
             Bytes(JsonSerializer.SerializeToUtf8Bytes(contentAddressed, JsonOpts));
             return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
@@ -383,6 +395,7 @@ public static class PreviewMaps
             Slots = doc.Slots,
             Bindings = doc.Bindings?.Select(binding => binding with
                 { Source = Portable(binding.Source) }).ToList(),
+            BakedRest = doc.BakedRest,
         };
         File.WriteAllText(SidecarPath(destination), JsonSerializer.Serialize(portable, JsonOpts));
     }
@@ -628,10 +641,16 @@ public static class PreviewMaps
     /// embedded. It lives in the same <c>textures/</c> folder, so the embedded sources locate it without the
     /// codec being told where the workspace is. <see cref="NeutralRmo"/> gets no entry: only the normal slot
     /// reads its flat map as an ask to blank.</summary>
-    private static IEnumerable<Entry> NeutralEntries(IEnumerable<Entry> embedded)
+    /// <summary>The neutral normal found beside any picture the export embedded or carried as an exact
+    /// binding. The bindings count too: an open whose three fixed maps are all the modder's own embeds
+    /// nothing from the workspace folder, and the stock bindings are then the only rows that still name
+    /// it.</summary>
+    private static IEnumerable<Entry> NeutralEntries(IEnumerable<Entry> embedded,
+        IEnumerable<TransportBinding>? bindings = null)
     {
-        var dirs = embedded
-            .Select(e => Path.GetDirectoryName(Path.GetFullPath(e.Source)))
+        var dirs = embedded.Select(e => e.Source)
+            .Concat(bindings?.Select(b => b.Source) ?? Array.Empty<string>())
+            .Select(source => Path.GetDirectoryName(Path.GetFullPath(source)))
             .Where(d => d is not null)
             .Distinct(StringComparer.OrdinalIgnoreCase);
         foreach (var dir in dirs)
@@ -724,20 +743,20 @@ public static class PreviewMaps
     /// slot rows carry content hashes, which no move touches.</summary>
     public static void WriteSidecar(string glbPath, IEnumerable<Entry> entries,
         IEnumerable<SubmeshSource> submeshes, IEnumerable<SlotSource>? slots = null,
-        IEnumerable<TransportBinding>? bindings = null)
+        IEnumerable<TransportBinding>? bindings = null, IReadOnlyList<float>? bakedRest = null)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(glbPath))!;
         var embedded = entries as IReadOnlyCollection<Entry> ?? entries.ToList();
-        var rel = embedded.Concat(NeutralEntries(embedded))
+        var rel = embedded.Concat(NeutralEntries(embedded, bindings))
             .Select(e => e with { Source = Rel(dir, e.Source) })
             .DistinctBy(e => (e.Hash, e.Source, e.Kind, e.Owner))
             .ToList();
         var transport = (bindings ?? Array.Empty<TransportBinding>())
             .Select(binding => binding with { Source = Rel(dir, binding.Source) })
             .ToList();
-        if (rel.Count == 0 && transport.Count == 0)
+        if (rel.Count == 0 && transport.Count == 0 && bakedRest is null)
         {
-            // no maps: clear the sidecar — a stale one would resolve an authored image as stock
+            // nothing to record: clear the sidecar — a stale one would resolve an authored image as stock
             var stale = SidecarPath(glbPath);
             if (File.Exists(stale)) File.Delete(stale);
             return;
@@ -751,8 +770,18 @@ public static class PreviewMaps
                     Submeshes = subs,
                     Slots = slots?.ToList() ?? new List<SlotSource>(),
                     Bindings = transport.Count == 0 ? null : transport,
+                    BakedRest = bakedRest?.ToList(),
                 },
                 JsonOpts));
+    }
+
+    /// <summary>The scene-rest uprighting a glb's geometry is baked by, as its record states it (see
+    /// <see cref="RestBake"/>); null where the record says nothing, which is a file in bind space.</summary>
+    public static IReadOnlyList<float>? ReadBakedRest(string glbPath)
+    {
+        var path = SidecarPath(glbPath);
+        if (!File.Exists(path)) return null;
+        return JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts)?.BakedRest;
     }
 
     /// <summary>The exact property bindings recorded for an outbound glb. Source paths are made absolute;
@@ -908,7 +937,12 @@ public static class PreviewMaps
     /// bytes are the comparison baseline even when the project authored them: returning that picture
     /// untouched is not a new ask, while changing it still is. The classifier is scoped to this one
     /// binding's outbound hash so another property with identical content cannot claim the slot.</summary>
-    public static ResolvedMap ResolveTransport(byte[]? imageBytes, TransportBinding binding)
+    /// <para><paramref name="neutrals"/> are the record's own neutral entries (see <see cref="ReadSidecar"/>),
+    /// the candidates that make "plug the neutral" answer on every normal slot: a slot whose outbound picture
+    /// is the modder's own authored normal has no <see cref="NeutralN"/> beside that picture, and the record
+    /// is where the session's neutral is named.</para></summary>
+    public static ResolvedMap ResolveTransport(byte[]? imageBytes, TransportBinding binding,
+        IEnumerable<Entry>? neutrals = null)
     {
         if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapOrigin.None);
 
@@ -924,6 +958,9 @@ public static class PreviewMaps
             if (File.Exists(neutral))
                 recorded.TryAdd((Hash(File.ReadAllBytes(neutral)), MapKind.Normal),
                     new Entry(Hash(File.ReadAllBytes(neutral)), neutral, MapKind.Normal, MapOrigin.Neutral));
+            foreach (var entry in neutrals ?? Array.Empty<Entry>())
+                if (entry.Origin == MapOrigin.Neutral && entry.Kind == MapKind.Normal)
+                    recorded.TryAdd((entry.Hash.ToLowerInvariant(), MapKind.Normal), entry);
         }
         return Resolve(imageBytes, binding.Kind, recorded, binding.Mesh, new StockPixels(),
             new SlotStock(binding.OutboundHash));

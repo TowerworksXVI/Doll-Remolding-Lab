@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Avalonia.Media.Imaging;
@@ -125,7 +125,10 @@ internal sealed class EditShadingFailureException : Exception
 /// not hold it. Its own state on the card: a slot the modder answered with a file that is gone is not the
 /// same card as one with no picture to show, and it is emphatically not a card the game's texture belongs
 /// on.</param>
-public sealed record EditMapPreview(Bitmap? Image, string Dimensions, string? MissingFile = null);
+/// <summary><paramref name="Authorable"/> is false for a game texture in a float format: decoding it flattens it
+/// to a lossy 8-bit picture, and an edit could not be encoded back into the slot.</summary>
+public sealed record EditMapPreview(Bitmap? Image, string Dimensions, string? MissingFile = null,
+    bool Authorable = true);
 
 /// <summary>One edit's own geometry, rendered.</summary>
 public sealed record EditMeshPreview(Bitmap Image, int VertexCount, int? OriginalVertexCount);

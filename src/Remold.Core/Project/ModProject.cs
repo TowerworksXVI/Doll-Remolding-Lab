@@ -394,6 +394,13 @@ public sealed class ProjectInfo
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ToggleKey { get; set; }
 
+    /// <summary>Whether the whole-mod on/off position survives a game restart. Opt-in: false is the
+    /// per-session reset every mod had before the choice existed, and a manifest that names it not means
+    /// false. Meaningless without <see cref="ToggleKey"/> — no key, nothing to restore.</summary>
+    [JsonPropertyName("toggle_key_persist")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PersistToggleKey { get; set; }
+
     /// <summary>Whether the build ships the record that lets the mod folder be read back into a project
     /// (<see cref="Migoto.RepairData"/>). True is the default and what a manifest that names it not takes,
     /// so a project written before the option existed keeps shipping the record. False ships the mod

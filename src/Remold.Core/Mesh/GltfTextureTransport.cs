@@ -11,23 +11,37 @@ using Remold.Core.Textures;
 namespace Remold.Core.Mesh;
 
 /// <summary>One workspace picture to carry through Blender under an exact material property. The primitive
-/// is null when the installed material position has no drawable carrier; it still rides the inventory.</summary>
+/// is null when the installed material position has no drawable carrier; it still rides the inventory.
+/// <paramref name="Drawable"/> records whether the material position fires at all (see
+/// <see cref="MaterialFold"/>); null is the older record shape and reads as drawable.</summary>
 public readonly record struct TextureTransportSource(string Mesh, int MaterialIndex, int? PrimitiveIndex,
     string ShaderProperty, MapKind Kind, string Png, string TextureName, string? Bundle, long PathId,
     bool? Srgb = null, MapOrigin Origin = MapOrigin.Vanilla,
-    PreviewMaps.TransportParameters? Parameters = null, int? TexCoord = null);
+    PreviewMaps.TransportParameters? Parameters = null, int? TexCoord = null, bool? Drawable = null,
+    string? Label = null);
 
 /// <summary>One transport source whose preview transform and outbound hash were already computed.</summary>
 internal readonly record struct TransformedTextureTransportSource(TextureTransportSource Source,
     byte[] PreviewPng, string OutboundHash);
 
-/// <summary>An authored picture laid over an outbound property binding when a workspace glb is rebuilt.</summary>
+/// <summary>An authored picture laid over an outbound property binding when a workspace glb is rebuilt. A
+/// replacement's picture names the PRIMITIVE it was authored for, since several of its submeshes can fold
+/// onto one material; a game-domain picture names the material alone and reaches every primitive drawn
+/// under it.</summary>
 public readonly record struct TextureTransportOverride(int MaterialIndex, string ShaderProperty, string Png,
-    MapKind? Kind = null);
+    MapKind? Kind = null, int? PrimitiveIndex = null, string? Label = null)
+{
+    /// <summary>Whether this picture is for the binding at <paramref name="materialIndex"/> /
+    /// <paramref name="primitiveIndex"/>, before its property is compared.</summary>
+    public bool Covers(int materialIndex, int? primitiveIndex) =>
+        PrimitiveIndex is { } primitive ? primitiveIndex == primitive : MaterialIndex == materialIndex;
+}
 
-/// <summary>A property-keyed image read out of a glb carrier.</summary>
+/// <summary>A property-keyed image read out of a glb carrier. <paramref name="Png"/> is null for a
+/// hash-only row — a binding Blender sent back as "unchanged" carrying only the content identity the app
+/// stamped at open, never the picture itself.</summary>
 public readonly record struct TextureTransportImage(string Mesh, int MaterialIndex, int? PrimitiveIndex,
-    string ShaderProperty, MapKind Kind, byte[] Png, string ImageName,
+    string ShaderProperty, MapKind Kind, byte[]? Png, string ImageName, string OutboundHash,
     PreviewMaps.TransportStock Stock, bool? Srgb, MapOrigin Origin,
     PreviewMaps.TransportParameters? Parameters, int? TexCoord);
 
@@ -129,7 +143,7 @@ public static class GltfTextureTransport
             var stock = new PreviewMaps.TransportStock(source.TextureName, source.Bundle ?? "", source.PathId);
             var row = new PreviewMaps.TransportBinding(source.Mesh, source.MaterialIndex, source.PrimitiveIndex,
                 source.ShaderProperty, source.Kind, source.Png, hash, stock, source.Srgb, source.Origin,
-                source.Parameters, source.TexCoord);
+                source.Parameters, source.TexCoord, source.Drawable);
             rows.Add(row);
             carrier.Add(CarrierRow(row, image));
         }
@@ -174,7 +188,7 @@ public static class GltfTextureTransport
             {
                 if (!TryReadRow(row, root, parsed.Bin, out var binding, out int image)) continue;
                 bindings.Add(binding);
-                referenced.Add(image);
+                if (image >= 0) referenced.Add(image);
             }
         }
 
@@ -254,11 +268,25 @@ public static class GltfTextureTransport
             string property = row.GetProperty("property").GetString() ?? "";
             if (property.Length == 0) return false;
             var kind = ParseKind(row.GetProperty("semantic").GetString());
-            imageIndex = row.GetProperty("image").GetInt32();
-            byte[] png = ImageBytes(root, bin, imageIndex);
-            var image = root.GetProperty("images")[imageIndex];
-            string imageName = image.TryGetProperty("name", out var n) ? n.GetString() ?? $"image {imageIndex}"
-                : $"image {imageIndex}";
+            byte[]? png = null;
+            string imageName = property;
+            if (row.TryGetProperty("image", out var imageRow) && imageRow.ValueKind == JsonValueKind.Number)
+            {
+                imageIndex = imageRow.GetInt32();
+                png = ImageBytes(root, bin, imageIndex);
+                var image = root.GetProperty("images")[imageIndex];
+                imageName = image.TryGetProperty("name", out var n) ? n.GetString() ?? $"image {imageIndex}"
+                    : $"image {imageIndex}";
+            }
+            string? outboundHash = row.TryGetProperty("outbound_hash", out var hashRow)
+                && hashRow.ValueKind == JsonValueKind.String ? hashRow.GetString() : null;
+            if (string.IsNullOrWhiteSpace(outboundHash))
+            {
+                // A row with neither picture nor identity keys nothing; a byte row without a stamp is a
+                // legacy writer's, and its bytes are its identity.
+                if (png is null) return false;
+                outboundHash = PreviewMaps.Hash(png);
+            }
             var stockRow = row.GetProperty("stock");
             var stock = new PreviewMaps.TransportStock(stockRow.GetProperty("name").GetString() ?? "",
                 stockRow.GetProperty("bundle").GetString() ?? "", stockRow.GetProperty("path_id").GetInt64());
@@ -271,7 +299,7 @@ public static class GltfTextureTransport
                 && texCoordRow.ValueKind == JsonValueKind.Number
                 && texCoordRow.TryGetInt32(out int index) && index >= 0 ? index : null;
             result = new TextureTransportImage(mesh, material, primitive, property, kind, png, imageName,
-                stock, srgb, origin, parameters, texCoord);
+                outboundHash, stock, srgb, origin, parameters, texCoord);
             return true;
         }
         catch (Exception e) when (e is not OutOfMemoryException and not OperationCanceledException)
@@ -321,8 +349,11 @@ public static class GltfTextureTransport
         }
     }
 
+    /// <summary>What Blender lists the carried picture as: the modder's own picture under its project label,
+    /// a stock one under its property and owner.</summary>
     private static string CarrierImageName(TextureTransportSource source)
     {
+        if (source.Label is { Length: > 0 } label) return label;
         string property = source.ShaderProperty.TrimStart('_');
         property = new string(property.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray());
         return $"gf2_{property}_m{source.MaterialIndex:D2}"

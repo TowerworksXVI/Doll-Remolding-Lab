@@ -307,6 +307,15 @@ public partial class MainWindowViewModel : IBuildPageShell
         else Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
 
+    /// <summary>The last preview file read, keyed by the file's own identity metadata. The stamp is a
+    /// content hash and the dimensions a header read, and every board change re-reads the preview state —
+    /// so both are recomputed only when the file itself moved under us (path, write time, or size), which
+    /// outside of a picture change is never. An immutable instance, so a concurrent read sees a whole
+    /// entry or none.</summary>
+    private sealed record PreviewReadCache(string Full, long WriteTicks, long Length, string Stamp,
+        int? Width, int? Height);
+    private PreviewReadCache? _previewReadCache;
+
     public BuildPreviewState ReadPreview(AuthoredProject? project)
     {
         string? relative = project?.Info.Preview;
@@ -317,11 +326,19 @@ public partial class MainWindowViewModel : IBuildPageShell
         {
             string full = Path.GetFullPath(Path.Combine(root,
                 relative.Replace('/', Path.DirectorySeparatorChar)));
-            if (!File.Exists(full)) return new BuildPreviewState(relative, full, true, "missing:" + relative);
+            var file = new FileInfo(full);
+            if (!file.Exists) return new BuildPreviewState(relative, full, true, "missing:" + relative);
+            long ticks = file.LastWriteTimeUtc.Ticks;
+            if (_previewReadCache is { } cached && string.Equals(cached.Full, full, StringComparison.Ordinal)
+                && cached.WriteTicks == ticks && cached.Length == file.Length)
+                return new BuildPreviewState(relative, full, false, cached.Stamp,
+                    cached.Width, cached.Height);
             Size? size = null;
             try { size = Image.Identify(full)?.Size; } catch { }
-            return new BuildPreviewState(relative, full, false, PreviewStamp(relative, full),
+            string stamp = PreviewStamp(relative, full);
+            _previewReadCache = new PreviewReadCache(full, ticks, file.Length, stamp,
                 size?.Width, size?.Height);
+            return new BuildPreviewState(relative, full, false, stamp, size?.Width, size?.Height);
         }
         catch { return new BuildPreviewState(relative, null, true, "missing:" + relative); }
     }

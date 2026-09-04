@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Avalonia.Input;
 using Remold.App.ViewModels;
+using Remold.App.Views;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Remold.Core.Tests.Migoto;
@@ -50,6 +52,96 @@ public class ToggleKeyTests : IDisposable
     public void A_modifier_run_and_a_multi_token_key_name_both_stay_usable(string typed) =>
         Assert.NotNull(ModKeys.Normalize(typed));
 
+    [Theory]
+    // punctuation and OEM spellings fold to the key table's one canonical token
+    [InlineData(".", "PERIOD")]
+    [InlineData("oem_period", "PERIOD")]
+    [InlineData("VK_OEM_PERIOD", "PERIOD")]
+    [InlineData("[", "VK_OEM_4")]
+    [InlineData("oem_4", "VK_OEM_4")]
+    [InlineData("~", "VK_OEM_3")]
+    [InlineData("tilde", "VK_OEM_3")]
+    [InlineData(";", "SEMICOLON")]
+    [InlineData("/", "SLASH")]
+    [InlineData("\\", "BACKSLASH")]
+    [InlineData("'", "QUOTE")]
+    [InlineData("]", "VK_OEM_6")]
+    [InlineData("=", "EQUALS")]
+    [InlineData("_", "MINUS")]
+    // the bare operator characters keep the table's numpad meaning
+    [InlineData("*", "MULTIPLY")]
+    [InlineData("+", "ADD")]
+    [InlineData("-", "SUBTRACT")]
+    // named navigation/editing aliases
+    [InlineData("pgup", "PRIOR")]
+    [InlineData("page_down", "NEXT")]
+    [InlineData("return", "ENTER")]
+    [InlineData("back", "BACKSPACE")]
+    [InlineData("delete", "DELETE")]
+    // hex codes: a named code comes back as its name; an unnamed one keeps the exact
+    // lower-case-0x shape hex is matched by
+    [InlineData("0x42", "B")]
+    [InlineData("0X70", "F1")]
+    [InlineData("0xe1", "0xe1")]
+    [InlineData("0xE1", "0xe1")]
+    // modifiers fold to one order, a spelled-out no_modifiers folds away (a bare key already
+    // means exactly that), and the sided modifier forms stand on their own
+    [InlineData("shift ctrl h", "CTRL SHIFT H")]
+    [InlineData("no_modifiers f6", "F6")]
+    [InlineData("lshift .", "LSHIFT PERIOD")]
+    [InlineData("lwin d", "LWIN D")]
+    public void Every_spelling_of_a_key_folds_to_its_one_canonical_token(string typed, string expected) =>
+        Assert.Equal(expected, ModKeys.Normalize(typed));
+
+    [Theory]
+    [InlineData("shift")]                // bare modifier: bound no_modifiers by the emitter, it could never fire
+    [InlineData("LWIN")]
+    [InlineData("ctrl ctrl h")]          // one modifier twice
+    [InlineData("ctrl lctrl h")]         // a modifier beside its own sided form: one binding spelled two ways
+    [InlineData("no_modifiers ctrl h")]  // a modifier excluded and required at once
+    [InlineData("no_modifiers")]         // no key at all
+    [InlineData("FOO")]                  // no such name in the key table
+    [InlineData("h j")]                  // two keys: not modifiers-then-key
+    [InlineData("0x00")]                 // outside the virtual-key range
+    [InlineData("0x1ff")]
+    [InlineData("0x")]
+    public void A_key_the_game_could_not_bind_normalizes_to_no_key(string typed) =>
+        Assert.Null(ModKeys.Normalize(typed));
+
+    [Theory]
+    // the parser's code names read as the keycap; everything already readable stays as it is
+    [InlineData("period", ".")]
+    [InlineData("VK_OEM_4", "[")]
+    [InlineData("~", "~")]
+    [InlineData("equals", "=")]
+    [InlineData("ctrl shift .", "CTRL SHIFT .")]
+    [InlineData("numpad5", "NUM 5")]
+    [InlineData("multiply", "NUM *")]
+    [InlineData("decimal", "NUM .")]
+    [InlineData("page_up", "PGUP")]
+    [InlineData("f6", "F6")]
+    [InlineData("ctrl shift h", "CTRL SHIFT H")]
+    [InlineData("space", "SPACE")]
+    public void A_key_reads_on_screen_as_its_keycap_not_the_parsers_code(string stored, string shown) =>
+        Assert.Equal(shown, ModKeys.Display(stored));
+
+    [Fact]
+    public void No_key_and_an_unusable_key_both_read_as_the_empty_label()
+    {
+        Assert.Equal("none", ModKeys.Display(null, "none"));
+        Assert.Equal("none", ModKeys.Display("FOO", "none"));
+    }
+
+    [Fact]
+    public void Every_spelling_of_one_key_is_one_variable()
+    {
+        Assert.Equal(ModKeys.VariableFor("."), ModKeys.VariableFor("VK_OEM_PERIOD"));
+        Assert.Equal(ModKeys.VariableFor("0x42"), ModKeys.VariableFor("b"));
+        Assert.Equal(ModKeys.VariableFor("ctrl shift h"), ModKeys.VariableFor("SHIFT CTRL H"));
+        Assert.True(ModKeys.SameKey("pgup", "PRIOR"));
+        Assert.False(ModKeys.SameKey("PERIOD", "COMMA"));
+    }
+
     [Fact]
     public void One_key_is_one_variable_however_it_was_typed()
     {
@@ -77,6 +169,42 @@ public class ToggleKeyTests : IDisposable
         Assert.Equal(ModKeys.VariableFor(a), ModKeys.VariableFor(b));
     }
 
+    // ---- capture ----
+
+    [Theory]
+    [InlineData(Key.OemPeriod, "PERIOD")]
+    [InlineData(Key.OemOpenBrackets, "VK_OEM_4")]
+    [InlineData(Key.OemTilde, "VK_OEM_3")]
+    [InlineData(Key.Multiply, "MULTIPLY")]
+    [InlineData(Key.Decimal, "DECIMAL")]
+    [InlineData(Key.Enter, "ENTER")]
+    [InlineData(Key.MediaPlayPause, "MEDIA_PLAY_PAUSE")]
+    public void A_captured_key_carries_the_tables_canonical_token(Key key, string token) =>
+        Assert.Equal(token, KeyCaptureButton.Token(key, KeyModifiers.None));
+
+    [Fact]
+    public void A_captured_combo_spells_its_modifiers_in_canonical_order() =>
+        Assert.Equal("CTRL SHIFT PERIOD",
+            KeyCaptureButton.Token(Key.OemPeriod, KeyModifiers.Control | KeyModifiers.Shift));
+
+    /// <summary>The capture whitelist and the normalizer are two statements of one vocabulary: every token
+    /// capture can produce must come back from <see cref="ModKeys.Normalize"/> exactly as it went in, or a
+    /// captured key and its own saved spelling would be two different bindings.</summary>
+    [Fact]
+    public void Every_capturable_token_normalizes_to_exactly_itself()
+    {
+        var seen = false;
+        foreach (Key key in Enum.GetValues<Key>())
+            foreach (var mods in new[]
+                { KeyModifiers.None, KeyModifiers.Control | KeyModifiers.Alt | KeyModifiers.Shift })
+                if (KeyCaptureButton.Token(key, mods) is { } token)
+                {
+                    seen = true;
+                    Assert.Equal(token, ModKeys.Normalize(token));
+                }
+        Assert.True(seen);
+    }
+
     // ---- persistence ----
 
     [Fact]
@@ -100,6 +228,23 @@ public class ToggleKeyTests : IDisposable
         Assert.Equal("F8", loaded.GetChangeKey("Vesna", "VesnaSSR01", "c_hair_lod0", EditVerbs.Hide));
         // the verb is part of the identity, exactly as it is for a build exclusion
         Assert.Null(loaded.GetChangeKey("Vesna", "VesnaSSR01", "c_body_lod0", EditVerbs.Retexture));
+    }
+
+    /// <summary>The whole-mod persistence choice rides the manifest, and a project that never made one
+    /// writes no field — older manifests read back as the per-session mod they always were.</summary>
+    [Fact]
+    public void The_whole_mod_persistence_choice_survives_a_save_and_is_absent_until_made()
+    {
+        var proj = new ModProject { RootDir = Path.Combine(_root, "persist-info") };
+        proj.Info.ToggleKey = "F6";
+        proj.Save();
+        Assert.DoesNotContain("toggle_key_persist",
+            File.ReadAllText(ModProject.ManifestPathFor(proj.RootDir!)));
+        Assert.False(ModProject.Load(proj.RootDir!).Info.PersistToggleKey);
+
+        proj.Info.PersistToggleKey = true;
+        proj.Save();
+        Assert.True(ModProject.Load(proj.RootDir!).Info.PersistToggleKey);
     }
 
     [Fact]
@@ -252,8 +397,48 @@ public class ToggleKeyTests : IDisposable
         Assert.Contains($"if ${v} == 0\nhandling = skip\nendif", ini);
     }
 
-    /// <summary>A toggle is per-session: no key variable asks to be restored from a previous run, on either
-    /// build route. Every keyed change re-reads its declared start at launch.</summary>
+    /// <summary>An opted-in key is declared <c>persist</c> — the runtime then saves its position on exit
+    /// and restores it from its user config at the next launch — and the restore lands AFTER the
+    /// <c>[Constants]</c> pre list runs, so a build whose flags depend on key positions re-runs the shared
+    /// recompute <c>post</c>.</summary>
+    [Fact]
+    public void An_opted_in_key_declares_persist_and_reruns_the_recompute_after_the_restore()
+    {
+        string outDir = Path.Combine(_root, "persist");
+        new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
+            hideHashes: new[] { "aaaa1111" }, modKey: "F6",
+            keyCycles: new[] { new KeyCycle("F7", 3, 0, Persist: true), new KeyCycle("F9", 2, 0) },
+            shownFlags: new[]
+                { new ShownFlag("skin", new KeyRef[] { new("F7", 0), new("F7", 2) }) },
+            persistToggleKey: true);
+        var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        Assert.Contains("global persist $zz_key_f6 = 0\n", ini);
+        Assert.Contains("global persist $zz_key_f7 = 0\n", ini);
+        Assert.Contains("run = CommandListRecomputeHidden\npost run = CommandListRecomputeHidden\n", ini);
+    }
+
+    /// <summary>Persistence is per key: a key that did not opt in keeps the plain declaration beside one
+    /// that did, and a build with no flag machinery gains no post run.</summary>
+    [Fact]
+    public void A_key_that_did_not_opt_in_stays_per_session_beside_one_that_did()
+    {
+        string outDir = Path.Combine(_root, "persist-mixed");
+        new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
+            hideHashes: new[] { "aaaa1111" }, modKey: "F6",
+            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>>
+                { ["aaaa1111"] = new KeyRef[] { "F7" } },
+            keyCycles: new[] { new KeyCycle("F7", 2, 0, Persist: true) });
+        var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        Assert.Contains("global $zz_key_f6 = 0\n", ini);
+        Assert.Contains("global persist $zz_key_f7 = 0\n", ini);
+        Assert.DoesNotContain("post run", ini);
+    }
+
+    /// <summary>A toggle is per-session unless its key opts in: by default no key variable asks to be
+    /// restored from a previous run, on either build route. Every keyed change re-reads its declared start
+    /// at launch.</summary>
     [Fact]
     public void No_key_variable_is_declared_persistent_on_either_build_route()
     {
@@ -325,6 +510,25 @@ public class ToggleKeyTests : IDisposable
         Assert.Contains("key = no_modifiers F6\n", ini);
         Assert.Contains("key = CTRL SHIFT H\n", ini);
         Assert.DoesNotContain("key = no_modifiers CTRL", ini);
+    }
+
+    /// <summary>A punctuation key crosses the whole path — capture spelling in, named table token out — so
+    /// the emitted line is one the game's parser takes: a literal <c>.</c> would read as an unknown name
+    /// and a literal <c>;</c> would end the line as a comment.</summary>
+    [Fact]
+    public void A_punctuation_key_is_emitted_as_its_named_token()
+    {
+        string outDir = Path.Combine(_root, "punct");
+        string dds = Path.Combine(_root, "punct-rtx.dds");
+        Directory.CreateDirectory(_root);
+        FlatDds.Write(dds, (10, 20, 30, 255));
+        new MigotoEmitter().BuildOverlaysOnly(outDir,
+            new[] { new RetexEntry("skin", "bbbb2222", dds, ".") },
+            hideHashes: new[] { "aaaa1111" }, modKey: "[");
+        var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+
+        Assert.Contains($"[Key_{ModKeys.VariableFor("[")}]\nkey = no_modifiers VK_OEM_4\n", ini);
+        Assert.Contains($"[Key_{ModKeys.VariableFor(".")}]\nkey = no_modifiers PERIOD\n", ini);
     }
 
     [Fact]

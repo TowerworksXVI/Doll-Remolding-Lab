@@ -19,6 +19,8 @@ public sealed class MeshEditGate
     private readonly Func<string, byte[]?> _tryDeobfuscate;
     private readonly ConcurrentDictionary<(string Bundle, string Mesh, long PathId),
         StreamDump.SkinRefusal?> _answers = new();
+    private readonly ConcurrentDictionary<(string Bundle, string Mesh, long PathId),
+        bool> _collapsed = new();
 
     /// <param name="tryDeobfuscate">non-throwing logical-bundle → plain bytes (null when
     /// absent/unreadable).</param>
@@ -37,5 +39,31 @@ public sealed class MeshEditGate
             return null;
         _answers[key] = answer;
         return answer;
+    }
+
+    /// <summary>Both per-mesh answers the Blender-edit surfaces read
+    /// (<see cref="PartSkinGate.TryBlenderEditAnswers"/>), settled together from one bundle read so the
+    /// second question never costs a second deobfuscate. A settled read also settles
+    /// <see cref="Blocked"/>'s memo, and a refusal <see cref="Blocked"/> already settled short-circuits
+    /// here — including while the bundle cannot be read RIGHT NOW, since a refusal once read is a fact
+    /// about the mesh. The not-memoized-while-unreadable contract otherwise holds.</summary>
+    public (StreamDump.SkinRefusal? Refusal, bool CollapsedBillboard) BlenderEditAnswers(
+        string bundle, string meshName, long pathId = 0)
+    {
+        var key = (bundle, meshName, pathId);
+        if (_answers.TryGetValue(key, out var settledRefusal))
+        {
+            // a settled refusal answers the whole question — no consumer reads the billboard half past
+            // one — and a settled clear answer waits only on the geometry half
+            if (settledRefusal is not null) return (settledRefusal, false);
+            if (_collapsed.TryGetValue(key, out var settledCollapsed))
+                return (settledRefusal, settledCollapsed);
+        }
+        if (!PartSkinGate.TryBlenderEditAnswers(_tryDeobfuscate, bundle, meshName, pathId,
+                out var refusal, out var collapsed))
+            return (_answers.TryGetValue(key, out var prior) ? prior : null, false);
+        _answers[key] = refusal;
+        _collapsed[key] = collapsed;
+        return (refusal, collapsed);
     }
 }
