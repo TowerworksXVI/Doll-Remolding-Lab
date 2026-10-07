@@ -36,7 +36,9 @@ public static class RosterSnapshot
     // predates (the weapon rosters) would read as dropped rather than unfilled. The curated set is keyed
     // separately (CuratedSet), so adding or re-routing an entry there needs no bump.
     private const int LegacySchema = 8;
-    private const int Schema = 9;
+    // 10: the confirm gate keeps a subject only for an owned, geometry-backed renderer slot (recipe rows
+    // alone no longer confirm), and a detail tier backed neither way is no longer kept.
+    private const int Schema = 10;
 
     private sealed record CacheFile(int SchemaVersion, string CatalogVersion, string? CuratedSet,
         Dictionary<long, List<string>> PartsByModelConfigId);

@@ -80,37 +80,60 @@ public sealed record EditRampPick(EditAssetResult? Picked)
     public bool KeepsGameOwn => Picked is null;
 }
 
-/// <summary>One shading value the selected material's shader reads: its field name, the plain-language
-/// label the dialog leads with, its shape, the value range seen across the game's own materials (a hint,
-/// not a limit), and the material's own value — null where the material states none and the shader
-/// default applies.</summary>
+/// <summary>One shading value the selected material's shader declares: its field name, the
+/// plain-language label the dialog leads with, its shape, the value range seen across the game's own
+/// materials (a hint, not a limit), and the material's own value — null where the material states none
+/// and the shader default applies. <see cref="Read"/> is false for a field the material's drawn programs
+/// declare but never read: not the material's value, so the editor shows it only when the edit already
+/// sets it, and Copy does not carry it.</summary>
 public sealed record EditShadingField(string Semantic, string Label,
     Remold.Core.Project.MaterialValueKind Kind, float ObservedMin, float ObservedMax,
-    string? OriginalValue);
+    string? OriginalValue, string? EffectId = null, bool Read = true);
 
-/// <summary>The shading values one material position supports, in offer order. Null from
-/// <see cref="IEditPageShell.ReadShading"/> means the position has no supported values at all — not on
-/// the character shader, or nothing the install can prove.</summary>
-public sealed record EditShadingInfo(IReadOnlyList<EditShadingField> Fields);
+/// <summary>One removable effect on the selected material. The enabled choice remains independent
+/// of the parent so turning the parent back on restores the child's choice.</summary>
+public sealed record EditShadingEffect(string Id, string Label, bool IsEnabled = true,
+    bool IsEdited = false, string? ParentId = null);
 
-/// <summary>One row of a shading copy: the field, and the two originals it would bridge.</summary>
+/// <summary>The values and removable effects supported by one material position, in offer order:
+/// only the fields its drawn programs read, and the exact operations behind its effect rows.</summary>
+public sealed record EditShadingInfo(IReadOnlyList<EditShadingField> Fields,
+    IReadOnlyList<EditShadingEffect>? Effects = null,
+    IReadOnlyList<MaterialEffectOperation>? EffectOperations = null);
+
+/// <summary>A completed install read. A null value describes a material with no adjustable shading;
+/// a problem describes a failed read rather than an empty capability list.</summary>
+public sealed record EditShadingRead(EditShadingInfo? Info, string? Problem = null,
+    IReadOnlyList<string>? PresentEffects = null);
+
+/// <summary>One row of a shading copy: the field, and the two originals it would bridge. A null
+/// <see cref="SourceValue"/> returns the field to the original, which the source already matches.</summary>
 public sealed record EditShadingCopyRow(string Semantic, string Label, string? CarrierValue,
-    string SourceValue);
+    string? SourceValue);
 
 /// <summary>What a shading-source pick came back with: the exact source material position, the label a
 /// confirm names it by, and the differing values the copy would set. An empty row list is a legal answer
-/// — the two materials already agree on every supported value.</summary>
+/// — the two materials already agree on every supported value. <see cref="SkippedUnreadable"/> names
+/// the shared fields the source states no readable value for; <see cref="EffectsCompared"/> is false
+/// when either material's effects could not be derived, so values copy and effects stay as they are.</summary>
 public sealed record EditShadingSource(TargetPart SourcePart, int SourceMaterialSlotIndex,
-    string Label, IReadOnlyList<EditShadingCopyRow> Rows);
+    string Label, IReadOnlyList<EditShadingCopyRow> Rows,
+    IReadOnlyList<string>? EffectsToDisable = null,
+    IReadOnlyList<string>? SourceOnlyEffects = null,
+    IReadOnlyList<MaterialEffectOperation>? EffectOperations = null, bool CopyRamp = false,
+    string SourceMaterialName = "", IReadOnlyList<string>? SkippedUnreadable = null,
+    bool EffectsCompared = true);
 
 /// <summary>One decision from the shading-values dialog: set the field to <see cref="Value"/>, or null
 /// to return it to the original. Only changed rows come back.</summary>
 public sealed record EditShadingValueEdit(string Semantic, string? Value);
 
+public sealed record EditShadingEffectEdit(string EffectId, bool Enabled);
+
 /// <summary>A committed shading-values answer. Empty edits are distinct from cancel; when every displayed
 /// value is original, the page reports that settled no-effect state.</summary>
 public sealed record EditShadingValuesResult(IReadOnlyList<EditShadingValueEdit> Edits,
-    bool MatchesOriginal = false);
+    bool MatchesOriginal = false, IReadOnlyList<EditShadingEffectEdit>? EffectEdits = null);
 
 /// <summary>A shading command failed after it began. Null dialog results remain the separate, silent
 /// cancellation answer; this exception carries only wording safe for the Edit page's status line.</summary>
@@ -253,6 +276,12 @@ public interface IEditPageShell
     /// than running past a read still in flight.</summary>
     Task<string?> MeshEditBlockAsync(TargetPart part);
 
+    /// <summary>Whether the game starts one part shrunk out of sight, so it opens in Blender centred at
+    /// full size and not lined up with the body. Read off the UI thread and memoized per install like
+    /// <see cref="MeshEditBlockAsync"/>; false while the part cannot be read. It never blocks
+    /// editing.</summary>
+    Task<bool> HiddenPartAsync(TargetPart part);
+
     /// <summary>Open one part from the game's original mesh in Blender, with the outfit around it when
     /// <paramref name="withReferences"/>. No edit is created or addressed by this route.</summary>
     Task OpenPartInBlenderAsync(TargetPart part, bool withReferences, IProgress<string> status);
@@ -304,6 +333,15 @@ public interface IEditPageShell
     /// pinned keep-the-game's-own row — or null on a cancel.</summary>
     Task<EditRampPick?> PickRampAsync(EditSlotRef slot);
 
+    /// <summary>Peek at the outfit's prepared material data without starting work. Null means the outfit
+    /// has not finished loading; completed reads may contain an unsupported or failed answer.</summary>
+    EditShadingRead? PeekShading(TargetPart part, int materialSlotIndex,
+        GameAssetRef? material = null) => new(null);
+
+    /// <summary>Get the values and effects the installed material supports for an explicit action.</summary>
+    Task<EditShadingInfo?> ReadShadingAsync(TargetPart part, int materialSlotIndex,
+        GameAssetRef? material = null) => Task.FromResult<EditShadingInfo?>(null);
+
     /// <summary>Show the shading-values dialog for one material position. <paramref name="authored"/> is
     /// what the edit currently sets, by field; the edit identity resolves copied fields through their
     /// source slots. Resolves to the changed rows, or null on a cancel.</summary>
@@ -314,8 +352,12 @@ public interface IEditPageShell
     /// <summary>Show the shading-source pick list: the materials of every part the given subjects have,
     /// with what a copy onto the target position would change. Resolves to the pick, or null on a
     /// cancel.</summary>
+    /// <param name="authored">What the edit already sets at this position, by field: a value the two
+    /// materials' originals share is left alone unless the edit sets it, in which case the copy returns
+    /// it to that shared original.</param>
     Task<EditShadingSource?> PickShadingSourceAsync(TargetPart part, int materialSlotIndex,
         string materialLabel, GameAssetRef? targetMaterial,
+        IReadOnlyDictionary<string, string> authored,
         IReadOnlyList<(string Subject, string Outfit)> subjects, IProgress<string> status);
 
     /// <summary>Take a <c>.png</c> dropped on one card: confirm, decode, publish. Resolves to the published

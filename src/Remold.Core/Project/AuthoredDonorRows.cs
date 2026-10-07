@@ -108,9 +108,9 @@ public static class AuthoredDonorRows
     ///
     /// <para>The ramp is the one input whose two file-less answers are different things. Every other input
     /// reads "the part's own value keeps drawing" off both, so they collapse onto
-    /// <see cref="SlotOrigin.VanillaOwn"/> — which is also what the build reads a normal or RMO slot's
+    /// <see cref="SlotOrigin.Untouched"/> — which is also what the build reads a normal or RMO slot's
     /// silence as under a Replace. A ramp slot's silence is a QUESTION the conversion offers to fill
-    /// (<see cref="Migoto.RampConversion"/>), and its <see cref="SlotOrigin.VanillaOwn"/> is the recorded
+    /// (<see cref="Migoto.RampConversion"/>), and its <see cref="SlotOrigin.Untouched"/> is the recorded
     /// answer that pass leaves alone; collapsing them would turn every unanswered ramp into a decision the
     /// modder never gave. The decision is said by <see cref="KeepsOwnRamp"/> and written above, so what
     /// reaches here is the question.</para></summary>
@@ -120,7 +120,7 @@ public static class AuthoredDonorRows
         if (binding.Kind == BindingKind.Neutral) return SlotOrigin.ExplicitNeutral;
         if (slot.Input == TargetInputKind.Ramp) return SlotOrigin.None;
         return binding.Kind is BindingKind.TargetGameValue or BindingKind.InheritedLiveCarrier
-            ? SlotOrigin.VanillaOwn : SlotOrigin.None;
+            ? SlotOrigin.Untouched : SlotOrigin.None;
     }
 
     private static void SetMap(SubmeshTextures row, TargetInputKind input, string? file, SlotOrigin origin,

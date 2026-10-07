@@ -107,18 +107,41 @@ public class AuthoredDdsTests : IDisposable
         Assert.Equal(expected, Header.Read(dst).DxgiFormat);
     }
 
-    [Fact]
-    public void Dimensions_off_the_block_grid_still_encode_whole_blocks()
+    [Theory]
+    [InlineData(30, 30, true)]
+    [InlineData(7, 4, false)]
+    [InlineData(4, 7, true)]
+    [InlineData(1, 8, false)]
+    [InlineData(1030, 1030, true)]
+    public void Dimensions_off_the_block_grid_preserve_pixels_in_a_loadable_uncompressed_format(
+        int width, int height, bool srgb)
     {
-        // A DDS stores whole 4×4 blocks with padded edges — an authored map need not be a multiple of four.
         string dst = Path.Combine(_root, "odd.dds");
-        AuthoredDds.Encode(WritePng(30, 30), dst, srgb: true);
+        string src = WritePng(width, height, img =>
+        {
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                    img[x, y] = new Rgba32((byte)x, (byte)y, 93, (byte)(x + y));
+        });
+        AuthoredDds.Encode(src, dst, srgb);
 
         var h = Header.Read(dst);
-        Assert.Equal(30, h.Width);
-        Assert.Equal(30, h.Height);
-        Assert.Equal(TextureCodec.MipChainLength(30, 30), h.MipCount);
-        Assert.Equal(TextureCodec.BlobSize(ATTextureFormat.BC7, 30, 30, h.MipCount), h.PayloadBytes);
+        Assert.Equal(width, h.Width);
+        Assert.Equal(height, h.Height);
+        Assert.Equal(srgb ? 29u : 28u, h.DxgiFormat);
+        Assert.Equal((uint)(width * 4), h.PitchOrLinearSize);
+        Assert.Equal(0x8u, h.Flags & 0x8u);
+        Assert.Equal(TextureCodec.MipChainLength(width, height), h.MipCount);
+        Assert.Equal(TextureCodec.BlobSize(ATTextureFormat.RGBA32, width, height, h.MipCount), h.PayloadBytes);
+        byte[] pixels = File.ReadAllBytes(dst)[HeaderBytes..];
+        using var original = Image.Load<Rgba32>(src);
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                int offset = (y * width + x) * 4;
+                Assert.Equal(original[x, height - 1 - y],
+                    new Rgba32(pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]));
+            }
     }
 
     [Fact]
@@ -132,7 +155,8 @@ public class AuthoredDdsTests : IDisposable
 
         var h = Header.Read(dst);
         Assert.Equal(1, h.MipCount);
-        Assert.Equal(16, h.PayloadBytes);   // one BC7 block
+        Assert.Equal(4, h.PayloadBytes);
+        Assert.Equal(29u, h.DxgiFormat);
         Assert.Equal(1, h.Width);
         Assert.Equal(1, h.Height);
     }
@@ -141,8 +165,21 @@ public class AuthoredDdsTests : IDisposable
     public void The_writer_refuses_a_chain_longer_than_the_dimensions_admit()
     {
         var ex = Assert.Throws<ArgumentException>(() => DdsWriter.Write(new MemoryStream(),
-            DdsWriter.BC7_UNORM, 1, 1, new[] { new byte[16], new byte[16] }));
+            DdsWriter.R8G8B8A8_UNORM, 1, 1, new[] { new byte[4], new byte[4] }));
         Assert.Contains("admits only 1", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(30, 32)]
+    [InlineData(32, 30)]
+    public void The_writer_refuses_block_compressed_dimensions_Direct3D_cannot_load(int width, int height)
+    {
+        using var output = new MemoryStream();
+        var ex = Assert.Throws<ArgumentException>(() => DdsWriter.Write(output,
+            DdsWriter.BC7_UNORM, width, height, new[] { new byte[16] }));
+        Assert.Contains("multiples of four", ex.Message);
+        Assert.Equal(0, output.Length);
     }
 
     [Fact]

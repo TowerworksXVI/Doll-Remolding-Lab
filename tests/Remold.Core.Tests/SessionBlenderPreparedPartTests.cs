@@ -511,7 +511,7 @@ public class SessionBlenderPreparedPartTests
     private static Outfit TheOutfit => new(0, "VesnaSSR01", OutfitKind.Base);
 
     private static (string Part, string SourceBundle, string MeshName, string? GlbOut,
-        IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb) Spec(string part, string bundle,
+        IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb) Spec(string part, string bundle,
         string mesh, string? glbOut, string? editedGlb) => (part, bundle, mesh, glbOut, null, 0L, editedGlb);
 
     private sealed record Fixture(GameVfs Vfs, string PartsDir, string MapsDir)
@@ -615,6 +615,7 @@ public class SessionBlenderPreparedPartTests
         AuthoredEdit(riggedGlb, meshName, Path.Combine(modRoot, "meshes", "long.glb"));
         var project = AuthoredEditFixtures.Saved();
         project.RootDir = modRoot;
+        project.TransportRoot = Path.Combine(modRoot, "round-trips");
         return new AuthoredEditSession(project);
     }
 

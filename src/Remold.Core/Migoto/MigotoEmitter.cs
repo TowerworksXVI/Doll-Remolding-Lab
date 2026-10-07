@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.ExceptionServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Remold.Core.Mesh;
@@ -19,9 +21,12 @@ namespace Remold.Core.Migoto;
 /// solve fresh, keep nothing). <paramref name="MeasuredRest"/> is the part's measured bind→scene transform
 /// (see <see cref="Skeleton.SceneRig.MeasuredRest"/>); the bind-space reconciliation MUST prefer measured
 /// deltas exactly as <see cref="SwapCompile.BuildUnionOrder"/> does — the compiled donor streams and the
-/// emitted palette state one union space.</summary>
+/// emitted palette state one union space. <paramref name="RootChain"/> is the bone the part's renderer is
+/// rooted at and that bone's ancestors, as bone hashes, the root first and the skeleton's top last; null
+/// when the renderer is unknown or its rig could not be read. A pooled Replace tells copies of this part
+/// apart by where that root stands (see <see cref="MigotoEmitter.PoseRingEntries"/>).</summary>
 public readonly record struct PoolPart(string Name, string DumpDir, string? OpKey = null,
-    System.Numerics.Matrix4x4? MeasuredRest = null);
+    System.Numerics.Matrix4x4? MeasuredRest = null, IReadOnlyList<uint>? RootChain = null);
 
 /// <summary>
 /// One Replace's pipeline within a build: an ordered pool of parts, an optional donor stream dir
@@ -37,8 +42,9 @@ public sealed record ReplacePipeline
     /// per build and ini-safe (lowercase alphanumerics + <c>_</c>).</summary>
     public required string Suffix { get; init; }
 
-    /// <summary>Ordered pool parts. The last is the anchor unless <see cref="Anchor"/> overrides. Max 8
-    /// (the convert pass uses cbuffer slots b5..b12 for parts, b13 for the anchor).</summary>
+    /// <summary>Ordered pool parts. The last is the anchor unless <see cref="Anchor"/> overrides. The
+    /// convert pass binds each part's constants at a register of b5..b12 (b13 is the anchor's), so it runs
+    /// one dispatch per <see cref="ComputeTemplates.PartsPerConvert"/> parts in this order.</summary>
     public required IReadOnlyList<PoolPart> Parts { get; init; }
 
     /// <summary>Donor body streams dir (stream0/1/2 + ib + meta.json, weighted to the union bone order).
@@ -140,6 +146,14 @@ public sealed record ReplacePipeline
     /// build log.</summary>
     public IReadOnlyDictionary<uint, string>? BonePaths { get; init; }
 
+    /// <summary>The bind each bone the replacement may ride is stated under (<see cref="Mesh.BindReference"/>),
+    /// stated for the REPLACED part as its Blender export states it, in the space the donor's vertices are
+    /// compiled in; the anchor's own restatement carries it to where the dumps' binds are, as it does in the
+    /// donor compile. Every mesh this pipeline recovers rows from, the anchor included, has the rows of a bone
+    /// it binds differently converted onto it; a bone missing here ships as its mesh states it. The donor
+    /// compile is handed the same one.</summary>
+    public IReadOnlyDictionary<uint, Matrix4x4>? ReferenceBinds { get; init; }
+
     /// <summary>Extra presence-sighting ib hashes per pool part: tiers the builder DROPPED from
     /// <see cref="Tiers"/> (unreadable, ambiguous, claim-refused) whose vanilla draw keeps running. The
     /// part's latch must still see those draws, or the tie underlay would fire — a rigid ride — while
@@ -200,6 +214,10 @@ public sealed record PoolGroupMesh(string Name, string Lod, string DumpDir, stri
     public bool IsLod0 => Lod.Length == 0;
 }
 
+/// <summary>A rigid replacement's tier mesh, as the emitter needs it to check the donor's streams against
+/// the layout that tier's draw reads them through.</summary>
+public sealed record RigidTierLayout(string Mesh, IReadOnlyList<Remold.Core.Mesh.UnityMesh.ChannelDef> Channels);
+
 /// <summary>
 /// One RIGID replacement: a direct geometry swap at a draw the game does not pose per vertex. The compiled
 /// donor's streams stand in for the vanilla ones and its submeshes are drawn in their place — no capture,
@@ -209,6 +227,10 @@ public sealed record RigidReplace
 {
     /// <summary>Names this replacement's shipped resources; unique across the whole build.</summary>
     public required string Suffix { get; init; }
+
+    /// <summary>The emission name of the part this replaces, as the mod.ini header names it; the suffix
+    /// where none is given.</summary>
+    public string? Part { get; init; }
 
     /// <summary>The compiled donor dir: <c>stream*.buf</c> + <c>ib.buf</c> + <c>meta.json</c>, already in
     /// the replaced part's OWN vertex layout (see <see cref="SwapCompile.CompilePart"/>).</summary>
@@ -222,6 +244,12 @@ public sealed record RigidReplace
     /// donor draw: LOD choice is not distance-only, so a tier left alone would draw the stock mesh in
     /// every context that picks it.</summary>
     public IReadOnlyList<string>? TierHashes { get; init; }
+
+    /// <summary>Per <see cref="TierHashes"/> entry, that tier mesh's name and channel table. The donor
+    /// draw at a tier is read through the tier mesh's input layout, so a tier storing a stream
+    /// differently from the replaced part gets that stream re-encoded. Every tier hash needs an entry:
+    /// the emission throws for one it cannot check.</summary>
+    public IReadOnlyDictionary<string, RigidTierLayout>? TierLayouts { get; init; }
 
     /// <summary>Per-donor-submesh texture binds; null when every submesh keeps the part's stock maps.</summary>
     public IReadOnlyDictionary<int, SubmeshMaps>? SubTextures { get; init; }
@@ -262,6 +290,11 @@ public sealed record RigidReplace
     /// multi-submesh set routes the donor draw per submesh, as <see cref="ReplacePipeline.AnchorShapes"/>
     /// does for a pooled draw; a hash with no entry (or one submesh) keeps the draw in its section.</summary>
     public IReadOnlyDictionary<string, DrawShapeSet>? ShapesByHash { get; init; }
+
+    /// <summary>Material maps per TIER hash: which of that tier's material positions carries each lod0
+    /// position's region. <see cref="Hash"/> is the lod0 draw itself and takes no map. A hash with no entry
+    /// routes donor ranges by position, which is what a caller with no prefab material data can say.</summary>
+    public IReadOnlyDictionary<string, TierMaterialMap>? MapsByHash { get; init; }
 }
 
 /// <summary>
@@ -287,6 +320,10 @@ public sealed record PoolBuildRequest
     /// would act on the same draws the capture's skip already covers.</summary>
     public IReadOnlyList<string>? HideHashes { get; init; }
 
+    /// <summary>The part each mesh section key names, for refusals that have to say which row to leave
+    /// out. A key with no entry is named by its ib hash.</summary>
+    public IReadOnlyDictionary<string, string>? MeshLabels { get; init; }
+
     /// <summary>Retexture sections appended after the pooled emission. See
     /// <see cref="RetexEntry"/>.</summary>
     public IReadOnlyList<RetexEntry>? Retextures { get; init; }
@@ -300,17 +337,17 @@ public sealed record PoolBuildRequest
     public IReadOnlyList<StockRampBind>? StockRamps { get; init; }
 
     /// <summary>Semantic material-value patches, each bound around every donor draw that folds onto its
-    /// target material position. See
-    /// <see cref="MaterialPatchEmission"/>. Null/empty keeps the emitted text byte-for-byte unchanged.</summary>
+    /// target material position, or around the game's own draw of a <see cref="StockDraws"/> entry its
+    /// suffix names. See <see cref="MaterialPatchEmission"/>.</summary>
     public IReadOnlyList<MaterialPatchEmission>? MaterialPatches { get; init; }
+
+    /// <summary>The draws of unreplaced parts that material patches apply at. See
+    /// <see cref="StockDrawSite"/>.</summary>
+    public IReadOnlyList<StockDrawSite>? StockDraws { get; init; }
 
     /// <summary>The presence latches this build's latched edits reference, one per authored outfit
     /// whose edits need one. See <see cref="WitnessLatch"/>.</summary>
     public IReadOnlyList<WitnessLatch>? Latches { get; init; }
-
-    /// <summary>Per-hide presence latch, by the hide's ib hash. A hash with no entry hides whenever its
-    /// keys allow.</summary>
-    public IReadOnlyDictionary<string, string>? HideLatches { get; init; }
 
     /// <summary>The mod's own toggle key (tier 1): every suppression, draw and texture override in the
     /// emitted ini is gated on it, so one key turns the whole mod off. Null = no key, and the mod is always
@@ -322,10 +359,10 @@ public sealed record PoolBuildRequest
     /// Meaningless without <see cref="ToggleKey"/>.</summary>
     public bool PersistToggleKey { get; init; }
 
-    /// <summary>Per-hide toggle keys, by the hide's own ib hash (tier 2) — the OR-list of key positions
-    /// demanding that draw suppressed, one guarded <c>handling = skip</c> each. A hash with no entry hides
-    /// unconditionally.</summary>
-    public IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? HideKeys { get; init; }
+    /// <summary>The changes claiming each hide, by the hide's own ib hash: every claim's key positions,
+    /// presence latch and twin verdict, each position one guarded <c>handling = skip</c>. A hash with no
+    /// entry hides unconditionally.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? HideClaims { get; init; }
 
     /// <summary>The keys whose two-state cycle launches at position 1, so what position 0 gates starts OFF
     /// and the first press turns it on. A key not listed launches at 0. Superseded per key by
@@ -353,34 +390,32 @@ public sealed record PoolBuildRequest
     /// by drawing at all rather than by a texture bound at the guarded draw. See
     /// <see cref="TwinSighting"/>.</summary>
     public IReadOnlyList<TwinSighting>? TwinSightings { get; init; }
+
+    /// <summary>The version of the app making this build, which the mod's ini header names. Null names the
+    /// app alone.</summary>
+    public string? AppVersion { get; init; }
 }
 
-/// <summary>One planned semantic material patch for a target material position. Every donor draw that
-/// folds onto the position is wrapped. The draw's
-/// live <c>ps-cb</c> is snapshotted, a generated compute shader overwrites only the patch's allowlisted
-/// bytes on a live-sized copy (self-guarding on the copied buffer's exact byte width), the copy is bound for that one draw,
-/// and the original resource is restored — so every unowned byte keeps its current runtime value.
-///
-/// <para><paramref name="PixelShaderHashes"/> is the CANDIDATE FAMILY: every shader variant the game can
-/// bind at this material's draws that declares the patched layout. All of them are tagged with the one
-/// <paramref name="FilterIndex"/>, and the draw-site gate fires when any of them is bound — runtime state
-/// (shadow quality, fog, LOD, render features) picks the variant per machine and per scene, so a
-/// single-variant gate would ship a patch that silently never fires under other settings.
-/// <paramref name="Key"/> names this patch's generated shader section; <paramref name="ShaderFile"/> is
-/// its already-written path relative to the mod folder. Patches sharing one (suffix, target material
-/// position) share one snapshot per resolved donor draw and run in sequence on the one working copy.
-/// <paramref name="ByteWidth"/> is the exact carrier-buffer size the group's constant-buffer draw resource
-/// must declare; the raw work resource inherits its live size from the copied <c>ps-cb</c> source.
-/// </para></summary>
+/// <summary>A planned operation on one target material position. Exact pixel-program gates wrap
+/// every replacement draw folded onto that position; where <see cref="Suffix"/> names a
+/// <see cref="StockDrawSite"/> instead, they wrap the game's own draw of that site and
+/// <see cref="Submesh"/> is 0. At each such draw one pixel pass writes the group's
+/// <see cref="Writes"/> over a copy of the bound constants; texture substitutions and buffer bindings are
+/// restored after the draw. SkipDraw omits only the matched pass of this material. FilterIndex is the
+/// input reflection family's identifier; emitted gates use stable per-program values so overlapping
+/// families agree across mods. A patch without <see cref="Writes"/> adds no pass.</summary>
 public sealed record MaterialPatchEmission(
     string Suffix,
     int Submesh,
     string Key,
     int ConstantBufferSlot,
-    string ShaderFile,
     int FilterIndex,
     IReadOnlyList<string> PixelShaderHashes,
-    int ByteWidth);
+    int ByteWidth,
+    IReadOnlyList<MaterialEffectTexture>? TextureOverrides = null,
+    bool SkipDraw = false,
+    bool IsEffect = false,
+    IReadOnlyList<MaterialPatchWrite>? Writes = null);
 
 /// <summary>One submesh draw of a replaced mesh as the game issues it: the draw's start index and index
 /// count. A multi-material mesh is drawn once per material, each draw covering one submesh's index
@@ -417,11 +452,16 @@ public static class DrawMaterialFold
 /// the draw in the capture section. <paramref name="SourcePart"/> and <paramref name="SourceMesh"/> retain
 /// the renderer-slot and game mesh names used by <paramref name="BoneVerdicts"/>; the emitter consumes
 /// those upstream verdicts but never reclassifies an off-union weighted row. <paramref name="PartDisplayNames"/>
-/// maps those raw renderer slots to the place names shown by the app; direct emitter callers may omit it.</summary>
+/// maps those raw renderer slots to the place names shown by the app; direct emitter callers may omit it.
+/// <paramref name="Map"/> (anchor tiers only) says which of THIS tier's material positions carries each
+/// lod0 material position's region; null routes donor ranges by position, which is all a caller with no
+/// prefab material data can say. <paramref name="RootChain"/> is THIS tier's own renderer's root chain, as
+/// on <see cref="PoolPart.RootChain"/>.</summary>
 public sealed record PoolTier(string Part, string Name, string Suffix, string DumpDir, string CaptureHash,
     string? OpKey = null, DrawShapeSet? Shapes = null, string? SourcePart = null, string? SourceMesh = null,
     IReadOnlyList<PoolDerive.TierBoneVerdict>? BoneVerdicts = null,
-    IReadOnlyDictionary<string, string>? PartDisplayNames = null);
+    IReadOnlyDictionary<string, string>? PartDisplayNames = null,
+    TierMaterialMap? Map = null, IReadOnlyList<uint>? RootChain = null);
 
 /// <summary>One image of a game-wide retexture: the replacement <paramref name="DdsFile"/> and the gate it
 /// rebinds under — its own key position (tier 2; null = no key of its own) or, where the change answering
@@ -482,27 +522,63 @@ public sealed record ScopedRetexEntry(string Name, string StockHash, IReadOnlyLi
 /// One toon ramp bound at the draws of a part this build does NOT replace — the modder picked a ramp for
 /// one of its materials and nothing else about the part changes.
 ///
-/// <para>The bind is DRAW-SCOPED, like every other ramp bind: the section keys on the part's index buffer,
-/// probes the ramp's own candidate registers for the ramp tag, and puts the register back afterwards.
-/// A global rebind is not available here at all — the runtime's texture hash reads too little of a ramp for
-/// two of them to be told apart, so it would follow every character and material sharing that
-/// prefix.</para>
+/// <para>The bind is DRAW-SCOPED, like every other ramp bind: the section keys on the part's mesh, probes
+/// the ramp's own candidate registers for the ramp tag, and puts the register back afterwards. A global
+/// rebind is not available here at all — the runtime's texture hash reads too little of a ramp for two of
+/// them to be told apart, so it would follow every character and material sharing that prefix.</para>
 ///
-/// <para>One index buffer draws every material of the part, so the ramp tag alone does not say WHICH
-/// material is drawing. <paramref name="MaterialHash"/> is one ordinary map of the target material — a
-/// sound hash, unlike the ramp's — tagged with the value derived from itself; seeing it bound at the draw
-/// is what admits the bind. A draw of another material sights nothing and keeps its own shading.</para>
+/// <para>One mesh draws every material of the part, each material in a draw of its own index range, so
+/// <paramref name="Shape"/> is what says WHICH material is drawing: the bind runs only at the draw whose
+/// first index and index count are that material's.</para>
 /// </summary>
 /// <param name="Name">ini-safe section suffix, unique per bind.</param>
-/// <param name="IbHash">the part's index-buffer hash — the draws this ramp applies at.</param>
+/// <param name="IbHash">the section key of the part's mesh at this level of detail — the draws this ramp
+/// applies at.</param>
+/// <param name="Shape">the target material's own draw at this level of detail.</param>
 /// <param name="RampHash">the target material's own ramp texture hash, tagged so the probe can find which
 /// register holds it. It selects a register, never a material.</param>
 /// <param name="DdsFile">the picked ramp's source path (fp16 DDS, shipped verbatim).</param>
 /// <param name="Part">the change-list label a refusal over this bind names. Empty when the caller has
 /// none.</param>
-public sealed record StockRampBind(string Name, string IbHash, string MaterialHash, string RampHash,
+/// <param name="TwinVerdict">the twin guard verdict naming this part's own mesh where another mesh draws on
+/// the same section key; null where none does.</param>
+/// <param name="Material">the texture that tells this material's draw apart from other outfits' draws of the
+/// same mesh; null where no other outfit wears the mesh, or where none of the material's textures does
+/// that.</param>
+public sealed record StockRampBind(string Name, string IbHash, DrawShape Shape, string RampHash,
     string DdsFile, KeyRef? ToggleKey = null, string? Latch = null, string Part = "",
-    string? ShownBy = null);
+    string? ShownBy = null, int? TwinVerdict = null, MaterialProbe? Material = null);
+
+/// <summary>
+/// One material's own draw, at one level of detail, of a part this build does NOT replace: where the
+/// shading changes and effect disables made on that material apply. The material patches naming
+/// <paramref name="Id"/> as their suffix run at this draw alone — the section keys on the mesh, and the
+/// draw's first index and index count say which material it is.
+/// </summary>
+/// <param name="Id">ini-safe identifier, unique in the build and distinct from every replacement's
+/// suffix.</param>
+/// <param name="IbHash">the section key of the part's mesh at this level of detail.</param>
+/// <param name="Shape">the material's own draw at this level of detail.</param>
+/// <param name="Part">the change-list label a refusal names.</param>
+/// <param name="ToggleKey">the key position the change applies in (tier 2); null = no key of its
+/// own.</param>
+/// <param name="Latch">the presence latch the change waits on; null where the mesh is the outfit's
+/// own.</param>
+/// <param name="ShownBy">the content flag standing in for the key position, where the change answers
+/// several.</param>
+/// <param name="TwinVerdict">the twin guard verdict naming this part's own mesh, as on
+/// <see cref="StockRampBind"/>.</param>
+/// <param name="Material">the texture that tells this material's draw apart, as on
+/// <see cref="StockRampBind"/>.</param>
+public sealed record StockDrawSite(string Id, string IbHash, DrawShape Shape, string Part = "",
+    KeyRef? ToggleKey = null, string? Latch = null, string? ShownBy = null, int? TwinVerdict = null,
+    MaterialProbe? Material = null);
+
+/// <summary>A texture one material of an unreplaced part binds at its own draw and that no other outfit
+/// wearing the same mesh wears at all. Where it is bound, the draw is this material's; where it is not, the
+/// draw is another outfit's, and a change on this material stays off it. <paramref name="TagValue"/> is the
+/// value the texture's tag carries, which is what the probe at the draw compares.</summary>
+public sealed record MaterialProbe(string TexHash, int TagValue);
 
 /// <summary>
 /// One outfit's presence latch. A sighting of any <paramref name="WitnessIbs"/> draw records into
@@ -611,6 +687,13 @@ public sealed record TwinProbeTag(string TexHash, int TagValue, int Verdict);
 public sealed record TwinGuard(string Hash, string Var, IReadOnlyList<int> OwnVerdicts,
     IReadOnlyList<TwinProbeTag> Tags);
 
+/// <summary>One change's demand that a hidden draw be skipped. <see cref="Keys"/> is the OR-list of key
+/// positions asking for it, empty when the hide holds in every state; <see cref="Latch"/> the presence
+/// latch it waits on, null when it waits on none; <see cref="Verdict"/> the twin guard's verdict naming the
+/// change's own mesh, null when the change skips at every draw of the hash. Several changes can claim one
+/// hash, and the section skips while any one of them asks.</summary>
+public sealed record HideClaim(IReadOnlyList<KeyRef> Keys, string? Latch = null, int? Verdict = null);
+
 /// <summary>An external sighting for a sticky twin variable: whenever the section owning
 /// <see cref="Hash"/> fires, <see cref="Var"/> takes <see cref="Verdict"/> — proof by a mesh the
 /// signature group's meshes are worn (or not worn) with.</summary>
@@ -626,31 +709,217 @@ public sealed record TwinSighting(string Hash, string Var, int Verdict);
 /// </summary>
 public sealed partial class MigotoEmitter
 {
-    // One trailing newline belongs to the header; the second is the seam before the emitted body.
-    // ModBuilder shares these exact anchors when it stamps a completed Core build.
-    internal const string PooledIniHeader =
-        "; Pooled mesh swap - generated by the Remold pooled mesh-swap emitter\n"
-        + "; one pipeline per replacement: capture each pool part's posed vb0 + vs-cb1 -> recover\n"
-        + "; into that pipeline's union palette (rows in each owner part's draw space) -> CONVERT\n"
-        + "; all rows into the anchor's space at the anchor draw -> skin the new geometry once ->\n"
-        + "; draw at the anchor (in EVERY pass the anchor fires in; texture binds probe the\n"
-        + "; slots actually bound at the draw, via filter_index tags on the anchor's own stock\n"
-        + "; maps) -> hide the other meshes. Meshes pooled by several\n"
-        + "; pipelines are captured once; their capture section serves every pipeline.\n"
-        + "; Compute (recover/convert/skin) runs ONCE per frame per chain ($zz_done_* flags,\n"
-        + "; reset in [Present]); the draw runs at every pass fire.\n";
+    /// <summary>How one Replace's replacement is posed, as the ini header tells it: from each draw's own
+    /// vertices with nothing kept between draws (<c>Pose</c>), the same with the parts it takes bones from
+    /// recorded at their own draws (<c>Pooled</c>), or once a frame for every copy (<c>Chain</c>).</summary>
+    internal enum ReplaceRoute { Pose, Pooled, Chain }
 
-    internal const string RigidIniHeader =
-        "; Rigid mesh swap - generated by the Remold rigid mesh-swap emitter\n"
-        + "; one section per replaced draw: skip the vanilla draw and issue the new geometry in\n"
-        + "; its place, at every shipped LOD tier. The draw is not posed per vertex, so nothing\n"
-        + "; is captured or recovered; texture binds probe the slots actually bound at the draw,\n"
-        + "; via filter_index tags on the part's own stock maps.\n";
+    /// <summary>One Replace as the ini header tells it: the emission name of the part it replaces, how its
+    /// replacement is posed, on the pooled route the emission names of the parts it takes bones from (each
+    /// part once, its lower-detail meshes folded into it, in the order their passes run), and whether any
+    /// of those parts has a pick pass of its own.</summary>
+    internal sealed record ReplaceSummary(string Part, ReplaceRoute Route, IReadOnlyList<string> Sources, bool Picked);
 
-    internal const string OverlayIniHeader =
-        "; Overlay overrides - generated by the Remold overlay emitter\n"
-        + "; hide skips every pass of a mesh; retexture rebinds a stock texture by its own\n"
-        + "; resource hash, which covers every pass, environment and LOD it is sampled in.\n";
+    /// <summary>What a generated mod does, as its ini header tells whoever opens the file: how many parts it
+    /// replaces the meshes of, how many original meshes it hides, how many original textures it changes,
+    /// whether it changes the shading of original materials, the key that turns it on and off and the keys
+    /// that switch its states; then each Replace (<see cref="Replaces"/>) and each rigid replacement's part
+    /// (<see cref="Rigids"/>), and which sections of the file the header names (<see cref="SlotProbe"/>,
+    /// <see cref="MaterialPasses"/>, <see cref="Retextures"/>).</summary>
+    internal sealed record ModSummary(int Replaced, int Hidden, int Textures, bool Shading,
+        string? ModKey, IReadOnlyList<string> StateKeys)
+    {
+        public IReadOnlyList<ReplaceSummary> Replaces { get; init; } = Array.Empty<ReplaceSummary>();
+        public IReadOnlyList<string> Rigids { get; init; } = Array.Empty<string>();
+        /// <summary>A replacement's draw list finds the slots the game bound the part's textures in.</summary>
+        public bool SlotProbe { get; init; }
+        /// <summary>The file holds a <c>[ShaderOverride_MaterialPass_*]</c> section.</summary>
+        public bool MaterialPasses { get; init; }
+        /// <summary>The file holds a <c>[TextureOverride_Retex_*]</c> section.</summary>
+        public bool Retextures { get; init; }
+    }
+
+    /// <summary>The comment header every generated mod.ini opens with: the app that generated it, what the
+    /// mod does, how each replacement is drawn, naming the sections that do it, what the file's other
+    /// section families do, and the keys. Each line is present only where its fact applies. The body
+    /// follows after one blank line, the seam <see cref="ModBuilder"/> stamps the build marker at.</summary>
+    internal static string IniHeader(string? appVersion, ModSummary mod)
+    {
+        static string Count(int n, string one, string many) => n == 1 ? $"1 {one}" : $"{n} {many}";
+        static string Capital(string s) => char.ToUpperInvariant(s[0]) + s[1..];
+        var lines = new List<string>
+        {
+            appVersion is { Length: > 0 } version
+                ? $"Generated by Doll Remolding Lab {version}." : "Generated by Doll Remolding Lab.",
+        };
+        var does = new List<string>();
+        if (mod.Replaced > 0) does.Add(mod.Replaced == 1 ? "replaces the mesh of 1 part" : $"replaces the meshes of {mod.Replaced} parts");
+        if (mod.Hidden > 0) does.Add($"hides {Count(mod.Hidden, "original mesh", "original meshes")}");
+        if (mod.Textures > 0) does.Add($"changes {Count(mod.Textures, "original texture", "original textures")}");
+        if (mod.Shading) does.Add("changes the shading of some original materials");
+        if (does.Count > 0) lines.Add(Capital(EnglishList(does)) + ".");
+
+        if (mod.Replaces.Any(r => r.Route != ReplaceRoute.Chain))
+            lines.AddRange(new[]
+            {
+                "At each draw of a replaced mesh, custom shader passes read the game's posed vertices,",
+                "recover that draw's bone matrices (CustomShaderGather_*, CustomShaderPosePalette_*),",
+                "skin the replacement with them (CustomShaderPoseSkin_*) and draw it in place of the",
+                "original (CommandListDraw_*), so each copy of the part on screen is posed from its own draw.",
+            });
+        // one sentence per Replace that says something of its own, each said once however many states
+        // repeat it
+        var told = new List<string>();
+        void Tell(params string[] sentence)
+        {
+            string text = string.Join("\n", sentence);
+            if (told.Contains(text)) return;
+            told.Add(text);
+            lines.AddRange(sentence);
+        }
+        foreach (var r in mod.Replaces.Where(r => r.Route == ReplaceRoute.Pooled && r.Sources.Count > 0))
+        {
+            string a = r.Part;
+            string ends = r.Picked ? "" : ".";
+            if (r.Sources.Count == 1)
+            {
+                string source = r.Sources[0];
+                var sentence = new List<string>
+                {
+                    $"{a}'s replacement is weighted to bones of {source} as well: each draw of",
+                    $"{source} records its vertices and object-to-world matrix (CustomShaderRing*_{source}),",
+                    $"and {a}'s draw takes the record standing where its own bones place that part{ends}",
+                };
+                if (r.Picked) sentence.Add("(CustomShaderPosePick_*).");
+                Tell(sentence.ToArray());
+            }
+            else
+            {
+                var sentence = new List<string>
+                {
+                    $"{a}'s replacement is weighted to bones of {EnglishList(r.Sources)} as well: each draw of",
+                    "those parts records its vertices and object-to-world matrix (CustomShaderRing*_*),",
+                    $"and {a}'s draw takes, for each, the record standing where its own bones place that part{ends}",
+                };
+                if (r.Picked) sentence.Add("(CustomShaderPosePick_*).");
+                Tell(sentence.ToArray());
+            }
+        }
+        foreach (var r in mod.Replaces.Where(r => r.Route == ReplaceRoute.Chain))
+            Tell($"{r.Part}'s replacement is skinned once a frame from the bone matrices recovered at the last draw of each",
+                "part it is weighted to (CustomShaderRecover_*, CustomShaderConvert_*, CustomShaderSkin_*), so every",
+                "copy of it on screen shares that pose.");
+        foreach (string part in mod.Rigids)
+            Tell($"{part}'s replacement is drawn in place of the original without per-vertex",
+                "posing (CommandListRigid_*).");
+        if (mod.SlotProbe)
+            lines.AddRange(new[]
+            {
+                "The if-blocks on $zz_t in CommandListDraw_* find which slot the game bound each of the",
+                "part's textures in, so the replacement's textures bind to the same slots.",
+            });
+        if (mod.MaterialPasses)
+            lines.Add("ShaderOverride_MaterialPass_* carry the shading changes, one per game material program.");
+        if (mod.Retextures)
+            lines.Add("TextureOverride_Retex_* bind the replacement textures by the original's hash.");
+
+        var keys = new List<string>();
+        if (ModKeys.Normalize(mod.ModKey) is { } modKey)
+            keys.Add($"key {ModKeys.Display(modKey)} turns the mod on and off");
+        var stateKeys = mod.StateKeys.Select(k => ModKeys.Display(k)).Where(k => k.Length > 0).ToList();
+        if (stateKeys.Count > 0)
+            keys.Add(stateKeys.Count == 1 ? $"key {stateKeys[0]} switches between states"
+                : $"keys {EnglishList(stateKeys)} switch between states");
+        if (keys.Count > 0) lines.Add(Capital(string.Join(", and ", keys)) + ".");
+        return string.Concat(lines.Select(line => $"; {line}\n"));
+    }
+
+    /// <summary>Which of the section families the ini header names a mod's file holds: a replacement draw
+    /// list probing the slots the game bound the part's textures in (a <c>$zz_t = ps-t</c> line in a
+    /// <c>[CommandListDraw*]</c> section), a <c>[ShaderOverride_MaterialPass_*]</c> section, and a
+    /// <c>[TextureOverride_Retex_*]</c> section. Read off the emitted body, so the header names only
+    /// sections the file holds.</summary>
+    internal static (bool SlotProbe, bool MaterialPasses, bool Retextures) IniMarkers(string body)
+    {
+        bool slotProbe = false, materialPasses = false, retextures = false, inDraw = false;
+        foreach (string line in body.Split('\n'))
+        {
+            if (line.StartsWith('['))
+            {
+                inDraw = line.StartsWith("[CommandListDraw", StringComparison.Ordinal);
+                materialPasses |= line.StartsWith("[ShaderOverride_MaterialPass_", StringComparison.Ordinal);
+                retextures |= line.StartsWith("[TextureOverride_Retex_", StringComparison.Ordinal);
+            }
+            else if (inDraw && line.StartsWith($"${VarProbe} = ps-t", StringComparison.Ordinal)) slotProbe = true;
+        }
+        return (slotProbe, materialPasses, retextures);
+    }
+
+    /// <summary>Each pipeline as the ini header tells it (<see cref="ReplaceSummary"/>), in emission order.</summary>
+    static IReadOnlyList<ReplaceSummary> ReplaceSummaries(IReadOnlyList<PipelineEmission> pipes) =>
+        pipes.Select(pipe =>
+        {
+            string anchor = pipe.PartMeta[pipe.AnchorIdx].Part;
+            if (pipe.PoseRoute is null) return new ReplaceSummary(anchor, ReplaceRoute.Chain, Array.Empty<string>(), false);
+            if (pipe.PoseRoute.Sources is not { } sources)
+                return new ReplaceSummary(anchor, ReplaceRoute.Pose, Array.Empty<string>(), false);
+            return new ReplaceSummary(anchor, ReplaceRoute.Pooled,
+                sources.Select(s => s.Part).Distinct(StringComparer.Ordinal).ToList(), sources.Any(s => s.ByBone));
+        }).ToList();
+
+    /// <summary>The keys that switch a build's states, as its header names them: every declared key but the
+    /// mod's own, then every shortcut key that sets a group's position.</summary>
+    static IReadOnlyList<string> StateKeys(string? modKey, IEnumerable<string?> changeKeys, IReadOnlyList<KeyCycle>? cycles)
+    {
+        var declared = ModKeys.Distinct(new[] { modKey }.Concat(changeKeys));
+        string? own = ModKeys.Normalize(modKey);
+        return declared.Where(k => !string.Equals(k, own, StringComparison.Ordinal))
+            .Concat(Jumps(declared, cycles).Keys.Where(k => !string.Equals(k, own, StringComparison.Ordinal)))
+            .Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The header's counts of a build's meshes, each counted as the app counts it: one per part, with
+    /// a part's lower-detail meshes and its states folded into it (<paramref name="meshLabels"/> names the
+    /// part a mesh hash belongs to; a hash it does not name counts on its own). <c>Replaced</c> is every part
+    /// a replacement draws in place of, and <c>Hidden</c> the parts hidden outright or suppressed beside a
+    /// replacement, less any part a replacement draws.</summary>
+    static (int Replaced, int Hidden) MeshCounts(IReadOnlyList<PipelineEmission> pipes,
+        IReadOnlyList<RigidEmission> rigids, IEnumerable<string> hideHashes,
+        IReadOnlyDictionary<string, string>? meshLabels)
+    {
+        string Label(string hash) => meshLabels is not null && meshLabels.TryGetValue(hash, out var l) ? l : hash;
+        // the parts replaced, and every mesh a replacement draws in place of (their lower-detail meshes too)
+        var replaced = new HashSet<string>(StringComparer.Ordinal);
+        var drawn = new HashSet<string>(StringComparer.Ordinal);
+        var hidden = new HashSet<string>(hideHashes.Select(Label), StringComparer.Ordinal);
+        foreach (var r in rigids)
+        {
+            replaced.Add(Label(r.Hashes[0]));
+            foreach (string h in r.Hashes) drawn.Add(Label(h));
+        }
+        foreach (var pipe in pipes)
+        {
+            string Hash(string part) => pipe.CapHashes.TryGetValue(part, out var h) ? h : $"REPLACE_{part}_ib";
+            string anchor = pipe.PartMeta[pipe.AnchorIdx].Part;
+            string anchorLabel = Label(Hash(anchor));
+            replaced.Add(anchorLabel);
+            drawn.Add(anchorLabel);
+            foreach (var t in pipe.TierMeta.Where(t => t.Part == anchor)) drawn.Add(Label(t.Hash));
+            foreach (var (part, _, _, _) in pipe.PartMeta)
+            {
+                if (part == anchor) continue;
+                bool suppressed = pipe.NoSkip?.Contains(part) != true
+                    || pipe.SuppressWhen?.ContainsKey(part) == true;
+                if (!suppressed) continue;
+                hidden.Add(Label(Hash(part)));
+                foreach (var t in pipe.TierMeta.Where(t => t.Part == part)) hidden.Add(Label(t.Hash));
+            }
+            foreach (var claim in pipe.GroupClaims)
+                if (claim.Hidden || claim.HiddenWhen is { Count: > 0 }) hidden.Add(Label(claim.Hash));
+        }
+        hidden.ExceptWith(drawn);
+        return (replaced.Count, hidden.Count);
+    }
 
     /// <summary>Where this build may keep solved operators (see <see cref="OperatorCachePath"/>).
     /// Null = solve fresh, write nothing.</summary>
@@ -677,6 +946,31 @@ public sealed partial class MigotoEmitter
             .Concat(ramp ? Slots.Ramp : Enumerable.Empty<int>())
             .Concat(properties ?? Enumerable.Empty<int>())
             .Distinct().OrderBy(s => s).ToList();
+
+    /// <summary>The slot variables a draw list's binds read, each with the registers its probe sweeps: a
+    /// stock picture kind some submesh binds, a shader property some submesh binds, and the ramp when some
+    /// submesh binds one. A kind no submesh binds is probed but never bound, so its slot is never saved.</summary>
+    IReadOnlyList<(string Var, IReadOnlyList<int> Registers)> BoundSlotVars(SubmeshMaps?[] subMaps)
+    {
+        var bound = new List<(string, IReadOnlyList<int>)>();
+        foreach (var (kind, v) in new[] { (StockMapKind.Albedo, VarAlbedoSlot), (StockMapKind.Normal, VarNormalSlot),
+                     (StockMapKind.Rmo, VarRmoSlot), (StockMapKind.Blend, VarBlendSlot) })
+            if (Enumerable.Range(0, subMaps.Length).Any(di => !Slot(subMaps, di, kind).IsInherit)) bound.Add((v, ProbeSlots));
+        foreach (var p in PropertySlots(subMaps)) bound.Add((PropertyVar(p.ShaderProperty), p.Registers));
+        if (RampTexed(subMaps)) bound.Add((VarRampSlot, Slots.Ramp));
+        return bound;
+    }
+
+    /// <summary>The save of every slot a draw list's binds can touch, taken once the probe has named it:
+    /// one reference per bound kind, at the register the probe answered, and none for a kind no register
+    /// holds. Saving the whole sweep range unconditionally cost a reference and a rebind per register at
+    /// every draw of the part, most of the draw's CPU time.</summary>
+    static string TextureSaves(IReadOnlyList<(string Var, IReadOnlyList<int> Registers)> bound) =>
+        string.Concat(bound.SelectMany(b => b.Registers.Select(s => $"if ${b.Var} == {s}\nResource_SaveT{s} = ref ps-t{s}\nendif\n")));
+
+    /// <summary>The game's own bind put back at every slot <see cref="TextureSaves"/> took, after the last draw.</summary>
+    static string TextureRestores(IReadOnlyList<(string Var, IReadOnlyList<int> Registers)> bound) =>
+        string.Concat(bound.SelectMany(b => b.Registers.Select(s => $"if ${b.Var} == {s}\nps-t{s} = Resource_SaveT{s}\nendif\n")));
 
     // filter_index values for the slot tags — distinctive on purpose: a texture's probe answer is the
     // HIGHEST-priority filter_index among every ini's sections on that hash, so a third-party mod tagging
@@ -725,21 +1019,42 @@ public sealed partial class MigotoEmitter
     // list's so a scoped bind can never clobber a Replace draw's probe state mid-frame.
     const string VarRetexProbe = "zz_rt", VarRetexSlot = "zz_rslot";
 
-    // A stock ramp bind's own scratch and its "the target material is what's drawing" verdict, separate
-    // from both of the above for the same reason: these sections fire at draws of parts nothing else in
-    // the build touches, and must not carry state into or out of one that does. The register the ramp was
-    // found in is the draw list's own VarRampSlot — one name for one question, wherever it is asked.
-    const string VarStockRampProbe = "zz_sr", VarStockRampSeen = "zz_srm";
+    // A stock ramp bind's own probe scratch, separate from both of the above for the same reason: these
+    // sections fire at draws of parts nothing else in the build touches, and must not carry state into or
+    // out of one that does. The register the ramp was found in is the draw list's own VarRampSlot — one
+    // name for one question, wherever it is asked.
+    const string VarStockRampProbe = "zz_sr";
+
+    /// <summary>The section-local flag saying this section put something in <c>ps-t</c><paramref
+    /// name="register"/> at the current draw, so its restore after the draw runs only then. A section that
+    /// bound nothing leaves the register to whoever did: its own save may hold another mod's resource, and
+    /// putting that back would outlast the draw.</summary>
+    static string BoundVar(int register) => $"zz_bt{register}";
+
+    /// <summary>The section-local flag saying this section bound its patched constant buffer for a material
+    /// patch group at the current draw.</summary>
+    static string BoundCbVar(string gid) => $"zz_bcb_{gid}";
+
+    // The section-local scratch a material probe reads each register through, and its answer: whether the
+    // material's own texture is bound at this draw.
+    const string VarMaterialProbe = "zz_mt", VarMaterialSeen = "zz_mat";
 
     // The scratch a multi-verdict twin guard folds its verdicts into: the ini nests if/endif rather than
     // offering an OR, so the admitted verdicts each set this and the body opens on it once. Declared only
     // in builds that carry such a guard.
     const string VarTwinOk = "zz_twok";
 
-    /// <summary>Pool parts one pipeline can carry — the convert shader's cb register range
-    /// (<see cref="ComputeTemplates.MaxPartCBuffers"/>) and nothing about taste. Raising it means finding
-    /// the shader more registers.</summary>
-    public const int MaxPoolParts = ComputeTemplates.MaxPartCBuffers;
+    /// <summary>The ini section of a pipeline's convert chunk <paramref name="chunk"/>. Chunk 0 keeps the
+    /// name the single convert has always had; a later chunk's name puts its number before the suffix, as
+    /// the witness convert's does, so it cannot equal another pipeline's section whatever that suffix
+    /// is.</summary>
+    static string ConvertSection(string sfx, int chunk) =>
+        chunk == 0 ? $"CustomShaderConvert_{sfx}" : $"CustomShaderConvertC{chunk}_{sfx}";
+
+    /// <summary>The shader file of a pipeline's convert chunk <paramref name="chunk"/>, named on the same
+    /// rule as <see cref="ConvertSection"/>.</summary>
+    static string ConvertFile(string sfx, int chunk) =>
+        chunk == 0 ? $"convert_cs_{sfx}.hlsl" : $"convert_c{chunk}_cs_{sfx}.hlsl";
 
     /// <summary>The slot-tag filter value carried for a stock map kind.</summary>
     static int KindFilter(StockMapKind kind) => kind switch
@@ -971,14 +1286,6 @@ public sealed partial class MigotoEmitter
             + $"owning parts {EnglishList(owners)}; bones {EnglishList(bones)}.";
     }
 
-    static string BindBone(uint hash, IReadOnlyDictionary<uint, string>? bonePaths)
-    {
-        if (bonePaths is not null && bonePaths.TryGetValue(hash, out var fullPath)
-            && BoneTable.MatchingLeaf(hash, fullPath) is { } leaf)
-            return $"bone '{leaf}'";
-        return "1 bone this install's files do not name";
-    }
-
     /// <summary><paramref name="UnionBones"/>/<paramref name="VertexCount"/> are totals across pipelines.
     /// <paramref name="Warnings"/> are user-facing and actionable; <paramref name="Diagnostics"/> record
     /// what the emission did, reaching the build log and no UI surface.
@@ -1013,20 +1320,311 @@ public sealed partial class MigotoEmitter
         public required HashSet<(string Name, string Dir)> PoolSources;
         public required HashSet<(string Name, string Dir)> TierSources;
         public required HashSet<(string Name, string Dir)> GroupSources;
+        /// <summary>The pooled pose route's verdict for this pipeline: null where no part but the anchor
+        /// supplies rows (the self-contained route decides) or the pipeline is the identity build.</summary>
+        public PooledPlan? Pooled;
+        /// <summary>Build-log lines about witness rows retained for the chain's conversion: withdrawn where
+        /// the pipeline takes the pose route, which converts nothing through witnesses.</summary>
+        public readonly List<string> WitnessLines = new();
+        /// <summary>Build-log lines about rows retained to place a part on the pooled route: withdrawn where
+        /// the pipeline keeps the chain after all.</summary>
+        public readonly List<string> PlacementLines = new();
+    }
+
+    /// <summary>How a part a pooled Replace takes rows from is matched to each copy of the replaced part:
+    /// its root is the anchor's own (<c>SameRoot</c>: the copy's draw binds the anchor's matrix), its root's
+    /// nearest recovered ancestor is the anchor's (<c>ByAnchorBone</c>) or another such part's
+    /// (<c>BySourceBone</c>) and carries the root's rest origin to where the copy's root stands, or nobody
+    /// recovers an ancestor and the copy's root is looked for near the anchor's own position
+    /// (<c>ByAnchorPosition</c>).</summary>
+    enum Placement { SameRoot, ByAnchorBone, BySourceBone, ByAnchorPosition }
+
+    /// <summary>One source mesh's placement: its emission name and dump, its pool part, whether it is a
+    /// lower-detail mesh, its renderer's root bone, how it is placed, the bone that places it and, for
+    /// <see cref="Placement.BySourceBone"/>, the pool part that recovers that bone.</summary>
+    sealed record SourcePlacement(string Mesh, string Dir, int Part, bool IsTier, uint Root, Placement Kind,
+        uint Bone, int Placer);
+
+    /// <summary>A pooled pipeline's placement verdicts, every source mesh in the order its passes run, or
+    /// the reason the pipeline keeps the once-per-frame chain.</summary>
+    sealed class PooledPlan
+    {
+        public string? Refusal;
+        public readonly List<SourcePlacement> Sources = new();
     }
 
     sealed record PipelineEmission(string Sfx,
         List<(string Part, int N, int Nb, int Rows)> PartMeta, int AnchorIdx,
         IReadOnlyDictionary<string, string> CapHashes, int Ub, int Vcount, int Vb1Stride, string IbFmt,
         List<(int Count, int Start, int Base)> Draws, SubmeshMaps?[] SubMaps,
-        HashSet<string>? NoSkip, List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes)> TierMeta,
+        HashSet<string>? NoSkip,
+        List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes,
+            TierMaterialMap? Map)> TierMeta,
         bool Lod0WitnessConvert, KeyRef? ToggleKey, string? Latch, bool HideWhenOff, string? HiddenBy,
         string? ShownBy,
         IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? SuppressWhen,
         List<GroupMemberEmission> GroupMembers,
         List<GroupMemberClaim> GroupClaims, List<(string Part, int Pairs)> Ties,
         IReadOnlyDictionary<string, int> TierTies,
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes, DrawShapeSet? AnchorShapes);
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? PresenceHashes, DrawShapeSet? AnchorShapes,
+        IReadOnlyList<StreamVariant> Vb1Variants, IReadOnlyDictionary<string, int> TierVb1,
+        HashSet<string> ConvertedOps, PoseRouteEmission? PoseRoute = null)
+    {
+        /// <summary>The operator resource this pipeline's recover of <paramref name="mesh"/> binds: its own
+        /// converted copy where the mesh binds bones elsewhere than this pipeline's reference
+        /// (<see cref="ConvertedOps"/>), else the solved operator every pipeline shares.</summary>
+        public string CpinvResource(string mesh) =>
+            ConvertedOps.Contains(mesh) ? $"Resource_{mesh}_Cpinv_{Sfx}" : $"Resource_{mesh}_Cpinv";
+    }
+
+    /// <summary>The per-copy pose route a pipeline runs instead of the once-per-frame chain when every
+    /// row it recovers comes from the replaced part itself: at every draw of the part, pixel passes rebuild
+    /// the posed stream from that draw's own packet (a palette pass per kernel mesh, a skin pass per piece)
+    /// and the draw reads it directly, so each copy on screen draws from its own pose with nothing kept
+    /// between draws. <c>Kernels</c>: one per mesh the anchor is captured from (its lod0 and each tier of
+    /// its own that recovers), with the size of the packet its gather fills and whether its operator is
+    /// slim; <c>TierKernel</c>: which mesh's palette pass each anchor tier's draw runs; <c>PaletteRows</c>:
+    /// the palette texture's width (four per palette slot); <c>Pieces</c>: the donor's draw ranges cut
+    /// into stream-sized pieces, in draw order; <c>ViewWidth</c>: the widest piece's stream in elements,
+    /// the viewport every skin pass borrows. <c>Sources</c>: on the pooled route, every mesh of the parts the
+    /// replacement takes rows from, in the order their passes run; null on the self-contained route.</summary>
+    sealed record PoseRouteEmission(IReadOnlyList<(string Mesh, int Tier, int Packet, bool Slim)> Kernels,
+        IReadOnlyDictionary<string, string> TierKernel, int PaletteRows, IReadOnlyList<PosePiece> Pieces, int ViewWidth,
+        IReadOnlyList<PoseSource>? Sources = null);
+
+    /// <summary>One source mesh of the pooled route: its emission name, the emission name of the part it
+    /// belongs to, the entries of its packet, whether its operator is slim, and whether a bone's row places
+    /// it, in which case a pick pass reading the palette so far and the row mask chooses its copy ahead of
+    /// its palette pass; any other source's palette pass chooses its copy itself.</summary>
+    sealed record PoseSource(string Mesh, string Part, int Packet, bool Slim, bool ByBone);
+
+    /// <summary>Ring slots kept per source mesh on the pooled route, filled in turn, one per draw of the mesh:
+    /// a copy drawn in several passes fills several slots with the same rows, which the pick counts as one,
+    /// and an anchor draw reads only those written in its own frame. Sixteen keep the last sixteen draws of
+    /// the mesh, every copy of the frame in the two-copy captures the route was sized on (about six draws a
+    /// copy a frame, two a pass).</summary>
+    // Accepted consequence: a copy whose last draw of the mesh is followed by sixteen draws of it by other
+    // copies before the copy's replacement draw has lost its slots, and its replacement finds no copy or a
+    // neighbour's. Where the game draws one material of every copy together, as the captures show, that takes
+    // nine copies of a two-material source mesh on screen together; choosing the slot per copy instead puts a
+    // wait on every write, and no mod is expected to reach the limit.
+    internal const int PoseRingEntries = 16;
+
+    /// <summary>The most rows a texture the mod declares may have (Direct3D 11's limit), and so the most
+    /// packet entries a source mesh's ring of <see cref="PoseRingEntries"/> slots holds: 65,472, read from the
+    /// source mesh's vertices.</summary>
+    internal const int MaxTextureRows = 16384;
+    internal const int MaxRingPacket = (MaxTextureRows / PoseRingEntries - 1) * ComputeTemplates.PacketWidth;
+
+    /// <summary>Refuse the build where a source mesh's ring would pass <see cref="MaxTextureRows"/>: the
+    /// loaders would fail to create it, and the replacement would draw with no pose.</summary>
+    internal static void RequireRingFits(string anchor, string source, int packet)
+    {
+        if (packet > MaxRingPacket)
+            throw new AuthoredRefusalException($"'{anchor}' can't be replaced: it moves with '{source}', which "
+                + "has too many vertices to follow. Remove this mesh edit");
+    }
+
+    /// <summary>The pick's margins: a slot placed by a bone's row may stand at most
+    /// <see cref="PlacementCap"/> from where that row puts the root, one placed by the anchor's own position
+    /// at most <see cref="PositionCap"/> (a body length); the nearest must be <see cref="PlacementAhead"/>
+    /// times nearer than any other; a same-root slot matches the anchor's rows within
+    /// <see cref="SameRootTolerance"/> per element. Two slots written this frame whose rows agree within
+    /// <see cref="SameDrawTolerance"/> per element are one copy drawn in two passes, and the pick counts
+    /// them once.</summary>
+    internal const float PlacementCap = 0.30f, PositionCap = 1.2f, PlacementAhead = 3.0f,
+        SameRootTolerance = 1e-4f, SameDrawTolerance = 1e-5f;
+
+    /// <summary>The frame number wraps back to 1 here, below the float's exact-integer range.</summary>
+    const int FrameWrap = 8388608;
+
+    /// <summary>The texture holding the pooled route's frame number, which every ring slot and replaced-part
+    /// capture is stamped with, and the one the <c>[Present]</c> pass writes the next number into before it
+    /// is copied back. Cleared to frame 1 when the mod loads, so a ring slot no draw has written (frame 0)
+    /// never matches it.</summary>
+    const string FrameResource = "Resource_PoseFrame", FrameNextResource = "Resource_PoseFrameNext";
+
+    static string PosePickFile(string mesh, string sfx) => $"pose_pick_{mesh}_{sfx}.hlsl";
+    static string RingGatherFile(string mesh) => $"ring_gather_{mesh}.hlsl";
+    static string RingStampFile(string mesh) => $"ring_stamp_{mesh}.hlsl";
+    /// <summary>The file holding ring slot <paramref name="k"/>'s number, one per slot per mod: a ring block
+    /// binds the one its write fills (see <see cref="RingSections"/>).</summary>
+    static string RingSlotFile(int k) => $"ring_slot_{k}.buf";
+    static string RingSlotResource(int k) => $"Resource_RingSlot_{k}";
+    internal const string PoseCaptureVsFile = "pose_capture_vs.hlsl";
+    internal const string PoseCapturePsFile = "pose_capture_ps.hlsl";
+    internal const string PoseFrameFile = "pose_frame_ps.hlsl";
+
+    /// <summary>One piece of the donor on the pose route: its global number (the resources' suffix), the
+    /// draw range it belongs to, and its vertex, index and stream-element counts.</summary>
+    sealed record PosePiece(int Number, int Range, int Vertices, int Indices, int Elements);
+
+    /// <summary>Vertices one piece of the pose route carries: a buffer render-target view spans 16,384
+    /// elements of 16 bytes, 6,553 vertices at the stream's 40-byte stride. An instance property so a
+    /// test can force a small donor into several pieces.</summary>
+    internal int PoseWindowVertices { get; init; } = DonorPieces.WindowVertices;
+
+    /// <summary>The pose route's fullscreen vertex shader file, one per mod, drawn by every pose pass.</summary>
+    internal const string PoseFullscreenFile = "pose_fullscreen.hlsl";
+
+    /// <summary>The gather's pixel shader file, one per mod, shared by every mesh's gather.</summary>
+    internal const string GatherPixelFile = "gather_ps.hlsl";
+
+    /// <summary>A bone as a build-log line names it: by its name in quotes, or by its path from the skeleton's
+    /// top where another bone of <paramref name="paths"/> shares the name, and by its hash where no path is
+    /// known. One bone listed under several starting links (one path the tail of another) is one bone, not a
+    /// shared name.</summary>
+    internal static string BoneName(IReadOnlyDictionary<uint, string>? paths, uint hash)
+    {
+        if (paths is null || !paths.TryGetValue(hash, out var path) || path.Length == 0) return $"0x{hash:x8}";
+        static string Leaf(string p) => p[(p.LastIndexOf('/') + 1)..];
+        static bool SameBone(string a, string b) => string.Equals(a, b, StringComparison.Ordinal)
+            || a.EndsWith("/" + b, StringComparison.Ordinal) || b.EndsWith("/" + a, StringComparison.Ordinal);
+        string leaf = Leaf(path);
+        bool shared = paths.Any(kv => kv.Key != hash && string.Equals(Leaf(kv.Value), leaf, StringComparison.Ordinal)
+            && !SameBone(kv.Value, path));
+        return $"'{(shared ? path : leaf)}'";
+    }
+
+    /// <summary>Every bone path a build's pipelines know, as one table: a bone's hash is its path, so the
+    /// pipelines' tables agree wherever they overlap. Null when no pipeline carries paths.</summary>
+    static IReadOnlyDictionary<uint, string>? BonePathsOf(PoolBuildRequest req)
+    {
+        var all = new Dictionary<uint, string>();
+        foreach (var pipe in req.Pipelines)
+            foreach (var kv in pipe.BonePaths ?? new Dictionary<uint, string>())
+                all.TryAdd(kv.Key, kv.Value);
+        return all.Count > 0 ? all : null;
+    }
+
+    /// <summary>The donor's stream 1 re-encoded for an anchor tier whose mesh stores that stream
+    /// differently from the lod0. The donor draw at a tier is read through the TIER mesh's input layout,
+    /// so the lod0-shaped stream is only correct there when the two layouts agree; each layout that
+    /// disagrees ships one of these. <see cref="PipelineEmission.TierVb1"/> maps a tier's emission name to
+    /// its 1-based variant, and a tier absent from it binds the primary stream.</summary>
+    sealed record StreamVariant(int Stride, string File);
+
+    /// <summary>One draw a donor stream is bound at besides the one it was built for: the key its
+    /// selector is looked up by, the mesh and part names a message names it by, and that mesh's channel
+    /// table — null when the caller recorded none.</summary>
+    sealed record TierLayout(string Key, string Mesh, string? Part, IReadOnlyList<UnityMesh.ChannelDef>? Channels)
+    {
+        public string Label => Part is null ? $"LOD '{Mesh}'" : $"LOD '{Mesh}' of '{Part}'";
+    }
+
+    /// <summary>The re-encoded copies of one shipped donor stream that its other draws need. The primary,
+    /// <c>{fileStem}.buf</c> in <paramref name="outDir"/>, is sliced in <paramref name="builtFor"/>; every
+    /// tier whose table stores <paramref name="stream"/> differently gets a copy in its own layout, shared
+    /// between tiers that agree, written as <c>{fileStem}_v{k}.buf</c>. Returns the copies in k order and
+    /// each such tier's 1-based k; a tier absent from the map binds the primary.
+    ///
+    /// <para>A tier storing nothing in the stream is left alone: its draw reads nothing from that slot. A
+    /// tier storing a UV set the donor lacks gets it filled from the donor's first one, and the build log
+    /// names it; a tier storing any other channel the donor lacks refuses the build, and so does any
+    /// difference when
+    /// <paramref name="reencode"/> is false — the caller ships that stream in one fixed shape. A channel
+    /// table missing on either side is a caller error and throws: without both there is no way to tell
+    /// whether the primary is readable at that tier.</para></summary>
+    static (List<StreamVariant> Variants, Dictionary<string, int> ByTier) StreamVariants(string outDir,
+        string fileStem, int vcount, IReadOnlyList<UnityMesh.ChannelDef>? builtFor, int stream,
+        IEnumerable<TierLayout> tiers, List<string> diagnostics, bool reencode = true)
+    {
+        var variants = new List<StreamVariant>();
+        var byTier = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (vcount <= 0) return (variants, byTier);
+        var layouts = new List<IReadOnlyList<UnityMesh.ChannelDef>>();
+        byte[]? primary = null;
+        static bool Stores(IReadOnlyList<UnityMesh.ChannelDef> table, int stream) =>
+            table.Any(c => c.Dimension != 0 && c.Stream == stream);
+        foreach (var t in tiers)
+        {
+            if (builtFor is null || t.Channels is null)
+                throw new InvalidOperationException(
+                    $"{fileStem}: no vertex layout is recorded for {(builtFor is null ? "the replacement" : t.Label)}, "
+                    + $"so stream {stream} cannot be checked against the layout its draw reads it through");
+            if (!Stores(t.Channels, stream)) continue;
+            if (UnityMesh.SameStreamLayout(builtFor, t.Channels, stream)) continue;
+            if (!reencode || !Stores(builtFor, stream))
+                throw new AuthoredRefusalException(
+                    $"{t.Label} cannot be built because it stores vertex data the original part does "
+                    + $"not. Internal detail: stream {stream} "
+                    + (reencode ? "is absent from the replacement" : "is laid out differently and ships in one shape")
+                    + ". Remove this mesh edit");
+            int k = layouts.FindIndex(l => UnityMesh.SameStreamLayout(l, t.Channels, stream));
+            if (k < 0)
+            {
+                primary ??= File.ReadAllBytes(Path.Combine(outDir, $"{fileStem}.buf"));
+                byte[] recoded;
+                IReadOnlyList<string> filled;
+                try { recoded = UnityMesh.TranscodeStream(primary, vcount, builtFor, t.Channels, stream, out filled); }
+                catch (FormatException ex)
+                {
+                    throw new AuthoredRefusalException(
+                        $"{t.Label} cannot be built because it stores vertex data the original part does "
+                        + $"not. Internal detail: {ex.Message}. Remove this mesh edit");
+                }
+                k = layouts.Count;
+                layouts.Add(t.Channels);
+                string file = $"{fileStem}_v{k + 1}.buf";
+                File.WriteAllBytes(Path.Combine(outDir, file), recoded);
+                variants.Add(new StreamVariant(recoded.Length / vcount, file));
+                diagnostics.Add($"{t.Mesh}: stores stream {stream} differently from the lod0 — the "
+                    + $"replacement's is re-encoded for it as {file}");
+                if (filled.Count > 0)
+                    diagnostics.Add($"{t.Mesh}: stores {string.Join(", ", filled)}, which the replacement "
+                        + "does not have — filled from its TexCoord0");
+            }
+            byTier[t.Key] = k + 1;
+        }
+        return (variants, byTier);
+    }
+
+    /// <summary>The per-pipeline global naming the stream-1 variant the next donor draw binds: 0 is the
+    /// primary stream. Set at every anchor capture of a pipeline that ships variants, so it never needs a
+    /// reset.</summary>
+    static string Vb1Var(string sfx) => $"zz_vb1_{sfx}";
+
+    /// <summary>The rigid route's selector for one stream, read as <see cref="Vb1Var"/> is: every section
+    /// of a replacement that ships variants of that stream writes it.</summary>
+    static string RigidStreamVar(string sfx, int stream) => $"zz_rvb{stream}_{sfx}";
+
+    /// <summary>A donor draw list's vertex and index binds. Stream 1 binds the primary buffer, then the
+    /// variant the capturing tier named, each bound directly so it is created as a vertex buffer the way
+    /// the primary is. A pipeline shipping no variant emits the four plain binds. A pose-route pipeline
+    /// binds per piece instead (<see cref="PoseDraw"/>); here it only points each piece's stride-40 alias
+    /// at the stream buffer the skin pass wrote, which the loader resolves at the bind.</summary>
+    static string DonorBinds(PipelineEmission pipe)
+    {
+        string sfx = pipe.Sfx;
+        if (pipe.PoseRoute is { } route)
+            return string.Concat(route.Pieces.Select(p =>
+                $"Resource_PoseVB_{sfx}_p{p.Number} = ref Resource_PoseRT_{sfx}_p{p.Number}\n"));
+        string posed = $"Resource_NewPosed_{sfx}";
+        string vb1 = $"Resource_NewVB1_{sfx}";
+        var b = new StringBuilder($"vb0 = {posed}\nvb1 = {vb1}\n");
+        for (int k = 1; k <= pipe.Vb1Variants.Count; k++)
+            b.Append($"if ${Vb1Var(sfx)} == {k}\nvb1 = {vb1}_v{k}\nendif\n");
+        return b.Append($"vb3 = {posed}\nib = Resource_NewIB_{sfx}\n").ToString();
+    }
+
+    /// <summary>The pose route's draw of one donor range: each of its pieces bound (the stream alias as
+    /// streams 0 and 3, the piece's UV rows as stream 1 with the variant the capturing tier named, the
+    /// piece's own index buffer) and drawn directly at base 0. Emitted where the chain route emits the
+    /// range's one draw, inside the same texture binds.</summary>
+    static string PoseDraw(PipelineEmission pipe, int range)
+    {
+        string sfx = pipe.Sfx;
+        var b = new StringBuilder();
+        foreach (var p in pipe.PoseRoute!.Pieces.Where(p => p.Range == range))
+        {
+            b.Append($"vb0 = Resource_PoseVB_{sfx}_p{p.Number}\nvb1 = Resource_PieceVB1_{sfx}_p{p.Number}\n");
+            for (int k = 1; k <= pipe.Vb1Variants.Count; k++)
+                b.Append($"if ${Vb1Var(sfx)} == {k}\nvb1 = Resource_PieceVB1_{sfx}_p{p.Number}_v{k}\nendif\n");
+            b.Append($"vb3 = Resource_PoseVB_{sfx}_p{p.Number}\nib = Resource_PieceIB_{sfx}_p{p.Number}\n");
+            b.Append($"drawindexed = {p.Indices}, 0, 0\n");
+        }
+        return b.ToString();
+    }
 
     /// <summary>One wardrobe-group member draw the ini carries a fused section for: the emission name its
     /// resources and shader are filed under, the ib hash the capture keys on, whether it is the member's
@@ -1116,6 +1714,561 @@ public sealed partial class MigotoEmitter
         }
     }
 
+    /// <summary>Derive one pipeline's per-copy pose route and write its shaders and piece files, or null
+    /// with a build-log line when the chain must stay. One palette pass per mesh the anchor is captured from
+    /// — its lod0 and each tier of its own that recovers; a tier recovering nothing gathers the lod0 packet
+    /// out of the lod0 capture at its own draw and runs the lod0 palette pass on it, as its chain read that
+    /// capture. Each kernel mesh ships its anchor packet (<see cref="ComputeTemplates.AnchorPacket"/>) and
+    /// the gather shader that fills it. The donor's draw ranges are cut into pieces of at most
+    /// <paramref name="windowVertices"/> vertices (<see cref="DonorPieces"/>), each shipping its index
+    /// buffer, its local-to-donor map and its rows of the UV stream and of every variant of it.
+    ///
+    /// <para>A pool reaching past the replaced part takes the route where <paramref name="pooled"/> places
+    /// every source mesh (see <see cref="PooledPlan"/>): each source mesh adds its ring with its gather and
+    /// stamp passes, its own palette pass and, where a bone's row places it, its pick pass, and the
+    /// anchor's palette passes write the tie rows (<paramref name="tiePairs"/>) under every slot a source
+    /// poses, so a source with no copy found at a draw leaves those rows as the tie underlay states them. Every palette pass of such a pipeline also
+    /// writes the row mask a bone-placed pick reads. Any other reach past the replaced part — a wardrobe
+    /// member, or a pool <paramref name="pooled"/> refuses or does not place — keeps the chain, since a
+    /// capture at another mesh's draw names whichever copy drew it last.</para>
+    ///
+    /// <para>A bone placing a source is checked in the shipped operator of every mesh of its part that
+    /// carries it: one shipped tied to another bone would place copies by that other bone's row, so the
+    /// build stops instead. The plan's placement (<see cref="PlanPalettePruning"/>) predicts what ships, so
+    /// this is not expected to fire.</para></summary>
+    static PoseRouteEmission? PoseRouteFor(string outDir, string sfx,
+        List<(string Part, int N, int Nb, int Rows)> partMeta, int anchorIdx, List<OperatorArt> partArts,
+        List<(string Name, int PartIdx, uint[] Scatter, OperatorArt Art)> tierWork,
+        List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes, TierMaterialMap? Map)> tierMeta,
+        List<GroupMemberEmission> groupSections, List<(string Part, int Pairs)> ties,
+        IReadOnlyList<(uint Tied, uint Source)> tiePairs,
+        Dictionary<string, List<(uint Tied, uint Source)>> tierOrphans,
+        PooledPlan? pooled, Func<uint, int> unionSlot, Func<string, uint, Vector3> restOrigin,
+        IReadOnlyDictionary<uint, string>? bonePaths,
+        int paletteSlots, int vcount, int vb1Stride, IReadOnlyList<StreamVariant> vb1Variants, string ibFmt,
+        List<(int Count, int Start, int Base)> draws, int windowVertices, List<string> diagnostics)
+    {
+        // The conversion of a single-part pool is always the witness one (a constants conversion needs a
+        // second lod0 owner, which the second reason already refused), so it is not a reason here.
+        int paletteRows = 4 * paletteSlots;
+        bool pool = pooled is { Refusal: null, Sources.Count: > 0 };
+        string? why =
+            partMeta[anchorIdx].Rows == 0 ? "The replaced part supplies no bones of its own"
+            : pooled?.Refusal is { } refusal ? refusal
+            : !pool && partMeta.Count(p => p.Rows > 0) > 1 ? "Some of its bones come from other parts"
+            : groupSections.Count > 0 ? "Some of its bones come from a wardrobe member's own draw"
+            : !pool && ties.Count > 0 ? "Some of its bones follow whether other parts are on screen"
+            : !pool && tierWork.Any(t => t.PartIdx != anchorIdx) ? "Another part's lower-detail mesh supplies some of its bones"
+            : vcount == 0 ? "The replacement mesh has no vertices"
+            : paletteRows > DonorPieces.WindowElements ? $"The replacement uses more bones than a palette row holds ({paletteSlots} of {DonorPieces.WindowElements / 4})"
+            : null;
+        if (why is not null)
+        {
+            diagnostics.Add($"{sfx}: copies of the replaced part share one pose when they are on screen together. {why}.");
+            return null;
+        }
+        string anchor = partMeta[anchorIdx].Part;
+        if (pool)
+        {
+            // the plan placed exactly the meshes this pipeline recovers rows from besides the anchor's own
+            var placed = pooled!.Sources.Select(s => s.Mesh).ToHashSet(StringComparer.Ordinal);
+            var recovering = partMeta.Where((p, i) => i != anchorIdx && p.Rows > 0).Select(p => p.Part)
+                .Concat(tierWork.Where(t => t.PartIdx != anchorIdx).Select(t => t.Name)).ToHashSet(StringComparer.Ordinal);
+            if (!placed.SetEquals(recovering))
+                throw new InvalidOperationException($"{sfx}: the placement plan names {string.Join(", ", placed.Order())} "
+                    + $"but the pipeline recovers rows from {string.Join(", ", recovering.Order())}");
+            // the placing bone as it ships, in every mesh of the placing part that carries it
+            foreach (var s in pooled.Sources.Where(s => s.Kind is Placement.ByAnchorBone or Placement.BySourceBone))
+            {
+                int by = s.Kind == Placement.ByAnchorBone ? anchorIdx : s.Placer;
+                foreach (var (mesh, art) in new[] { (partMeta[by].Part, partArts[by]) }
+                             .Concat(tierWork.Where(t => t.PartIdx == by).Select(t => (t.Name, t.Art))))
+                    if (Array.IndexOf(art.Hashes, s.Bone) is var row and >= 0 && art.Weak[row])
+                        throw new InvalidOperationException($"{sfx}: bone {BoneName(bonePaths, s.Bone)} places '{s.Mesh}', "
+                            + $"but '{mesh}' recovers that bone only as a copy of another bone's row");
+            }
+        }
+        var anchorTiers = tierWork.Where(t => t.PartIdx == anchorIdx).ToList();
+        // a row a source poses takes its tie at the anchor's passes, ahead of a tier's own orphan pairs, so a
+        // tie onto a row the tier does not carry follows that tier's orphan pair too
+        var anchorTies = pool ? tiePairs.OrderBy(p => p.Tied).ToList() : new List<(uint Tied, uint Source)>();
+        // every kernel mesh with its operator: the lod0, then each tier of the anchor that recovers rows
+        var meshes = new List<(string Mesh, OperatorArt Art, IReadOnlyList<(uint Tied, uint Source)> Pairs)>
+            { (anchor, partArts[anchorIdx], anchorTies) };
+        var tierKernel = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var t in tierMeta.Where(t => t.Part == anchor))
+        {
+            var work = anchorTiers.FirstOrDefault(w => w.Name == t.Name);
+            if (t.Rows == 0 || work.Art is null)
+            {
+                // this level's draws gather the lod0 packet out of the lod0 capture reference and run the
+                // lod0 palette pass on it: the reference names whichever copy drew at full detail last,
+                // not the copy drawing now
+                diagnostics.Add($"{t.Name}: this lower-detail mesh supplies no bones of its own, so copies of "
+                    + "the replaced part share one pose at its draws");
+                tierKernel[t.Name] = anchor;
+                continue;
+            }
+            tierKernel[t.Name] = t.Name;
+            meshes.Add((t.Name, work.Art, anchorTies.Concat(tierOrphans.TryGetValue(t.Name, out var list)
+                ? list.OrderBy(p => p.Tied) : Enumerable.Empty<(uint Tied, uint Source)>()).ToList()));
+        }
+        // per local bone, whether its row is its own recovery: the row mask's answer on the pooled route
+        static bool[] Sound(OperatorArt art) => art.Weak.Select(weak => !weak).ToArray();
+        // each mesh's packet: the gather's index and lookup, and a slim operator's vertex list remapped to
+        // packet entries, which the palette pass reads in place of the operator's own
+        var kernels = new List<(string Mesh, int Tier, int Packet, bool Slim)>();
+        for (int tier = 0; tier < meshes.Count; tier++)
+        {
+            var (mesh, art, pairs) = meshes[tier];
+            var (index, lookup, packetSel) = ComputeTemplates.AnchorPacket(art.Sel, art.N);
+            bool slim = packetSel is not null;
+            File.WriteAllBytes(Path.Combine(outDir, PacketIndexFile(mesh)), UIntBytes(index));
+            File.WriteAllBytes(Path.Combine(outDir, PacketLookupFile(mesh)), UIntBytes(lookup));
+            if (packetSel is not null)
+                File.WriteAllBytes(Path.Combine(outDir, PacketSelFile(mesh)), UIntBytes(packetSel));
+            File.WriteAllText(Path.Combine(outDir, GatherFile(mesh)), ComputeTemplates.EmitGather(index.Length));
+            File.WriteAllText(Path.Combine(outDir, PosePaletteFile(mesh, sfx)),
+                ComputeTemplates.EmitPosePalette(4 * art.Hashes.Length, slim, art.N, pairs, pool ? Sound(art) : null));
+            kernels.Add((mesh, tier, index.Length, slim));
+        }
+        // the pooled route's source meshes, in the order their passes run: each one's packet layout, its ring
+        // gather and stamp (run at its own draws), its own palette pass and, where a bone's row places it, its
+        // pick
+        List<PoseSource>? sources = null;
+        if (pool)
+        {
+            sources = new List<PoseSource>();
+            diagnostics.Add($"{sfx}: copies of the replaced part each keep their own pose when they are on screen "
+                + "together, the parts it takes bones from included.");
+            foreach (var s in pooled!.Sources)
+            {
+                var art = s.IsTier ? tierWork.First(w => w.Name == s.Mesh).Art : partArts[s.Part];
+                var (index, lookup, packetSel) = ComputeTemplates.AnchorPacket(art.Sel, art.N);
+                RequireRingFits(anchor, partMeta[s.Part].Part, index.Length);
+                bool slim = packetSel is not null;
+                File.WriteAllBytes(Path.Combine(outDir, PacketIndexFile(s.Mesh)), UIntBytes(index));
+                File.WriteAllBytes(Path.Combine(outDir, PacketLookupFile(s.Mesh)), UIntBytes(lookup));
+                if (packetSel is not null)
+                    File.WriteAllBytes(Path.Combine(outDir, PacketSelFile(s.Mesh)), UIntBytes(packetSel));
+                File.WriteAllText(Path.Combine(outDir, RingGatherFile(s.Mesh)),
+                    ComputeTemplates.EmitRingGather(index.Length, PoseRingEntries));
+                File.WriteAllText(Path.Combine(outDir, RingStampFile(s.Mesh)), ComputeTemplates.EmitRingStamp(index.Length));
+                var pairs = s.IsTier && tierOrphans.TryGetValue(s.Mesh, out var orphans)
+                    ? orphans.OrderBy(p => p.Tied).ToList() : new List<(uint Tied, uint Source)>();
+                string PoolPalette(ComputeTemplates.PickRule rule, float cap) =>
+                    ComputeTemplates.EmitPoolPosePalette(4 * art.Hashes.Length, slim, art.N, pairs, Sound(art), index.Length,
+                        rule, PoseRingEntries, cap, PlacementAhead, SameRootTolerance, SameDrawTolerance);
+
+                string palette;
+                string how;
+                switch (s.Kind)
+                {
+                    case Placement.SameRoot:
+                        palette = PoolPalette(ComputeTemplates.PickRule.SameRoot, PlacementCap);
+                        how = "by sharing the replaced part's position";
+                        break;
+                    case Placement.ByAnchorBone:
+                    case Placement.BySourceBone:
+                    {
+                        var rest = restOrigin(s.Dir, s.Root);
+                        int slot = unionSlot(s.Bone);
+                        palette = PoolPalette(ComputeTemplates.PickRule.ByRow, PlacementCap);
+                        File.WriteAllText(Path.Combine(outDir, PosePickFile(s.Mesh, sfx)), ComputeTemplates.EmitPosePick(
+                            PoseRingEntries, PlacementCap, PlacementAhead, SameRootTolerance, SameDrawTolerance, (uint)slot,
+                            (rest.X, rest.Y, rest.Z), index.Length));
+                        how = s.Kind == Placement.ByAnchorBone
+                            ? $"by where the replaced part's bone {BoneName(bonePaths, s.Bone)} places it"
+                            : $"by where bone {BoneName(bonePaths, s.Bone)} of '{partMeta[s.Placer].Part}' places it";
+                        // a lower-detail mesh of the anchor that does not carry the placing bone writes no row
+                        // for it at its own draws, so the row mask leaves the source absent there
+                        if (s.Kind == Placement.ByAnchorBone)
+                            foreach (var (mesh, kart, _) in meshes.Skip(1))
+                                if (Array.IndexOf(kart.Hashes, s.Bone) < 0)
+                                    diagnostics.Add($"{mesh}: this lower-detail mesh does not recover bone "
+                                        + $"{BoneName(bonePaths, s.Bone)}, so at its draws '{s.Mesh}' is treated as absent: "
+                                        + "each of its bones under a bone of the replaced part moves rigidly with the "
+                                        + "nearest such bone, and any other keeps its bind pose");
+                        break;
+                    }
+                    default:
+                        palette = PoolPalette(ComputeTemplates.PickRule.ByPosition, PositionCap);
+                        how = "by its distance from the replaced part's position";
+                        break;
+                }
+                File.WriteAllText(Path.Combine(outDir, PosePaletteFile(s.Mesh, sfx)), palette);
+                diagnostics.Add($"{sfx}: '{s.Mesh}' is matched to each copy {how}.");
+                sources.Add(new PoseSource(s.Mesh, partMeta[s.Part].Part, index.Length, slim,
+                    s.Kind is Placement.ByAnchorBone or Placement.BySourceBone));
+            }
+            diagnostics.Add($"{sfx}: a part it takes bones from that has not drawn yet in a pass, or whose copies "
+                + "are too close together to tell apart, is treated as absent for that draw: each of its bones under a "
+                + "bone of the replaced part moves rigidly with the nearest such bone, and any other keeps its bind pose.");
+        }
+        File.WriteAllText(Path.Combine(outDir, $"pose_skin_{sfx}.hlsl"), ComputeTemplates.EmitPoseSkin(vcount));
+
+        // the pieces: each draw range cut by its triangles, every piece shipping its own index buffer,
+        // local-to-donor map and rows of stream 1 and of each variant
+        byte[] ib = File.ReadAllBytes(Path.Combine(outDir, $"combined_ib_{sfx}.buf"));
+        int bpi = ibFmt.Contains("R16", StringComparison.Ordinal) ? 2 : 4;
+        byte[] vb1 = File.ReadAllBytes(Path.Combine(outDir, $"combined_vb1_{sfx}.buf"));
+        var variants = vb1Variants.Select(v => (v.Stride, Bytes: File.ReadAllBytes(Path.Combine(outDir, v.File)))).ToList();
+        var pieces = new List<PosePiece>();
+        for (int range = 0; range < draws.Count; range++)
+        {
+            var (count, start, baseVertex) = draws[range];
+            var indices = new uint[count];
+            for (int i = 0; i < count; i++)
+                indices[i] = bpi == 2 ? BitConverter.ToUInt16(ib, (start + i) * 2) : BitConverter.ToUInt32(ib, (start + i) * 4);
+            foreach (var piece in DonorPieces.Cut(indices, baseVertex, windowVertices))
+            {
+                int k = pieces.Count;
+                if (piece.LocalToDonor.Any(v => v >= (uint)vcount))
+                    throw new InvalidOperationException($"{sfx}: draw range {range} names a vertex past the replacement's {vcount}");
+                var ibBytes = new byte[(piece.Indices * 2 + 3) / 4 * 4];
+                Buffer.BlockCopy(piece.LocalIndices, 0, ibBytes, 0, piece.Indices * 2);
+                File.WriteAllBytes(Path.Combine(outDir, PieceFile(sfx, k, "ib")), ibBytes);
+                File.WriteAllBytes(Path.Combine(outDir, PieceFile(sfx, k, "map")), UIntBytes(piece.LocalToDonor));
+                File.WriteAllBytes(Path.Combine(outDir, PieceFile(sfx, k, "vb1")), Rows(vb1, vb1Stride, piece.LocalToDonor));
+                for (int j = 0; j < variants.Count; j++)
+                    File.WriteAllBytes(Path.Combine(outDir, PieceFile(sfx, k, $"vb1_v{j + 1}")),
+                        Rows(variants[j].Bytes, variants[j].Stride, piece.LocalToDonor));
+                pieces.Add(new PosePiece(k, range, piece.Vertices, piece.Indices, piece.StreamElements));
+            }
+        }
+        if (pieces.Count > draws.Count)
+            diagnostics.Add($"{sfx}: the replacement is drawn in {pieces.Count} pieces, as its {vcount} vertices exceed the {windowVertices} one stream holds");
+        return new PoseRouteEmission(kernels, tierKernel, paletteRows, pieces, pieces.Max(p => p.Elements), sources);
+    }
+
+    /// <summary>The rows of a vertex stream, <paramref name="stride"/> bytes each, for the vertices named,
+    /// in that order.</summary>
+    static byte[] Rows(byte[] stream, int stride, uint[] vertices)
+    {
+        var rows = new byte[vertices.Length * stride];
+        for (int i = 0; i < vertices.Length; i++)
+            Buffer.BlockCopy(stream, (int)vertices[i] * stride, rows, i * stride, stride);
+        return rows;
+    }
+
+    static string PosePaletteFile(string mesh, string sfx) => $"pose_palette_{mesh}_{sfx}.hlsl";
+    static string PieceFile(string sfx, int piece, string what) => $"piece{piece}_{what}_{sfx}.buf";
+
+    static string PacketIndexFile(string mesh) => $"packet_index_{mesh}.buf";
+    static string PacketLookupFile(string mesh) => $"packet_lookup_{mesh}.buf";
+    static string PacketSelFile(string mesh) => $"packet_sel_{mesh}.buf";
+    static string GatherFile(string mesh) => $"gather_{mesh}.hlsl";
+
+    /// <summary>The gather of one kernel mesh's anchor packet, the first pass of the block at the mesh's own
+    /// draw: one point per packet entry, drawn through the index buffer so the input assembler reads each
+    /// entry's vertex out of the draw's bound vertex buffer, into the packet texture. It runs inside a pose
+    /// or ring block (<see cref="BlockSection"/>), which has set the shared state, saved the draw's index
+    /// buffer and lookup slot and cleared the other targets, so the gather names only its own vertex shader
+    /// and topology; the loader puts the block's back after it. The texture states its single slice, mip
+    /// and sample, which the loader gives a texture no default for.</summary>
+    static string GatherSection(string mesh, int packet, bool withLayout) =>
+        PacketTexture($"Resource_Packet_{mesh}", packet) + (withLayout ? PacketLayout(mesh) : "") + "\n"
+        + GatherShader($"CustomShaderGather_{mesh}", mesh, packet, source: null);
+
+    /// <summary>The index and lookup buffers a mesh's gathers draw through: its plain gather into its packet
+    /// texture where it is a replaced part, its ring gather where it is a source.</summary>
+    static string PacketLayout(string mesh) =>
+        $"[Resource_PacketIndex_{mesh}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {PacketIndexFile(mesh)}\n"
+        + $"[Resource_PacketLookup_{mesh}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {PacketLookupFile(mesh)}\n";
+
+    /// <summary>A texture holding a packet of <paramref name="packet"/> entries, read and rendered to.</summary>
+    static string PacketTexture(string name, int packet) =>
+        $"[{name}]\ntype = Texture2D\nformat = R32G32B32A32_FLOAT\n"
+        + $"width = {ComputeTemplates.PacketWidth}\nheight = {ComputeTemplates.PacketHeight(packet)}\n"
+        + "array = 1\nmips = 1\nmsaa = 1\n"
+        + "bind_flags = shader_resource render_target\n";
+
+    /// <summary>The anchor's lod0 gather as run at the draw of a lower-detail mesh that recovers nothing
+    /// itself: the draw of <see cref="GatherSection"/>, fed from the lod0 capture reference instead of the
+    /// tier's own vertex buffer, so the lod0 kernel that runs next reads this frame's lod0 pose wherever
+    /// the tier's draw falls in the frame. The reference keeps the captured buffer's stride.</summary>
+    static string GatherRefSection(string anchor, int packet) =>
+        GatherShader($"CustomShaderGatherRef_{anchor}", anchor, packet, source: $"Resource_{anchor}_Posed");
+
+    static string GatherShader(string section, string mesh, int packet, string? source) =>
+        $"[{section}]\nvs = {GatherFile(mesh)}\nps = {GatherPixelFile}\ntopology = point_list\n"
+        + $"o0 = set_viewport Resource_Packet_{mesh}\n"
+        + $"ib = Resource_PacketIndex_{mesh}\nvs-t1 = Resource_PacketLookup_{mesh}\n"
+        + (source is null ? "" : $"vb0 = {source}\n")
+        + $"drawindexed = {packet}, 0, 0\n\n";
+
+    /// <summary>The pixel-shader slots the pose passes bind at: packet or palette at 0, the operator and
+    /// the map at 1 to 4, the replacement's bind geometry and weights at 5 and 6 (on the pooled route a
+    /// source's pick and the replaced part's rows). A pose block saves the draw's own binds at the slots its
+    /// passes bind when it starts and puts them back when it ends.</summary>
+    static readonly int[] PosePassSlots = { 0, 1, 2, 3, 4, 5, 6 };
+
+    /// <summary>The pose passes of one draw of the replacement: the passes that build the draw's palette
+    /// (<see cref="Head"/>), then one skin pass per piece with the donor range the piece belongs to. A
+    /// section runs them as one pose block (<see cref="Block"/>): in the routed draw sections where the draw
+    /// routes, else in the capture chain ahead of the draw. <paramref name="Slots"/> are the pixel-shader
+    /// slots the passes bind between them; <paramref name="GatherRef"/> says the block's gather rebinds the
+    /// draw's first vertex buffer, which the block then saves too; every block declared goes to
+    /// <paramref name="Blocks"/>.</summary>
+    sealed record PosePasses(string Sfx, IReadOnlyList<string> Head, IReadOnlyList<(int Range, string Skin)> Skins,
+        IReadOnlyList<int> Slots, bool GatherRef, ICollection<string> Blocks)
+    {
+        /// <summary>The run lines for a section that draws the ranges <paramref name="drawsRange"/> admits
+        /// (every range when null): a piece of a range the section does not draw is not skinned there, since
+        /// nothing in that section reads its stream and the section that draws it skins it again.</summary>
+        IEnumerable<string> Lines(Func<int, bool>? drawsRange)
+        {
+            foreach (string line in Head) yield return line;
+            foreach (var (range, skin) in Skins)
+                if (drawsRange is null || drawsRange(range)) yield return skin;
+        }
+
+        /// <summary>The one run line a section draws its ranges with: the pose block holding the passes the
+        /// section runs (<see cref="Lines"/>), declared once under the section's name (its
+        /// <c>TextureOverride_Cap_</c> part dropped) and this pipeline's suffix.</summary>
+        public string Block(string section, Func<int, bool>? drawsRange = null)
+        {
+            string stem = section.StartsWith("Cap_", StringComparison.Ordinal) ? section[4..] : section;
+            string name = $"CustomShaderPoseBlock_{stem}_{Sfx}";
+            var saves = Slots.Select(k => $"ps-t{k}").Append("ib").Append("vs-t1");
+            if (GatherRef) saves = saves.Append("vb0");
+            Blocks.Add(BlockSection(name, PoseFullscreenFile, saves, Lines(drawsRange)));
+            return $"run = {name}";
+        }
+    }
+
+    /// <summary>The pose passes at a draw whose gather is <paramref name="gather"/> (the mesh's own, or the
+    /// lod0-reference gather of a tier that supplies no bones) and whose palette pass is
+    /// <paramref name="kernelMesh"/>'s. On the pooled route the anchor's object-to-world rows are captured
+    /// after the gather, and after the anchor's palette pass each source mesh, in order, runs its pick where
+    /// a bone's row places it and its own palette pass, only in a frame the source mesh has drawn in so far:
+    /// one that has not leaves the rows and the mask the anchor's palette pass wrote under its slots.</summary>
+    static PosePasses PosePassesFor(PoseRouteEmission route, string gather, string kernelMesh, string sfx,
+        ICollection<string> blocks)
+    {
+        var head = new List<string> { $"run = {gather}" };
+        if (route.Sources is not null) head.Add($"run = CustomShaderPoseAnchorMat_{sfx}");
+        head.Add($"run = CustomShaderPosePalette_{kernelMesh}_{sfx}");
+        foreach (var source in route.Sources ?? Array.Empty<PoseSource>())
+        {
+            head.Add($"if ${DrewVar(source.Mesh)} == 1");
+            head.AddRange(SourceRuns(source, sfx));
+            head.Add("endif");
+        }
+        // the slots the block's passes bind between them (see PosePassSlots): the kernel's palette pass reads
+        // slots 0 to 2, 3 and 4 as well where its operator is slim; a source's reads the same and 6, 5 too
+        // where its pick places it, and its pick pass 0 to 3; every skin pass reads 0, 1, 5 and 6
+        bool kernelSlim = route.Kernels.First(k => k.Mesh == kernelMesh).Slim;
+        var sources = route.Sources ?? Array.Empty<PoseSource>();
+        var slots = new SortedSet<int> { 0, 1, 2, 5, 6 };
+        if (kernelSlim || sources.Any(s => s.Slim)) { slots.Add(3); slots.Add(4); }
+        if (sources.Any(s => s.ByBone)) slots.Add(3);
+        return new PosePasses(sfx, head, route.Pieces.Select(p => (p.Range, $"run = CustomShaderPoseSkin_{sfx}_p{p.Number}")).ToList(),
+            slots.ToList(), gather.StartsWith("CustomShaderGatherRef_", StringComparison.Ordinal), blocks);
+    }
+
+    /// <summary>One source mesh's passes at a draw of the replacement, reading the mesh's ring: its pick where
+    /// a bone's row places it, then its palette pass.</summary>
+    static IEnumerable<string> SourceRuns(PoseSource source, string sfx)
+    {
+        if (source.ByBone) yield return $"run = CustomShaderPosePick_{source.Mesh}_{sfx}";
+        yield return $"run = CustomShaderPosePalette_{source.Mesh}_{sfx}";
+    }
+
+    /// <summary>One block of passes at a draw: an outer custom shader that sets the state every pass in it
+    /// shares (<paramref name="vs"/>, no hull, domain or geometry shader, a triangle list, no culling, no
+    /// depth, no blending), saves the draw's binds at <paramref name="saves"/>, clears the depth target and
+    /// every colour target but the first (a target set whose members differ in size is dropped, and the
+    /// game's own targets are still bound), runs <paramref name="lines"/>, and puts the binds back. The
+    /// loader itself restores the shaders, states, viewports and targets a custom shader run sets when the
+    /// run ends, the block's and each pass's alike, so a pass inside the block (<see cref="InnerPass"/>)
+    /// names only what differs from the block. A state group given any key is rebuilt from the D3D11
+    /// defaults plus the keys given, not merged over the game's: <c>cull = none</c> alone already turns the
+    /// scissor off, and <c>blend = disable</c> replaces the game's blend with an opaque write of every
+    /// channel.</summary>
+    static string BlockSection(string name, string vs, IEnumerable<string> saves, IEnumerable<string> lines)
+    {
+        var slots = saves.ToList();
+        var b = new StringBuilder($"[{name}]\nvs = {vs}\nhs = null\nds = null\ngs = null\n"
+            + "topology = triangle_list\ncull = none\ndepth_enable = false\nblend = disable\n");
+        foreach (string slot in slots) b.Append($"{SaveResource(slot)} = ref {slot}\n");
+        b.Append("od = null\n").Append(string.Concat(Enumerable.Range(1, 7).Select(k => $"o{k} = null\n")));
+        foreach (string line in lines) b.Append(line).Append('\n');
+        foreach (string slot in slots) b.Append($"{slot} = {SaveResource(slot)}\n");
+        return b.Append('\n').ToString();
+    }
+
+    /// <summary>The resource a block saves the draw's bind at <paramref name="slot"/> in.</summary>
+    static string SaveResource(string slot) => slot switch
+    {
+        "ib" => "Resource_SaveIB",
+        "vs-t1" => "Resource_SaveVST1",
+        "vs-t2" => "Resource_SaveVST2",
+        "vb0" => "Resource_SaveVB0",
+        _ when slot.StartsWith("ps-t", StringComparison.Ordinal) => $"Resource_SavePST{slot[4..]}",
+        _ => throw new ArgumentOutOfRangeException(nameof(slot), slot, "no save resource for this slot"),
+    };
+
+    /// <summary>One pass inside a block: the fullscreen triangle with <paramref name="ps"/>, its inputs
+    /// bound, its colour target (and the viewport, from a texture) set, and the draw. The state, the slot
+    /// saves and the target clears are the block's. A pass that reads the draw's own object-to-world rows
+    /// names the capture vertex shader (<paramref name="vs"/>), which leaves the draw's vertex-shader
+    /// constants bound; the loader puts the block's back after it.</summary>
+    static string InnerPass(string section, string ps, IReadOnlyList<(int Slot, string Resource)> inputs, IEnumerable<string> targets,
+        string? vs = null)
+    {
+        var b = new StringBuilder($"[{section}]\n");
+        if (vs is not null) b.Append($"vs = {vs}\n");
+        b.Append($"ps = {ps}\n");
+        foreach (var (slot, resource) in inputs) b.Append($"ps-t{slot} = {resource}\n");
+        foreach (string t in targets) b.Append(t).Append('\n');
+        return b.Append("draw = 3, 0\n\n").ToString();
+    }
+
+    /// <summary>A pass run on its own, outside any block (the frame pass in <c>[Present]</c>): a block of
+    /// one pass, with <paramref name="ps"/> and its inputs' slots saved.</summary>
+    static string StandalonePass(string section, string ps, IReadOnlyList<(int Slot, string Resource)> inputs, IEnumerable<string> targets) =>
+        BlockSection(section, PoseFullscreenFile, inputs.Select(i => $"ps-t{i.Slot}"),
+            new[] { $"ps = {ps}" }.Concat(inputs.Select(i => $"ps-t{i.Slot} = {i.Resource}")).Concat(targets).Append("draw = 3, 0"));
+
+    /// <summary>The palette pass of one kernel mesh: the packet its gather filled, its operator and map (and
+    /// a slim operator's remapped vertex list and widths), into the palette texture. On the pooled route
+    /// (<paramref name="masked"/>) the row mask is the pass's second target. A source mesh's pass
+    /// (<paramref name="source"/>) reads its mesh's ring in place of the packet (the slots' packets and rows
+    /// both), its pick where a bone's row places it, and the replaced part's rows.</summary>
+    static string PosePaletteSection(PipelineEmission pipe, string mesh, bool slim, bool masked, PoseSource? source = null)
+    {
+        string sfx = pipe.Sfx;
+        var inputs = new List<(int, string)>
+        {
+            (0, source is null ? $"Resource_Packet_{mesh}" : RingTexture(mesh)), (1, pipe.CpinvResource(mesh)),
+            (2, $"Resource_{mesh}_Map_{sfx}"),
+        };
+        if (slim) inputs.AddRange(new[] { (3, $"Resource_{mesh}_PacketSel"), (4, $"Resource_{mesh}_Off") });
+        // a source mesh's pass also reads what finds this draw's copy and the anchor's rows, which its rebase
+        // goes between
+        if (source is not null)
+        {
+            if (source.ByBone) inputs.Add((5, PickResource(mesh, sfx)));
+            inputs.Add((6, AnchorMatResource(sfx)));
+        }
+        var targets = new List<string> { $"o0 = set_viewport Resource_PoseTex_{sfx}" };
+        if (masked) targets.Add($"o1 = {MaskResource(sfx)}");
+        return InnerPass($"CustomShaderPosePalette_{mesh}_{sfx}", PosePaletteFile(mesh, sfx), inputs, targets);
+    }
+
+    // ---- the pooled route's sections ------------------------------------------------------------------
+
+    static string AnchorMatResource(string sfx) => $"Resource_AnchorMat_{sfx}";
+    static string PickResource(string mesh, string sfx) => $"Resource_Pick_{mesh}_{sfx}";
+    static string MaskResource(string sfx) => $"Resource_PoseMask_{sfx}";
+    /// <summary>A source mesh's ring texture: <see cref="PoseRingEntries"/> slots, slot k's packet at rows
+    /// k·S to k·S+H−1 and its object-to-world rows and frame number in row k·S+H.</summary>
+    static string RingTexture(string mesh) => $"Resource_Ring_{mesh}";
+    /// <summary>The ring slot a source mesh's next draw fills: advanced by every write and wrapped at
+    /// <see cref="PoseRingEntries"/>, never reset (a reload clears the ring, so any slot reads as empty).</summary>
+    static string RingSlotVar(string mesh) => $"zz_rslot_{mesh}";
+    /// <summary>The per-frame flag a source mesh's ring block sets at its draw: 1 once the mesh has drawn in
+    /// the frame while a pipeline reading it is on.</summary>
+    static string DrewVar(string mesh) => $"zz_drew_{mesh}";
+
+    /// <summary>A one-row texture of <paramref name="width"/> float4 pixels, read and rendered to: a
+    /// capture's target, a pick's answer, a ring slot, the frame number, a ring's rows.</summary>
+    static string RowsTexture(string name, int width = 5) =>
+        $"[{name}]\ntype = Texture2D\nformat = R32G32B32A32_FLOAT\nwidth = {width}\nheight = 1\n"
+        + "array = 1\nmips = 1\nmsaa = 1\nbind_flags = shader_resource render_target\n";
+
+    /// <summary>The replaced part's capture at each of its draws: its four object-to-world rows and this
+    /// frame's number, into a 5x1 target, drawn with the draw's own vertex-shader constants left bound.</summary>
+    static string AnchorMatSection(string sfx) =>
+        InnerPass($"CustomShaderPoseAnchorMat_{sfx}", PoseCapturePsFile, new[] { (0, FrameResource) },
+            new[] { $"o0 = set_viewport {AnchorMatResource(sfx)}" }, PoseCaptureVsFile);
+
+    /// <summary>The lines one draw of a source mesh writes its ring with: the mesh's ring block
+    /// (<see cref="RingSections"/>), then the flag saying the mesh has drawn this frame.</summary>
+    static string[] RingRuns(string mesh) =>
+        new[] { $"run = CustomShaderRingBlock_{mesh}", $"${DrewVar(mesh)} = 1" };
+
+    /// <summary>One source mesh's ring, shared by every pipeline that takes rows from it: its texture
+    /// (<see cref="RingTexture"/>), the gather that writes this draw's packet into a slot and the stamp that
+    /// writes the draw's object-to-world rows and frame number beside it, and the ring block run at the
+    /// mesh's draw: the number of the slot the mesh's next draw fills bound for both, the gather, the stamp,
+    /// then the slot advanced. Neither pass reads anything rendered this frame (the draw's own vertex buffer
+    /// and constants, the mod's lookup and slot files, the frame number from the last <c>[Present]</c>), so a
+    /// ring write waits on no pass. The mesh's packet layout is declared beside it
+    /// (<see cref="PacketLayout"/>), once whichever route needs it.</summary>
+    static string RingSections(string mesh, int packet)
+    {
+        var b = new StringBuilder();
+        b.Append($"[{RingTexture(mesh)}]\ntype = Texture2D\nformat = R32G32B32A32_FLOAT\n"
+            + $"width = {ComputeTemplates.PacketWidth}\nheight = {ComputeTemplates.RingSlotRows(packet) * PoseRingEntries}\n"
+            + "array = 1\nmips = 1\nmsaa = 1\nbind_flags = shader_resource render_target\n\n");
+        b.Append($"[CustomShaderRingGather_{mesh}]\nvs = {RingGatherFile(mesh)}\nps = {GatherPixelFile}\ntopology = point_list\n"
+            + $"o0 = set_viewport {RingTexture(mesh)}\n"
+            + $"ib = Resource_PacketIndex_{mesh}\nvs-t1 = Resource_PacketLookup_{mesh}\n"
+            + $"drawindexed = {packet}, 0, 0\n\n");
+        b.Append(InnerPass($"CustomShaderRingStamp_{mesh}", RingStampFile(mesh), new[] { (0, FrameResource) },
+            new[] { $"o0 = set_viewport {RingTexture(mesh)}" }));
+        string slot = RingSlotVar(mesh);
+        var lines = new List<string>();
+        for (int k = 0; k < PoseRingEntries; k++)
+            lines.AddRange(new[] { $"{(k == 0 ? "if" : "else if")} ${slot} == {k}",
+                $"vs-t2 = {RingSlotResource(k)}", $"ps-t2 = {RingSlotResource(k)}" });
+        lines.AddRange(new[]
+        {
+            "endif",
+            $"run = CustomShaderRingGather_{mesh}",
+            $"run = CustomShaderRingStamp_{mesh}",
+            $"${slot} = ${slot} + 1",
+            $"if ${slot} >= {PoseRingEntries}",
+            $"${slot} = 0",
+            "endif",
+        });
+        b.Append(BlockSection($"CustomShaderRingBlock_{mesh}", PoseCaptureVsFile,
+            new[] { "ps-t0", "ps-t2", "ib", "vs-t1", "vs-t2" }, lines));
+        return b.ToString();
+    }
+
+    /// <summary>The ring slots' numbers, one buffer per slot loaded from its file, which a ring block binds
+    /// for its gather and stamp; declared once per mod.</summary>
+    static string RingSlotSections() =>
+        string.Concat(Enumerable.Range(0, PoseRingEntries).Select(k =>
+            $"[{RingSlotResource(k)}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {RingSlotFile(k)}\n")) + "\n";
+
+    /// <summary>The <c>[Present]</c> lines that advance the frame number: the frame pass, then the next number
+    /// copied back over the frame texture (a pass never reads and writes one texture).</summary>
+    static readonly string[] FramePresentLines =
+        { "run = CustomShaderPoseFrame", $"{FrameResource} = copy {FrameNextResource}" };
+
+    /// <summary>The frame number's two textures and the pass that writes the next number, which the
+    /// <c>[Present]</c> command list runs and copies back (<see cref="FramePresentLines"/>).</summary>
+    static string FrameSections() =>
+        RowsTexture(FrameResource, 1) + RowsTexture(FrameNextResource, 1) + "\n"
+        + StandalonePass("CustomShaderPoseFrame", PoseFrameFile, new[] { (0, FrameResource) },
+            new[] { $"o0 = set_viewport {FrameNextResource}" });
+
+    /// <summary>The pick pass of one source mesh a bone's row places: the palette so far, the replaced part's
+    /// rows, the row mask and the mesh's ring, into the mesh's pick texture. A source placed any other way has
+    /// no pick pass: its palette pass picks for itself.</summary>
+    static string PosePickSection(string sfx, PoseSource source) =>
+        InnerPass($"CustomShaderPosePick_{source.Mesh}_{sfx}", PosePickFile(source.Mesh, sfx),
+            new[] { (0, $"Resource_PoseTex_{sfx}"), (1, AnchorMatResource(sfx)), (2, MaskResource(sfx)), (3, RingTexture(source.Mesh)) },
+            new[] { $"o0 = set_viewport {PickResource(source.Mesh, sfx)}" });
+
+    /// <summary>The skin pass of one piece: the palette, the piece's map and the replacement's bind geometry
+    /// and weights, into the piece's stream buffer under the borrowed viewport.</summary>
+    static string PoseSkinSection(PipelineEmission pipe, PosePiece piece)
+    {
+        string sfx = pipe.Sfx;
+        var inputs = new List<(int, string)>
+        {
+            (0, $"Resource_PoseTex_{sfx}"), (1, $"Resource_PieceMap_{sfx}_p{piece.Number}"),
+            (5, $"Resource_NewBind_{sfx}"), (6, $"Resource_NewSkin_{sfx}"),
+        };
+        return InnerPass($"CustomShaderPoseSkin_{sfx}_p{piece.Number}", $"pose_skin_{sfx}.hlsl", inputs,
+            new[] { $"o0 = set_viewport Resource_PoseView_{sfx}", $"o0 = Resource_PoseRT_{sfx}_p{piece.Number}" });
+    }
+
     /// <summary>Derive the tie underlay and write its shaders: for every donor-WEIGHTED union bone another
     /// part owns, the deepest skeleton ancestor the anchor owns — anchor-owned rows are recovered at the
     /// anchor's own draw, so the ancestor's converted row is live whenever the replacement is. A verbatim
@@ -1125,7 +2278,8 @@ public sealed partial class MigotoEmitter
     /// per owner part, pairs in ascending tied-slot order, parts in pool order: rebuilds reproduce.</summary>
     static List<(string Part, int Pairs)> TieUnderlay(string outDir, string sfx, PoolMath.UnionResult union,
         int anchorIdx, List<string> parts, HashSet<int> donorSlots,
-        IReadOnlyDictionary<uint, string>? bonePaths, List<string> diagnostics)
+        IReadOnlyDictionary<uint, string>? bonePaths, List<string> diagnostics,
+        List<(uint Tied, uint Source)>? pairsOut = null)
     {
         var ties = new List<(string Part, int Pairs)>();
         var anchorPaths = new List<(string Path, int Slot)>();
@@ -1152,7 +2306,7 @@ public sealed partial class MigotoEmitter
             if (bonePaths is null || !bonePaths.TryGetValue(hash, out var path))
             {
                 Seed(union.Owner[u], (uint)u);
-                diagnostics.Add($"{sfx}: bone 0x{hash:x8} has no skeleton path — donor weight on it keeps "
+                diagnostics.Add($"{sfx}: bone {BoneName(bonePaths, hash)} has no skeleton path — donor weight on it keeps "
                     + $"the bind-pose seed while '{owner}' is absent");
                 continue;
             }
@@ -1164,20 +2318,21 @@ public sealed partial class MigotoEmitter
             if (best < 0)
             {
                 Seed(union.Owner[u], (uint)u);
-                diagnostics.Add($"{sfx}: bone 0x{hash:x8} has no anchor-owned skeleton ancestor — donor "
+                diagnostics.Add($"{sfx}: bone {BoneName(bonePaths, hash)} has no anchor-owned skeleton ancestor — donor "
                     + $"weight on it keeps the bind-pose seed while '{owner}' is absent");
                 continue;
             }
             if (!pairsByOwner.TryGetValue(union.Owner[u], out var list))
                 pairsByOwner[union.Owner[u]] = list = new List<(uint, uint)>();
             list.Add(((uint)u, (uint)best));
-            diagnostics.Add($"{sfx}: bone 0x{hash:x8} rides its ancestor 0x{union.UnionHashes[best]:x8} "
+            diagnostics.Add($"{sfx}: bone {BoneName(bonePaths, hash)} rides its ancestor {BoneName(bonePaths, union.UnionHashes[best])} "
                 + $"rigidly while '{owner}' is absent");
         }
         foreach (int owner in pairsByOwner.Keys.Concat(seedsByOwner.Keys).Distinct().OrderBy(k => k))
         {
             var pairs = pairsByOwner.GetValueOrDefault(owner) ?? new List<(uint, uint)>();
             var seeds = seedsByOwner.GetValueOrDefault(owner) ?? new List<uint>();
+            pairsOut?.AddRange(pairs);
             File.WriteAllText(Path.Combine(outDir, $"tiefill_{parts[owner]}_{sfx}.hlsl"),
                 ComputeTemplates.EmitTieFill(pairs, seeds));
             ties.Add((parts[owner], pairs.Count + seeds.Count));
@@ -1195,7 +2350,7 @@ public sealed partial class MigotoEmitter
     /// Pairs are (tied, source) compact union rows in ascending tied order.</summary>
     static List<(uint Tied, uint Source)> TierOrphanTies(string tierName, uint[] scatter,
         PoolMath.UnionResult union, int owner, HashSet<int> donorRows, StreamsLoad lod0, uint[] lod0Hashes,
-        List<string> diagnostics)
+        IReadOnlyDictionary<uint, string>? bonePaths, List<string> diagnostics)
     {
         int ub = union.UnionHashes.Length;
         var written = new SortedSet<int>();
@@ -1282,8 +2437,8 @@ public sealed partial class MigotoEmitter
                 else { best = written.Min; how = "first written"; }
             }
             pairs.Add(((uint)u, (uint)best));
-            diagnostics.Add($"{tierName}: bone 0x{hash:x8} has no row at this tier — its converted row copies "
-                + $"{how} bone 0x{union.UnionHashes[best]:x8} at this tier's draws");
+            diagnostics.Add($"{tierName}: bone {BoneName(bonePaths, hash)} has no row at this tier — its converted row copies "
+                + $"{how} bone {BoneName(bonePaths, union.UnionHashes[best])} at this tier's draws");
         }
         return pairs;
     }
@@ -1327,6 +2482,7 @@ public sealed partial class MigotoEmitter
         List<string> diagnostics,
         out Dictionary<(string Name, string Dir), HashSet<int>> globalRows)
     {
+        var allPaths = BonePathsOf(req);
         var allRows = new Dictionary<(string Name, string Dir), HashSet<int>>();
         var plans = new List<PalettePrunePlan>(req.Pipelines.Count);
 
@@ -1355,9 +2511,58 @@ public sealed partial class MigotoEmitter
         {
             int row = Array.IndexOf(unionInput(dir).Hashes, hash);
             if (row < 0)
-                throw new InvalidOperationException($"{name}: selected recovery bone 0x{hash:x8} is absent "
+                throw new InvalidOperationException($"{name}: selected recovery bone {BoneName(allPaths, hash)} is absent "
                     + "from its source bone table");
             Demand(plan, name, dir, row);
+        }
+        // Whether a pool part's or tier's operator will ship the bone with a slim selection of its own: the
+        // bone is carried, sound, and held by the slim search (HoldsSlim, which the full solve cannot do
+        // worse than). A bone it would otherwise ship at every vertex is tied there, so it is no witness and
+        // no owner's first choice.
+        var slimVerdicts = new Dictionary<(string Dir, uint Hash), bool>();
+        bool Holds(string name, string dir, uint hash)
+        {
+            if (slimVerdicts.TryGetValue((dir, hash), out bool held)) return held;
+            var art = Art(name, dir);
+            int row = Array.IndexOf(art.Hashes, hash);   // a classification art keeps every local row, in order
+            held = row >= 0 && HoldsSlim(load(dir), art.Weak, row);
+            return slimVerdicts[(dir, hash)] = held;
+        }
+        var weightOn = new Dictionary<string, double[]>(StringComparer.Ordinal);
+        double WeightOn(string dir, uint hash)
+        {
+            if (!weightOn.TryGetValue(dir, out var summed)) weightOn[dir] = summed = SummedWeights(load(dir));
+            int row = Array.IndexOf(unionInput(dir).Hashes, hash);
+            return row >= 0 && row < summed.Length ? summed[row] : 0;
+        }
+        // A used bone its owner could ship only at every vertex of its mesh moves to the pool part that holds
+        // it with a slim selection, the one carrying the most weight on it (the first on ties, as the weight
+        // argmax). When no part holds it, the owner keeps it and its operator ties it to a co-riding bone.
+        PoolMath.UnionResult OwnBySlimHold(ReplacePipeline pipe, PoolMath.UnionResult union, IEnumerable<int> used)
+        {
+            var owner = (int[])union.Owner.Clone();
+            bool moved = false;
+            foreach (int u in used.OrderBy(u => u))
+            {
+                int from = owner[u];
+                uint h = union.UnionHashes[u];
+                if (Holds(pipe.Parts[from].Name, pipe.Parts[from].DumpDir, h)) continue;
+                int to = -1;
+                double toWeight = 0;
+                for (int pi = 0; pi < pipe.Parts.Count; pi++)
+                {
+                    var p = pipe.Parts[pi];
+                    if (pi == from || !Holds(p.Name, p.DumpDir, h)) continue;
+                    double w = WeightOn(p.DumpDir, h);
+                    if (to < 0 || w > toWeight) { to = pi; toWeight = w; }
+                }
+                if (to < 0) continue;
+                owner[u] = to;
+                moved = true;
+                diagnostics.Add($"{pipe.Suffix}: bone {BoneName(pipe.BonePaths, h)} is recovered from '{pipe.Parts[to].Name}' instead of "
+                    + $"'{pipe.Parts[from].Name}', which needs every one of its vertices to recover it");
+            }
+            return moved ? PoolMath.WithOwner(union, owner) : union;
         }
 
         for (int pipeIdx = 0; pipeIdx < req.Pipelines.Count; pipeIdx++)
@@ -1388,6 +2593,7 @@ public sealed partial class MigotoEmitter
                 // union and every recovery source exactly as the legacy emitter did.
                 plan.SkinUnionRows.UnionWith(Enumerable.Range(0, compiledUnionBones));
                 plan.RetainedUnionRows.UnionWith(plan.SkinUnionRows);
+                plan.FullUnion = OwnBySlimHold(pipe, union, plan.SkinUnionRows);
                 plan.UsedGroupRows.UnionWith(Enumerable.Range(0, compiledGroupBones));
                 foreach (var p in pipe.Parts)
                 {
@@ -1426,6 +2632,7 @@ public sealed partial class MigotoEmitter
                     else
                         plan.UsedGroupRows.Add(row - compiledUnionBones);
                 }
+            plan.FullUnion = union = OwnBySlimHold(pipe, union, plan.SkinUnionRows);
 
             var parts = pipe.Parts.Select(p => p.Name).ToList();
             foreach (int old in plan.SkinUnionRows)
@@ -1481,7 +2688,7 @@ public sealed partial class MigotoEmitter
             {
                 int old = Array.IndexOf(union.UnionHashes, witness);
                 if (old < 0)
-                    throw new InvalidOperationException($"{pipe.Suffix}: witness 0x{witness:x8} is outside the union");
+                    throw new InvalidOperationException($"{pipe.Suffix}: witness {BoneName(pipe.BonePaths, witness)} is outside the union");
                 bool added = plan.RetainedUnionRows.Add(old);
                 foreach (var op in sourceOps) DemandHash(plan, op.Name, op.Dir, witness);
                 foreach (var op in sourceOps)
@@ -1492,8 +2699,11 @@ public sealed partial class MigotoEmitter
                         plan.TierSources.Add((op.Name, op.Dir));
                 }
                 if (added && !plan.SkinUnionRows.Contains(old))
-                    diagnostics.Add($"{pipe.Suffix}: palette retains donor-unused witness row 0x{witness:x8} "
+                {
+                    plan.WitnessLines.Add($"{pipe.Suffix}: palette retains donor-unused witness row {BoneName(pipe.BonePaths, witness)} "
                         + "to preserve live recovery quality");
+                    diagnostics.Add(plan.WitnessLines[^1]);
+                }
             }
 
             var anchorOps = ActiveOps(parts[anchorOf[pipeIdx]]);
@@ -1506,7 +2716,8 @@ public sealed partial class MigotoEmitter
                 bool found = false;
                 foreach (uint hash in Art(pipe.Parts[anchorOf[pipeIdx]].Name,
                              pipe.Parts[anchorOf[pipeIdx]].DumpDir).Hashes)
-                    if (ownerOps.All(op => Sound(op.Art, hash)) && anchorOps.All(op => Sound(op.Art, hash)))
+                    if (ownerOps.All(op => Holds(op.Name, op.Dir, hash))
+                        && anchorOps.All(op => Holds(op.Name, op.Dir, hash)))
                     { witness = hash; found = true; break; }
                 if (!found) continue;
                 RetainWitness(witness, ownerOps.Concat(anchorOps));
@@ -1544,8 +2755,8 @@ public sealed partial class MigotoEmitter
                         {
                             int row = Array.IndexOf(art.Hashes, live.Hash);
                             diagnostics.Add(row < 0
-                                ? $"{pipe.Suffix}: {lod0.Name} does not carry bone 0x{live.Hash:x8}, so it writes no rows for it"
-                                : $"{pipe.Suffix}: {lod0.Name} recovers bone 0x{live.Hash:x8} ill-conditioned, so it writes no rows for it");
+                                ? $"{pipe.Suffix}: {lod0.Name} does not carry bone {BoneName(pipe.BonePaths, live.Hash)}, so it writes no rows for it"
+                                : $"{pipe.Suffix}: {lod0.Name} recovers bone {BoneName(pipe.BonePaths, live.Hash)} ill-conditioned, so it writes no rows for it");
                         }
                     }
                     if (lod0Rows.Count > 0)
@@ -1555,7 +2766,7 @@ public sealed partial class MigotoEmitter
                         bool found = false;
                         foreach (uint hash in Art(pipe.Parts[anchorOf[pipeIdx]].Name,
                                      pipe.Parts[anchorOf[pipeIdx]].DumpDir).Hashes)
-                            if (Sound(lod0Art, hash) && anchorOps.All(op => Sound(op.Art, hash)))
+                            if (Sound(lod0Art, hash) && anchorOps.All(op => Holds(op.Name, op.Dir, hash)))
                             { witness = hash; found = true; break; }
                         if (found)
                         {
@@ -1572,7 +2783,7 @@ public sealed partial class MigotoEmitter
                     bool tierFound = false;
                     foreach (uint hash in Art(pipe.Parts[anchorOf[pipeIdx]].Name,
                                  pipe.Parts[anchorOf[pipeIdx]].DumpDir).Hashes)
-                        if (tierRows.All(x => Sound(x.Art, hash)) && anchorOps.All(op => Sound(op.Art, hash)))
+                        if (tierRows.All(x => Sound(x.Art, hash)) && anchorOps.All(op => Holds(op.Name, op.Dir, hash)))
                         { tierWitness = hash; tierFound = true; break; }
                     if (!tierFound) continue;
                     foreach (var tier in tierRows)
@@ -1583,6 +2794,127 @@ public sealed partial class MigotoEmitter
                     }
                     RetainWitness(tierWitness, anchorOps);
                 }
+            }
+
+            // ---- the pooled pose route: how each copy finds its own copy of every part the replacement
+            // takes rows from, decided here because the row that places a part must be recovered with the
+            // rest of the palette (retained and demanded as the witness rows above are) ---------------
+            if (liveOwners.Count > 0)
+                plan.Pooled = PlacePooled(pipe, anchorOf[pipeIdx], union, liveOwners);
+
+            PooledPlan PlacePooled(ReplacePipeline pp, int anchor, PoolMath.UnionResult u0, List<int> owners)
+            {
+                var pooled = new PooledPlan();
+                if (plan.UsedGroupRows.Count > 0)
+                {
+                    pooled.Refusal = "Some of its bones come from a wardrobe member's own draw";
+                    return pooled;
+                }
+                var anchorPart = pp.Parts[anchor];
+                uint? anchorRoot = anchorPart.RootChain is { Count: > 0 } ac ? ac[0] : null;
+                // every source mesh: each owning part's lod0, then each of its tiers that recovers rows
+                var meshes = new List<(string Name, string Dir, int Part, bool Tier, IReadOnlyList<uint>? Chain)>();
+                foreach (int owner in owners)
+                {
+                    var op = pp.Parts[owner];
+                    meshes.Add((op.Name, op.DumpDir, owner, false, op.RootChain));
+                    foreach (var t in pp.Tiers ?? Array.Empty<PoolTier>())
+                        if (string.Equals(t.Part, op.Name, StringComparison.Ordinal)
+                            && plan.TierSources.Contains((t.Name, t.DumpDir)))
+                            meshes.Add((t.Name, t.DumpDir, owner, true, t.RootChain));
+                }
+                foreach (var m in meshes)
+                {
+                    if (m.Chain is not { Count: > 0 } chain)
+                    {
+                        pooled.Refusal = $"Which bone '{m.Name}' is attached to is not known";
+                        return pooled;
+                    }
+                    if (Array.IndexOf(unionInput(m.Dir).Hashes, chain[0]) < 0)
+                    {
+                        pooled.Refusal = $"'{m.Name}' does not list the bone it is attached to";
+                        return pooled;
+                    }
+                }
+                // A part places a bone where it owns it and every one of its recoveries carrying the bone will
+                // ship it as its own row: judged by the slim-hold predictor (Holds), the verdict the shipped
+                // operators follow, not by the dense classification, which can call a bone sound that the
+                // shipped operator ties to another.
+                bool OwnsSound(int partIdx, uint hash)
+                {
+                    int old = Array.IndexOf(u0.UnionHashes, hash);
+                    if (old < 0 || u0.Owner[old] != partIdx) return false;
+                    var part = pp.Parts[partIdx];
+                    return Holds(part.Name, part.DumpDir, hash)
+                        && ActiveOps(part.Name).Skip(1).Where(op => Array.IndexOf(unionInput(op.Dir).Hashes, hash) >= 0)
+                            .All(op => Holds(op.Name, op.Dir, hash));
+                }
+                var placed = new List<SourcePlacement>();
+                foreach (var m in meshes)
+                {
+                    var chain = m.Chain!;
+                    var verdict = new SourcePlacement(m.Name, m.Dir, m.Part, m.Tier, chain[0], Placement.ByAnchorPosition, 0, -1);
+                    if (anchorRoot == chain[0]) verdict = verdict with { Kind = Placement.SameRoot };
+                    else
+                        // one walk up from the root's parent: the nearest ancestor that the anchor, or failing
+                        // the anchor another part the replacement takes rows from, owns and recovers places it
+                        for (int k = 1; k < chain.Count && verdict.Kind == Placement.ByAnchorPosition; k++)
+                        {
+                            if (OwnsSound(anchor, chain[k]))
+                            {
+                                verdict = verdict with { Kind = Placement.ByAnchorBone, Bone = chain[k] };
+                                break;
+                            }
+                            int old = Array.IndexOf(u0.UnionHashes, chain[k]);
+                            if (old < 0) continue;
+                            int by = u0.Owner[old];
+                            if (by != anchor && by != m.Part && owners.Contains(by) && OwnsSound(by, chain[k]))
+                                verdict = verdict with { Kind = Placement.BySourceBone, Bone = chain[k], Placer = by };
+                        }
+                    placed.Add(verdict);
+                }
+                // a part placed by another part's row runs after it, so the row is this draw's when read;
+                // chains only go up, so a cycle means two parts' tables disagree about the skeleton
+                var order = new List<int>();
+                var pending = new List<int>(owners);
+                while (pending.Count > 0)
+                {
+                    int next = pending.FirstOrDefault(pi => placed.Where(v => v.Part == pi && v.Kind == Placement.BySourceBone)
+                        .All(v => order.Contains(v.Placer)), -1);
+                    if (next < 0)
+                    {
+                        pooled.Refusal = "Two of the parts it takes bones from are each attached to the other";
+                        return pooled;
+                    }
+                    order.Add(next);
+                    pending.Remove(next);
+                }
+                // within a part its lower-detail meshes first and its lod0 last, so where both drew this frame
+                // the full-detail rows are the ones that stay
+                foreach (int pi in order)
+                {
+                    pooled.Sources.AddRange(placed.Where(v => v.Part == pi && v.IsTier));
+                    pooled.Sources.AddRange(placed.Where(v => v.Part == pi && !v.IsTier));
+                }
+                foreach (var v in pooled.Sources)
+                {
+                    if (v.Kind is not (Placement.ByAnchorBone or Placement.BySourceBone)) continue;
+                    var by = pp.Parts[v.Kind == Placement.ByAnchorBone ? anchor : v.Placer];
+                    int old = Array.IndexOf(u0.UnionHashes, v.Bone);
+                    bool added = plan.RetainedUnionRows.Add(old);
+                    // every recovery of the placing part that carries the bone recovers it, so the row is
+                    // written at whichever of its meshes this draw's palette comes from
+                    foreach (var op in ActiveOps(by.Name))
+                        if (Array.IndexOf(unionInput(op.Dir).Hashes, v.Bone) >= 0)
+                            DemandHash(plan, op.Name, op.Dir, v.Bone);
+                    if (added && !plan.SkinUnionRows.Contains(old))
+                    {
+                        plan.PlacementLines.Add($"{pp.Suffix}: palette retains donor-unused placement row "
+                            + $"{BoneName(pp.BonePaths, v.Bone)} to match '{v.Mesh}' to each copy");
+                        diagnostics.Add(plan.PlacementLines[^1]);
+                    }
+                }
+                return pooled;
             }
 
             if (plan.RetainedUnionRows.Count == 0 && plan.UsedGroupRows.Count == 0)
@@ -1652,6 +2984,16 @@ public sealed partial class MigotoEmitter
         }
         var opCache = new Dictionary<string, OperatorArt>(StringComparer.Ordinal);
         var slimParts = new HashSet<string>(StringComparer.Ordinal);   // parts/tiers whose operator shipped slim (Sel exists)
+        // A dump's binds by bone hash, as the union reads them: the conversion is a property of the dump (one
+        // dump, one space — BindConversions settles that), so every pipeline reads a shared dump the same way.
+        var dumpBinds = new ConcurrentDictionary<string, Dictionary<uint, Matrix4x4>>(StringComparer.Ordinal);
+        Dictionary<uint, Matrix4x4> BindsOf(string dir) => dumpBinds.GetOrAdd(dir,
+            d => UnionInput(d).Binds.ToDictionary(kv => kv.Key, kv => BindSpace.FromRowMajor(kv.Value)));
+        // Operators some pipeline binds AS SOLVED. A pipeline whose reference differs from a mesh's own binds
+        // ships its own converted copy instead (see ShipOperator below), and a solved file no pipeline binds
+        // is removed once every pipeline has spoken.
+        var solvedOperatorUsers = new HashSet<string>(StringComparer.Ordinal);
+        var convertedOperators = new HashSet<string>(StringComparer.Ordinal);
         var analysis = SolveOperators(req, Load, UnionInput, Conv, classificationOnly: true);
         OperatorArt Analysis(string name, string dir)
         {
@@ -1753,9 +3095,6 @@ public sealed partial class MigotoEmitter
             string sfx = pipe.Suffix;
             var parts = pipe.Parts.Select(p => p.Name).ToList();
             var dirs = pipe.Parts.Select(p => p.DumpDir).ToList();
-            if (parts.Count > MaxPoolParts)
-                throw new InvalidOperationException(
-                    $"{sfx}: convert pass uses cb slots b5..b12 for parts (b13 = anchor) — {MaxPoolParts} pool parts max");
             int anchorIdx = anchorOf[pipeIdx];
             var capHashes = pipe.CaptureHashes ?? new Dictionary<string, string>();
             var subTexOverrides = pipe.SubTextures ?? new Dictionary<int, SubmeshMaps>();
@@ -1769,6 +3108,56 @@ public sealed partial class MigotoEmitter
             int ub = union.UnionHashes.Length;
             ubTotal += ub;
 
+            // ---- the bind each bone is STATED under ---------------------------------------------------
+            // The game skins every mesh with that mesh's own binds, so the pool's meshes are free to bind
+            // one bone differently — a whole mesh in another mesh space, a helper bone bound off the
+            // skeleton, a tier re-bound after decimation. One donor needs one statement per bone, settled
+            // by the build (ReferenceBinds). Every mesh this pipeline recovers rows from — pool parts, tiers,
+            // wardrobe-group members — has the rows of each bone it binds differently converted onto that
+            // statement, folded into its own copy of the mesh's operator. The fold sits AHEAD of everything
+            // that reads a recovered row, which the witness convert requires: it solves a part's whole
+            // draw-space relation from one shared bone, and a bind difference on that bone would ride into
+            // every row the part owns. The reference arrives stated for the replaced part, in the space the
+            // donor's vertices were compiled in, and the anchor's own restatement carries it to where the
+            // dumps' binds are, as the donor compile carried it. Which part it was stated for makes no
+            // difference here: each mesh is compared with it bone by bone.
+            var anchorConversion = Conv(dirs[anchorIdx]);
+            var reference = new Dictionary<uint, Matrix4x4>();
+            foreach (var (h, bind) in pipe.ReferenceBinds ?? new Dictionary<uint, Matrix4x4>())
+                reference[h] = anchorConversion is { } restate ? BindSpace.Rebase(bind, restate) : bind;
+            var foldedOps = new HashSet<string>(StringComparer.Ordinal);
+            // Ship one mesh's operator for THIS pipeline: as solved when the mesh states every retained bone
+            // under the reference, else as a converted copy of its own.
+            void ShipOperator(string name, string dir, OperatorArt art)
+            {
+                var hashes = UnionInput(dir).Hashes;
+                var binds = BindsOf(dir);
+                var constants = new double[]?[art.Hashes.Length];
+                var converted = new List<(uint Hash, float Offset)>();
+                for (int i = 0; i < art.Hashes.Length; i++)
+                {
+                    // a tied bone ships its TIE's rows, so it is the tie's statement that needs converting
+                    int source = art.Weak[i] && art.TieFullRows[i] >= 0 ? art.TieFullRows[i] : art.SourceRows[i];
+                    uint h = hashes[source];
+                    if (!binds.TryGetValue(h, out var own) || !reference.TryGetValue(h, out var target)) continue;
+                    if ((constants[i] = BindReference.Constant(target, own)) is null) continue;
+                    converted.Add((art.Hashes[i], MathF.Max(RestBake.TranslationDiff(target, own),
+                        RestBake.RotationDiff(target, own))));
+                }
+                if (converted.Count == 0) { solvedOperatorUsers.Add(name); return; }
+                File.WriteAllBytes(Path.Combine(req.OutDir, $"{name}_cpinv_{sfx}.buf"),
+                    FloatBytes(FoldConstants(art, constants)));
+                foldedOps.Add(name);
+                convertedOperators.Add(name);
+                var worst = converted.OrderByDescending(c => c.Offset).ThenBy(c => c.Hash).Take(6)
+                    .Select(c => (pipe.BonePaths is not null && pipe.BonePaths.TryGetValue(c.Hash, out var path)
+                            ? BoneTable.MatchingSuffix(c.Hash, path) : null) is { } named
+                        ? $"{named} (0x{c.Hash:x8}) {c.Offset:g3}" : $"0x{c.Hash:x8} {c.Offset:g3}");
+                diagnostics.Add($"{sfx}: {name} binds {converted.Count} bone{(converted.Count == 1 ? "" : "s")} "
+                    + "elsewhere than the replacement is posed from, so their recovered rows are converted "
+                    + $"(largest offsets: {string.Join(", ", worst)})");
+            }
+
             // ---- per-part shared operator + per-pipeline scatter map ----------------------------------
             // (map files are written AFTER witness selection below — witnesses repurpose entries)
             var partMeta = new List<(string Part, int N, int Nb, int Rows)>();
@@ -1780,6 +3169,7 @@ public sealed partial class MigotoEmitter
                 var load = Load(dirs[i]);
                 bool active = plan.PoolSources.Contains((parts[i], dirs[i]));
                 var art = active ? Operator(parts[i], dirs[i]) : Analysis(parts[i], dirs[i]);
+                if (active) ShipOperator(parts[i], dirs[i], art);
                 partArts.Add(art);
                 var scatter = Enumerable.Repeat(PoolMath.Sentinel, art.Hashes.Length).ToArray();
                 if (active)
@@ -1802,8 +3192,8 @@ public sealed partial class MigotoEmitter
             // Anchor-preferred ownership, applied before ANY consumer reads owner or scatter — the part
             // scatter maps, the owner buffer, the tier scatter and the witness reservations all see one
             // verdict. Needs the anchor's conditioning, which is why it waits for the operator loop.
-            int movedRows = rawUnion.Owner.Count(o => o != anchorIdx)
-                - plan.FullUnion.Owner.Count(o => o != anchorIdx);
+            int movedRows = Enumerable.Range(0, rawUnion.Owner.Length)
+                .Count(u => rawUnion.Owner[u] != anchorIdx && plan.FullUnion.Owner[u] == anchorIdx);
             if (movedRows > 0)
                 diagnostics.Add($"{sfx}: {movedRows} union bone{(movedRows == 1 ? "" : "s")} re-owned to the "
                     + "anchor — recovered at its own draw instead of another part's");
@@ -1811,7 +3201,8 @@ public sealed partial class MigotoEmitter
                 UIntBytes(union.Owner.Select(o => (uint)o).ToArray()));
 
             // ---- per-tier operators: same union and per-bone ownership as the part's lod0 -------------
-            var tierMeta = new List<(string Part, string Name, string Suffix, string Hash, int Rows, DrawShapeSet? Shapes)>();
+            var tierMeta = new List<(string Part, string Name, string Suffix, string Hash, int Rows,
+                DrawShapeSet? Shapes, TierMaterialMap? Map)>();
             var tierWork = new List<(string Name, int PartIdx, uint[] Scatter, OperatorArt Art)>();
             foreach (var t in pipe.Tiers ?? Array.Empty<PoolTier>())
             {
@@ -1824,10 +3215,7 @@ public sealed partial class MigotoEmitter
                 var mergedVerdicts = new List<PoolDerive.TierBoneVerdict>();
                 ClaimName(t.Name, t.DumpDir);
                 var load = Load(t.DumpDir);
-                // both sides restated in the pipeline's reference space, so the gate below reads a real
-                // bind difference rather than the tier's own authoring space
-                var tierIn = UnionInput(t.DumpDir);
-                var (tierHashes, tierBinds) = (tierIn.Hashes, tierIn.Binds);
+                var tierHashes = UnionInput(t.DumpDir).Hashes;
                 var scatter = new uint[load.Nb];
                 var analysisArt = Analysis(t.Name, t.DumpDir);
                 // the whole tier's per-bone weight in one traversal, on the first bone that needs it
@@ -1873,26 +3261,9 @@ public sealed partial class MigotoEmitter
                         scatter[b] = PoolMath.Sentinel;
                         continue;
                     }
-                    double d0 = 0;
-                    if (unionInputs[pi].Binds.TryGetValue(tierHashes[b], out var lodBind))
-                        for (int m = 0; m < 16; m++) d0 = Math.Max(d0, Math.Abs(lodBind[m] - tierBinds[tierHashes[b]][m]));
-                    if (d0 > BindSpace.MaxBindDisagreement)
-                    {
-                        string? suffix = pipe.BonePaths is not null
-                            && pipe.BonePaths.TryGetValue(tierHashes[b], out var diagnosticPath)
-                                ? BoneTable.MatchingSuffix(tierHashes[b], diagnosticPath)
-                                : null;
-                        string diagnosticBone = suffix is not null
-                            ? $"'{suffix}' (0x{tierHashes[b]:x8})"
-                            : $"no matching chain suffix (0x{tierHashes[b]:x8})";
-                        throw BuildLogDiagnostics.Attach(new InvalidOperationException(
-                            $"LOD '{sourceTier}' has a different bind pose than the lod0 of "
-                            + $"'{sourcePart}' for {BindBone(tierHashes[b], pipe.BonePaths)} (max diff "
-                            + $"{d0:g4}). The difference is not one rigid rotation, so that LOD cannot be "
-                            + "moved into the part's space. Remove this mesh edit"),
-                            $"Tier bind-pose refusal: tier '{sourceTier}' of '{sourcePart}' uses "
-                            + $"{diagnosticBone} (max diff {d0:g4}).");
-                    }
+                    // A tier is free to bind the bone elsewhere than its lod0 does — a decimated tier is often
+                    // re-bound — because its rows are converted onto the pipeline's reference where they
+                    // ship (ShipOperator below).
                     scatter[b] = union.Owner[u] == pi ? (uint)u : PoolMath.Sentinel;
                 }
                 if (consumedVerdicts.Count != verdicts.Count)
@@ -1923,8 +3294,8 @@ public sealed partial class MigotoEmitter
                     if (scatter[b] != PoolMath.Sentinel && analysisArt.Weak[b] && analysisArt.TieFullRows[b] < 0)
                     {
                         scatter[b] = PoolMath.Sentinel;
-                        diagnostics.Add($"{t.Name}: bone 0x{tierHashes[b]:x8} is too weakly supported in this tier — "
-                            + "its lod0 recovery is reused for draws at this tier");
+                        diagnostics.Add($"{t.Name}: bone {BoneName(pipe.BonePaths, tierHashes[b])} has too little support in this "
+                            + "lower-detail mesh to recover");
                     }
                 // A bone this part owns that this tier's rig does not carry at all is written by nobody in
                 // this tier's chain. Donor-weighted rows of that class are filled by the tier tie below
@@ -1934,12 +3305,13 @@ public sealed partial class MigotoEmitter
                     for (int u2 = 0; u2 < union.UnionHashes.Length; u2++)
                         if (union.Owner[u2] == pi && !tierSet.Contains(union.UnionHashes[u2]))
                             diagnostics.Add($"{t.Name}: this tier does not carry bone "
-                                + $"0x{union.UnionHashes[u2]:x8}");
+                                + $"{BoneName(pipe.BonePaths, union.UnionHashes[u2])}");
                 }
                 bool active = plan.TierSources.Contains((t.Name, t.DumpDir));
                 if (active)
                 {
                     var art = Operator(t.Name, t.DumpDir);
+                    ShipOperator(t.Name, t.DumpDir, art);
                     var compactScatter = new uint[art.Hashes.Length];
                     for (int row = 0; row < art.Hashes.Length; row++)
                     {
@@ -1947,10 +3319,10 @@ public sealed partial class MigotoEmitter
                         compactScatter[row] = original >= 0 ? scatter[original] : PoolMath.Sentinel;
                     }
                     tierWork.Add((t.Name, pi, compactScatter, art));
-                    tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * art.Hashes.Length, t.Shapes));
+                    tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * art.Hashes.Length, t.Shapes, t.Map));
                 }
                 else
-                    tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 0, t.Shapes));
+                    tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 0, t.Shapes, t.Map));
             }
 
             // ---- witness bones: constants-free space conversion --------------------------------------
@@ -1964,6 +3336,9 @@ public sealed partial class MigotoEmitter
             // use every witness available and pass an unwitnessed owner's rows through, as before. A one-part
             // pool designates no witness — no second draw space — and its anchor-owned rows pass through.
             uint nextSlot = (uint)ub;
+            // build-log lines about the chain's conversion alone, withdrawn where the pipeline takes the
+            // pose route, which converts nothing through witnesses or constants
+            var chainOnly = new List<string>();
             var witRows = Enumerable.Repeat((PartRow: 0xFFFFFFFFu, AnchorRow: 0xFFFFFFFFu), parts.Count).ToArray();
             // The anchor's operators, and the slots its recoveries of a witness bone are reserved in. Both
             // the tier converts below and the group members further down solve K against the anchor's own
@@ -2001,8 +3376,9 @@ public sealed partial class MigotoEmitter
                     { witness = h; found = true; break; }
                 if (!found)
                 {
-                    diagnostics.Add($"{sfx}: {parts[pi]} shares no sound bone with the anchor — its owned bones "
+                    chainOnly.Add($"{sfx}: {parts[pi]} shares no sound bone with the anchor — its owned bones "
                         + "have no current-frame geometry conversion");
+                    diagnostics.Add(chainOnly[^1]);
                     continue;
                 }
 
@@ -2032,8 +3408,11 @@ public sealed partial class MigotoEmitter
 
             bool lod0WitnessConvert = lod0Owners.All(pi => witRows[pi].PartRow != uint.MaxValue);
             if (!lod0WitnessConvert)
-                diagnostics.Add($"{sfx}: LOD0 has no complete current-frame witness conversion — it falls "
+            {
+                chainOnly.Add($"{sfx}: LOD0 has no complete current-frame witness conversion — it falls "
                     + "back to per-draw constants, whose freshness depends on draw order");
+                diagnostics.Add(chainOnly[^1]);
+            }
             if (lod0WitnessConvert || tierMeta.Count > 0)
             {
                 File.WriteAllText(Path.Combine(req.OutDir, $"convert_witness_{sfx}.hlsl"),
@@ -2180,18 +3559,19 @@ public sealed partial class MigotoEmitter
                             if (idx < 0)
                             {
                                 gmap[k] = PoolMath.Sentinel;
-                                diagnostics.Add($"{sfx}: {mesh.Name} does not carry bone 0x{g.GroupBones[k]:x8}, "
+                                diagnostics.Add($"{sfx}: {mesh.Name} does not carry bone {BoneName(pipe.BonePaths, g.GroupBones[k])}, "
                                     + "so it writes no rows for it");
                             }
                             else if (art.Weak[idx])
                             {
                                 gmap[k] = PoolMath.Sentinel;
-                                diagnostics.Add($"{sfx}: {mesh.Name} recovers bone 0x{g.GroupBones[k]:x8} "
+                                diagnostics.Add($"{sfx}: {mesh.Name} recovers bone {BoneName(pipe.BonePaths, g.GroupBones[k])} "
                                     + "ill-conditioned, so it writes no rows for it");
                             }
                             else gmap[k] = (uint)idx;
                         }
                         if (gmap.All(v => v == PoolMath.Sentinel)) continue;   // nothing left for it to write
+                        ShipOperator(mesh.Name, mesh.DumpDir, art);
                         File.WriteAllBytes(Path.Combine(req.OutDir, $"{mesh.Name}_gmap_{sfx}.buf"), UIntBytes(gmap));
                         bool slim = slimParts.Contains(mesh.Name);
                         bool atDraw = mesh.IsLod0 && !lod0HasWitness;
@@ -2215,6 +3595,7 @@ public sealed partial class MigotoEmitter
             // copy source. One shader per LOD level (suffix): the anchor's chain at that level runs every
             // part's same-level tier, so the level's orphan rows across parts fill together.
             var tierTiePairs = new Dictionary<string, List<(uint Tied, uint Source)>>(StringComparer.Ordinal);
+            var tierOrphans = new Dictionary<string, List<(uint Tied, uint Source)>>(StringComparer.Ordinal);
             {
                 var donorRows = new HashSet<int>();
                 foreach (int old in plan.SkinUnionRows)
@@ -2223,8 +3604,9 @@ public sealed partial class MigotoEmitter
                 {
                     var tier = (pipe.Tiers ?? Array.Empty<PoolTier>()).First(x => x.Name == name);
                     var pairs = TierOrphanTies(name, scatter, union, pi, donorRows,
-                        Load(pipe.Parts[pi].DumpDir), unionInputs[pi].Hashes, diagnostics);
+                        Load(pipe.Parts[pi].DumpDir), unionInputs[pi].Hashes, pipe.BonePaths, diagnostics);
                     if (pairs.Count == 0) continue;
+                    tierOrphans[name] = pairs;
                     if (!tierTiePairs.TryGetValue(tier.Suffix, out var list))
                         tierTiePairs[tier.Suffix] = list = new List<(uint, uint)>();
                     list.AddRange(pairs);
@@ -2265,8 +3647,9 @@ public sealed partial class MigotoEmitter
             for (int u = 0; u < (int)nextSlot; u++) Buffer.BlockCopy(identBytes, 0, seed, u * identBytes.Length, identBytes.Length);
             File.WriteAllBytes(Path.Combine(req.OutDir, $"palette_seed_{sfx}.buf"), seed);
 
-            File.WriteAllText(Path.Combine(req.OutDir, $"convert_cs_{sfx}.hlsl"),
-                ComputeTemplates.EmitConvert(parts.Count, ub));
+            for (int chunk = 0; chunk < ComputeTemplates.ConvertChunks(parts.Count); chunk++)
+                File.WriteAllText(Path.Combine(req.OutDir, ConvertFile(sfx, chunk)),
+                    ComputeTemplates.EmitConvert(parts.Count, ub, chunk));
 
             // ---- the new geometry: donor streams, or the identity concat of the pool parts -----------
             int vcount, vb1Stride;
@@ -2277,6 +3660,7 @@ public sealed partial class MigotoEmitter
             // same way), but because the route ships from no app build (ModBuilder always sets DonorDir)
             // and carries no bone paths to tie with. Emitter-API/test reach only; recorded, not cured.
             var ties = new List<(string Part, int Pairs)>();
+            var tiePairs = new List<(uint Tied, uint Source)>();
             if (pipe.DonorDir is null)
             {
                 var idParts = dirs.Select(d => LoadIdentityPart(d, Conv(d))).ToList();
@@ -2351,18 +3735,60 @@ public sealed partial class MigotoEmitter
                 foreach (int old in plan.SkinUnionRows)
                     if (compact.OldToCompact[old] >= 0) donorSlots.Add(compact.OldToCompact[old]);
                 ties = TieUnderlay(req.OutDir, sfx, union, anchorIdx, parts, donorSlots,
-                    pipe.BonePaths, diagnostics);
+                    pipe.BonePaths, diagnostics, tiePairs);
             }
             vcountTotal += vcount;
 
-            File.WriteAllText(Path.Combine(req.OutDir, $"skin_cs_{sfx}.hlsl"), ComputeTemplates.EmitSkin(vcount));
+            // ---- stream-1 variants: the donor draw at an anchor tier is read through THAT tier mesh's
+            // input layout, and a tier can store stream 1 differently from the lod0 the stream was built
+            // for (float UVs beside half UVs) ---------------------------------------------------------
+            var donorLayout = MetaChannels.Read(pipe.DonorDir ?? dirs[anchorIdx]);
+            var anchorTiers = (pipe.Tiers ?? Array.Empty<PoolTier>()).Where(t => t.Part == parts[anchorIdx])
+                .Select(t => new TierLayout(t.Name, t.SourceMesh ?? t.Name, t.SourcePart ?? t.Part,
+                    MetaChannels.Read(t.DumpDir))).ToList();
+            // stream 0 is posed into one 40-byte shape every frame, so a tier reading it otherwise has no
+            // copy to be given
+            StreamVariants(req.OutDir, $"combined_bind_{sfx}", vcount, donorLayout, stream: 0, anchorTiers,
+                diagnostics, reencode: false);
+            var (vb1Variants, tierVb1) = StreamVariants(req.OutDir, $"combined_vb1_{sfx}", vcount, donorLayout,
+                stream: 1, anchorTiers, diagnostics);
 
             // shipped compact palette layout record (donors compile against the full union, not this order)
             File.WriteAllText(Path.Combine(req.OutDir, $"union_{sfx}.json"),
                 UnionJson(ub, union.UnionHashes, partMeta));
 
             int bpi = ibFmt.Contains("R16") ? 2 : 4;
-            var draws = submeshes.Select(s => (s.IndexCount, Start: s.FirstByte / bpi, s.BaseVertex)).ToList();
+            var draws = submeshes.Select(s => (Count: s.IndexCount, Start: s.FirstByte / bpi, Base: s.BaseVertex)).ToList();
+
+            // ---- the per-copy pose route: a pipeline recovering every row from the replaced part itself
+            // skins each copy of that part from that copy's own draw, in pixel passes before each draw -----
+            // ---- a pool reaching other parts takes the same route where every part it takes rows from is
+            // matched to each copy by placement (see PlanPalettePruning) --------------------------------
+            int UnionSlot(uint hash) => compact.OldToCompact[Array.IndexOf(plan.FullUnion.UnionHashes, hash)];
+            Vector3 RestOrigin(string dir, uint hash) => Matrix4x4.Invert(BindsOf(dir)[hash], out var restWorld)
+                ? restWorld.Translation
+                : throw new InvalidDataException($"{sfx}: bone {BoneName(pipe.BonePaths, hash)} of '{dir}' has a bind that cannot be inverted");
+            var copyCache = PoseRouteFor(req.OutDir, sfx, partMeta, anchorIdx, partArts,
+                tierWork, tierMeta, groupSections, ties, tiePairs, tierOrphans, plan.Pooled, UnionSlot, RestOrigin,
+                pipe.BonePaths, (int)nextSlot, vcount, vb1Stride, vb1Variants, ibFmt, draws, PoseWindowVertices, diagnostics);
+            if (copyCache is not null)
+                // The pose route converts nothing through witnesses or constants. The witness rows the plan
+                // kept stay in the operators, which were solved with them (dropping them now would take a
+                // second solve), and the lines saying why they were kept are withdrawn.
+                foreach (string line in chainOnly.Concat(plan.WitnessLines)) diagnostics.RemoveAt(diagnostics.LastIndexOf(line));
+            else if (plan.Pooled is not null)
+                // The chain stays after all (no vertices, a palette too wide). The rows the plan kept to place
+                // parts stay retained for the same reason, and place nothing, so the lines saying why go.
+                foreach (string line in plan.PlacementLines) diagnostics.RemoveAt(diagnostics.LastIndexOf(line));
+            if (copyCache is null)
+                File.WriteAllText(Path.Combine(req.OutDir, $"skin_cs_{sfx}.hlsl"), ComputeTemplates.EmitSkin(vcount));
+            else
+                // the chain's own files, written above before the shape was settled, are read by nothing
+                foreach (string stale in new[] { $"palette_seed_{sfx}.buf", $"owner_part_{sfx}.buf", $"convert_witness_{sfx}.hlsl" }
+                             .Concat(Enumerable.Range(0, ComputeTemplates.ConvertChunks(parts.Count)).Select(c => ConvertFile(sfx, c)))
+                             .Concat(tierTies.Keys.Select(suffix => $"tiertie_{suffix}_{sfx}.hlsl"))
+                             .Concat(ties.Select(tie => $"tiefill_{tie.Part}_{sfx}.hlsl")))
+                    File.Delete(Path.Combine(req.OutDir, stale));
 
             // ---- per-submesh maps ---------------------------------------------------------------------
             var subMaps = SubMapsFor(sfx, subTexOverrides, draws.Count);
@@ -2373,8 +3799,32 @@ public sealed partial class MigotoEmitter
                 tierMeta, lod0WitnessConvert, pipe.ToggleKey, pipe.Latch, pipe.HideWhenOff, pipe.HiddenBy,
                 pipe.ShownBy, pipe.SuppressWhen,
                 groupSections, groupClaims, ties, tierTies,
-                pipe.PresenceHashes, pipe.AnchorShapes));
+                pipe.PresenceHashes, pipe.AnchorShapes, vb1Variants, tierVb1, foldedOps, copyCache));
         }
+
+        // every mesh's gather draws through the one pixel shader, and every pose pass through the one
+        // fullscreen vertex shader
+        if (pipes.Any(p => p.PoseRoute is not null))
+        {
+            File.WriteAllText(Path.Combine(req.OutDir, GatherPixelFile), ComputeTemplates.EmitGatherPixel());
+            File.WriteAllText(Path.Combine(req.OutDir, PoseFullscreenFile), ComputeTemplates.EmitPoseFullscreen());
+        }
+        // the pooled route's capture and frame passes, one shader of each per mod, and the ring slots' numbers;
+        // each source mesh's ring gather and stamp ship beside its packet layout above
+        if (pipes.Any(p => p.PoseRoute?.Sources is not null))
+        {
+            File.WriteAllText(Path.Combine(req.OutDir, PoseCaptureVsFile), ComputeTemplates.EmitPoseCaptureVertex());
+            File.WriteAllText(Path.Combine(req.OutDir, PoseCapturePsFile), ComputeTemplates.EmitPoseCapturePixel());
+            File.WriteAllText(Path.Combine(req.OutDir, PoseFrameFile), ComputeTemplates.EmitPoseFrame(FrameWrap));
+            for (int k = 0; k < PoseRingEntries; k++)
+                File.WriteAllBytes(Path.Combine(req.OutDir, RingSlotFile(k)), UIntBytes(new[] { (uint)k }));
+        }
+
+        // A solved operator file every one of its pipelines replaced with a converted copy is bound by
+        // nothing, so it does not ship.
+        foreach (string name in convertedOperators)
+            if (!solvedOperatorUsers.Contains(name))
+                File.Delete(Path.Combine(req.OutDir, $"{name}_cpinv.buf"));
 
         // ---- rigid replacements: the compiled donor streams, shipped and drawn as they are ---------------
         // No capture, no palette, no compute: the streams are already in the replaced part's own layout, so
@@ -2416,11 +3866,22 @@ public sealed partial class MigotoEmitter
 
                 var subMaps = SubMapsFor(sfx, r.SubTextures ?? new Dictionary<int, SubmeshMaps>(), draws.Count);
 
+                // the tiers' draws read these streams through their OWN meshes' layouts
+                var builtFor = MetaChannels.Read(r.DonorDir);
+                var tierLayouts = (r.TierHashes ?? Array.Empty<string>()).Select(h =>
+                    r.TierLayouts is not null && r.TierLayouts.TryGetValue(h, out var tl)
+                        ? new TierLayout(h, tl.Mesh, null, tl.Channels)
+                        : new TierLayout(h, h, null, null)).ToList();
+                var (vb0Variants, tierVb0) = StreamVariants(req.OutDir, $"rigid_vb0_{sfx}", vcount, builtFor,
+                    stream: 0, tierLayouts, diagnostics);
+                var (vb1Variants, tierVb1) = StreamVariants(req.OutDir, $"rigid_vb1_{sfx}", vcount, builtFor,
+                    stream: 1, tierLayouts, diagnostics);
+
                 rigids.Add(new RigidEmission(sfx, r.Hashes.ToList(),
                     streams.FirstOrDefault(s => s.Stream == 0).Stride,
                     hasVb1 ? streams.FirstOrDefault(s => s.Stream == 1).Stride : null,
                     ibFmt, draws, subMaps, r.ToggleKey, r.Latch, r.HideWhenOff, r.HiddenBy, r.ShownBy,
-                    r.SuppressWhen, r.ShapesByHash));
+                    r.SuppressWhen, r.ShapesByHash, r.MapsByHash, vb0Variants, tierVb0, vb1Variants, tierVb1, r.Part ?? sfx));
             }
         }
 
@@ -2466,12 +3927,27 @@ public sealed partial class MigotoEmitter
         // walk and the emission all read the same dictionary
         var guards = GuardsByHash(req.TwinGuards);
         RefuseTagCollisions(slotTags.Select(t => (Hash: t.Hash, Part: t.Part))
-                .Concat(propertyTags.Select(t => (t.Hash, t.Part)))
-                .Concat((req.StockRamps ?? Array.Empty<StockRampBind>())
-                    .Select(b => (Hash: b.MaterialHash, Part: b.Part))),
+                .Concat(propertyTags.Select(t => (t.Hash, t.Part))),
             (req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>())
                 .Select(e => (Hash: e.StockHash, Part: e.Part)),
-            MintedTwinTagHashes(guards.Values).Select(h => (Hash: h, Part: "")));
+            MintedProbeTagHashes(guards.Values, req.StockRamps, req.StockDraws)
+                .Select(h => (Hash: h, Part: "")),
+            BufferTags(req.MeshLabels, req.Pipelines
+                .SelectMany(p => p.CaptureHashes?.Values ?? Enumerable.Empty<string>())
+                // a pool's lod0 captures, its tiers' captures and every group member's captured draws all
+                // open sections of their own, so every one of their keys is walked
+                .Concat(req.Pipelines.SelectMany(p => (p.Tiers ?? Array.Empty<PoolTier>()).Select(t => t.CaptureHash)))
+                .Concat(req.Pipelines.SelectMany(p => (p.Groups ?? Array.Empty<PoolGroup>())
+                    .SelectMany(g => g.Members).SelectMany(m => m.Meshes ?? Array.Empty<PoolGroupMesh>())
+                    .Select(m => m.CaptureHash)))
+                .Concat(reqRigids.SelectMany(r => new[] { r.Hash }.Concat(r.TierHashes ?? Array.Empty<string>())))
+                .Concat(req.HideHashes ?? Array.Empty<string>())
+                .Concat((req.Latches ?? Array.Empty<WitnessLatch>()).SelectMany(l => l.WitnessIbs))
+                .Concat((req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>())
+                    .SelectMany(e => e.Images.SelectMany(i => i.Anchors.Select(a => a.Hash))))
+                .Concat((req.StockRamps ?? Array.Empty<StockRampBind>()).Select(b => b.IbHash))
+                .Concat((req.StockDraws ?? Array.Empty<StockDrawSite>()).Select(s => s.IbHash))
+                .Concat((req.TwinSightings ?? Array.Empty<TwinSighting>()).Select(t => t.Hash))));
         var hides = (req.HideHashes ?? Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToList();
         var units = BuildCaptureUnits(pipes, req.ToggleKey, guards, req.HiddenFlags);
         foreach (var h in hides)
@@ -2500,7 +3976,6 @@ public sealed partial class MigotoEmitter
                         + "apart, so this mod can't be built");
                 rigidOwner[h] = r;
             }
-        RefuseHiddenRampMeshes(hides, req.StockRamps);
         // Presence latches. Group members latch PER MESH (each fused dispatch reads its own mesh's
         // buffer). Pool parts latch PER PART — one latch sighted by the part's lod0, every tier, and any
         // dropped-tier hash the builder recorded (a dropped tier's vanilla draw still proves the part is
@@ -2511,6 +3986,9 @@ public sealed partial class MigotoEmitter
         // verdict. The anchor needs none: the chain firing IS its draw.
         var meshLatches = pipes.SelectMany(p =>
             {
+                // the pooled route reads no latch: a part with no copy found at a draw takes the tie rows
+                // at that draw
+                if (p.PoseRoute?.Sources is not null) return Enumerable.Empty<(string Name, string Hash)>();
                 string anchor = p.PartMeta[p.AnchorIdx].Part;
                 return p.GroupMembers.Where(m => !m.AtDraw).Select(m => (m.Name, m.Hash))
                     .Concat(p.PartMeta
@@ -2544,23 +4022,48 @@ public sealed partial class MigotoEmitter
         var allLatches = (req.Latches ?? Array.Empty<WitnessLatch>()).Concat(meshLatches).ToList();
         var sightings = RouteSightings(allLatches, units, hides, req.ScopedRetextures, rigidOwner.Keys,
             new HashSet<string>(guards.Keys, StringComparer.Ordinal),
-            LiveSightings(req.TwinSightings, guards.Values), req.StockRamps);
+            LiveSightings(req.TwinSightings, guards.Values), req.StockRamps, req.StockDraws);
+        // Grouped ahead of the retexture text: a group at an unreplaced part's own draw is written inside
+        // that part's section, which the retexture text composes.
+        var materialPatches = MaterialPatchGroups(req.MaterialPatches, pipes, rigids, req.OutDir,
+            req.StockDraws);
+        WriteMaterialPatchShaders(req.OutDir, materialPatches);
         // A hidden mesh that a scoped retexture also anchors on owns ONE section; this is where the
         // retexture hands its body over, and the hide section below writes it out.
         var hideScope = HideScope(hides);
         string retexIni = req.Retextures is { Count: > 0 } || req.ScopedRetextures is { Count: > 0 }
-                          || req.StockRamps is { Count: > 0 } || guards.Count > 0
+                          || req.StockRamps is { Count: > 0 } || req.StockDraws is { Count: > 0 }
+                          || guards.Count > 0
             ? RetexIni(req.Retextures ?? Array.Empty<RetexEntry>(), req.OutDir, req.ToggleKey,
-                req.ScopedRetextures, units, sightings, rigidOwner, guards.Values, tagKinds,
-                req.StockRamps, hideScope)
+                req.ScopedRetextures, units, sightings, rigidOwner, guards, tagKinds,
+                req.StockRamps, hideScope, req.StockDraws, materialPatches)
             : "";
-        var materialPatches = MaterialPatchGroups(req.MaterialPatches, pipes, rigids, req.OutDir);
         string ini = EmitIni(pipes, rigids, units, hides, sightings, slotTags, propertyTags, slimParts,
-            req.ToggleKey, req.HideKeys, req.Retextures ?? Array.Empty<RetexEntry>(),
-            req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), allLatches, req.HideLatches,
+            req.ToggleKey, req.HideClaims, req.Retextures ?? Array.Empty<RetexEntry>(),
+            req.ScopedRetextures ?? Array.Empty<ScopedRetexEntry>(), allLatches,
             req.KeysStartingOff, guards, req.StockRamps, materialPatches, req.KeyCycles,
-            req.HiddenFlags, hideScope, req.ShownFlags, req.PersistToggleKey) + retexIni;
-        File.WriteAllText(Path.Combine(req.OutDir, "mod.ini"), ini);
+            req.HiddenFlags, hideScope, req.ShownFlags, req.PersistToggleKey, req.StockDraws, req.AppVersion, req.MeshLabels,
+            tail: retexIni);
+        // A slim operator's vertex list is written with the operator and declared with the mesh; a mesh
+        // that only cached pipelines recover reads it through its packet instead, so a list no section
+        // binds is neither declared nor shipped. Its offsets stay: the kernel binds them.
+        var boundSel = new HashSet<string>(
+            Regex.Matches(ini, @"^[^\[\n][^\n]* = Resource_(.+)_Sel$", RegexOptions.Multiline).Select(m => m.Groups[1].Value),
+            StringComparer.Ordinal);
+        ini = Regex.Replace(ini,
+            @"^\[Resource_(?<m>[^\]\n]+)_Sel\]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = \k<m>_sel\.buf\n",
+            m => boundSel.Contains(m.Groups["m"].Value) ? m.Value : "", RegexOptions.Multiline);
+        foreach (string name in slimParts)
+            if (!boundSel.Contains(name))
+                File.Delete(Path.Combine(req.OutDir, $"{name}_sel.buf"));
+        File.WriteAllText(Path.Combine(req.OutDir, "mod.ini"), DrawSelectorIni.Lower(ini));
+        // A recover shader is written for every solved operator; a mesh whose every pipeline caches
+        // reads its operator from the cache kernel instead, and the shader is read by nothing.
+        var recoverShaders = new HashSet<string>(
+            Regex.Matches(ini, @"^cs = (recover_.+_cs\.hlsl)$", RegexOptions.Multiline).Select(m => m.Groups[1].Value),
+            StringComparer.OrdinalIgnoreCase);
+        foreach (string file in Directory.GetFiles(req.OutDir, "recover_*_cs.hlsl"))
+            if (!recoverShaders.Contains(Path.GetFileName(file))) File.Delete(file);
 
         foreach (var grouped in mergedTierWarnings.GroupBy(w => (w.AffectedPart, w.Tier)))
         {
@@ -2587,49 +4090,60 @@ public sealed partial class MigotoEmitter
     /// empty.</summary>
     public Result BuildOverlaysOnly(string outDir, IReadOnlyList<RetexEntry>? entries,
         IReadOnlyList<string>? hideHashes = null, string? modKey = null,
-        IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? hideKeys = null,
+        IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? hideClaims = null,
         IReadOnlyList<ScopedRetexEntry>? scopedEntries = null,
         IReadOnlyList<WitnessLatch>? latches = null,
-        IReadOnlyDictionary<string, string>? hideLatches = null,
         IReadOnlyCollection<string>? keysStartingOff = null,
         IReadOnlyList<TwinGuard>? twinGuards = null,
         IReadOnlyList<TwinSighting>? twinSightings = null,
         IReadOnlyList<StockRampBind>? stockRamps = null,
         IReadOnlyList<KeyCycle>? keyCycles = null,
         IReadOnlyList<ShownFlag>? shownFlags = null,
-        bool persistToggleKey = false)
+        bool persistToggleKey = false,
+        IReadOnlyDictionary<string, string>? meshLabels = null,
+        IReadOnlyList<MaterialPatchEmission>? materialPatches = null,
+        IReadOnlyList<StockDrawSite>? stockDraws = null, string? appVersion = null)
     {
         var retex = entries ?? Array.Empty<RetexEntry>();
         var shown = shownFlags ?? Array.Empty<ShownFlag>();
         var scoped = scopedEntries ?? Array.Empty<ScopedRetexEntry>();
         var ramps = stockRamps ?? Array.Empty<StockRampBind>();
+        var sites = stockDraws ?? Array.Empty<StockDrawSite>();
         var guards = GuardsByHash(twinGuards);
         // deduped for the same reason the pooled path dedupes: one hash gets one owning TextureOverride —
         // the runtime runs every match-passing section, so a second hide would just repeat the same skip
         var hides = (hideHashes ?? Array.Empty<string>()).Distinct(StringComparer.Ordinal).ToList();
-        if (retex.Count == 0 && scoped.Count == 0 && hides.Count == 0 && ramps.Count == 0)
+        if (retex.Count == 0 && scoped.Count == 0 && hides.Count == 0 && ramps.Count == 0 && sites.Count == 0)
             throw new InvalidOperationException(
-                "overlay-only build with no retextures, no ramp picks and no hides");
-        RefuseHiddenRampMeshes(hides, ramps);
-        // No pipelines here, so nothing slot-tags an anchor's stock maps: every hash is a retexture's, a
-        // twin guard's, or the map a ramp pick sights its material by.
-        RefuseTagCollisions(ramps.Select(b => (Hash: b.MaterialHash, Part: b.Part)),
+                "overlay-only build with no retextures, no ramp picks, no shading changes and no hides");
+        // No pipelines here, so nothing slot-tags an anchor's stock maps: every hash is a retexture's or a
+        // twin guard's.
+        RefuseTagCollisions(Array.Empty<(string Hash, string Part)>(),
             scoped.Select(e => (Hash: e.StockHash, Part: e.Part)),
-            MintedTwinTagHashes(guards.Values).Select(h => (Hash: h, Part: "")));
+            MintedProbeTagHashes(guards.Values, ramps, sites).Select(h => (Hash: h, Part: "")),
+            BufferTags(meshLabels, hides
+                .Concat((latches ?? Array.Empty<WitnessLatch>()).SelectMany(l => l.WitnessIbs))
+                .Concat(scoped.SelectMany(e => e.Images.SelectMany(i => i.Anchors.Select(a => a.Hash))))
+                .Concat(ramps.Select(b => b.IbHash))
+                .Concat(sites.Select(s => s.IbHash))
+                .Concat((twinSightings ?? Array.Empty<TwinSighting>()).Select(t => t.Hash))));
         Directory.CreateDirectory(outDir);
         // no pipelines here, so no hash is capture-claimed; a sighting still routes into the hide or
         // scoped-anchor section that owns its ib
         var units = BuildCaptureUnits(Array.Empty<PipelineEmission>(), modKey, guards);
         var sightings = RouteSightings(latches, units, hides, scoped,
-            twins: LiveSightings(twinSightings, guards.Values), stockRamps: ramps);
+            twins: LiveSightings(twinSightings, guards.Values), stockRamps: ramps, stockDraws: sites);
+        var patchGroups = MaterialPatchGroups(materialPatches, new List<PipelineEmission>(),
+            new List<RigidEmission>(), outDir, sites);
+        WriteMaterialPatchShaders(outDir, patchGroups);
         var P = new StringBuilder();
-        P.Append(OverlayIniHeader).Append('\n');
         // an overlay-only mod has no [Constants] of its own, so a keyed or latched one declares its
         // variables here or every gate would test an undefined name
-        var overlayKeys = hides.SelectMany(h => HideKeys(hideKeys, h).Select(k => (KeyRef?)k))
+        var overlayKeys = hides.SelectMany(h => HideClaimKeys(hideClaims, h).Select(k => (KeyRef?)k))
             .Concat(retex.SelectMany(r => r.Images).Select(i => i.ToggleKey))
             .Concat(scoped.SelectMany(r => r.Images).Select(i => i.ToggleKey))
             .Concat(ramps.Select(b => b.ToggleKey))
+            .Concat(sites.Select(s => s.ToggleKey))
             // a change gated on a content flag carries no key term of its own, so the key that raises the
             // flag is declared from the flag's own positions or from nowhere
             .Concat(shown.SelectMany(f => f.WhenAny).Select(k => (KeyRef?)k)).ToList();
@@ -2642,8 +4156,7 @@ public sealed partial class MigotoEmitter
             P.Append("[Constants]\n");
             if (scoped.Count > 0) P.Append($"global ${VarRetexProbe} = 0\nglobal ${VarRetexSlot} = 0\n");
             if (ramps.Count > 0)
-                P.Append($"global ${VarRampSlot} = 0\nglobal ${VarStockRampProbe} = 0\n"
-                       + $"global ${VarStockRampSeen} = 0\n");
+                P.Append($"global ${VarRampSlot} = 0\nglobal ${VarStockRampProbe} = 0\n");
             if (guards.Count > 0)
             {
                 // the slot probe belongs to the guards that carry tags; a build whose verdicts all arrive
@@ -2651,7 +4164,7 @@ public sealed partial class MigotoEmitter
                 if (guards.Values.Any(g => g.Tags.Count > 0)) P.Append($"global ${VarProbe} = 0\n");
                 foreach (var v in TwinVars(guards.Values)) P.Append($"global ${v} = 0\n");
                 // the multi-verdict guards' scratch, rewritten at every guard it opens rather than carried
-                if (TwinScratchNeeded(guards.Values)) P.Append($"global ${VarTwinOk} = 0\n");
+                if (TwinScratchNeeded(guards.Values, hides)) P.Append($"global ${VarTwinOk} = 0\n");
             }
             foreach (var l in lat)
                 P.Append($"global ${GateVar(l.Name)} = 0\nglobal ${SeenVar(l.Name)} = 0\n");
@@ -2680,13 +4193,15 @@ public sealed partial class MigotoEmitter
         }
         P.Append(KeysIni(modKey, overlayKeyNames, keysStartingOff, keyCycles, shown.Count > 0));
         P.Append(WitnessIni(sightings));
+        EmitMaterialPatchSections(P, patchGroups);
         // Built ahead of the hide sections and appended after them, unchanged in the emitted order: a
         // scoped retexture anchored on a hidden draw hands its body to that draw's one section, and this
         // is what fills it.
         var hideScope = HideScope(hides);
         string retexTail = retex.Count > 0 || scoped.Count > 0 || guards.Count > 0 || ramps.Count > 0
-            ? RetexIni(retex, outDir, modKey, scoped, units, sightings, null, guards.Values,
-                null, ramps, hideScope)
+                           || sites.Count > 0
+            ? RetexIni(retex, outDir, modKey, scoped, units, sightings, null, guards,
+                null, ramps, hideScope, sites, patchGroups)
             : "";
         for (int i = 0; i < hides.Count; i++)
         {
@@ -2695,22 +4210,27 @@ public sealed partial class MigotoEmitter
             // absent the frame it comes back on
             if (sightings.ByHash.TryGetValue(hides[i], out var seen))
                 foreach (var line in seen) P.Append(line).Append('\n');
-            // this hash also fires on a sibling mesh's draws, so the skip waits for the probe to find
-            // the hidden mesh's own tagged texture bound
-            bool hideGuarded = OpenTwinGuardIfAny(P, guards, hides[i]);
-            foreach (var gate in CollapseSkips(HideGates(hideKeys, hides[i], modKey,
-                LatchTerms(HideLatch(hideLatches, hides[i]))), modKey, keyCycles))
-            {
-                gate.Open(P);
-                P.Append("handling = skip\n");
-                gate.Close(P);
-            }
-            CloseTwinGuard(P, hideGuarded);
+            // where this hash also fires on a sibling mesh's draws, each skip waits for the probe to find
+            // its own hidden mesh's tagged texture bound
+            AppendHideSkips(P, guards, hideClaims, hides[i], modKey, keyCycles);
             foreach (var line in HideScopeLines(hideScope, hides[i])) P.Append(line).Append('\n');
             P.Append("\n");
         }
         P.Append(retexTail);
-        File.WriteAllText(Path.Combine(outDir, "mod.ini"), P.ToString());
+        // the header says what the finished file holds, so it is written last and goes first
+        var (_, overlayPasses, overlayRetex) = IniMarkers(P.ToString());
+        P.Insert(0, IniHeader(appVersion, new ModSummary(0,
+            hides.Select(h => meshLabels is not null && meshLabels.TryGetValue(h, out var l) ? l : h)
+                .Distinct(StringComparer.Ordinal).Count(),
+            retex.Select(r => r.Hash).Concat(scoped.Select(e => e.StockHash))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            ramps.Count > 0 || patchGroups.Count > 0, modKey,
+            StateKeys(modKey, overlayKeyNames, keyCycles))
+        {
+            MaterialPasses = overlayPasses,
+            Retextures = overlayRetex,
+        }) + "\n");
+        File.WriteAllText(Path.Combine(outDir, "mod.ini"), DrawSelectorIni.Lower(P.ToString()));
         return new Result(outDir, 0, 0, Array.Empty<string>(), Array.Empty<string>());
     }
 
@@ -2725,27 +4245,98 @@ public sealed partial class MigotoEmitter
         string hash) => scope is not null && scope.TryGetValue(hash, out var lines)
             ? lines : Array.Empty<string>();
 
-    /// <summary>The per-hide presence latch for one hash, or null when that hide waits on none.</summary>
-    static string? HideLatch(IReadOnlyDictionary<string, string>? latches, string hash) =>
-        latches is not null && latches.TryGetValue(hash, out var l) ? l : null;
-
-    /// <summary>The per-hide key positions for one hash — the OR-list of states demanding that draw
-    /// suppressed, empty when the hide carries no key and so holds in every state.</summary>
-    static IReadOnlyList<KeyRef> HideKeys(IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? keys,
+    /// <summary>Every key position any claim on one hash names, for the declarations: a variable one
+    /// claim tests has to exist whichever claim the build met first.</summary>
+    static IEnumerable<KeyRef> HideClaimKeys(IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? claims,
         string hash) =>
-        keys is not null && keys.TryGetValue(hash, out var k) ? k : Array.Empty<KeyRef>();
+        claims is not null && claims.TryGetValue(hash, out var named)
+            ? named.SelectMany(claim => claim.Keys) : Array.Empty<KeyRef>();
 
-    /// <summary>The gates one hide emits: one per key position demanding it, or a single keyless gate
-    /// when nothing narrows it. Each becomes its own guarded <c>handling = skip</c>, so the suppression
-    /// is the OR across the states that ask for it.</summary>
-    static List<Gate> HideGates(IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? keys, string hash,
-        string? modKey, IEnumerable<GateVarState>? rawTerms)
+    /// <summary>The claims one hide answers. A hash no claim names hides in every state: at each of its
+    /// twin guard's own verdicts where a guard holds it, else at every draw.</summary>
+    static IReadOnlyList<HideClaim> HideClaimsOn(IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? claims,
+        string hash, TwinGuard? guard)
     {
-        var terms = HideKeys(keys, hash);
-        return terms.Count == 0
-            ? new List<Gate> { new(new KeyRef?[] { ModTerm(modKey) }, rawTerms) }
-            : terms.Select(term => new Gate(new KeyRef?[] { ModTerm(modKey), term }, rawTerms))
-                .ToList();
+        if (claims is not null && claims.TryGetValue(hash, out var named) && named.Count > 0) return named;
+        return guard is null
+            ? new[] { new HideClaim(Array.Empty<KeyRef>()) }
+            : guard.OwnVerdicts.Select(v => new HideClaim(Array.Empty<KeyRef>(), Verdict: v)).ToList();
+    }
+
+    /// <summary>A hide section's skips: the OR across every claim on the hash. Each claim's key positions
+    /// stand on that claim's OWN presence latch and, under a twin guard, its OWN mesh's verdict, so one
+    /// change's states never skip another change's outfit or sibling mesh. Where every claim names the
+    /// same verdict the guard opens once around them all, which is the section a single claim has always
+    /// emitted. A skip whose conditions another skip already covers is dropped.</summary>
+    void AppendHideSkips(StringBuilder P, IReadOnlyDictionary<string, TwinGuard> guards,
+        IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? claims, string hash, string? modKey,
+        IReadOnlyList<KeyCycle>? keyCycles)
+    {
+        var guard = guards.TryGetValue(hash, out var found) ? found : null;
+        var onHash = HideClaimsOn(claims, hash, guard);
+        foreach (var claim in onHash)
+            if (claim.Verdict is { } v && (guard is null || !guard.OwnVerdicts.Contains(v)))
+                throw new InvalidOperationException(
+                    $"the hide on {hash} claims twin verdict {v}, which no guard on that hash admits");
+        var verdicts = onHash.Select(claim => claim.Verdict).Distinct().ToList();
+        int? shared = guard is not null && verdicts.Count == 1 ? verdicts[0] : null;
+        if (guard is not null) AppendTwinProbe(P, guard);
+        if (shared is { } common) P.Append($"if ${guard!.Var} == {common}\n");
+        var gates = new List<Gate>();
+        foreach (var claim in onHash)
+        {
+            var raw = new List<GateVarState>(LatchTerms(claim.Latch) ?? Array.Empty<GateVarState>());
+            if (shared is null && claim.Verdict is { } own) raw.Add(new GateVarState(guard!.Var, own));
+            var mine = claim.Keys.Count == 0
+                ? new List<Gate> { new(new KeyRef?[] { ModTerm(modKey) }, raw) }
+                : claim.Keys.Select(term => new Gate(new KeyRef?[] { ModTerm(modKey), term }, raw)).ToList();
+            gates.AddRange(CollapseSkips(mine, modKey, keyCycles));
+        }
+        foreach (var gate in CollapseSkips(Uncovered(gates), modKey, keyCycles))
+        {
+            gate.Open(P);
+            P.Append("handling = skip\n");
+            gate.Close(P);
+        }
+        if (shared is not null) P.Append("endif\n");
+    }
+
+    /// <summary>The gates no other gate already covers. A duplicate skips exactly where its first copy
+    /// does, and a gate standing on every term of another plus more skips only where the other already
+    /// does.</summary>
+    static List<Gate> Uncovered(List<Gate> gates)
+    {
+        var distinct = gates.GroupBy(gate => gate.Id, StringComparer.Ordinal)
+            .Select(group => group.First()).ToList();
+        return distinct.Where(gate => !distinct.Any(other => other.Terms.Length < gate.Terms.Length
+            && other.Terms.All(gate.Terms.Contains))).ToList();
+    }
+
+    /// <summary>The gate a pipeline's draw, and every pass run for it, sits inside: the mod's key, the
+    /// change's own key, its presence latch and content flag, and the hider flag of a group that takes it off
+    /// screen.</summary>
+    static Gate DrawGateOf(PipelineEmission pipe, string? modKey)
+    {
+        var contentVars = With(LatchTerms(pipe.Latch), ShownTerm(pipe.ShownBy));
+        return new Gate(new KeyRef?[] { ModTerm(modKey), pipe.ToggleKey },
+            pipe.HiddenBy is null ? contentVars : With(contentVars, HiddenTerm(pipe.HiddenBy)));
+    }
+
+    /// <summary><paramref name="body"/> run while any one of <paramref name="gates"/> holds, once whichever
+    /// of them do: bare where one always holds, inside that gate where only one is left once the gates
+    /// another covers are dropped, and otherwise under one test joining each gate's conditions with
+    /// <c>&amp;&amp;</c> and the gates with <c>||</c>.</summary>
+    static IEnumerable<string> WrapAny(IReadOnlyList<Gate> gates, IEnumerable<string> body)
+    {
+        var any = Uncovered(gates.ToList());
+        if (any.Count == 0 || any.Any(g => g.IsAlwaysOn)) return body;
+        if (any.Count == 1) return any[0].Wrap(body);
+        return new[]
+            {
+                "if " + string.Join(" || ", any.Select(g =>
+                    "(" + string.Join(" && ", g.Terms.Select(t => $"${t.Var} == {t.State}")) + ")")),
+            }
+            .Concat(body).Append("endif");
     }
 
     // ---- ini emission (LF; the emission contract) ---------------------------------------------------
@@ -2781,6 +4372,16 @@ public sealed partial class MigotoEmitter
         public void Run(string line) => RunLines.Add(line);
         public void Suppress(Gate gate) { if (_skipSeen.Add(gate.Id)) SkipGates.Add(gate); }
         public bool Skips => SkipGates.Count > 0;
+        /// <summary>The pooled route's ring of each source mesh this hash draws, first-seen order, with the
+        /// draw gate of every pipeline reading it: the ring passes run while any of those pipelines is on
+        /// (see <see cref="WrapAny"/>), once whichever of them are.</summary>
+        public readonly List<(string Mesh, List<Gate> Gates)> Rings = new();
+        public void Ring(string mesh, Gate gate)
+        {
+            int at = Rings.FindIndex(r => r.Mesh == mesh);
+            if (at < 0) Rings.Add((mesh, new List<Gate> { gate }));
+            else if (Rings[at].Gates.All(g => g.Id != gate.Id)) Rings[at].Gates.Add(gate);
+        }
         /// <summary>Per-submesh draw routing for this section's hash, when the replaced mesh has several
         /// submeshes: the donor draw leaves the chain above and moves into extra sections on the same
         /// hash, each matching one vanilla submesh draw's shape, so donor range k renders under submesh
@@ -2793,13 +4394,67 @@ public sealed partial class MigotoEmitter
     }
 
     /// <summary>One pipeline's routed donor draw: the command-list namespace (the pipeline suffix), the
-    /// replaced mesh's vanilla shape set, the draw's gate, and the donor's own draw count. Donor range k
-    /// belongs to vanilla submesh k; ranges past the last vanilla submesh join it.</summary>
+    /// replaced mesh's vanilla shape set at THIS section's detail level, the draw's gate, and the donor's
+    /// own draw count. Donor range k belongs to vanilla submesh k; ranges past the last vanilla submesh
+    /// join it.
+    ///
+    /// <para><paramref name="Map"/> and <paramref name="AnchorShapes"/> are the tier reading: the donor
+    /// range's material position is read off the ANCHOR's (lod0) shapes, then the map says which of this
+    /// tier's positions carries that region — or that the tier draws it nowhere, in which case the range
+    /// is not drawn here at all. Both null is the lod0 reading, where the position is the tier's own.</para>
+    ///
+    /// <para><paramref name="Pose"/> holds the pose route's passes for this draw — the gather, the palette
+    /// passes (on the pooled route also the anchor capture and each source mesh's pick and take) and the
+    /// skin passes — which every routed section runs inside this draw's gate before its lists,
+    /// skinning only the pieces of the ranges that section draws, so the passes run only where a replacement
+    /// draws. The gather reads that draw's own vertices, except for a lower-detail mesh that supplies no
+    /// bones of its own, whose gather reads the lod0 capture's reference as the build log says. Null for a
+    /// pooled chain, whose compute stays in the capture section, and for a rigid draw.</para></summary>
     sealed record RoutedDraw(string Sfx, DrawShapeSet Shapes, Gate DrawGate, int DonorDraws,
-        bool IsRigid = false);
+        bool IsRigid = false, DrawShapeSet? AnchorShapes = null, TierMaterialMap? Map = null,
+        PosePasses? Pose = null)
+    {
+        /// <summary>The material position of this section's mesh that donor range <paramref name="donorDraw"/>
+        /// renders under, or -1 when the tier carries that range's region nowhere and it is not drawn.</summary>
+        public int TargetPosition(int donorDraw) =>
+            RoutedTargetPosition(Shapes, AnchorShapes, Map, donorDraw);
+
+        /// <summary>Every donor range this section draws, in range order. Short of the full list when the
+        /// map drops one, which is what keeps a dropped range out of the whole-mesh pass too.</summary>
+        public IEnumerable<int> CarriedDraws =>
+            Enumerable.Range(0, DonorDraws).Where(di => TargetPosition(di) >= 0);
+
+        /// <summary>The map leaves at least one donor range with nowhere to draw at this detail level.</summary>
+        public bool DropsAnyDraw => RoutedDropsAnyDraw(Shapes, AnchorShapes, Map, DonorDraws);
+    }
+
+    /// <summary>Which material position of the section's own mesh donor range <paramref name="donorDraw"/>
+    /// renders under. WITHOUT a map that is the fold on the section's own shapes, which is what the lod0
+    /// draw and every legacy caller mean. WITH one the range's position is read on the anchor's (lod0's)
+    /// shapes and then carried to this tier, and -1 says the tier draws that region nowhere.</summary>
+    static int RoutedTargetPosition(DrawShapeSet shapes, DrawShapeSet? anchorShapes, TierMaterialMap? map,
+        int donorDraw)
+    {
+        if (map is null) return DrawMaterialFold.TargetMaterialPosition(shapes, donorDraw);
+        int lod0 = DrawMaterialFold.TargetMaterialPosition(anchorShapes ?? shapes, donorDraw);
+        if (lod0 < 0) return -1;
+        // a position the map says nothing about keeps the fold it has always taken, never a dropped range
+        return map.TryCarrier(lod0, out var carrier)
+            ? carrier ?? -1
+            : DrawMaterialFold.TargetMaterialPosition(shapes, donorDraw);
+    }
+
+    /// <summary>At least one donor range has nowhere to draw under this map. The reason a one-submesh tier
+    /// still routes: holding a range back needs the per-range lists.</summary>
+    static bool RoutedDropsAnyDraw(DrawShapeSet shapes, DrawShapeSet? anchorShapes, TierMaterialMap? map,
+        int donorDraws) =>
+        map is not null && Enumerable.Range(0, donorDraws)
+            .Any(di => RoutedTargetPosition(shapes, anchorShapes, map, di) < 0);
 
     /// <summary>The build's capture sections, in emission order and by the hash each one owns.</summary>
-    sealed record CaptureUnits(List<CaptureUnit> Ordered, Dictionary<string, CaptureUnit> ByHash);
+    /// <summary>The capture sections, and every pose block they and their routed draw sections run
+    /// (<see cref="PosePasses.Block"/>), declared with the pose sections.</summary>
+    sealed record CaptureUnits(List<CaptureUnit> Ordered, Dictionary<string, CaptureUnit> ByHash, List<string> PoseBlocks);
 
     /// <summary>
     /// One capture section per unique ib hash, merged across the pipelines that pool the mesh: a part in
@@ -2814,14 +4469,17 @@ public sealed partial class MigotoEmitter
         IReadOnlyDictionary<string, TwinGuard> guards,
         IReadOnlyList<HiddenFlag>? hiddenFlags = null)
     {
-        // A hash routes its donor draw per submesh only when the replaced mesh really has several
-        // DRAWABLE submeshes (a zero-index-count submesh is a material slot with no geometry — the game
-        // issues no draw for it) AND the hash carries no twin guard: a guarded section's draw must stay
-        // inside the guard's verdict, so a guarded multi-submesh target keeps the draw in its capture
-        // section (every range at every fire).
-        DrawShapeSet? RoutedShapes(DrawShapeSet? shapes, string hash)
-            => shapes is not null && shapes.Shapes.Count(sh => sh.Count > 0) > 1
-                && !guards.ContainsKey(hash) ? shapes : null;
+        var poseBlocks = new List<string>();
+        // A hash routes its donor draw per submesh when the replaced mesh really has several DRAWABLE
+        // submeshes (a zero-index-count submesh is a material slot with no geometry — the game issues no
+        // draw for it), OR when this tier's material map leaves a donor range with nowhere to draw, since
+        // holding that range back needs the per-range lists even on a one-submesh tier. Never when the hash
+        // carries a twin guard: a guarded section's draw must stay inside the guard's verdict, so a guarded
+        // target keeps the draw in its capture section (every range at every fire).
+        DrawShapeSet? RoutedShapes(DrawShapeSet? shapes, string hash, RoutedDraw? routed = null)
+            => shapes is not null && !guards.ContainsKey(hash)
+                && (shapes.Shapes.Count(sh => sh.Count > 0) > 1 || (routed?.DropsAnyDraw ?? false))
+                ? shapes : null;
         var ordered = new List<CaptureUnit>();
         var byHash = new Dictionary<string, CaptureUnit>(StringComparer.Ordinal);
         var takenNames = new HashSet<string>(StringComparer.Ordinal);
@@ -2867,9 +4525,7 @@ public sealed partial class MigotoEmitter
             // content flag, which is 1 in every one of those positions.
             var contentVars = With(latchVars, ShownTerm(pipe.ShownBy));
             var contentGate = new Gate(new KeyRef?[] { ModTerm(modKey), pipe.ToggleKey }, contentVars);
-            var drawGate = pipe.HiddenBy is null ? contentGate
-                : new Gate(new KeyRef?[] { ModTerm(modKey), pipe.ToggleKey },
-                    With(contentVars, HiddenTerm(pipe.HiddenBy)));
+            var drawGate = DrawGateOf(pipe, modKey);
             var skipGate = pipe.HideWhenOff
                 ? new Gate(new KeyRef?[] { ModTerm(modKey) }, latchVars) : contentGate;
             // per POOL PART: hiding the replaced part leaves this pipeline's pool mates drawing their
@@ -2885,8 +4541,21 @@ public sealed partial class MigotoEmitter
                 var u = Unit(h, $"Cap_{part}");
                 if (pipe.PartMeta[idx].Rows > 0)
                 {
-                    u.Capture($"Resource_{part}_Posed = ref vb0");
-                    u.Capture($"Resource_{part}_CB = copy vs-cb1");
+                    // On the pooled route a part the replacement takes rows from writes its ring slot at
+                    // every draw the pipeline is on for instead of a reference, and the anchor keeps its
+                    // reference only for a lower-detail mesh of its own that gathers out of it.
+                    if (pipe.PoseRoute is { Sources: not null } pooledRoute)
+                    {
+                        if (idx != pipe.AnchorIdx) u.Ring(part, drawGate);
+                        else if (pooledRoute.TierKernel.Values.Contains(part)) u.Capture($"Resource_{part}_Posed = ref vb0");
+                    }
+                    else u.Capture($"Resource_{part}_Posed = ref vb0");
+                    // The constants are read by the constants convert, and by an AT-DRAW member's rebase
+                    // of the anchor's. A witness-converted pool without such a member reads none, and
+                    // the copy is a resource copy at every fire of the part. The pose route reads none.
+                    if (pipe.PoseRoute is null
+                        && (!pipe.Lod0WitnessConvert || (idx == pipe.AnchorIdx && pipe.GroupMembers.Any(m => m.AtDraw))))
+                        u.Capture($"Resource_{part}_CB = copy vs-cb1");
                 }
                 // The sticky flag an AT-DRAW member lod0 waits on, set right where the anchor's constants
                 // land: this is the ONE capture that fills the CB its rebase reads. Never reset, so it
@@ -2894,6 +4563,8 @@ public sealed partial class MigotoEmitter
                 // need no flag — the chain itself runs at the anchor's draw.
                 if (idx == pipe.AnchorIdx && pipe.GroupMembers.Any(m => m.AtDraw))
                     u.Capture($"${GroupCbVar(sfx)} = 1");
+                if (idx == pipe.AnchorIdx && pipe.Vb1Variants.Count > 0)
+                    u.Capture($"${Vb1Var(sfx)} = 0");
                 if (pipe.NoSkip?.Contains(part) != true) u.Suppress(skipGate);
                 // one guarded skip per state that hides THIS part: hidden means nothing on screen, so the
                 // vanilla draw the content gate closes over in those positions goes too. Owed by a NoSkip
@@ -2903,25 +4574,46 @@ public sealed partial class MigotoEmitter
                     foreach (var g in partSkips) u.Suppress(g);
                 if (idx == pipe.AnchorIdx)
                 {
-                    // recover/convert/skin once per frame (the flag resets in [Present]); the DRAW runs at
-                    // every fire — suppressing draws kills shadows/outlines
-                    var chain = new List<string>
+                    var chain = new List<string>();
+                    PosePasses? pose = null;
+                    if (pipe.PoseRoute is { } route0)
                     {
-                        $"if $zz_done_{sfx} == 0",
-                    };
-                    for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
-                        RecoverRun(chain, pipe, pi, pipe.PartMeta[pi].Part, sfx);
-                    chain.Add($"run = CustomShaderConvert{(pipe.Lod0WitnessConvert ? "W" : "")}_{sfx}");
-                    MemberRuns(chain, pipe, sfx);
-                    TieRuns(chain, pipe, sfx);
-                    chain.Add($"run = CustomShaderSkin_{sfx}");
-                    chain.Add($"$zz_done_{sfx} = 1");
-                    chain.Add("endif");
-                    if (RoutedShapes(pipe.AnchorShapes, h) is { } routed0)
-                        u.RoutedDraws.Add(new RoutedDraw(sfx, routed0, drawGate, pipe.Draws.Count));
+                        // the pose passes run right before each draw of the replacement: the gather reads
+                        // that draw's own vertices, the palette pass recovers this copy's pose from them,
+                        // and a skin pass per piece writes the stream the draw list binds next. Where the
+                        // draw routes they ride the routed sections, which fire only where a replacement
+                        // draws; the capture section fires at every draw of the mesh, those no routed
+                        // section names included, where a pass would write a stream nothing reads.
+                        pose = PosePassesFor(route0, $"CustomShaderGather_{part}", part, sfx, poseBlocks);
+                    }
                     else
+                    {
+                        // recover/convert/skin once per frame (the flag resets in [Present]); the DRAW runs
+                        // at every fire — suppressing draws kills shadows/outlines
+                        chain.Add($"if $zz_done_{sfx} == 0");
+                        for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
+                            RecoverRun(chain, pipe, pi, pipe.PartMeta[pi].Part, sfx);
+                        if (pipe.Lod0WitnessConvert)
+                            chain.Add($"run = CustomShaderConvertW_{sfx}");
+                        else
+                            for (int chunk = 0; chunk < ComputeTemplates.ConvertChunks(pipe.PartMeta.Count); chunk++)
+                                chain.Add($"run = {ConvertSection(sfx, chunk)}");
+                        MemberRuns(chain, pipe, sfx);
+                        TieRuns(chain, pipe, sfx);
+                        chain.Add($"run = CustomShaderSkin_{sfx}");
+                        chain.Add($"$zz_done_{sfx} = 1");
+                        chain.Add("endif");
+                    }
+                    if (RoutedShapes(pipe.AnchorShapes, h) is { } routed0)
+                        u.RoutedDraws.Add(new RoutedDraw(sfx, routed0, drawGate, pipe.Draws.Count, Pose: pose));
+                    else
+                    {
+                        if (pose is not null) chain.Add(pose.Block(part));
                         chain.Add($"run = CommandListDraw_{sfx}");
-                    foreach (var line in drawGate.Wrap(chain)) u.Run(line);
+                    }
+                    // a routed pose draw leaves nothing to run here, and an empty gate says nothing
+                    if (chain.Count > 0)
+                        foreach (var line in drawGate.Wrap(chain)) u.Run(line);
                 }
             }
 
@@ -2932,7 +4624,13 @@ public sealed partial class MigotoEmitter
             foreach (var t in pipe.TierMeta)
             {
                 var u = Unit(t.Hash, $"Cap_{t.Name}");
-                if (t.Rows > 0) u.Capture($"Resource_{t.Name}_Posed = ref vb0");
+                // the pooled route reads a recovering tier through its ring where another part's, and never
+                // reads the anchor's own tier's reference: that tier's gather reads its draw directly
+                if (t.Rows > 0)
+                {
+                    if (pipe.PoseRoute?.Sources is null) u.Capture($"Resource_{t.Name}_Posed = ref vb0");
+                    else if (t.Part != anchor) u.Ring(t.Name, drawGate);
+                }
                 if (pipe.NoSkip?.Contains(t.Part) != true) u.Suppress(skipGate);
                 // the same per-part account the lod0 walk above emits, on the part's OTHER draws: hidden
                 // means nothing on screen at any detail, and LOD choice is not distance-only, so a tier
@@ -2943,27 +4641,53 @@ public sealed partial class MigotoEmitter
                     foreach (var g in tierSkips) u.Suppress(g);
                 if (t.Part == anchor)
                 {
-                    var chain = new List<string> { $"if $zz_done_{sfx}_{t.Suffix} == 0" };
-                    for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
+                    if (pipe.Vb1Variants.Count > 0)
+                        u.Capture($"${Vb1Var(sfx)} = {pipe.TierVb1.GetValueOrDefault(t.Name)}");
+                    var chain = new List<string>();
+                    PosePasses? pose = null;
+                    if (pipe.PoseRoute is { } route)
                     {
-                        string p2 = pipe.PartMeta[pi].Part;
-                        var pt = pipe.TierMeta.FirstOrDefault(x => x.Part == p2 && x.Suffix == t.Suffix
-                            && x.Rows > 0);
-                        RecoverRun(chain, pipe, pi, pt.Name ?? p2, sfx);
+                        // this level's own gather and palette pass; where this tier recovers nothing
+                        // itself, the lod0 packet gathered here out of the lod0 capture reference, which
+                        // the game refreshes at frame start, and the lod0's palette pass on it. Placed as
+                        // the lod0 walk places its passes: with the draw, wherever the draw goes.
+                        string kernelMesh = route.TierKernel[t.Name];
+                        pose = PosePassesFor(route, kernelMesh == t.Name ? $"CustomShaderGather_{t.Name}"
+                            : $"CustomShaderGatherRef_{kernelMesh}", kernelMesh, sfx, poseBlocks);
                     }
-                    chain.Add($"run = CustomShaderConvertW_{sfx}");
-                    MemberRuns(chain, pipe, sfx);
-                    if (pipe.TierTies.TryGetValue(t.Suffix, out int tierPairs) && tierPairs > 0)
-                        chain.Add($"run = CustomShaderTierTie_{t.Suffix}_{sfx}");
-                    TieRuns(chain, pipe, sfx);
-                    chain.Add($"run = CustomShaderSkin_{sfx}");
-                    chain.Add($"$zz_done_{sfx}_{t.Suffix} = 1");
-                    chain.Add("endif");
-                    if (RoutedShapes(t.Shapes, t.Hash) is { } routedT)
-                        u.RoutedDraws.Add(new RoutedDraw(sfx, routedT, drawGate, pipe.Draws.Count));
                     else
+                    {
+                        chain.Add($"if $zz_done_{sfx}_{t.Suffix} == 0");
+                        for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
+                        {
+                            string p2 = pipe.PartMeta[pi].Part;
+                            var pt = pipe.TierMeta.FirstOrDefault(x => x.Part == p2 && x.Suffix == t.Suffix
+                                && x.Rows > 0);
+                            RecoverRun(chain, pipe, pi, pt.Name ?? p2, sfx);
+                        }
+                        chain.Add($"run = CustomShaderConvertW_{sfx}");
+                        MemberRuns(chain, pipe, sfx);
+                        if (pipe.TierTies.TryGetValue(t.Suffix, out int tierPairs) && tierPairs > 0)
+                            chain.Add($"run = CustomShaderTierTie_{t.Suffix}_{sfx}");
+                        TieRuns(chain, pipe, sfx);
+                        chain.Add($"run = CustomShaderSkin_{sfx}");
+                        chain.Add($"$zz_done_{sfx}_{t.Suffix} = 1");
+                        chain.Add("endif");
+                    }
+                    // the tier's own shapes carry the draw; the map and the ANCHOR's shapes say which of
+                    // those shapes each donor range belongs at, and which ranges this tier draws at all
+                    var tierRouted = t.Shapes is null ? null
+                        : new RoutedDraw(sfx, t.Shapes, drawGate, pipe.Draws.Count,
+                            AnchorShapes: pipe.AnchorShapes, Map: t.Map, Pose: pose);
+                    if (RoutedShapes(t.Shapes, t.Hash, tierRouted) is not null)
+                        u.RoutedDraws.Add(tierRouted!);
+                    else
+                    {
+                        if (pose is not null) chain.Add(pose.Block(t.Name));
                         chain.Add($"run = CommandListDraw_{sfx}");
-                    foreach (var line in drawGate.Wrap(chain)) u.Run(line);
+                    }
+                    if (chain.Count > 0)
+                        foreach (var line in drawGate.Wrap(chain)) u.Run(line);
                 }
             }
 
@@ -3008,7 +4732,12 @@ public sealed partial class MigotoEmitter
                         Unit(c.Hash, $"Cap_{c.Name}").Suppress(g);
             }
         }
-        return new CaptureUnits(ordered, byHash);
+        // each ring is written once per draw of its mesh, while any pipeline reading it is on: one pipeline
+        // off leaves another's ring running, and every pipeline off leaves nothing running at all
+        foreach (var u in ordered)
+            foreach (var (mesh, gates) in u.Rings)
+                u.Capture(string.Join("\n", WrapAny(gates, RingRuns(mesh))));
+        return new CaptureUnits(ordered, byHash, poseBlocks);
     }
 
     /// <summary>Where each presence latch's sighting assignment lands. A witness ib whose hash already owns
@@ -3038,16 +4767,18 @@ public sealed partial class MigotoEmitter
     static Sightings RouteSightings(IReadOnlyList<WitnessLatch>? latches, CaptureUnits units,
         IReadOnlyList<string> hides, IReadOnlyList<ScopedRetexEntry>? scoped,
         IEnumerable<string>? rigidHashes = null, IReadOnlySet<string>? guardedHashes = null,
-        IReadOnlyList<TwinSighting>? twins = null, IReadOnlyList<StockRampBind>? stockRamps = null)
+        IReadOnlyList<TwinSighting>? twins = null, IReadOnlyList<StockRampBind>? stockRamps = null,
+        IReadOnlyList<StockDrawSite>? stockDraws = null)
     {
         var s = new Sightings();
         var hideSet = new HashSet<string>(hides, StringComparer.Ordinal);
         hideSet.UnionWith(rigidHashes ?? Array.Empty<string>());
-        // a stock ramp pick owns its mesh's section exactly as a scoped retexture anchor does, so a
-        // sighting on that hash lands INSIDE it rather than minting a witness section of its own
+        // a stock ramp pick or shading change owns its mesh's section exactly as a scoped retexture anchor
+        // does, so a sighting on that hash lands INSIDE it rather than minting a witness section of its own
         var anchors = new HashSet<string>((scoped ?? Array.Empty<ScopedRetexEntry>())
             .SelectMany(e => e.Images).SelectMany(i => i.Anchors).Select(a => a.Hash), StringComparer.Ordinal);
         anchors.UnionWith((stockRamps ?? Array.Empty<StockRampBind>()).Select(b => b.IbHash));
+        anchors.UnionWith((stockDraws ?? Array.Empty<StockDrawSite>()).Select(site => site.IbHash));
         foreach (var l in latches ?? Array.Empty<WitnessLatch>())
             for (int i = 0; i < l.WitnessIbs.Count; i++)
             {
@@ -3144,32 +4875,69 @@ public sealed partial class MigotoEmitter
     /// carry no part label, and they walk here for the same reason the others do: the guard probes compare
     /// tag VALUES, so a derived value shared with a slot tag or a scoped tag would identify the wrong
     /// sibling.</para></summary>
-    static void RefuseTagCollisions(IEnumerable<(string Hash, string Part)> slotTags,
+    internal static void RefuseTagCollisions(IEnumerable<(string Hash, string Part)> slotTags,
         IEnumerable<(string Hash, string Part)> retexes,
-        IEnumerable<(string Hash, string Part)>? twinTags = null)
+        IEnumerable<(string Hash, string Part)>? twinTags = null,
+        IEnumerable<(string Hash, string Part)>? bufferTags = null)
     {
         // enumerated in arrival order, so a refusal reads the same way twice
         var retexInOrder = retexes.ToList();
         var retex = new HashSet<string>(retexInOrder.Select(r => r.Hash), StringComparer.OrdinalIgnoreCase);
+        var buffers = new HashSet<string>((bufferTags ?? Array.Empty<(string, string)>()).Select(b => b.Hash),
+            StringComparer.OrdinalIgnoreCase);
         var byTag = new Dictionary<int, (string Hash, string Part)>();
         // deduped by HASH alone: one texture reaching the build twice is one texture
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var one in slotTags.Concat(retexInOrder)
-                     .Concat(twinTags ?? Array.Empty<(string, string)>()))
+                     .Concat(twinTags ?? Array.Empty<(string, string)>())
+                     .Concat(bufferTags ?? Array.Empty<(string, string)>()))
         {
             if (!seen.Add(one.Hash)) continue;
             int tag = RetexTag(one.Hash);
             if (byTag.TryGetValue(tag, out var other))
-                throw new AuthoredRefusalException(
-                    $"Stock textures {Named(other)} and {Named(one)} derive the same slot tag ({tag}). "
-                    + "The draw probes can't tell the two apart. "
-                    + TagCollisionFix(retex.Contains(other.Hash), other.Part, retex.Contains(one.Hash), one.Part));
+            {
+                bool otherIsBuffer = buffers.Contains(other.Hash), oneIsBuffer = buffers.Contains(one.Hash);
+                throw new AuthoredRefusalException(otherIsBuffer || oneIsBuffer
+                    ? $"{Kind(other, otherIsBuffer)} and {Kind(one, oneIsBuffer)} derive the same draw tag ({tag}). "
+                        + "The draw predicates can't tell the two apart. "
+                        + BufferTagCollisionFix(other, otherIsBuffer, one, oneIsBuffer, retex)
+                    : $"Stock textures {Named(other)} and {Named(one)} derive the same slot tag ({tag}). "
+                        + "The draw probes can't tell the two apart. "
+                        + TagCollisionFix(retex.Contains(other.Hash), other.Part, retex.Contains(one.Hash), one.Part));
+            }
             byTag[tag] = one;
         }
 
         static string Named((string Hash, string Part) t) =>
             t.Part.Length > 0 ? $"{t.Hash} on {t.Part}" : t.Hash;
+
+        static string Kind((string Hash, string Part) t, bool isBuffer) => isBuffer
+            ? (t.Part.Length > 0 ? $"the mesh {t.Part}" : $"a mesh buffer ({t.Hash})")
+            : $"stock texture {Named(t)}";
+
+        // the buffer side is a mesh edit row; the other side is whatever kind it is
+        static string BufferTagCollisionFix((string Hash, string Part) first, bool firstIsBuffer,
+            (string Hash, string Part) second, bool secondIsBuffer, HashSet<string> retex)
+        {
+            if (firstIsBuffer && secondIsBuffer)
+                return first.Part.Length > 0 && second.Part.Length > 0
+                    ? $"Leave the edit on {first.Part} or the edit on {second.Part} out of the build."
+                    : "Leave one of the two mesh edits out of the build.";
+            var (buffer, texture) = firstIsBuffer ? (first, second) : (second, first);
+            string bufferRow = buffer.Part.Length > 0 ? $"the edit on {buffer.Part}" : "the mesh edit";
+            string textureRow = retex.Contains(texture.Hash) ? RetexRow(texture.Part) : MeshRow(texture.Part);
+            return $"Leave {bufferRow} or {textureRow} out of the build.";
+        }
     }
+
+    /// <summary>The vertex-slot hashes every compound mesh section key in <paramref name="keys"/> will
+    /// tag, each named by the part its key labels (<see cref="PoolBuildRequest.MeshLabels"/>) or by its ib
+    /// hash. Walked with the texture tags so a derived draw tag can never alias a slot tag.</summary>
+    static IEnumerable<(string Hash, string Part)> BufferTags(IReadOnlyDictionary<string, string>? labels,
+        IEnumerable<string> keys) =>
+        keys.Distinct(StringComparer.Ordinal).Select(DrawSelector.Parse).Where(s => s.IsCompound)
+            .SelectMany(s => s.SlotBindings()
+                .Select(b => (b.Hash, Part: labels?.GetValueOrDefault(s.Key) ?? s.Hash)));
 
     /// <summary>What the author can do about one tag collision, by what the colliding pair came from —
     /// named in the change list's own row vocabulary.</summary>
@@ -3195,8 +4963,52 @@ public sealed partial class MigotoEmitter
         string IbFmt, List<(int Count, int Start, int Base)> Draws, SubmeshMaps?[] SubMaps,
         KeyRef? ToggleKey, string? Latch, bool HideWhenOff, string? HiddenBy, string? ShownBy,
         IReadOnlyList<KeyRef>? SuppressWhen,
-        IReadOnlyDictionary<string, DrawShapeSet>? ShapesByHash)
+        IReadOnlyDictionary<string, DrawShapeSet>? ShapesByHash,
+        IReadOnlyDictionary<string, TierMaterialMap>? MapsByHash,
+        IReadOnlyList<StreamVariant> Vb0Variants, IReadOnlyDictionary<string, int> TierVb0,
+        IReadOnlyList<StreamVariant> Vb1Variants, IReadOnlyDictionary<string, int> TierVb1, string Part)
     {
+        /// <summary>The vertex and index binds of this replacement's draw lists: each slot's primary
+        /// buffer, then the variant the drawing section named. vb3 carries stream 0 as vb0 does. A
+        /// replacement shipping no variant emits the plain binds.</summary>
+        public string Binds()
+        {
+            var b = new StringBuilder();
+            void Slot(string slot, string res, int stream, IReadOnlyList<StreamVariant> variants)
+            {
+                b.Append($"{slot} = Resource_{res}_{Sfx}\n");
+                for (int k = 1; k <= variants.Count; k++)
+                    b.Append($"if ${RigidStreamVar(Sfx, stream)} == {k}\n{slot} = Resource_{res}_{Sfx}_v{k}\nendif\n");
+            }
+            Slot("vb0", "RigidVB0", 0, Vb0Variants);
+            if (Vb1Stride is not null) Slot("vb1", "RigidVB1", 1, Vb1Variants);
+            Slot("vb3", "RigidVB0", 0, Vb0Variants);
+            return b.Append($"ib = Resource_RigidIB_{Sfx}\n").ToString();
+        }
+
+        /// <summary>This replacement routes its donor draw per submesh on <paramref name="hash"/>: the
+        /// hash's shapes have several drawable submeshes, or its map leaves a donor range with nowhere to
+        /// draw. A twin-guarded hash never routes — its draw must stay inside the guard's verdict. The ONE
+        /// place the rigid routing condition lives; the section emission and the per-range command lists
+        /// both ask it, and a disagreement between the two would leave a list unreferenced or missing.</summary>
+        public bool RoutesOn(string hash, IReadOnlyDictionary<string, TwinGuard> guards)
+        {
+            if (ShapesByHash?.GetValueOrDefault(hash) is not { } shapes) return false;
+            if (guards.ContainsKey(hash)) return false;
+            return shapes.Shapes.Count(sh => sh.Count > 0) > 1
+                || RoutedDropsAnyDraw(shapes, ShapesByHash.GetValueOrDefault(Hashes[0]),
+                    MapsByHash?.GetValueOrDefault(hash), Draws.Count);
+        }
+
+        /// <summary>This replacement's routed draw on <paramref name="hash"/>, or null when the draw stays
+        /// in the hash's own section (see <see cref="RoutesOn"/>).</summary>
+        public RoutedDraw? RoutedOn(string hash, IReadOnlyDictionary<string, TwinGuard> guards, Gate drawGate) =>
+            RoutesOn(hash, guards)
+                ? new RoutedDraw(Sfx, ShapesByHash![hash], drawGate, Draws.Count, IsRigid: true,
+                    AnchorShapes: ShapesByHash.GetValueOrDefault(Hashes[0]),
+                    Map: MapsByHash?.GetValueOrDefault(hash))
+                : null;
+
         /// <summary>Draw-scoped retexture blocks anchored at one of this replacement's hashes, by hash —
         /// the rigid twin of <see cref="CaptureUnit.ScopeLines"/>; the owning section runs them instead of
         /// a second override minting itself on the same hash.</summary>
@@ -3231,7 +5043,9 @@ public sealed partial class MigotoEmitter
     /// one call. Donor range k draws at vanilla submesh k's fire (ranges past the last submesh join it),
     /// so every range renders under its own material's bound state. All share the owning section's hash;
     /// their names extend its, and equal match_priority runs same-hash sections in name order, so the
-    /// owning section's capture/compute always precedes these draws. A vanilla shape no section names
+    /// owning section's capture/compute always precedes these draws. A pose draw's passes run here, inside
+    /// its gate and ahead of its lists, so they run once per draw of the replacement and at no other fire
+    /// of the mesh. A vanilla shape no section names
     /// draws nothing — its original is already suppressed — and a full shape colliding with a submesh
     /// shape yields that submesh's section alone (the two draws cannot be told apart).</summary>
     static void EmitRoutedDrawSections(StringBuilder P, string hash, string ownerName,
@@ -3260,7 +5074,7 @@ public sealed partial class MigotoEmitter
         {
             var runs = routedDraws
                 .Select(r => (Routed: r, Dis: Enumerable.Range(0, r.DonorDraws)
-                    .Where(di => ks.Contains(DrawMaterialFold.TargetMaterialPosition(shapeSet, di))).ToList()))
+                    .Where(di => ks.Contains(r.TargetPosition(di))).ToList()))
                 .Where(x => x.Dis.Count > 0).ToList();
             if (runs.Count == 0) continue;
             OpenTextureOverride(P, $"{ownerName}_DrawS{firstK}", hash);
@@ -3270,6 +5084,7 @@ public sealed partial class MigotoEmitter
             {
                 string listStem = routed.IsRigid ? "CommandListRigid" : "CommandListDraw";
                 routed.DrawGate.Open(P);
+                if (routed.Pose is { } pose) P.Append(pose.Block($"{ownerName}_DrawS{firstK}", dis.Contains)).Append('\n');
                 foreach (int di in dis) P.Append($"run = {listStem}S{di}_{routed.Sfx}\n");
                 routed.DrawGate.Close(P);
             }
@@ -3280,13 +5095,23 @@ public sealed partial class MigotoEmitter
         // the two draws cannot be told apart, and the submesh reading wins
         int full = routedDraws[0].Shapes.FullCount;
         if (emitted.Any(s => s.First == 0 && s.Count == full)) return;
+        // A pass that draws the whole mesh in one call normally runs the whole donor. Where the map leaves
+        // a range with nowhere to draw at this detail level, the whole-donor list would put it back, so the
+        // pass runs the carried ranges one list at a time instead — a dropped range draws in no pass here.
+        var fullRuns = routedDraws
+            .Select(routed => (Routed: routed, Dis: routed.DropsAnyDraw ? routed.CarriedDraws.ToList() : null))
+            .Where(x => x.Dis is not { Count: 0 }).ToList();
+        if (fullRuns.Count == 0) return;
         OpenTextureOverride(P, $"{ownerName}_DrawFull", hash);
         P.Append("match_first_index = 0\n");
         P.Append($"match_index_count = {full}\n");
-        foreach (var routed in routedDraws)
+        foreach (var (routed, dis) in fullRuns)
         {
+            string listStem = routed.IsRigid ? "CommandListRigid" : "CommandListDraw";
             routed.DrawGate.Open(P);
-            P.Append($"run = {(routed.IsRigid ? "CommandListRigid" : "CommandListDraw")}_{routed.Sfx}\n");
+            if (routed.Pose is { } pose) P.Append(pose.Block($"{ownerName}_DrawFull", dis is null ? null : dis.Contains)).Append('\n');
+            if (dis is null) P.Append($"run = {listStem}_{routed.Sfx}\n");
+            else foreach (int di in dis) P.Append($"run = {listStem}S{di}_{routed.Sfx}\n");
             routed.DrawGate.Close(P);
         }
         P.Append("\n");
@@ -3295,96 +5120,101 @@ public sealed partial class MigotoEmitter
     static bool SameDrawShapeSet(DrawShapeSet first, DrawShapeSet second) =>
         first.FullCount == second.FullCount && first.Shapes.SequenceEqual(second.Shapes);
 
-    readonly record struct DrawFoldSignature(int PositionCount, string DrawablePattern);
-
-    static DrawFoldSignature FoldSignature(DrawShapeSet shapes) => new(shapes.Shapes.Count,
-        string.Concat(shapes.Shapes.Select(shape => shape.Count > 0 ? '1' : '0')));
-
     /// <summary>The material patches of one target material position, sharing one snapshot at every donor
     /// draw that folds onto it: the owning draw list's suffix, the material position, the resolved donor
     /// draw indices, the ini-safe group id, the carrier gate, and the member patches in request order.</summary>
     internal sealed record MaterialPatchGroup(string Sfx, int MaterialPosition,
         IReadOnlyList<int> DonorDraws, string Gid, int FilterIndex, int ConstantBufferSlot,
-        int ByteWidth, IReadOnlyList<MaterialPatchEmission> Patches);
+        int ByteWidth, IReadOnlyList<MaterialPatchEmission> Patches,
+    IReadOnlyList<string> Hashes);
 
     /// <summary>Validate the request's material patches against the target material fold and group them by
     /// target material position. Everything here throws rather than warns: an empty resolved draw set, a
     /// split filter value, or a missing generated shader would each ship a mod that silently renders wrong.</summary>
     static IReadOnlyList<MaterialPatchGroup> MaterialPatchGroups(
         IReadOnlyList<MaterialPatchEmission>? patches, List<PipelineEmission> pipes,
-        List<RigidEmission> rigids, string outDir)
+        List<RigidEmission> rigids, string outDir, IReadOnlyList<StockDrawSite>? stockDraws = null)
     {
         if (patches is not { Count: > 0 }) return Array.Empty<MaterialPatchGroup>();
-        static DrawShapeSet? AgreedPipeShapes(PipelineEmission pipe)
+        foreach (var patch in patches)
         {
-            if (pipe.AnchorShapes is not { } anchor) return null;
-            var signature = FoldSignature(anchor);
-            if (pipe.TierMeta.Any(tier => tier.Shapes is { } shapes
-                    && FoldSignature(shapes) != signature))
-                throw new InvalidOperationException(
-                    $"material patch replacement '{pipe.Sfx}' has tiers that disagree on target draw shapes");
-            return anchor;
+            if (string.IsNullOrWhiteSpace(patch.Key))
+                throw new InvalidOperationException("material patch key is missing");
+            if (patch.PixelShaderHashes is not { Count: > 0 })
+                throw new InvalidOperationException($"material patch '{patch.Key}' names no candidate pixel shaders");
+            if (patch.PixelShaderHashes.Any(hash => hash is not { Length: 16 } || !hash.All(Uri.IsHexDigit)))
+                throw new InvalidOperationException($"material patch '{patch.Key}' carries a malformed pixel-shader hash");
         }
-        static DrawShapeSet? AgreedRigidShapes(RigidEmission rigid)
-        {
-            var sets = rigid.Hashes.Select(hash => rigid.ShapesByHash?.GetValueOrDefault(hash))
-                .Where(shapes => shapes is not null).Cast<DrawShapeSet>().ToList();
-            if (sets.Skip(1).Any(shapes => FoldSignature(shapes) != FoldSignature(sets[0])))
-                throw new InvalidOperationException(
-                    $"material patch replacement '{rigid.Sfx}' has hashes that disagree on target draw shapes");
-            return sets.FirstOrDefault();
-        }
+        // A patch names a material position of the replaced part as the modder sees it, which is the lod0
+        // position. Tiers order their own materials, so their shape sets legitimately differ; each tier's
+        // material map is what carries the patched position there, or says the tier draws it nowhere.
+        // Neither is a reason to refuse the patch.
+        static DrawShapeSet? AnchorPipeShapes(PipelineEmission pipe) => pipe.AnchorShapes;
+        // The patch's position is the modder's, read on the replaced part's OWN draw — the first hash,
+        // which is the lod0 one. A tier's shapes are not that reading: its materials are ordered on its
+        // own, so resolving a patch against them would land it on another material. A caller that supplies
+        // no shapes for the own hash has not said where the patch goes, and the caller below refuses.
+        static DrawShapeSet? OwnRigidShapes(RigidEmission rigid) =>
+            rigid.Hashes.Count > 0 ? rigid.ShapesByHash?.GetValueOrDefault(rigid.Hashes[0]) : null;
         static bool SafeKey(string key) => key.All(c => c is >= 'A' and <= 'Z'
             or >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '-');
-        static bool TryModFile(string outDir, string relative, out string full)
-        {
-            full = "";
-            try
-            {
-                if (Path.IsPathRooted(relative)) return false;
-                string root = Path.GetFullPath(outDir);
-                string normalized = relative.Replace('/', Path.DirectorySeparatorChar);
-                full = Path.GetFullPath(Path.Combine(root, normalized));
-                string back = Path.GetRelativePath(root, full);
-                return back != ".." && !back.StartsWith(".." + Path.DirectorySeparatorChar,
-                    StringComparison.Ordinal) && !Path.IsPathRooted(back);
-            }
-            catch (Exception error) when (error is ArgumentException or NotSupportedException
-                or PathTooLongException)
-            {
-                return false;
-            }
-        }
-        // Fold agreement is judged lazily, per suffix a patch actually names: a replacement no patch
-        // rides never owes the fold an answer, so its tiers may disagree without failing the build.
+        // The fold a patch is resolved against is the ANCHOR's (lod0's), which is the one the modder picked
+        // the position on. Read lazily, per suffix a patch actually names.
         var draws = pipes.Select(pipe => (pipe.Sfx, Count: pipe.Draws.Count,
-                Shapes: (Func<DrawShapeSet?>)(() => AgreedPipeShapes(pipe))))
+                Shapes: (Func<DrawShapeSet?>)(() => AnchorPipeShapes(pipe))))
             .Concat(rigids.Select(rigid => (rigid.Sfx, Count: rigid.Draws.Count,
-                Shapes: (Func<DrawShapeSet?>)(() => AgreedRigidShapes(rigid)))))
+                Shapes: (Func<DrawShapeSet?>)(() => OwnRigidShapes(rigid)))))
             .ToDictionary(unit => unit.Sfx, StringComparer.Ordinal);
+        // An unreplaced part's own draw of one material: its patches run around the game's draw rather than
+        // a donor's, so it names no donor draws and exactly one material, its own.
+        var sites = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var site in stockDraws ?? Array.Empty<StockDrawSite>())
+        {
+            if (string.IsNullOrWhiteSpace(site.Id) || !SafeKey(site.Id) || !sites.Add(site.Id))
+                throw new InvalidOperationException(
+                    $"stock draw '{site.Id}' is missing, repeated or outside its safe alphabet");
+            if (draws.ContainsKey(site.Id))
+                throw new InvalidOperationException(
+                    $"stock draw '{site.Id}' takes the name of a replacement in this build");
+            if (site.Shape.First < 0 || site.Shape.Count <= 0)
+                throw new InvalidOperationException(
+                    $"stock draw '{site.Id}' names draw range {site.Shape.First}+{site.Shape.Count}, which "
+                    + "the game never issues");
+        }
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var filterByHash = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var resolved = new List<(MaterialPatchEmission Patch, IReadOnlyList<int> DonorDraws)>();
         foreach (var patch in patches)
         {
-            if (!draws.TryGetValue(patch.Suffix, out var unit))
-                throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' names replacement '{patch.Suffix}', which this build does not draw");
-            if (patch.Submesh < 0)
-                throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' names negative material position {patch.Submesh} "
-                    + $"of '{patch.Suffix}'");
-            var unitShapes = unit.Shapes()
-                ?? throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' cannot resolve the target material positions "
-                    + $"of '{patch.Suffix}'");
-            var donorDraws = Enumerable.Range(0, unit.Count)
-                .Where(draw => DrawMaterialFold.TargetMaterialPosition(unitShapes, draw) == patch.Submesh)
-                .ToArray();
-            if (donorDraws.Length == 0)
-                throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' names material position {patch.Submesh} of "
-                    + $"'{patch.Suffix}', which receives no donor draws");
+            IReadOnlyList<int> donorDraws;
+            if (sites.Contains(patch.Suffix))
+            {
+                if (patch.Submesh != 0)
+                    throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' names material position {patch.Submesh} of stock draw "
+                        + $"'{patch.Suffix}', which draws one material");
+                donorDraws = Array.Empty<int>();
+            }
+            else
+            {
+                if (!draws.TryGetValue(patch.Suffix, out var unit))
+                    throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' names replacement '{patch.Suffix}', which this build does not draw");
+                if (patch.Submesh < 0)
+                    throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' names negative material position {patch.Submesh} "
+                        + $"of '{patch.Suffix}'");
+                var unitShapes = unit.Shapes()
+                    ?? throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' cannot resolve the target material positions "
+                        + $"of '{patch.Suffix}'");
+                donorDraws = Enumerable.Range(0, unit.Count)
+                    .Where(draw => DrawMaterialFold.TargetMaterialPosition(unitShapes, draw) == patch.Submesh)
+                    .ToArray();
+                if (donorDraws.Count == 0)
+                    throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' names material position {patch.Submesh} of "
+                        + $"'{patch.Suffix}', which receives no donor draws");
+            }
             if (string.IsNullOrWhiteSpace(patch.Key))
                 throw new InvalidOperationException(
                     $"material patch key '{patch.Key}' is missing or repeated");
@@ -3394,12 +5224,17 @@ public sealed partial class MigotoEmitter
             if (!keys.Add(patch.Key))
                 throw new InvalidOperationException(
                     $"material patch key '{patch.Key}' is missing or repeated");
-            if (patch.ConstantBufferSlot is < 0 or > 13)
+            bool writes = WritesConstants(patch);
+            if (writes && (patch.ConstantBufferSlot is < 0 or > 13))
                 throw new InvalidOperationException(
                     $"material patch '{patch.Key}' has constant-buffer slot {patch.ConstantBufferSlot}, outside 0..13");
-            if (patch.ByteWidth <= 0 || patch.ByteWidth % 16 != 0)
+            if (writes && (patch.ByteWidth <= 0 || patch.ByteWidth % 16 != 0))
                 throw new InvalidOperationException(
                     $"material patch '{patch.Key}' has byte width {patch.ByteWidth}, which is not a positive multiple of 16");
+            foreach (var write in patch.Writes ?? Array.Empty<MaterialPatchWrite>())
+                if (write.ByteOffset < 0 || write.ByteOffset % 4 != 0 || write.ByteOffset >= patch.ByteWidth)
+                    throw new InvalidOperationException(
+                        $"material patch '{patch.Key}' writes byte {write.ByteOffset}, outside its {patch.ByteWidth}-byte buffer");
             if (patch.FilterIndex is <= 0 or > 16_777_216)
                 throw new InvalidOperationException(
                     $"material patch '{patch.Key}' has filter value {patch.FilterIndex}, outside the exact-float range");
@@ -3411,79 +5246,226 @@ public sealed partial class MigotoEmitter
                 if (hash is not { Length: 16 } || !hash.All(Uri.IsHexDigit))
                     throw new InvalidOperationException(
                         $"material patch '{patch.Key}' carries a malformed pixel-shader hash '{hash}'");
-                if (filterByHash.TryGetValue(hash, out int held) && held != patch.FilterIndex)
-                    throw new InvalidOperationException(
-                        $"pixel shader {hash} is tagged with filter values {held} and {patch.FilterIndex} — "
-                        + "one shader carries one value");
-                filterByHash[hash] = patch.FilterIndex;
             }
-            if (!TryModFile(outDir, patch.ShaderFile, out string shaderFile))
-                throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' references shader '{patch.ShaderFile}', which escapes the mod folder");
-            if (!File.Exists(shaderFile))
-                throw new InvalidOperationException(
-                    $"material patch '{patch.Key}' references shader '{patch.ShaderFile}', which is not in the mod folder");
+            if (!writes && !patch.IsEffect)
+                throw new InvalidOperationException($"material patch '{patch.Key}' writes no values");
+            if (!writes && !patch.SkipDraw && patch.TextureOverrides is not { Count: > 0 })
+                throw new InvalidOperationException($"material effect '{patch.Key}' has no operation");
+            if (patch.SkipDraw && (writes || patch.TextureOverrides is { Count: > 0 }))
+                throw new InvalidOperationException($"material effect '{patch.Key}' mixes draw omission and resource writes");
+            foreach (var texture in patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>())
+            {
+                if (texture.Slot is < 0 or > 127 || new[] { texture.R, texture.G, texture.B, texture.A }
+                    .Any(value => !float.IsFinite(value) || value is not (0 or 1)))
+                    throw new InvalidOperationException($"material effect '{patch.Key}' has an invalid neutral texture");
+                string file = Path.Combine(outDir, EffectTextureFile(texture));
+                if (!File.Exists(file)) FlatDds.Write(file, ((byte)(texture.R * 255), (byte)(texture.G * 255),
+                    (byte)(texture.B * 255), (byte)(texture.A * 255)), srgb: false);
+            }
             resolved.Add((patch, donorDraws));
         }
-        var groups = new List<MaterialPatchGroup>();
-        foreach (var group in resolved.GroupBy(item => (item.Patch.Suffix, item.Patch.Submesh)))
+        // One program carries one filter value. Programs are classed by the exact set of patches that
+        // reach them: a value edit reaches its whole candidate family, an effect operation the programs
+        // it is proven for. A family under one recipe stays one group with its own filter value, exactly
+        // as a value-only build emits it; a family whose passes take different operations splits only
+        // where the operations differ, each class deriving its value from its own sorted programs.
+        // Accepted consequence: two mods that patch the same shader family with different effect
+        // disables partition it differently and tag a shared program with different values, and the
+        // loader keeps one — the other mod's gate then never fires for that program. Dev already had this
+        // whenever two mods' families overlapped; the classes add the effect case.
+        var keysByHash = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (patch, _) in resolved)
+            foreach (string hash in patch.PixelShaderHashes)
+            {
+                if (!keysByHash.TryGetValue(hash, out var keysOf))
+                    keysByHash[hash] = keysOf = new SortedSet<string>(StringComparer.Ordinal);
+                keysOf.Add(patch.Key);
+            }
+        int ClassFilter(IReadOnlyList<string> hashes, HashSet<string> members)
         {
-            var members = group.Select(item => item.Patch).ToList();
-            if (members.Select(patch => patch.FilterIndex).Distinct().Count() > 1
-                || members.Select(patch => patch.ConstantBufferSlot).Distinct().Count() > 1)
-                throw new InvalidOperationException(
-                    $"material patches on submesh {group.Key.Submesh} of '{group.Key.Suffix}' disagree on "
-                    + "which draw they bind at. One draw has one bound material");
-            if (members.Select(patch => patch.ByteWidth).Distinct().Count() > 1)
-                throw new InvalidOperationException(
-                    $"material patches on submesh {group.Key.Submesh} of '{group.Key.Suffix}' disagree on "
-                    + "their constant-buffer byte width");
-            groups.Add(new MaterialPatchGroup(group.Key.Suffix, group.Key.Submesh,
-                group.First().DonorDraws, $"{group.Key.Suffix}_s{group.Key.Submesh}",
-                members[0].FilterIndex, members[0].ConstantBufferSlot, members[0].ByteWidth, members));
+            var owned = resolved.Select(item => item.Patch)
+                .Where(patch => !patch.IsEffect && members.Contains(patch.Key)
+                    && patch.PixelShaderHashes.Select(hash => hash.ToLowerInvariant())
+                        .OrderBy(hash => hash, StringComparer.Ordinal).SequenceEqual(hashes, StringComparer.Ordinal))
+                .Select(patch => patch.FilterIndex).Distinct().ToList();
+            return owned.Count == 1 ? owned[0] : DerivedMaterialEvidence.FamilyFilterValue(hashes);
+        }
+        var classes = keysByHash
+            .GroupBy(pair => string.Join("\n", pair.Value), pair => pair.Key.ToLowerInvariant(), StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var members = group.Key.Split('\n').ToHashSet(StringComparer.Ordinal);
+                IReadOnlyList<string> hashes = group.OrderBy(hash => hash, StringComparer.Ordinal).ToList();
+                return (Members: members, Hashes: hashes, Filter: ClassFilter(hashes, members));
+            })
+            .OrderBy(programClass => programClass.Filter).ToList();
+        if (classes.Select(programClass => programClass.Filter).Distinct().Count() != classes.Count)
+            throw new InvalidOperationException("two material program classes collide on one filter value");
+        var groups = new List<MaterialPatchGroup>();
+        foreach (var submesh in resolved.GroupBy(item => (item.Patch.Suffix, item.Patch.Submesh)))
+        {
+            var touching = classes.Where(programClass =>
+                submesh.Any(item => programClass.Members.Contains(item.Patch.Key))).ToList();
+            for (int ordinal = 0; ordinal < touching.Count; ordinal++)
+            {
+                var programClass = touching[ordinal];
+                var members = submesh.Where(item => programClass.Members.Contains(item.Patch.Key))
+                    .Select(item => item.Patch).ToList();
+                var writing = members.Where(WritesConstants).ToList();
+                if (writing.Select(patch => patch.ConstantBufferSlot).Distinct().Count() > 1)
+                    throw new InvalidOperationException(
+                        $"material patches on submesh {submesh.Key.Submesh} of '{submesh.Key.Suffix}' disagree on "
+                        + "which draw they bind at. One draw has one bound material");
+                if (writing.Select(patch => patch.ByteWidth).Distinct().Count() > 1)
+                    throw new InvalidOperationException(
+                        $"material patches on submesh {submesh.Key.Submesh} of '{submesh.Key.Suffix}' disagree on "
+                        + "their constant-buffer byte width");
+                if (members.SelectMany(patch => patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>())
+                    .GroupBy(texture => texture.Slot).Any(slot => slot.Distinct().Count() != 1))
+                    throw new InvalidOperationException("material effects disagree on a neutral texture binding");
+                string gid = touching.Count == 1
+                    ? $"{submesh.Key.Suffix}_s{submesh.Key.Submesh}"
+                    : $"{submesh.Key.Suffix}_s{submesh.Key.Submesh}_c{ordinal}";
+                groups.Add(new MaterialPatchGroup(submesh.Key.Suffix, submesh.Key.Submesh,
+                    submesh.First().DonorDraws, gid, programClass.Filter,
+                    writing.FirstOrDefault()?.ConstantBufferSlot ?? -1, writing.FirstOrDefault()?.ByteWidth ?? 0,
+                    members, programClass.Hashes));
+            }
         }
         return groups;
     }
 
-    /// <summary>The material patches' section block: one ShaderOverride tag per candidate pixel shader
-    /// (carrying the family filter value the draw-site gates read), and per group the snapshot, work, and draw
-    /// resources plus each member patch's generated compute shader. The draw-site gate itself is
-    /// emitted by <see cref="EmitDrawTextures"/> inside every list that issues the patched draw.</summary>
+    static string EffectTextureFile(MaterialEffectTexture texture) =>
+        $"effect_neutral_{(int)texture.R}{(int)texture.G}{(int)texture.B}{(int)texture.A}.dds";
+
+    /// <summary>The material patches' section block: one tag per exact pixel program carrying its
+    /// class's filter value, and per group the saved bindings, the patch pass and the buffers it writes
+    /// through. The draw-site gate is emitted by <see cref="EmitDrawTextures"/> inside every list that
+    /// issues the patched draw.</summary>
     static void EmitMaterialPatchSections(StringBuilder P, IReadOnlyList<MaterialPatchGroup> groups)
     {
         if (groups.Count == 0) return;
         var tagged = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in groups)
-            foreach (var patch in group.Patches)
-                foreach (var hash in patch.PixelShaderHashes)
-                    tagged.TryAdd(hash.ToLowerInvariant(), patch.FilterIndex);
+            foreach (var hash in group.Hashes)
+                if (!tagged.TryAdd(hash, group.FilterIndex) && tagged[hash] != group.FilterIndex)
+                    throw new InvalidOperationException(
+                        $"pixel shader {hash} is tagged with filter values {tagged[hash]} and {group.FilterIndex} — "
+                        + "one shader carries one value");
         foreach (var (hash, filter) in tagged.OrderBy(entry => entry.Key, StringComparer.Ordinal))
             P.Append($"\n[ShaderOverride_MaterialPass_{hash}]\nhash = {hash}\n"
                    + $"filter_index = {filter}\nallow_duplicate_hash = true\n");
         foreach (var group in groups)
         {
+            foreach (var texture in group.Patches.SelectMany(patch =>
+                         patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>()).Distinct())
+                P.Append($"\n[Resource_MaterialTextureSave_{group.Gid}_{texture.Slot}]\n")
+                 .Append($"\n[Resource_MaterialTexture_{group.Gid}_{texture.Slot}]\nfilename = {EffectTextureFile(texture)}\n");
+            if (!HasPatchShader(group)) continue;
+            int elements = group.ByteWidth / 16;
             P.Append($"\n[Resource_MaterialSource_{group.Gid}]\n\n")
-             .Append($"[Resource_MaterialWork_{group.Gid}]\ntype = RWByteAddressBuffer\n")
-             .Append("stride = 0\nbind_flags = unordered_access\n")
-             .Append("misc_flags = buffer_allow_raw_views\n\n")
+             .Append($"[{PatchViewResource(group)}]\ntype = Texture2D\nformat = R32_FLOAT\n")
+             .Append($"width = {elements}\nheight = 1\narray = 1\nmips = 1\nmsaa = 1\nbind_flags = render_target\n\n")
+             .Append($"[{PatchTargetResource(group)}]\ntype = Buffer\nformat = R32G32B32A32_UINT\n")
+             .Append($"array = {elements}\nbind_flags = render_target\n\n")
              .Append($"[Resource_MaterialDraw_{group.Gid}]\ntype = Buffer\n")
              .Append($"byte_width = {group.ByteWidth}\nstride = 0\nbind_flags = constant_buffer\n");
-            foreach (var patch in group.Patches)
-                P.Append($"\n[CustomShader_MaterialPatch_{patch.Key}]\ncs = ")
-                 .Append(patch.ShaderFile.Replace('\\', '/'))
-                 .Append($"\ncs-u0 = Resource_MaterialWork_{group.Gid}\nDispatch = 1, 1, 1\n")
-                 .Append("post cs-u0 = null\n");
+            P.Append($"\n[{PatchShaderSection(group)}]\n").Append(PatchPassState)
+             .Append($"ps = {PatchPassFile(group)}\n")
+             .Append($"o0 = set_viewport {PatchViewResource(group)}\no0 = {PatchTargetResource(group)}\ndraw = 3, 0\n");
+        }
+    }
+
+    /// <summary>The pixel pass that patches one group's constants at a draw. A value edit whose programs span
+    /// two program classes belongs to both classes' groups, and each group patches its own buffers, so the
+    /// pass is named per group: one name for both would keep only the first, and the second class's draws
+    /// would run a pass writing the first group's buffers.</summary>
+    static string PatchShaderSection(MaterialPatchGroup group) => $"CustomShader_MaterialPatch_{group.Gid}";
+    static string PatchPassFile(MaterialPatchGroup group) => $"generated/material_pass_{group.Gid}.hlsl";
+    /// <summary>The texture whose size the patch pass takes its viewport from, one pixel per 16-byte element
+    /// of the constants: <c>set_viewport</c> reads a texture's size and ignores a buffer's.</summary>
+    static string PatchViewResource(MaterialPatchGroup group) => $"Resource_MaterialView_{group.Gid}";
+    /// <summary>The buffer the patch pass writes, one element per 16 bytes of the constants, typed as integers
+    /// so every byte arrives as the game or the patch wrote it.</summary>
+    static string PatchTargetResource(MaterialPatchGroup group) => $"Resource_MaterialTarget_{group.Gid}";
+    /// <summary>The state the patch pass sets: the fullscreen triangle, no other stages, no culling, depth or
+    /// blending, the depth target and the other colour targets cleared (the game's own targets are still
+    /// bound, and a target set whose members differ in size is dropped). The loader restores all of it when
+    /// the pass ends.</summary>
+    const string PatchPassState = $"vs = {PoseFullscreenFile}\nhs = null\nds = null\ngs = null\ntopology = triangle_list\n"
+        + "cull = none\ndepth_enable = false\nblend = disable\nod = null\no1 = null\no2 = null\no3 = null\no4 = null\n"
+        + "o5 = null\no6 = null\no7 = null\n";
+
+    /// <summary>The lines that patch one group's constants at a draw while its program is bound: the patch
+    /// pass reads the constants the game bound and writes them with the group's values over theirs, the
+    /// result is copied into the constant buffer, and the draw binds that buffer. Every draw patches its own
+    /// constants, so two draws of one material that the game gives different constants keep them apart.</summary>
+    // Accepted consequence: a loader that failed to run the pass would still bind its target, unwritten, so
+    // the draw would render with zeroed or stale constants instead of the material's own. The failure shows
+    // on the material rather than passing for a stock draw.
+    static IEnumerable<string> PatchLines(MaterialPatchGroup group)
+    {
+        yield return $"run = {PatchShaderSection(group)}";
+        yield return $"Resource_MaterialDraw_{group.Gid} = copy {PatchTargetResource(group)}";
+        yield return $"ps-cb{group.ConstantBufferSlot} = Resource_MaterialDraw_{group.Gid}";
+    }
+
+    /// <summary>The shaders a mod's patch passes draw with: the fullscreen triangle and, per group, the pixel
+    /// shader that copies each 16-byte element of the constants bound at the group's slot and writes the
+    /// group's values over its components, every patch in the group's order (a later patch's value at a byte
+    /// wins). The constants are read and written as integers, so no byte is rounded on the way.</summary>
+    static void WriteMaterialPatchShaders(string outDir, IReadOnlyList<MaterialPatchGroup> groups)
+    {
+        var shaded = groups.Where(HasPatchShader).ToList();
+        if (shaded.Count == 0) return;
+        File.WriteAllText(Path.Combine(outDir, PoseFullscreenFile), ComputeTemplates.EmitPoseFullscreen());
+        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
+        foreach (var group in shaded)
+        {
+            var values = new SortedDictionary<int, uint>();
+            foreach (var patch in group.Patches.Where(WritesConstants))
+                foreach (var write in patch.Writes!)
+                    values[write.ByteOffset] = unchecked((uint)BitConverter.SingleToInt32Bits(write.Value));
+            var text = new StringBuilder()
+                .Append("// One draw's material constants as the game bound them, with this mod's values written over\n")
+                .Append("// theirs: one 16-byte element per pixel, copied into the constant buffer the draw binds.\n")
+                .Append($"cbuffer material_state : register(b{group.ConstantBufferSlot}) {{ uint4 material_constants[{group.ByteWidth / 16}]; }}\n")
+                .Append("uint4 main(float4 pos : SV_Position) : SV_Target {\n")
+                .Append("    uint e = (uint)pos.x;\n")
+                .Append("    uint4 v = material_constants[e];\n");
+            foreach (var element in values.GroupBy(entry => entry.Key / 16))
+            {
+                text.Append("    if (e == ").Append(element.Key.ToString(CultureInfo.InvariantCulture)).Append("u) {");
+                foreach (var (offset, bits) in element)
+                    text.Append(" v.").Append("xyzw"[offset % 16 / 4])
+                        .Append(" = 0x").Append(bits.ToString("x8", CultureInfo.InvariantCulture)).Append("u;");
+                text.Append(" }\n");
+            }
+            text.Append("    return v;\n}\n");
+            File.WriteAllText(Path.Combine(outDir, PatchPassFile(group).Replace('/', Path.DirectorySeparatorChar)),
+                text.ToString());
         }
     }
 
     void AppendTwinProbe(StringBuilder P, TwinGuard guard)
     {
-        if (guard.Tags.Count == 0) return;
+        foreach (var line in TwinProbeLines(guard)) P.Append(line).Append('\n');
+    }
+
+    /// <summary>A twin guard's probe as lines: every probed register read once, each tag writing its
+    /// sibling's verdict. Nothing for a guard whose verdicts arrive from sightings alone.</summary>
+    IEnumerable<string> TwinProbeLines(TwinGuard guard)
+    {
+        if (guard.Tags.Count == 0) yield break;
         foreach (int s in ProbeSlots)
         {
-            P.Append($"${VarProbe} = ps-t{s}\n");
+            yield return $"${VarProbe} = ps-t{s}";
             foreach (var t in guard.Tags)
-                P.Append($"if ${VarProbe} == {t.TagValue}\n${guard.Var} = {t.Verdict}\nendif\n");
+            {
+                yield return $"if ${VarProbe} == {t.TagValue}";
+                yield return $"${guard.Var} = {t.Verdict}";
+                yield return "endif";
+            }
         }
     }
 
@@ -3518,11 +5500,15 @@ public sealed partial class MigotoEmitter
 
     static void CloseTwinGuard(StringBuilder P, bool opened) { if (opened) P.Append("endif\n"); }
 
-    /// <summary>Whether any emitted guard admits more than one verdict, so the build declares
-    /// <see cref="VarTwinOk"/>. False leaves the declarations exactly where a single-verdict build has
+    /// <summary>Whether any guard opened around a section admits more than one verdict, so the build
+    /// declares <see cref="VarTwinOk"/>. A hide section never opens that way: its skips carry their own
+    /// claims' verdicts. False leaves the declarations exactly where a single-verdict build has
     /// them.</summary>
-    static bool TwinScratchNeeded(IEnumerable<TwinGuard> guards) =>
-        guards.Any(g => g.OwnVerdicts.Count > 1);
+    static bool TwinScratchNeeded(IEnumerable<TwinGuard> guards, IEnumerable<string> hideHashes)
+    {
+        var hides = hideHashes.ToHashSet(StringComparer.Ordinal);
+        return guards.Any(g => g.OwnVerdicts.Count > 1 && !hides.Contains(g.Hash));
+    }
 
     /// <summary>Every sticky variable the emitted guards read, first-seen order. Declared in
     /// <c>[Constants]</c> and written nowhere else, so an unidentified signature reads 0 and the
@@ -3538,14 +5524,26 @@ public sealed partial class MigotoEmitter
             .Select(t => t.TexHash)
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
+    /// <summary>Every stock texture a probe needs a tag section of its own on: the twin guards' and the
+    /// stock draws' material probes, which derive their values the same way.</summary>
+    static List<string> MintedProbeTagHashes(IEnumerable<TwinGuard> guards,
+        IEnumerable<StockRampBind>? ramps, IEnumerable<StockDrawSite>? sites) =>
+        MintedTwinTagHashes(guards)
+            .Concat((ramps ?? Array.Empty<StockRampBind>()).Select(b => b.Material)
+                .Concat((sites ?? Array.Empty<StockDrawSite>()).Select(site => site.Material))
+                .OfType<MaterialProbe>()
+                .Where(probe => probe.TagValue == RetexTag(probe.TexHash))
+                .Select(probe => probe.TexHash))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
     string EmitIni(List<PipelineEmission> pipes, List<RigidEmission> rigids, CaptureUnits units,
         IReadOnlyList<string> hideHashes,
         Sightings sightings, IReadOnlyList<StockMapTag> slotTags,
         IReadOnlyList<StockPropertyTag> propertyTags,
         IReadOnlySet<string> slimParts, string? modKey,
-        IReadOnlyDictionary<string, IReadOnlyList<KeyRef>>? hideKeys,
+        IReadOnlyDictionary<string, IReadOnlyList<HideClaim>>? hideClaims,
         IReadOnlyList<RetexEntry> retextures, IReadOnlyList<ScopedRetexEntry>? scopedRetextures = null,
-        IReadOnlyList<WitnessLatch>? latches = null, IReadOnlyDictionary<string, string>? hideLatches = null,
+        IReadOnlyList<WitnessLatch>? latches = null,
         IReadOnlyCollection<string>? keysStartingOff = null,
         IReadOnlyDictionary<string, TwinGuard>? twinGuards = null,
         IReadOnlyList<StockRampBind>? stockRamps = null,
@@ -3553,21 +5551,40 @@ public sealed partial class MigotoEmitter
         IReadOnlyList<KeyCycle>? keyCycles = null,
         IReadOnlyList<HiddenFlag>? hiddenFlags = null,
         IReadOnlyDictionary<string, List<string>>? hideScope = null,
-        IReadOnlyList<ShownFlag>? shownFlags = null, bool persistModKey = false)
+        IReadOnlyList<ShownFlag>? shownFlags = null, bool persistModKey = false,
+        IReadOnlyList<StockDrawSite>? stockDraws = null, string? appVersion = null,
+        IReadOnlyDictionary<string, string>? meshLabels = null, string tail = "")
     {
         var P = new StringBuilder();
         var guards = twinGuards ?? new Dictionary<string, TwinGuard>(StringComparer.Ordinal);
         var patchGroups = materialPatches ?? Array.Empty<MaterialPatchGroup>();
 
-        // Emitted ini header — ships in every generated mod, so it describes the mod, not this code;
-        // each route describes only itself.
-        if (pipes.Count > 0) P.Append(PooledIniHeader).Append('\n');
-        if (rigids.Count > 0) P.Append(RigidIniHeader).Append('\n');
+        // every key a change of this build answers to
+        var changeKeys = pipes.Select(x => x.ToggleKey?.Key)
+                .Concat(rigids.Select(x => x.ToggleKey?.Key))
+                .Concat(hideHashes.SelectMany(h => HideClaimKeys(hideClaims, h).Select(k => (string?)k.Key)))
+                .Concat(retextures.SelectMany(r => r.Images).Select(i => i.ToggleKey?.Key))
+                .Concat((scopedRetextures ?? Array.Empty<ScopedRetexEntry>())
+                    .SelectMany(r => r.Images).Select(i => i.ToggleKey?.Key))
+                .Concat((stockRamps ?? Array.Empty<StockRampBind>()).Select(b => b.ToggleKey?.Key))
+                .Concat((stockDraws ?? Array.Empty<StockDrawSite>()).Select(s => s.ToggleKey?.Key))
+                // the states that RAISE a hider flag are keys too: their group may own nothing else in
+                // this build, and an undeclared variable would leave every flag stuck at 0
+                .Concat((hiddenFlags ?? Array.Empty<HiddenFlag>())
+                    .SelectMany(f => f.WhenAny).Select(k => (string?)k.Key))
+                // a change gated on a content flag carries no key term of its own, so the key that
+                // raises the flag is declared from the flag's own positions or from nowhere
+                .Concat((shownFlags ?? Array.Empty<ShownFlag>())
+                    .SelectMany(f => f.WhenAny).Select(k => (string?)k.Key))
+            .ToList();
 
-        // per-frame compute flags: one per pipeline's lod0 chain, one per anchored tier chain
+        // per-frame compute flags: one per pipeline's lod0 chain, one per anchored tier chain, and on the
+        // pooled route one per source mesh, set where its ring is written
         var doneFlags = new List<string>();
+        bool pooledRoute = pipes.Any(p => p.PoseRoute?.Sources is not null);
         foreach (var pipe in pipes)
         {
+            if (pipe.PoseRoute is not null) continue;   // its passes run at every draw and keep no frame flag
             doneFlags.Add($"zz_done_{pipe.Sfx}");
             string anch = pipe.PartMeta[pipe.AnchorIdx].Part;
             foreach (var tsfx in pipe.TierMeta.Where(t => t.Part == anch).Select(t => t.Suffix).Distinct())
@@ -3582,72 +5599,130 @@ public sealed partial class MigotoEmitter
         // yet" from "the anchor drew last frame". Only the CB flag survives — in-chain member dispatches
         // run at the anchor's own draw and need no proof of it.
         var stickyFlags = pipes.Where(p => p.GroupMembers.Any(m => m.AtDraw))
-            .Select(p => GroupCbVar(p.Sfx)).ToList();
+            .Select(p => GroupCbVar(p.Sfx))
+            // the stream-1 variant selector: every anchor capture writes it, so it is never reset either
+            .Concat(pipes.Where(p => p.Vb1Variants.Count > 0).Select(p => Vb1Var(p.Sfx)))
+            .Concat(rigids.Where(r => r.Vb0Variants.Count > 0).Select(r => RigidStreamVar(r.Sfx, 0)))
+            .Concat(rigids.Where(r => r.Vb1Variants.Count > 0).Select(r => RigidStreamVar(r.Sfx, 1))).ToList();
+        // The pooled route's textures start cleared when the mod loads: every ring slot at frame 0 with no
+        // rows, and the frame number at 1, so no slot a previous load or no draw wrote matches a frame. The
+        // [Present] pass advances the number once a frame while any pooled pipeline is on.
+        var ringMeshes = pipes.SelectMany(p => p.PoseRoute?.Sources ?? Array.Empty<PoseSource>())
+            .Select(source => source.Mesh).Distinct(StringComparer.Ordinal).ToList();
+        doneFlags.AddRange(ringMeshes.Select(DrewVar));
+        // the ring slot counters are never reset: a reload clears the rings, so any slot reads as empty
+        stickyFlags.AddRange(ringMeshes.Select(RingSlotVar));
+        var poseClears = !pooledRoute ? null
+            : ringMeshes.Select(mesh => $"clear = {RingTexture(mesh)}")
+                .Prepend($"clear = {FrameResource} 1").ToList();
+        var framePresent = !pooledRoute ? null
+            : WrapAny(pipes.Where(p => p.PoseRoute?.Sources is not null).Select(p => DrawGateOf(p, modKey)).ToList(),
+                FramePresentLines).ToList();
         P.Append(FlagsIni(doneFlags, slotTags, modKey,
-            pipes.Select(x => x.ToggleKey?.Key)
-                .Concat(rigids.Select(x => x.ToggleKey?.Key))
-                .Concat(hideHashes.SelectMany(h => HideKeys(hideKeys, h).Select(k => (string?)k.Key)))
-                .Concat(retextures.SelectMany(r => r.Images).Select(i => i.ToggleKey?.Key))
-                .Concat((scopedRetextures ?? Array.Empty<ScopedRetexEntry>())
-                    .SelectMany(r => r.Images).Select(i => i.ToggleKey?.Key))
-                .Concat((stockRamps ?? Array.Empty<StockRampBind>()).Select(b => b.ToggleKey?.Key))
-                // the states that RAISE a hider flag are keys too: their group may own nothing else in
-                // this build, and an undeclared variable would leave every flag stuck at 0
-                .Concat((hiddenFlags ?? Array.Empty<HiddenFlag>())
-                    .SelectMany(f => f.WhenAny).Select(k => (string?)k.Key))
-                // a change gated on a content flag carries no key term of its own, so the key that
-                // raises the flag is declared from the flag's own positions or from nowhere
-                .Concat((shownFlags ?? Array.Empty<ShownFlag>())
-                    .SelectMany(f => f.WhenAny).Select(k => (string?)k.Key)),
+            changeKeys,
             latches, sightings, scopedRetextures is { Count: > 0 }, scopedHashes, keysStartingOff,
-            TwinVars(guards.Values), TwinScratchNeeded(guards.Values),
+            TwinVars(guards.Values), TwinScratchNeeded(guards.Values, hideHashes),
             retextures.Select(r => r.Hash).ToHashSet(StringComparer.OrdinalIgnoreCase), stickyFlags,
             pipes.Select(p => p.SubMaps).Concat(rigids.Select(r => r.SubMaps)).Any(RampTexed)
                 || stockRamps is { Count: > 0 },
             stockRamps is { Count: > 0 }, keyCycles, hiddenFlags, shownFlags,
             pipes.Select(p => p.SubMaps).Concat(rigids.Select(r => r.SubMaps))
                 .Any(m => m.Any(x => x is not null && !x.Blend.IsInherit)), propertyTags,
-            persistModKey));
+            persistModKey, poseClears, framePresent));
 
         // resource declarations: per-pipeline blocks; shared per-part resources declared by the first
         // pipeline that pools the part
         var declaredParts = new HashSet<string>(StringComparer.Ordinal);
+        // A mesh's posed reference and constants copy are declared where some section names them: the chain
+        // reads both of every part it recovers from and the posed reference of every tier, the self-contained
+        // pose route captures the posed reference of the meshes it recovers from, the pooled route only the
+        // replaced part's, and only where a lower-detail mesh of its gathers out of it, and a wardrobe member
+        // keeps both as before. Neither pose route reads a constants copy.
+        var posedRefs = new HashSet<string>(StringComparer.Ordinal);
+        var cbRefs = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pipe in pipes)
+        {
+            string anchorPart = pipe.PartMeta[pipe.AnchorIdx].Part;
+            if (pipe.PoseRoute is null)
+            {
+                foreach (var (part, _, _, rows) in pipe.PartMeta.Where(p => p.Rows > 0)) { posedRefs.Add(part); cbRefs.Add(part); }
+                foreach (var t in pipe.TierMeta.Where(t => t.Rows > 0)) posedRefs.Add(t.Name);
+            }
+            else if (pipe.PoseRoute.Sources is null)
+            {
+                foreach (var (part, _, _, rows) in pipe.PartMeta.Where(p => p.Rows > 0)) posedRefs.Add(part);
+                foreach (var t in pipe.TierMeta.Where(t => t.Rows > 0)) posedRefs.Add(t.Name);
+            }
+            else if (pipe.PoseRoute.TierKernel.Values.Contains(anchorPart)) posedRefs.Add(anchorPart);
+            foreach (var m in pipe.GroupMembers)
+            {
+                posedRefs.Add(m.Name);
+                if (m.Lod0) cbRefs.Add(m.Name);
+            }
+        }
+        // A mesh's SOLVED operator is shared and declared once; a pipeline whose bind reference differs from
+        // the mesh's own binds ships a converted copy under its own suffix instead, and a solved operator
+        // no pipeline binds was never kept.
+        var solvedUsers = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var pipe in pipes)
+            foreach (string mesh in pipe.PartMeta.Where(p => p.Rows > 0).Select(p => p.Part)
+                         .Concat(pipe.TierMeta.Where(t => t.Rows > 0).Select(t => t.Name))
+                         .Concat(pipe.GroupMembers.Select(m => m.Name)))
+                if (!pipe.ConvertedOps.Contains(mesh)) solvedUsers.Add(mesh);
+        void DeclareSolved(string mesh)
+        {
+            if (solvedUsers.Contains(mesh))
+                P.Append($"[Resource_{mesh}_Cpinv]\ntype = Buffer\nformat = DXGI_FORMAT_R32_FLOAT\nfilename = {mesh}_cpinv.buf\n");
+        }
+        var declaredConverted = new HashSet<string>(StringComparer.Ordinal);
+        // a packet belongs to its mesh, and pipelines caching one anchor (its toggle states) share it
+        var declaredPacketSel = new HashSet<string>(StringComparer.Ordinal);
+        void DeclareConverted(PipelineEmission pipe, string mesh)
+        {
+            if (pipe.ConvertedOps.Contains(mesh) && declaredConverted.Add($"{mesh}|{pipe.Sfx}"))
+                P.Append($"[Resource_{mesh}_Cpinv_{pipe.Sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_FLOAT\nfilename = {mesh}_cpinv_{pipe.Sfx}.buf\n");
+        }
         foreach (var pipe in pipes)
         {
             string sfx = pipe.Sfx;
-            P.Append($"[Resource_Palette_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
-            P.Append($"[Resource_PaletteConv_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
-            P.Append($"[Resource_OwnerPart_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = owner_part_{sfx}.buf\n");
+            if (pipe.PoseRoute is null)
+            {
+                P.Append($"[Resource_Palette_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
+                P.Append($"[Resource_PaletteConv_{sfx}]\ntype = RWStructuredBuffer\nstride = 16\nfilename = palette_seed_{sfx}.buf\n");
+                P.Append($"[Resource_OwnerPart_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = owner_part_{sfx}.buf\n");
+            }
             foreach (var (part, _, _, rows) in pipe.PartMeta)
             {
                 if (rows == 0) continue;
                 if (declaredParts.Add(part))
                 {
-                    P.Append($"[Resource_{part}_Cpinv]\ntype = Buffer\nformat = DXGI_FORMAT_R32_FLOAT\nfilename = {part}_cpinv.buf\n");
+                    DeclareSolved(part);
                     if (slimParts.Contains(part))
                     {
                         P.Append($"[Resource_{part}_Sel]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {part}_sel.buf\n");
                         P.Append($"[Resource_{part}_Off]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {part}_off.buf\n");
                     }
-                    P.Append($"[Resource_{part}_Posed]\n\n");
-                    P.Append($"[Resource_{part}_CB]\n\n");
+                    if (posedRefs.Contains(part)) P.Append($"[Resource_{part}_Posed]\n\n");
+                    if (cbRefs.Contains(part)) P.Append($"[Resource_{part}_CB]\n\n");
                 }
                 P.Append($"[Resource_{part}_Map_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {part}_map_{sfx}.buf\n");
+                DeclareConverted(pipe, part);
             }
-            foreach (var (_, name, _, _, rows, _) in pipe.TierMeta)
+            foreach (var (_, name, _, _, rows, _, _) in pipe.TierMeta)
             {
                 if (rows == 0) continue;
                 if (declaredParts.Add(name))
                 {
-                    P.Append($"[Resource_{name}_Cpinv]\ntype = Buffer\nformat = DXGI_FORMAT_R32_FLOAT\nfilename = {name}_cpinv.buf\n");
+                    DeclareSolved(name);
                     if (slimParts.Contains(name))
                     {
                         P.Append($"[Resource_{name}_Sel]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {name}_sel.buf\n");
                         P.Append($"[Resource_{name}_Off]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {name}_off.buf\n");
                     }
-                    P.Append($"[Resource_{name}_Posed]\n\n");
+                    if (posedRefs.Contains(name)) P.Append($"[Resource_{name}_Posed]\n\n");
                 }
                 P.Append($"[Resource_{name}_Map_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {name}_map_{sfx}.buf\n");
+                DeclareConverted(pipe, name);
             }
             // wardrobe-group members: the same shared per-mesh declarations a pool part gets (a member this
             // build also pools is declared once), plus this pipeline's own group map
@@ -3655,7 +5730,7 @@ public sealed partial class MigotoEmitter
             {
                 if (declaredParts.Add(m.Name))
                 {
-                    P.Append($"[Resource_{m.Name}_Cpinv]\ntype = Buffer\nformat = DXGI_FORMAT_R32_FLOAT\nfilename = {m.Name}_cpinv.buf\n");
+                    DeclareSolved(m.Name);
                     if (slimParts.Contains(m.Name))
                     {
                         P.Append($"[Resource_{m.Name}_Sel]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {m.Name}_sel.buf\n");
@@ -3665,14 +5740,58 @@ public sealed partial class MigotoEmitter
                     // member here and pooled as a part by another pipeline under the same name, so
                     // whichever route declares it first must leave the other's binds something to name. A
                     // tier's name never meets a pool part's, and no tier binds constants.
-                    P.Append($"[Resource_{m.Name}_Posed]\n\n");
-                    if (m.Lod0) P.Append($"[Resource_{m.Name}_CB]\n\n");
+                    if (posedRefs.Contains(m.Name)) P.Append($"[Resource_{m.Name}_Posed]\n\n");
+                    if (cbRefs.Contains(m.Name)) P.Append($"[Resource_{m.Name}_CB]\n\n");
                 }
                 P.Append($"[Resource_{m.Name}_GMap_{sfx}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {m.Name}_gmap_{sfx}.buf\n");
+                DeclareConverted(pipe, m.Name);
+            }
+            if (pipe.PoseRoute is { } route)
+            {
+                // The skin pass reads the replacement's bind geometry and weights straight from these, so
+                // they are declared in the shapes it reads them as: no per-draw copy into a structured view.
+                P.Append($"[Resource_NewBind_{sfx}]\ntype = StructuredBuffer\nstride = 40\nfilename = combined_bind_{sfx}.buf\n");
+                P.Append($"[Resource_NewSkin_{sfx}]\ntype = StructuredBuffer\nstride = 32\nfilename = combined_skin_{sfx}.buf\n");
+                // a slim palette pass's vertex list, remapped to its packet's entries
+                foreach (string slimMesh in route.Kernels.Where(k => k.Slim).Select(k => k.Mesh)
+                             .Concat((route.Sources ?? Array.Empty<PoseSource>()).Where(s => s.Slim).Select(s => s.Mesh)))
+                    if (declaredPacketSel.Add(slimMesh))
+                        P.Append($"[Resource_{slimMesh}_PacketSel]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\n"
+                               + $"filename = {PacketSelFile(slimMesh)}\n");
+                // the pooled route's capture of the anchor's rows at each of its draws
+                if (route.Sources is not null) P.Append(RowsTexture(AnchorMatResource(sfx)));
+                // the palette: one row per pixel, written by the palette pass and read by the skin passes; on
+                // the pooled route the row mask beside it, as wide, written by the same passes
+                P.Append(RowsTexture($"Resource_PoseTex_{sfx}", route.PaletteRows));
+                if (route.Sources is not null) P.Append(RowsTexture(MaskResource(sfx), route.PaletteRows));
+                // the viewport every skin pass borrows: set_viewport reads a texture's size and ignores a
+                // buffer's, and the viewport it sets stays while the stream buffer is bound as the target
+                P.Append($"[Resource_PoseView_{sfx}]\ntype = Texture2D\nformat = R32_FLOAT\n"
+                       + $"width = {route.ViewWidth}\nheight = 1\narray = 1\nmips = 1\nmsaa = 1\nbind_flags = render_target\n");
+                // per piece: the stream buffer the skin pass writes as a render target, declared typed so
+                // it takes the view; its stride-40 alias, which the draw binds (a ref keeps the alias's
+                // declared stride); its index buffer, its local-to-donor map and its rows of each UV stream
+                foreach (var p in route.Pieces)
+                {
+                    P.Append($"[Resource_PoseRT_{sfx}_p{p.Number}]\ntype = Buffer\nformat = R32G32B32A32_FLOAT\narray = {p.Elements}\n"
+                           + "bind_flags = render_target vertex_buffer\n");
+                    P.Append($"[Resource_PoseVB_{sfx}_p{p.Number}]\nstride = 40\n");
+                    P.Append($"[Resource_PieceIB_{sfx}_p{p.Number}]\ntype = Buffer\nformat = DXGI_FORMAT_R16_UINT\nfilename = {PieceFile(sfx, p.Number, "ib")}\n");
+                    P.Append($"[Resource_PieceMap_{sfx}_p{p.Number}]\ntype = Buffer\nformat = DXGI_FORMAT_R32_UINT\nfilename = {PieceFile(sfx, p.Number, "map")}\n");
+                    P.Append($"[Resource_PieceVB1_{sfx}_p{p.Number}]\ntype = Buffer\nstride = {pipe.Vb1Stride}\nbind_flags = vertex_buffer\n"
+                           + $"filename = {PieceFile(sfx, p.Number, "vb1")}\n");
+                    for (int k = 0; k < pipe.Vb1Variants.Count; k++)
+                        P.Append($"[Resource_PieceVB1_{sfx}_p{p.Number}_v{k + 1}]\ntype = Buffer\nstride = {pipe.Vb1Variants[k].Stride}\n"
+                               + $"bind_flags = vertex_buffer\nfilename = {PieceFile(sfx, p.Number, $"vb1_v{k + 1}")}\n");
+                }
+                continue;
             }
             P.Append($"[Resource_NewBind_{sfx}]\ntype = RWBuffer\nstride = 40\nfilename = combined_bind_{sfx}.buf\n");
             P.Append($"[Resource_NewSkin_{sfx}]\ntype = RWBuffer\nstride = 32\nfilename = combined_skin_{sfx}.buf\n");
             P.Append($"[Resource_NewVB1_{sfx}]\ntype = RWBuffer\nstride = {pipe.Vb1Stride}\nfilename = combined_vb1_{sfx}.buf\n");
+            for (int k = 0; k < pipe.Vb1Variants.Count; k++)
+                P.Append($"[Resource_NewVB1_{sfx}_v{k + 1}]\ntype = RWBuffer\nstride = {pipe.Vb1Variants[k].Stride}\n"
+                       + $"filename = {pipe.Vb1Variants[k].File}\n");
             P.Append($"[Resource_NewIB_{sfx}]\ntype = Buffer\nformat = {pipe.IbFmt}\nfilename = combined_ib_{sfx}.buf\n");
             // Keep the draw's 40-byte vertex resource separate from the compute shader's stride-zero
             // raw UAV. D3D11's resource/view contracts do not permit one strided resource to serve both
@@ -3690,10 +5809,26 @@ public sealed partial class MigotoEmitter
             if (r.Vb1Stride is { } vb1)
                 P.Append($"[Resource_RigidVB1_{r.Sfx}]\ntype = Buffer\nstride = {vb1}\n"
                        + $"filename = rigid_vb1_{r.Sfx}.buf\n");
+            for (int k = 0; k < r.Vb0Variants.Count; k++)
+                P.Append($"[Resource_RigidVB0_{r.Sfx}_v{k + 1}]\ntype = Buffer\nstride = {r.Vb0Variants[k].Stride}\n"
+                       + $"filename = {r.Vb0Variants[k].File}\n");
+            for (int k = 0; k < r.Vb1Variants.Count; k++)
+                P.Append($"[Resource_RigidVB1_{r.Sfx}_v{k + 1}]\ntype = Buffer\nstride = {r.Vb1Variants[k].Stride}\n"
+                       + $"filename = {r.Vb1Variants[k].File}\n");
             P.Append($"[Resource_RigidIB_{r.Sfx}]\ntype = Buffer\nformat = {r.IbFmt}\n"
                    + $"filename = rigid_ib_{r.Sfx}.buf\n");
         }
         P.Append("[Resource_SaveVB0]\n\n[Resource_SaveVB1]\n\n[Resource_SaveVB3]\n\n[Resource_SaveIB]\n\n");
+        // the gathers bind their lookup at vs-t1, which the block around them saves and puts back
+        if (pipes.Any(p => p.PoseRoute is not null))
+        {
+            P.Append("[Resource_SaveVST1]\n\n");
+            // a ring block binds its slot's number at vs-t2 for its gather
+            if (pipes.Any(p => p.PoseRoute?.Sources is not null)) P.Append("[Resource_SaveVST2]\n\n");
+            // the pixel-shader slots the pose passes bind their inputs at, saved and put back by hand: a
+            // custom shader run restores no shader resources
+            foreach (int k in PosePassSlots) P.Append($"[Resource_SavePST{k}]\n\n");
+        }
         // the save slots exist for the probe/bind range of each kind of bind this build ships; one that
         // binds nothing never touches a ps-t slot, so it declares none
         var subMapSets = pipes.Select(p => p.SubMaps).Concat(rigids.Select(r => r.SubMaps)).ToList();
@@ -3800,17 +5935,19 @@ public sealed partial class MigotoEmitter
                     foreach (var line in seen) P.Append(line).Append('\n');
                 // this hash also fires on a sibling mesh's draws, so the suppression and the donor draw
                 // wait for the probe to find this part's own tagged texture bound
+                // ungated, as the sighting is: it only names which buffers this hash's draw reads
+                if (r.Vb0Variants.Count > 0)
+                    P.Append($"${RigidStreamVar(r.Sfx, 0)} = {r.TierVb0.GetValueOrDefault(r.Hashes[i])}\n");
+                if (r.Vb1Variants.Count > 0)
+                    P.Append($"${RigidStreamVar(r.Sfx, 1)} = {r.TierVb1.GetValueOrDefault(r.Hashes[i])}\n");
                 bool rigidGuarded = OpenTwinGuardIfAny(P, guards, r.Hashes[i]);
-                // a multi-submesh target routes its donor draw per submesh (the pooled anchors' rule);
-                // a guarded hash keeps the draw here, inside the guard's verdict
-                DrawShapeSet? routedShapes =
-                    r.ShapesByHash?.GetValueOrDefault(r.Hashes[i]) is { } rs
-                        && rs.Shapes.Count(sh => sh.Count > 0) > 1
-                        && !guards.ContainsKey(r.Hashes[i]) ? rs : null;
+                // a multi-submesh target, or one whose map drops a range, routes its donor draw per submesh
+                // (the pooled anchors' rule); a guarded hash keeps the draw here, inside the guard's verdict
+                var routedDraw = r.RoutedOn(r.Hashes[i], guards, drawGate);
                 if (oneGate)
                 {
                     drawGate.Open(P);
-                    P.Append(routedShapes is null
+                    P.Append(routedDraw is null
                         ? $"handling = skip\nrun = CommandListRigid_{r.Sfx}\n"
                         : "handling = skip\n");
                     drawGate.Close(P);
@@ -3828,7 +5965,7 @@ public sealed partial class MigotoEmitter
                         P.Append("handling = skip\n");
                         g.Close(P);
                     }
-                    if (routedShapes is null)
+                    if (routedDraw is null)
                     {
                         drawGate.Open(P);
                         P.Append($"run = CommandListRigid_{r.Sfx}\n");
@@ -3840,13 +5977,12 @@ public sealed partial class MigotoEmitter
                 // place a pooled capture section runs its scoped-retexture blocks. On a routed hash the
                 // block moves after the draw sections, exactly as at a routed pooled capture.
                 bool hasScope = r.ScopeLines.TryGetValue(r.Hashes[i], out var scope);
-                if (routedShapes is null && hasScope)
+                if (routedDraw is null && hasScope)
                     foreach (var line in scope!) P.Append(line).Append('\n');
                 P.Append("\n");
-                if (routedShapes is not null)
+                if (routedDraw is not null)
                 {
-                    EmitRoutedDrawSections(P, r.Hashes[i], name,
-                        new[] { new RoutedDraw(r.Sfx, routedShapes, drawGate, r.Draws.Count, IsRigid: true) });
+                    EmitRoutedDrawSections(P, r.Hashes[i], name, new[] { routedDraw });
                     if (hasScope)
                     {
                         OpenTextureOverride(P, $"{name}_Scope", r.Hashes[i]);
@@ -3867,17 +6003,9 @@ public sealed partial class MigotoEmitter
                 // absent the frame it comes back on
                 if (sightings.ByHash.TryGetValue(h, out var seen))
                     foreach (var line in seen) P.Append(line).Append('\n');
-                // this hash also fires on a sibling mesh's draws, so the skip waits for the probe to find
-                // the hidden mesh's own tagged texture bound
-                bool hideGuarded = OpenTwinGuardIfAny(P, guards, h);
-                foreach (var hideGate in CollapseSkips(HideGates(hideKeys, h, modKey,
-                    LatchTerms(HideLatch(hideLatches, h))), modKey, keyCycles))
-                {
-                    hideGate.Open(P);
-                    P.Append("handling = skip\n");
-                    hideGate.Close(P);
-                }
-                CloseTwinGuard(P, hideGuarded);
+                // where this hash also fires on a sibling mesh's draws, each skip waits for the probe to
+                // find its own hidden mesh's tagged texture bound
+                AppendHideSkips(P, guards, hideClaims, h, modKey, keyCycles);
                 // a scoped retexture anchored on this same draw, folded in: it carries its own probe and
                 // self-corrects, so it sits outside the guard exactly as it does in a capture section
                 foreach (var line in HideScopeLines(hideScope, h)) P.Append(line).Append('\n');
@@ -3885,22 +6013,82 @@ public sealed partial class MigotoEmitter
             }
         }
 
+        // the pose blocks the capture units and routed draw sections above run, one per section and pipeline
+        foreach (string block in units.PoseBlocks) P.Append(block);
+        var declaredGatherRefs = new HashSet<string>(StringComparer.Ordinal);
+        // a mesh's packet layout is declared once whether it is gathered as a kernel, as a source or as both;
+        // a kernel mesh's packet and plain gather once, and a source mesh's ring once however many pipelines
+        // read it
+        var declaredLayouts = new HashSet<string>(StringComparer.Ordinal);
+        var declaredGathers = new HashSet<string>(StringComparer.Ordinal);
+        var declaredRings = new HashSet<string>(StringComparer.Ordinal);
+        void DeclareLayout(string mesh)
+        {
+            if (declaredLayouts.Add(mesh)) P.Append(PacketLayout(mesh));
+        }
+        void DeclareGather(string mesh, int packet)
+        {
+            if (declaredGathers.Add(mesh)) P.Append(GatherSection(mesh, packet, withLayout: declaredLayouts.Add(mesh)));
+        }
+        bool declaredFrame = false;
         foreach (var pipe in pipes)
         {
             string sfx = pipe.Sfx;
             string anchor = pipe.PartMeta[pipe.AnchorIdx].Part;
 
+            if (pipe.PoseRoute is { } route)
+            {
+                // One palette pass per mesh the anchor is captured from, reading the pose only through the
+                // packet its mesh's gather filled at this draw; then one skin pass per piece, reading the
+                // palette the pass just wrote. No compute, no unordered-access view: nothing the draw
+                // consumes was written through one, so the draw waits on no drain.
+                foreach (var (mesh, _, packet, slim) in route.Kernels)
+                {
+                    DeclareGather(mesh, packet);
+                    // a tier recovering nothing gathers this lod0 packet at its own draw, out of the lod0
+                    // capture reference
+                    if (mesh == anchor && route.TierKernel.Values.Contains(anchor) && declaredGatherRefs.Add(mesh))
+                        P.Append(GatherRefSection(mesh, packet));
+                    P.Append(PosePaletteSection(pipe, mesh, slim, masked: route.Sources is not null));
+                }
+                // the pooled route: the anchor's rows captured at its draw, then per source mesh its packet,
+                // gather and ring (shared between pipelines), and this pipeline's pick where a bone's row
+                // places the source, and its palette pass
+                if (route.Sources is { } sources)
+                {
+                    if (!declaredFrame)
+                    {
+                        P.Append(FrameSections()).Append(RingSlotSections());
+                        declaredFrame = true;
+                    }
+                    P.Append(AnchorMatSection(sfx));
+                    foreach (var source in sources)
+                    {
+                        DeclareLayout(source.Mesh);
+                        if (declaredRings.Add(source.Mesh)) P.Append(RingSections(source.Mesh, source.Packet));
+                        if (source.ByBone)
+                        {
+                            P.Append(RowsTexture(PickResource(source.Mesh, sfx))).Append('\n');
+                            P.Append(PosePickSection(sfx, source));
+                        }
+                        P.Append(PosePaletteSection(pipe, source.Mesh, source.Slim, masked: true, source: source));
+                    }
+                }
+                foreach (var p in route.Pieces) P.Append(PoseSkinSection(pipe, p));
+            }
+            else
+            {
             foreach (var (part, _, _, rows) in pipe.PartMeta.Where(p => p.Rows > 0))
                 P.Append($"[CustomShaderRecover_{part}_{sfx}]\ncs = recover_{part}_cs.hlsl\n"
                        + $"cs-u1 = copy Resource_Palette_{sfx}\ncs-t0 = copy Resource_{part}_Posed\n"
-                       + $"cs-t1 = Resource_{part}_Cpinv\ncs-t2 = Resource_{part}_Map_{sfx}\n"
+                       + $"cs-t1 = {pipe.CpinvResource(part)}\ncs-t2 = Resource_{part}_Map_{sfx}\n"
                        + (slimParts.Contains(part) ? $"cs-t3 = Resource_{part}_Sel\ncs-t4 = Resource_{part}_Off\n" : "")
                        + $"Dispatch = {(rows + 63) / 64}, 1, 1\nResource_Palette_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            foreach (var (_, name, _, _, rows, _) in pipe.TierMeta.Where(t => t.Rows > 0))
+            foreach (var (_, name, _, _, rows, _, _) in pipe.TierMeta.Where(t => t.Rows > 0))
                 P.Append($"[CustomShaderRecover_{name}_{sfx}]\ncs = recover_{name}_cs.hlsl\n"
                        + $"cs-u1 = copy Resource_Palette_{sfx}\ncs-t0 = copy Resource_{name}_Posed\n"
-                       + $"cs-t1 = Resource_{name}_Cpinv\ncs-t2 = Resource_{name}_Map_{sfx}\n"
+                       + $"cs-t1 = {pipe.CpinvResource(name)}\ncs-t2 = Resource_{name}_Map_{sfx}\n"
                        + (slimParts.Contains(name) ? $"cs-t3 = Resource_{name}_Sel\ncs-t4 = Resource_{name}_Off\n" : "")
                        + $"Dispatch = {(rows + 63) / 64}, 1, 1\nResource_Palette_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
@@ -3913,13 +6101,24 @@ public sealed partial class MigotoEmitter
                        + $"Dispatch = {(4 * pairs + 63) / 64}, 1, 1\n"
                        + $"Resource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
 
-            P.Append($"[CustomShaderConvert_{sfx}]\ncs = convert_cs_{sfx}.hlsl\n"
-                   + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_Palette_{sfx}\ncs-t1 = Resource_OwnerPart_{sfx}\n");
-            for (int pi = 0; pi < pipe.PartMeta.Count; pi++)
-                if (pipe.PartMeta[pi].Rows > 0)
-                    P.Append($"cs-cb{5 + pi} = Resource_{pipe.PartMeta[pi].Part}_CB\n");
-            P.Append($"cs-cb13 = Resource_{anchor}_CB\n"
-                   + $"Dispatch = {(4 * pipe.Ub + 63) / 64}, 1, 1\nResource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
+            // one convert per chunk of parts, each reading the converted palette the chunk before it
+            // copied back, so the rows it does not own pass through as that chunk left them.
+            // Accepted costs: a pool over one chunk pays the convert's palette copies (raw into t0,
+            // converted in and out) once per chunk per frame, 64 bytes per palette slot each (some 14 KB
+            // on a real 10-part body pool); and a pipeline whose LOD0 runs the witness convert still ships
+            // every chunk's section and shader, as it always shipped the single convert's, so each extra
+            // chunk costs one shader compile at load.
+            for (int chunk = 0; chunk < ComputeTemplates.ConvertChunks(pipe.PartMeta.Count); chunk++)
+            {
+                var (first, end) = ComputeTemplates.ConvertChunkParts(pipe.PartMeta.Count, chunk);
+                P.Append($"[{ConvertSection(sfx, chunk)}]\ncs = {ConvertFile(sfx, chunk)}\n"
+                       + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_Palette_{sfx}\ncs-t1 = Resource_OwnerPart_{sfx}\n");
+                for (int pi = first; pi < end; pi++)
+                    if (pipe.PartMeta[pi].Rows > 0)
+                        P.Append($"cs-cb{ComputeTemplates.PartRegister(pi)} = Resource_{pipe.PartMeta[pi].Part}_CB\n");
+                P.Append($"cs-cb13 = Resource_{anchor}_CB\n"
+                       + $"Dispatch = {(4 * pipe.Ub + 63) / 64}, 1, 1\nResource_PaletteConv_{sfx} = copy cs-u1\npost cs-u1 = null\n\n");
+            }
 
             // the witness convert, shared by LOD0 when complete and by every tier chain: K from
             // shared-bone recoveries in the palette's reserved witness slots, no constant buffers
@@ -3936,7 +6135,7 @@ public sealed partial class MigotoEmitter
             {
                 P.Append($"[CustomShaderGroup_{m.Name}_{sfx}]\ncs = grpfuse_{m.Name}_{sfx}.hlsl\n"
                        + $"cs-u1 = copy Resource_PaletteConv_{sfx}\ncs-t0 = copy Resource_{m.Name}_Posed\n"
-                       + $"cs-t1 = Resource_{m.Name}_Cpinv\ncs-t2 = Resource_{m.Name}_GMap_{sfx}\n"
+                       + $"cs-t1 = {pipe.CpinvResource(m.Name)}\ncs-t2 = Resource_{m.Name}_GMap_{sfx}\n"
                        + (slimParts.Contains(m.Name) ? $"cs-t3 = Resource_{m.Name}_Sel\ncs-t4 = Resource_{m.Name}_Off\n" : ""));
                 if (m.AtDraw)
                     P.Append($"cs-cb5 = Resource_{m.Name}_CB\ncs-cb13 = Resource_{anchor}_CB\n");
@@ -3962,6 +6161,11 @@ public sealed partial class MigotoEmitter
                    + $"cs-t1 = copy Resource_NewSkin_{sfx}\ncs-t2 = copy Resource_PaletteConv_{sfx}\n"
                    + $"Dispatch = {(pipe.Vcount + 63) / 64}, 1, 1\ncs-u1 = null\n"
                    + $"Resource_NewPosed_{sfx} = copy Resource_NewPosedUAV_{sfx}\npost cs-u1 = null\n\n");
+            }
+
+            // A pose-route pipeline draws each range piece by piece, every piece from the stream buffer
+            // its skin pass just wrote; the per-range texture binds wrap all of a range's pieces.
+            Func<int, string>? poseDraw = pipe.PoseRoute is null ? null : di => PoseDraw(pipe, di);
 
             // A COMMAND LIST, not a [CustomShader]: a CustomShader invocation unconditionally
             // saves/restores the viewports and the full OM state (RTVs+UAVs+DSV) around every run — pure
@@ -3973,17 +6177,15 @@ public sealed partial class MigotoEmitter
             // submesh inherits keeps every original map, so it needs no probe and no ps-t save/restore
             bool donorTexed = DonorTexed(pipe.SubMaps);
             bool rampTexed = RampTexed(pipe.SubMaps);
-            var propertySlots = PropertySlots(pipe.SubMaps);
             var pipePatches = patchGroups.Where(group => group.Sfx == sfx).ToList();
-            var saved = SavedSlots(donorTexed, rampTexed, propertySlots.SelectMany(p => p.Registers));
-            foreach (int s in saved) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
-            P.Append($"vb0 = Resource_NewPosed_{sfx}\nvb1 = Resource_NewVB1_{sfx}\nvb3 = Resource_NewPosed_{sfx}\nib = Resource_NewIB_{sfx}\n");
+            var restores = TextureRestores(BoundSlotVars(pipe.SubMaps));
+            P.Append(DonorBinds(pipe));
             EmitDrawTextures(P, donorTexed, rampTexed, pipe.SubMaps, pipe.Draws, slotTags, propertyTags, texRes,
-                pipePatches);
+                pipePatches, poseDraw: poseDraw);
             // vb3 gets its own save: it is rebound to the skin output above, and restoring it from the vb0
             // save would hand the game whatever vb0 held — wrong whenever they differed
             P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
-            foreach (int s in saved) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+            P.Append(restores);
             // The routed per-range lists: one per donor submesh, the full list's save/bind/restore shape
             // drawing only that range. Referenced by the per-submesh sections a routed capture site emits;
             // a site a twin guard kept on the full list leaves its per-range lists unreferenced and inert.
@@ -3992,12 +6194,11 @@ public sealed partial class MigotoEmitter
                 {
                     P.Append($"\n[CommandListDrawS{di}_{sfx}]\n"
                            + "Resource_SaveVB0 = ref vb0\nResource_SaveVB1 = ref vb1\nResource_SaveVB3 = ref vb3\nResource_SaveIB = ref ib\n");
-                    foreach (int s in saved) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
-                    P.Append($"vb0 = Resource_NewPosed_{sfx}\nvb1 = Resource_NewVB1_{sfx}\nvb3 = Resource_NewPosed_{sfx}\nib = Resource_NewIB_{sfx}\n");
+                    P.Append(DonorBinds(pipe));
                     EmitDrawTextures(P, donorTexed, rampTexed, pipe.SubMaps, pipe.Draws, slotTags, propertyTags, texRes,
-                        pipePatches, only: di);
+                        pipePatches, only: di, poseDraw: poseDraw);
                     P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
-                    foreach (int s in saved) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+                    P.Append(restores);
                 }
             if (pipes.IndexOf(pipe) + 1 < pipes.Count) P.Append("\n");
         }
@@ -4012,38 +6213,47 @@ public sealed partial class MigotoEmitter
                    + "Resource_SaveVB0 = ref vb0\nResource_SaveVB1 = ref vb1\nResource_SaveVB3 = ref vb3\nResource_SaveIB = ref ib\n");
             bool rigidTexed = DonorTexed(r.SubMaps);
             bool rigidRamped = RampTexed(r.SubMaps);
-            var rigidProperties = PropertySlots(r.SubMaps);
             var rigidPatches = patchGroups.Where(group => group.Sfx == r.Sfx).ToList();
-            var rigidSaved = SavedSlots(rigidTexed, rigidRamped,
-                rigidProperties.SelectMany(p => p.Registers));
-            foreach (int s in rigidSaved) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
+            var rigidRestores = TextureRestores(BoundSlotVars(r.SubMaps));
             // vb3 takes the position stream like vb0, matching what a pooled draw binds: the passes that
             // read it read positions.
-            P.Append($"vb0 = Resource_RigidVB0_{r.Sfx}\n");
-            if (r.Vb1Stride is not null) P.Append($"vb1 = Resource_RigidVB1_{r.Sfx}\n");
-            P.Append($"vb3 = Resource_RigidVB0_{r.Sfx}\nib = Resource_RigidIB_{r.Sfx}\n");
+            P.Append(r.Binds());
             EmitDrawTextures(P, rigidTexed, rigidRamped, r.SubMaps, r.Draws, slotTags, propertyTags, texRes,
                 rigidPatches);
             P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
-            foreach (int s in rigidSaved) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+            P.Append(rigidRestores);
             // the rigid twin of the pooled per-range lists above
-            if (r.Hashes.Any(h => r.ShapesByHash?.GetValueOrDefault(h) is { } hs
-                && hs.Shapes.Count(sh => sh.Count > 0) > 1 && !guards.ContainsKey(h)))
+            if (r.Hashes.Any(h => r.RoutesOn(h, guards)))
                 for (int di = 0; di < r.Draws.Count; di++)
                 {
                     P.Append($"\n[CommandListRigidS{di}_{r.Sfx}]\n"
                            + "Resource_SaveVB0 = ref vb0\nResource_SaveVB1 = ref vb1\nResource_SaveVB3 = ref vb3\nResource_SaveIB = ref ib\n");
-                    foreach (int s in rigidSaved) P.Append($"Resource_SaveT{s} = ref ps-t{s}\n");
-                    P.Append($"vb0 = Resource_RigidVB0_{r.Sfx}\n");
-                    if (r.Vb1Stride is not null) P.Append($"vb1 = Resource_RigidVB1_{r.Sfx}\n");
-                    P.Append($"vb3 = Resource_RigidVB0_{r.Sfx}\nib = Resource_RigidIB_{r.Sfx}\n");
+                    P.Append(r.Binds());
                     EmitDrawTextures(P, rigidTexed, rigidRamped, r.SubMaps, r.Draws, slotTags, propertyTags, texRes,
                         rigidPatches, only: di);
                     P.Append("vb0 = Resource_SaveVB0\nvb1 = Resource_SaveVB1\nvb3 = Resource_SaveVB3\nib = Resource_SaveIB\n");
-                    foreach (int s in rigidSaved) P.Append($"ps-t{s} = Resource_SaveT{s}\n");
+                    P.Append(rigidRestores);
                 }
         }
         EmitMaterialPatchSections(P, patchGroups);
+        P.Append(tail);
+
+        // The ini header: what the mod does and which sections do it, read off the finished file, so it is
+        // written last and goes first
+        var (replacedParts, hiddenParts) = MeshCounts(pipes, rigids, hideHashes, meshLabels);
+        var (slotProbe, materialPasses, retexSections) = IniMarkers(P.ToString());
+        P.Insert(0, IniHeader(appVersion, new ModSummary(replacedParts, hiddenParts,
+            retextures.Select(r => r.Hash).Concat((scopedRetextures ?? Array.Empty<ScopedRetexEntry>()).Select(e => e.StockHash))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            stockRamps is { Count: > 0 } || patchGroups.Count > 0, modKey,
+            StateKeys(modKey, changeKeys, keyCycles))
+        {
+            Replaces = ReplaceSummaries(pipes),
+            Rigids = rigids.Select(r => r.Part).ToList(),
+            SlotProbe = slotProbe,
+            MaterialPasses = materialPasses,
+            Retextures = retexSections,
+        }) + "\n");
         return P.ToString();
     }
 
@@ -4059,7 +6269,8 @@ public sealed partial class MigotoEmitter
     void EmitDrawTextures(StringBuilder P, bool donorTexed, bool rampTexed, SubmeshMaps?[] subMaps,
         IReadOnlyList<(int Count, int Start, int Base)> draws, IReadOnlyList<StockMapTag> slotTags,
         IReadOnlyList<StockPropertyTag> propertyTags, IReadOnlyDictionary<string, string> texRes,
-        IReadOnlyList<MaterialPatchGroup>? patches = null, int only = -1)
+        IReadOnlyList<MaterialPatchGroup>? patches = null, int only = -1,
+        Func<int, string>? poseDraw = null)
     {
         // an ordered list, not a map: the emitted text is a pinned contract, so bind order is fixed
         bool blendTexed = subMaps.Any(m => m is not null && !m.Blend.IsInherit);
@@ -4141,6 +6352,8 @@ public sealed partial class MigotoEmitter
         // one inherits — otherwise an untouched submesh would draw wearing its neighbour's map.
         // A single-range list (only >= 0) emits exactly that submesh's binds and draw: alone in its
         // list, it inherits from the game's own binds rather than a neighbour's leftovers.
+        // the slots the binds below can touch, saved now that the probes have named them
+        P.Append(TextureSaves(BoundSlotVars(subMaps)));
         var bound = new Dictionary<StockMapKind, string?>();   // null/absent = the game's own bind
         void Bind(int di, StockMapKind kind, string slotVar, IReadOnlyList<int> registers)
         {
@@ -4177,32 +6390,47 @@ public sealed partial class MigotoEmitter
             foreach (var property in properties) BindProperty(di, property);
             if (rampTexed) Bind(di, StockMapKind.Ramp, VarRampSlot, Slots.Ramp);
             // The submesh's material patches, wrapped immediately around its one draw: gate on a
-            // declaring shader variant being bound (the family filter value its tag sections carry),
-            // snapshot the live carrier buffer into a work resource that inherits the copied byte width,
-            // run each patch shader whose exact-width guard reads that live descriptor, copy into the
-            // constant-buffer-typed draw resource carrying the declared width, bind that copy for this
-            // draw alone, and put the game's own resource back — every unowned byte keeps its current
-            // runtime value.
-            var group = patches?.FirstOrDefault(candidate => candidate.DonorDraws.Contains(di));
-            if (group is not null)
-            {
+            // exact pixel program being bound (the stable filter value its tag section carries), patch
+            // the live constants in one pass (PatchLines), bind the patched copy for this draw alone, and
+            // put the game's own resource back — every unowned byte keeps its current runtime value.
+            var drawGroups = patches?.Where(candidate => candidate.DonorDraws.Contains(di)).ToArray()
+                ?? Array.Empty<MaterialPatchGroup>();
+            foreach (var group in drawGroups)
                 P.Append(declaredPatchLocals.Add(group.Gid)
                     ? $"local $zz_material_ps_{group.Gid} = ps\n"
-                    : $"$zz_material_ps_{group.Gid} = ps\n")
-                 .Append($"if $zz_material_ps_{group.Gid} == {group.FilterIndex}\n")
-                 .Append($"Resource_MaterialSource_{group.Gid} = ref ps-cb{group.ConstantBufferSlot}\n")
-                 .Append($"Resource_MaterialWork_{group.Gid} = copy ps-cb{group.ConstantBufferSlot}\n");
-                foreach (var patch in group.Patches)
-                    P.Append($"run = CustomShader_MaterialPatch_{patch.Key}\n");
-                P.Append($"Resource_MaterialDraw_{group.Gid} = copy Resource_MaterialWork_{group.Gid}\n")
-                 .Append($"ps-cb{group.ConstantBufferSlot} = Resource_MaterialDraw_{group.Gid}\n")
-                 .Append("endif\n");
+                    : $"$zz_material_ps_{group.Gid} = ps\n");
+            var skipped = drawGroups.Where(group => group.Patches.Any(patch => patch.SkipDraw)).ToArray();
+            foreach (var group in skipped)
+                P.Append($"if $zz_material_ps_{group.Gid} != {group.FilterIndex}\n");
+            var activeGroups = drawGroups.Where(group => !group.Patches.Any(patch => patch.SkipDraw)).ToArray();
+            foreach (var group in activeGroups)
+            {
+                P.Append($"if $zz_material_ps_{group.Gid} == {group.FilterIndex}\n");
+                if (HasPatchShader(group))
+                {
+                    P.Append($"Resource_MaterialSource_{group.Gid} = ref ps-cb{group.ConstantBufferSlot}\n");
+                    foreach (string line in PatchLines(group)) P.Append(line).Append('\n');
+                }
+                foreach (var texture in group.Patches.SelectMany(patch =>
+                             patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>()).Distinct())
+                    P.Append($"Resource_MaterialTextureSave_{group.Gid}_{texture.Slot} = ref ps-t{texture.Slot}\n")
+                     .Append($"ps-t{texture.Slot} = Resource_MaterialTexture_{group.Gid}_{texture.Slot}\n");
+                P.Append("endif\n");
             }
-            P.Append($"drawindexed = {draws[di].Count}, {draws[di].Start}, {draws[di].Base}\n");
-            if (group is not null)
-                P.Append($"if $zz_material_ps_{group.Gid} == {group.FilterIndex}\n")
-                 .Append($"ps-cb{group.ConstantBufferSlot} = Resource_MaterialSource_{group.Gid}\n")
-                 .Append("endif\n");
+            P.Append(poseDraw is not null
+                ? poseDraw(di)
+                : $"drawindexed = {draws[di].Count}, {draws[di].Start}, {draws[di].Base}\n");
+            foreach (var group in activeGroups.Reverse())
+            {
+                P.Append($"if $zz_material_ps_{group.Gid} == {group.FilterIndex}\n");
+                foreach (var texture in group.Patches.SelectMany(patch =>
+                             patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>()).Distinct())
+                    P.Append($"ps-t{texture.Slot} = ref Resource_MaterialTextureSave_{group.Gid}_{texture.Slot}\n");
+                if (group.Patches.Any(WritesConstants))
+                    P.Append($"ps-cb{group.ConstantBufferSlot} = Resource_MaterialSource_{group.Gid}\n");
+                P.Append("endif\n");
+            }
+            foreach (var _ in skipped) P.Append("endif\n");
         }
     }
 
@@ -4220,16 +6448,28 @@ public sealed partial class MigotoEmitter
     /// whose anchor is one of them. One hash owns one TextureOverride section and the hide's is it, so the
     /// body is handed over exactly as it is to a capture unit's or a rigid replacement's section. Filled
     /// here and emitted by the caller, which writes the hide sections after this has run.</param>
+    /// <param name="stockDraws">The unreplaced parts' own material draws the material patches in
+    /// <paramref name="patchGroups"/> apply at. Their bodies join the scoped retextures' and the ramp binds'
+    /// in the section their mesh owns.</param>
     string RetexIni(IReadOnlyList<RetexEntry> entries, string outDir, string? modKey,
         IReadOnlyList<ScopedRetexEntry>? scoped, CaptureUnits units, Sightings sightings,
         IReadOnlyDictionary<string, RigidEmission>? rigidOwner = null,
-        IEnumerable<TwinGuard>? twinGuards = null,
+        IReadOnlyDictionary<string, TwinGuard>? twinGuards = null,
         IReadOnlyDictionary<string, StockMapKind>? slotTagKinds = null,
         IReadOnlyList<StockRampBind>? stockRamps = null,
-        IReadOnlyDictionary<string, List<string>>? hideScope = null)
+        IReadOnlyDictionary<string, List<string>>? hideScope = null,
+        IReadOnlyList<StockDrawSite>? stockDraws = null,
+        IReadOnlyList<MaterialPatchGroup>? patchGroups = null)
     {
         var P = new StringBuilder();
         var ramps = stockRamps ?? Array.Empty<StockRampBind>();
+        var guards = twinGuards ?? new Dictionary<string, TwinGuard>(StringComparer.Ordinal);
+        // a site no patch names changes nothing and gets no body
+        var groupsBySite = (patchGroups ?? Array.Empty<MaterialPatchGroup>())
+            .GroupBy(group => group.Sfx, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+        var sites = (stockDraws ?? Array.Empty<StockDrawSite>())
+            .Where(site => groupsBySite.ContainsKey(site.Id)).ToList();
 
         // copy + declare each distinct replacement once, before anything assigns it
         var texRes = new Dictionary<string, string>(StringComparer.Ordinal);   // source path → resource name
@@ -4291,8 +6531,8 @@ public sealed partial class MigotoEmitter
         // a stock ramp bind saves the ramp's OWN candidate range. The two ranges OVERLAP — the ramp's
         // candidates are measured out of the same shader slot data the probe sweep is — so a register in
         // both is saved under both names. Two names for one register cost a declaration each and nothing
-        // else; what matters is that a section carrying both restores each register exactly once, which
-        // the anchor bodies below do.
+        // else; what matters is that a section carrying both saves and restores each register exactly once,
+        // which the anchor bodies below do.
         if (ramps.Count > 0)
             foreach (int s in Slots.Ramp) P.Append($"[Resource_SrSave{s}]\n");
         P.Append("\n");
@@ -4301,8 +6541,8 @@ public sealed partial class MigotoEmitter
         // section already owns those hashes, so it carries the tag rather than letting a second section
         // mint itself on one — the ini parse drops the second, and which of the two survived could not
         // be predicted.
-        var guardList = (twinGuards ?? Array.Empty<TwinGuard>()).ToList();
-        var mintedTwinTags = MintedTwinTagHashes(guardList);
+        var guardList = guards.Values.ToList();
+        var mintedTwinTags = MintedProbeTagHashes(guardList, ramps, sites);
         var twinProbed = new HashSet<string>(mintedTwinTags, StringComparer.OrdinalIgnoreCase);
 
         foreach (var e in entries)
@@ -4365,21 +6605,7 @@ public sealed partial class MigotoEmitter
                 P.Append($"[TextureOverride_RetexTag_{hash}]\nhash = {hash}\n"
                        + $"filter_index = {RetexTag(hash)}\nmatch_priority = 100\n\n");
 
-        // A stock ramp bind reads its target material's ordinary map by the same derived value. The hash
-        // is the modder's to pick no more than the ramp's is, so a hash something else in this build
-        // already tags carries THAT section instead of a second one on the same name — which the parse
-        // would drop, and which of the two survived could not be predicted. The caller chooses a map no
-        // one else claims; this is the belt on that brace.
-        foreach (var hash in ramps.Select(b => b.MaterialHash).Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            if (scopedTagged.Contains(hash) || retexTagged.Contains(hash)
-                || mintedTwinTags.Contains(hash, StringComparer.OrdinalIgnoreCase)
-                || slotTagKinds?.ContainsKey(hash) == true) continue;
-            P.Append($"[TextureOverride_StockRampTag_{hash}]\nhash = {hash}\n"
-                   + $"filter_index = {RetexTag(hash)}\nmatch_priority = 100\n\n");
-        }
-
-        // …and one per target material's own ramp, carrying the ramp KIND value, which is what says which
+        // One tag per picked material's own ramp, carrying the ramp KIND value, which is what says which
         // register holds a ramp at the draw. Minted here rather than beside the Replace anchors' slot tags
         // because a mod may pick a ramp on an unreplaced part and replace nothing at all.
         //
@@ -4406,33 +6632,40 @@ public sealed partial class MigotoEmitter
                    + $"filter_index = {FilterRamp}\nmatch_priority = 100\n\n");
         }
 
-        // One section per distinct anchor mesh, whatever draw-scoped work lands there: each scoped
-        // texture and each stock ramp of that mesh probes and binds inside it. Saves and post-restores
-        // are UNCONDITIONAL — restoring an untouched slot to its own just-saved ref is a no-op, and a
-        // gated-off draw must not restore stale refs — so only the binds sit under the keys and the latch.
+        // One section per distinct anchor mesh, whatever draw-scoped work lands there: each scoped texture,
+        // each stock ramp pick and each stock shading change of that mesh probes and binds inside it. Every
+        // save is unconditional, since a save is only a reference. Each restore runs only where this section
+        // bound that register at this draw: a section that bound nothing leaves the register to whoever did,
+        // because its own save may then hold another mod's resource, and putting that back after the draw
+        // would leave it bound past it.
         var anchors = new List<(string Hash, string Suffix)>();
+        var anchored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var perAnchor = new Dictionary<string,
             List<(ScopedRetexEntry E, ScopedRetexImage I, ScopedAnchor A)>>(StringComparer.OrdinalIgnoreCase);
         var rampsAt = new Dictionary<string, List<StockRampBind>>(StringComparer.OrdinalIgnoreCase);
+        var sitesAt = new Dictionary<string, List<StockDrawSite>>(StringComparer.OrdinalIgnoreCase);
         foreach (var e in scoped ?? Array.Empty<ScopedRetexEntry>())
             foreach (var img in e.Images)
             foreach (var a in img.Anchors)
             {
                 if (!perAnchor.TryGetValue(a.Hash, out var list))
-                {
                     perAnchor[a.Hash] = list = new List<(ScopedRetexEntry, ScopedRetexImage, ScopedAnchor)>();
-                    anchors.Add((a.Hash, a.Suffix));
-                }
+                if (anchored.Add(a.Hash)) anchors.Add((a.Hash, a.Suffix));
                 list.Add((e, img, a));
             }
         foreach (var b in ramps)
         {
             if (!rampsAt.TryGetValue(b.IbHash, out var list))
-            {
                 rampsAt[b.IbHash] = list = new List<StockRampBind>();
-                if (!perAnchor.ContainsKey(b.IbHash)) anchors.Add((b.IbHash, b.Name));
-            }
+            if (anchored.Add(b.IbHash)) anchors.Add((b.IbHash, b.Name));
             list.Add(b);
+        }
+        foreach (var site in sites)
+        {
+            if (!sitesAt.TryGetValue(site.IbHash, out var list))
+                sitesAt[site.IbHash] = list = new List<StockDrawSite>();
+            if (anchored.Add(site.IbHash)) anchors.Add((site.IbHash, site.Id));
+            list.Add(site);
         }
         var usedSuffixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (ibHash, first) in anchors)
@@ -4440,16 +6673,39 @@ public sealed partial class MigotoEmitter
             var body = new List<string>();
             bool hasScoped = perAnchor.TryGetValue(ibHash, out var scopedHere);
             bool hasRamps = rampsAt.TryGetValue(ibHash, out var rampsHere);
+            var sitesHere = sitesAt.GetValueOrDefault(ibHash) ?? new List<StockDrawSite>();
+            var groupsHere = sitesHere.SelectMany(site => groupsBySite[site.Id]).ToList();
+            var patchedHere = groupsHere.Where(HasPatchShader).ToList();
+            // Every register a bind in this section can touch, with the save it is put back from. The families
+            // overlap, so a register takes the first family's save and keeps it: one save and one restore
+            // per register, whatever wanted it.
+            var saves = new SortedDictionary<int, string>();
+            if (hasScoped)
+                foreach (int s in scopedHere!.SelectMany(x => x.E.Registers ?? ProbeSlots))
+                    saves.TryAdd(s, $"Resource_RtxSave{s}");
+            if (hasRamps)
+                foreach (int s in Slots.Ramp) saves.TryAdd(s, $"Resource_SrSave{s}");
+            foreach (var group in groupsHere)
+                foreach (var texture in PatchTextures(group))
+                    saves.TryAdd(texture.Slot, $"Resource_MaterialTextureSave_{group.Gid}_{texture.Slot}");
+            // The bound flags and the pixel-program answers are declared at the section's top level, where
+            // the restores after the draw can read them.
+            foreach (int s in saves.Keys) body.Add($"local ${BoundVar(s)} = 0");
+            foreach (var group in patchedHere) body.Add($"local ${BoundCbVar(group.Gid)} = 0");
+            foreach (var group in groupsHere) body.Add($"local $zz_material_ps_{group.Gid}");
+            if ((rampsHere ?? new List<StockRampBind>()).Any(b => b.Material is not null)
+                || sitesHere.Any(site => site.Material is not null))
+            {
+                body.Add($"local ${VarMaterialProbe}");
+                body.Add($"local ${VarMaterialSeen}");
+            }
             // EVERY save first, ahead of every probe and every bind in this section. A save taken after a
             // bind captures the mod's own resource, and its restore would then leave that resource bound
             // past the draw instead of putting the game's back — which is what a section carrying both a
             // scoped retexture and a ramp bind did on the registers the two ranges share.
-            if (hasScoped)
-                foreach (int s in scopedHere!.SelectMany(x => x.E.Registers ?? ProbeSlots)
-                             .Distinct().OrderBy(x => x))
-                    body.Add($"Resource_RtxSave{s} = ref ps-t{s}");
-            if (hasRamps)
-                foreach (int s in Slots.Ramp) body.Add($"Resource_SrSave{s} = ref ps-t{s}");
+            foreach (var (s, save) in saves) body.Add($"{save} = ref ps-t{s}");
+            foreach (var group in patchedHere)
+                body.Add($"Resource_MaterialSource_{group.Gid} = ref ps-cb{group.ConstantBufferSlot}");
             if (hasScoped)
             {
                 // ONE probe per stock texture, ahead of every image that binds through it: a bind replaces
@@ -4475,23 +6731,64 @@ public sealed partial class MigotoEmitter
                             With(LatchTerms(a.Latch), ShownTerm(img.ShownBy)));
                         body.AddRange(gate.Wrap(registers.SelectMany(s => new[]
                         {
-                            $"if ${VarRetexSlot} == {s}", $"ps-t{s} = {texRes[img.DdsFile]}", "endif",
+                            $"if ${VarRetexSlot} == {s}", $"ps-t{s} = {texRes[img.DdsFile]}",
+                            $"${BoundVar(s)} = 1", "endif",
                         })));
                     }
                 }
             }
-            if (hasRamps) body.AddRange(StockRampBody(rampsHere!, modKey, texRes));
-            // One restore per register, whatever wanted it saved. Post commands run in source order and the
-            // last one on a register wins, so a register in both ranges must be named once — from the save
-            // the scoped range took, since that is the family the section's first save came from.
-            var restored = new HashSet<int>();
-            if (hasScoped)
-                foreach (int s in scopedHere!.SelectMany(x => x.E.Registers ?? ProbeSlots)
-                             .Distinct().OrderBy(x => x))
-                    if (restored.Add(s)) body.Add($"post ps-t{s} = Resource_RtxSave{s}");
-            if (hasRamps)
-                foreach (int s in Slots.Ramp)
-                    if (restored.Add(s)) body.Add($"post ps-t{s} = Resource_SrSave{s}");
+            // The work on one material's own draw: the section fires at every draw of the mesh, and the
+            // draw's first index and index count say which material it is.
+            var shapes = (rampsHere ?? new List<StockRampBind>()).Select(b => b.Shape)
+                .Concat(sitesHere.Select(site => site.Shape)).Distinct()
+                .OrderBy(shape => shape.First).ThenBy(shape => shape.Count).ToList();
+            foreach (var shape in shapes)
+            {
+                body.Add($"if first_index == {shape.First}");
+                body.Add($"if index_count == {shape.Count}");
+                var rampsAtShape = (rampsHere ?? new List<StockRampBind>()).Where(b => b.Shape == shape).ToList();
+                var sitesAtShape = sitesHere.Where(site => site.Shape == shape).ToList();
+                // One material draws at this range, so every change here tells it apart the same way: where
+                // another outfit wears the mesh, by the material's own texture being bound.
+                var probes = rampsAtShape.Select(b => b.Material)
+                    .Concat(sitesAtShape.Select(site => site.Material)).Distinct().ToList();
+                if (probes.Count > 1)
+                    throw new InvalidOperationException(
+                        $"two changes at one draw of {ibHash} identify its material by different textures");
+                if (probes[0] is { } probe)
+                {
+                    body.Add($"${VarMaterialSeen} = 0");
+                    foreach (int s in ProbeSlots)
+                    {
+                        body.Add($"${VarMaterialProbe} = ps-t{s}");
+                        body.Add($"if ${VarMaterialProbe} == {probe.TagValue}");
+                        body.Add($"${VarMaterialSeen} = 1");
+                        body.Add("endif");
+                    }
+                    body.Add($"if ${VarMaterialSeen} == 1");
+                }
+                foreach (var b in rampsAtShape) body.AddRange(StockRampBody(b, modKey, texRes, guards));
+                foreach (var site in sitesAtShape)
+                    body.AddRange(StockSiteBody(site, groupsBySite[site.Id], modKey, guards));
+                if (probes[0] is not null) body.Add("endif");
+                body.Add("endif");
+                body.Add("endif");
+            }
+            // One restore per register, and only where this section bound it at this draw. Post commands
+            // run in source order and the last one on a register wins, so a register two families bind is
+            // named once, from the save the first of them took.
+            foreach (var (s, save) in saves)
+            {
+                body.Add($"if ${BoundVar(s)} == 1");
+                body.Add($"post ps-t{s} = {save}");
+                body.Add("endif");
+            }
+            foreach (var group in patchedHere)
+            {
+                body.Add($"if ${BoundCbVar(group.Gid)} == 1");
+                body.Add($"post ps-cb{group.ConstantBufferSlot} = Resource_MaterialSource_{group.Gid}");
+                body.Add("endif");
+            }
 
             // A mesh this build already captures owns its ONE section: the block runs there instead
             // of minting a second override on the same hash, which 3DMigoto would drop at parse time.
@@ -4524,68 +6821,114 @@ public sealed partial class MigotoEmitter
             OpenTextureOverride(P, $"RetexScope_{suffix}", ibHash);
             if (sightings.ByHash.TryGetValue(ibHash, out var seen))
                 foreach (var line in seen) P.Append(line).Append('\n');
+            // A stock change under a twin guard acts on its own mesh's verdict. The probe that writes the
+            // verdict runs here, at every draw of the mesh: the texture it looks for is bound at one material's
+            // draw only, and the verdict carries to the others. A section this body folds into above already
+            // runs that probe at its own top.
+            if (guards.TryGetValue(ibHash, out var stockGuard)
+                && ((rampsHere ?? new List<StockRampBind>()).Any(b => b.TwinVerdict is not null)
+                    || sitesHere.Any(site => site.TwinVerdict is not null)))
+                AppendTwinProbe(P, stockGuard);
             foreach (var line in body) P.Append(line).Append('\n');
             P.Append("\n");
         }
         return P.ToString();
     }
 
-    /// <summary>The draw-scoped ramp binds of one mesh: per pick, sight the target material and, where it is
-    /// what's drawing, put the picked ramp in whichever register holds the material's own. The section's
-    /// saves and its unconditional restores are the caller's — they belong to the whole section, not to this
-    /// block, and a section may carry scoped retexture work alongside these binds.
+    /// <summary>One draw-scoped ramp bind, inside its material's draw-range test: find which register holds a
+    /// ramp at this draw and put the picked ramp there. The section's saves and restores are the caller's —
+    /// they belong to the whole section, not to this block — and this block raises the bound flag of the
+    /// register it wrote, which is what lets the restore run.
     ///
-    /// <para>Two probes, because the two questions are different. WHICH MATERIAL is drawing is answered by
-    /// an ordinary map of it — a sound hash — carrying the value derived from itself. WHICH REGISTER holds
-    /// the ramp is answered by the ramp tag, which cannot answer the first question: the runtime hashes too
-    /// little of a ramp for two of them to be told apart. A draw sighting neither leaves every register as
-    /// it found it, which is what a depth, shadow or outline pass wants.</para></summary>
-    IEnumerable<string> StockRampBody(IReadOnlyList<StockRampBind> binds, string? modKey,
-        IReadOnlyDictionary<string, string> texRes)
+    /// <para>The draw range answers WHICH MATERIAL is drawing; the ramp tag answers WHICH REGISTER holds its
+    /// ramp, which the draw range cannot, since registers move between shader variants and scenes. A pass
+    /// binding no ramp, such as a depth or shadow pass, finds no register and leaves every one as it found
+    /// it.</para></summary>
+    IEnumerable<string> StockRampBody(StockRampBind b, string? modKey,
+        IReadOnlyDictionary<string, string> texRes, IReadOnlyDictionary<string, TwinGuard> guards)
     {
-        foreach (var b in binds)
+        // the verdict is written by the probe at the top of the mesh's section, at every draw of the mesh
+        var guard = StockTwinGuard(b.IbHash, b.TwinVerdict, b.Name, guards);
+        if (guard is not null) yield return $"if ${guard.Var} == {b.TwinVerdict}";
+        yield return $"${VarRampSlot} = -1";
+        foreach (int s in Slots.Ramp)
         {
-            yield return $"${VarStockRampSeen} = 0";
-            foreach (int s in ProbeSlots)
-            {
-                yield return $"${VarStockRampProbe} = ps-t{s}";
-                yield return $"if ${VarStockRampProbe} == {RetexTag(b.MaterialHash)}";
-                yield return $"${VarStockRampSeen} = 1";
-                yield return "endif";
-            }
-            yield return $"${VarRampSlot} = -1";
-            foreach (int s in Slots.Ramp)
-            {
-                yield return $"${VarStockRampProbe} = ps-t{s}";
-                yield return $"if ${VarStockRampProbe} == {FilterRamp}";
-                yield return $"${VarRampSlot} = {s}";
-                yield return "endif";
-            }
-            yield return $"if ${VarStockRampSeen} == 1";
-            var gate = new Gate(new KeyRef?[] { ModTerm(modKey), b.ToggleKey },
-                With(LatchTerms(b.Latch), ShownTerm(b.ShownBy)));
-            foreach (var line in gate.Wrap(Slots.Ramp.SelectMany(s => new[]
-                     {
-                         $"if ${VarRampSlot} == {s}", $"ps-t{s} = {texRes[b.DdsFile]}", "endif",
-                     })))
-                yield return line;
+            yield return $"${VarStockRampProbe} = ps-t{s}";
+            yield return $"if ${VarStockRampProbe} == {FilterRamp}";
+            yield return $"${VarRampSlot} = {s}";
             yield return "endif";
         }
+        var gate = new Gate(new KeyRef?[] { ModTerm(modKey), b.ToggleKey },
+            With(LatchTerms(b.Latch), ShownTerm(b.ShownBy)));
+        foreach (var line in gate.Wrap(Slots.Ramp.SelectMany(s => new[]
+                 {
+                     $"if ${VarRampSlot} == {s}", $"ps-t{s} = {texRes[b.DdsFile]}", $"${BoundVar(s)} = 1", "endif",
+                 })))
+            yield return line;
+        if (guard is not null) yield return "endif";
     }
 
-    /// <summary>A hash both hidden and carrying a ramp pick would mint two TextureOverride sections on one
-    /// name, and the parse keeps only one. Refused instead, on both build routes — and the pairing is
-    /// meaningless anyway: a mesh that never draws shades with nothing.</summary>
-    static void RefuseHiddenRampMeshes(IReadOnlyList<string> hides, IReadOnlyList<StockRampBind>? ramps)
+    /// <summary>The material patches of one stock draw site, inside its draw-range test and exactly as the
+    /// replacement route wraps a donor draw, except that the draw is the game's own: each group's gate is
+    /// its exact pixel program being bound; a group that omits the draw skips it; every other group runs its
+    /// pass over the live constant buffer, binds the patched copy and its neutral textures,
+    /// and raises the bound flags the section's restores read after the draw.</summary>
+    IEnumerable<string> StockSiteBody(StockDrawSite site, IReadOnlyList<MaterialPatchGroup> groups,
+        string? modKey, IReadOnlyDictionary<string, TwinGuard> guards)
     {
-        if (hides.Count == 0 || ramps is not { Count: > 0 }) return;
-        var hidden = new HashSet<string>(hides, StringComparer.OrdinalIgnoreCase);
-        foreach (var b in ramps)
-            if (hidden.Contains(b.IbHash))
-                throw new AuthoredRefusalException(
-                    $"'{b.Name}' is hidden, and a toon ramp is picked on its draws. One mesh takes one "
-                    + "override section, so the build can't emit both. Drop the Hide or that ramp");
+        var guard = StockTwinGuard(site.IbHash, site.TwinVerdict, site.Id, guards);
+        if (guard is not null) yield return $"if ${guard.Var} == {site.TwinVerdict}";
+        var gate = new Gate(new KeyRef?[] { ModTerm(modKey), site.ToggleKey },
+            With(LatchTerms(site.Latch), ShownTerm(site.ShownBy)));
+        foreach (var group in groups) yield return $"$zz_material_ps_{group.Gid} = ps";
+        foreach (var group in groups)
+        {
+            yield return $"if $zz_material_ps_{group.Gid} == {group.FilterIndex}";
+            var lines = new List<string>();
+            if (group.Patches.Any(patch => patch.SkipDraw)) lines.Add("handling = skip");
+            else
+            {
+                if (HasPatchShader(group))
+                {
+                    lines.AddRange(PatchLines(group));
+                    lines.Add($"${BoundCbVar(group.Gid)} = 1");
+                }
+                foreach (var texture in PatchTextures(group))
+                {
+                    lines.Add($"ps-t{texture.Slot} = Resource_MaterialTexture_{group.Gid}_{texture.Slot}");
+                    lines.Add($"${BoundVar(texture.Slot)} = 1");
+                }
+            }
+            foreach (var line in gate.Wrap(lines)) yield return line;
+            yield return "endif";
+        }
+        if (guard is not null) yield return "endif";
     }
+
+    /// <summary>The twin guard a stock draw's work opens, or null where its mesh key has none. A work item
+    /// on a guarded key must name the verdict of its own mesh, and a verdict must be one the guard admits:
+    /// either missing would act on the other mesh's draws.</summary>
+    static TwinGuard? StockTwinGuard(string hash, int? verdict, string name,
+        IReadOnlyDictionary<string, TwinGuard> guards)
+    {
+        if (!guards.TryGetValue(hash, out var guard))
+            return verdict is null ? null
+                : throw new InvalidOperationException(
+                    $"'{name}' names twin verdict {verdict} on {hash}, which no guard holds");
+        if (verdict is not { } own || !guard.OwnVerdicts.Contains(own))
+            throw new InvalidOperationException(
+                $"'{name}' acts on {hash}, which another mesh also draws on, without its own twin verdict");
+        return guard;
+    }
+
+    static bool WritesConstants(MaterialPatchEmission patch) => patch.Writes is { Count: > 0 };
+
+    static bool HasPatchShader(MaterialPatchGroup group) =>
+        group.Patches.Any(WritesConstants);
+
+    static IEnumerable<MaterialEffectTexture> PatchTextures(MaterialPatchGroup group) =>
+        group.Patches.SelectMany(patch => patch.TextureOverrides ?? Array.Empty<MaterialEffectTexture>())
+            .Distinct();
 
     /// <summary>The <c>[Constants]</c> declaration of every distinct key — the ONE place a key variable is
     /// declared, so both build routes start a key the same way. A key is declared at the position its cycle
@@ -4647,27 +6990,62 @@ public sealed partial class MigotoEmitter
     /// suppressed by — so every key's command list ends by re-running the shared recompute.</para>
     ///
     /// <para>A key with no modifiers is bound <c>no_modifiers</c>: a bare <c>key = F6</c> also fires on
-    /// CTRL+F6, which would fire two toggles at once beside a distinct CTRL F6 binding.</para></summary>
+    /// CTRL+F6, which would fire two toggles at once beside a distinct CTRL F6 binding.</para>
+    ///
+    /// <para>A state shortcut sets its group's variable to that state's position. A shortcut that is also a
+    /// stepping key writes its assignments into that key's command list after the step, so one press does
+    /// both. Any other shortcut key gets a section pair of its own. Either way the recompute runs once,
+    /// after every assignment the press makes.</para></summary>
     static string KeysIni(string? modKey, IEnumerable<string?> changeKeys,
         IReadOnlyCollection<string>? startingOff = null, IReadOnlyList<KeyCycle>? cycles = null,
         bool recomputeHidden = false)
     {
         var keys = ModKeys.Distinct(new[] { modKey }.Concat(changeKeys));
         if (keys.Count == 0) return "";
+        var jumps = Jumps(keys, cycles);
         var P = new StringBuilder();
-        foreach (var k in keys)
+        void Section(string k, bool steps)
         {
             string v = ModKeys.VariableFor(k);
             // normalized keys are modifier tokens then ONE key token, so a single token means none named
             string binding = k.Contains(' ') ? k : $"no_modifiers {k}";
             P.Append($"[Key_{v}]\nkey = {binding}\nrun = CommandListKey_{v}\n\n");
             P.Append($"[CommandListKey_{v}]\n");
-            int count = CycleFor(k, modKey, startingOff, cycles).StateCount;
-            P.Append($"${v} = ${v} + 1\nif ${v} == {count}\n${v} = 0\nendif\n");
+            if (steps)
+            {
+                int count = CycleFor(k, modKey, startingOff, cycles).StateCount;
+                P.Append($"${v} = ${v} + 1\nif ${v} == {count}\n${v} = 0\nendif\n");
+            }
+            if (jumps.TryGetValue(k, out var sets))
+                foreach (var (variable, state) in sets) P.Append($"${variable} = {state}\n");
             if (recomputeHidden) P.Append($"run = {SectionRecomputeHidden}\n");
             P.Append('\n');
         }
+        foreach (var k in keys) Section(k, steps: true);
+        foreach (var k in jumps.Keys.Where(k => !keys.Contains(k, StringComparer.Ordinal)))
+            Section(k, steps: false);
         return P.ToString();
+    }
+
+    /// <summary>What each shortcut key sets: the variable of every group it jumps and the position it
+    /// jumps that group to, keyed by the shortcut in first-seen order. Only a group whose key this build
+    /// declares is jumped. A group that switches nothing in this build has no variable to set.</summary>
+    static OrderedDictionary<string, List<(string Variable, int State)>> Jumps(IReadOnlyList<string> declared,
+        IReadOnlyList<KeyCycle>? cycles)
+    {
+        var jumps = new OrderedDictionary<string, List<(string Variable, int State)>>(StringComparer.Ordinal);
+        foreach (var cycle in cycles ?? Array.Empty<KeyCycle>())
+        {
+            if (ModKeys.Normalize(cycle.Key) is not { } key || !declared.Contains(key, StringComparer.Ordinal))
+                continue;
+            foreach (var shortcut in cycle.Shortcuts ?? Array.Empty<KeyShortcut>())
+            {
+                if (ModKeys.Normalize(shortcut.Key) is not { } jump) continue;
+                if (!jumps.TryGetValue(jump, out var sets)) jumps[jump] = sets = new();
+                sets.Add((ModKeys.VariableFor(key), shortcut.State));
+            }
+        }
+        return jumps;
     }
 
     /// <summary>The one command list that recomputes every hider flag. Named once so the <c>[Constants]</c>
@@ -4723,7 +7101,8 @@ public sealed partial class MigotoEmitter
         bool rampTexed = false, bool stockRamped = false,
         IReadOnlyList<KeyCycle>? keyCycles = null, IReadOnlyList<HiddenFlag>? hiddenFlags = null,
         IReadOnlyList<ShownFlag>? shownFlags = null, bool blendTexed = false,
-        IReadOnlyList<StockPropertyTag>? propertyTags = null, bool persistModKey = false)
+        IReadOnlyList<StockPropertyTag>? propertyTags = null, bool persistModKey = false,
+        IReadOnlyList<string>? constantsRuns = null, IReadOnlyList<string>? presentRuns = null)
     {
         var hidden = hiddenFlags ?? Array.Empty<HiddenFlag>();
         var shown = shownFlags ?? Array.Empty<ShownFlag>();
@@ -4744,13 +7123,13 @@ public sealed partial class MigotoEmitter
         // the multi-verdict guards' scratch, rewritten at every guard it opens rather than carried
         if (twinScratch) P.Append($"global ${VarTwinOk} = 0\n");
         foreach (var f in perFrameFlags ?? Array.Empty<string>()) P.Append($"global ${f} = 0\n");
-        // declared beside the per-frame flags and left out of the [Present] reset below: what they record
-        // is that a capture has happened at all, which is a per-SESSION fact
+        // declared beside the per-frame flags and left out of the [Present] reset below. Two kinds: a flag
+        // recording that a capture has happened at all, which is a per-SESSION fact, and a stream
+        // selector, which every draw that reads it writes first
         foreach (var f in stickyFlags ?? Array.Empty<string>()) P.Append($"global ${f} = 0\n");
         if (scopedRetex) P.Append($"global ${VarRetexProbe} = 0\nglobal ${VarRetexSlot} = 0\n");
-        // declared only where a ramp is picked on an unreplaced part, so every other build is
-        // byte-identical to the emission that predates the pick
-        if (stockRamped) P.Append($"global ${VarStockRampProbe} = 0\nglobal ${VarStockRampSeen} = 0\n");
+        // declared only where a ramp is picked on an unreplaced part
+        if (stockRamped) P.Append($"global ${VarStockRampProbe} = 0\n");
         foreach (var l in latches ?? Array.Empty<WitnessLatch>())
             P.Append($"global ${GateVar(l.Name)} = 0\nglobal ${SeenVar(l.Name)} = 0\n");
         // one per part another group's state takes off screen, declared beside the keys that raise them and
@@ -4768,12 +7147,15 @@ public sealed partial class MigotoEmitter
             if (keys.Any(k => CycleFor(k, modKey, keysStartingOff, keyCycles, persistModKey).Persist))
                 P.Append($"post run = {SectionRecomputeHidden}\n");
         }
+        // run once when the mod loads (and again on a reload), after the declarations above
+        foreach (var line in constantsRuns ?? Array.Empty<string>()) P.Append(line).Append('\n');
         P.Append("\n");
         P.Append(RecomputeHiddenIni(hidden, shown));
-        if (perFrameFlags is { Count: > 0 } || latches is { Count: > 0 })
+        if (perFrameFlags is { Count: > 0 } || latches is { Count: > 0 } || presentRuns is { Count: > 0 })
         {
             P.Append("[Present]\n");
             foreach (var f in perFrameFlags ?? Array.Empty<string>()) P.Append($"${f} = 0\n");
+            foreach (var line in presentRuns ?? Array.Empty<string>()) P.Append(line).Append('\n');
             foreach (var l in latches ?? Array.Empty<WitnessLatch>())
                 P.Append($"${GateVar(l.Name)} = ${SeenVar(l.Name)}\n${SeenVar(l.Name)} = 0\n");
             P.Append("\n");
@@ -4872,17 +7254,20 @@ public sealed partial class MigotoEmitter
         IReadOnlyDictionary<(string Name, string Dir), HashSet<int>>? retainedRows = null,
         bool classificationOnly = false)
     {
-        var jobs = new List<(string Name, string Dir, string? OpKey)>();
+        // Pool parts and tiers tie a bone no slim selection holds; a wardrobe member never ties (its rows are
+        // not ridden by the donor's geometry, see the group emission), so it keeps the dense width.
+        var jobs = new List<(string Name, string Dir, string? OpKey, bool TieSlim)>();
         var seen = new HashSet<(string, string)>();
         foreach (var pipe in req.Pipelines)
         {
             foreach (var p in pipe.Parts)
-                if (seen.Add((p.Name, p.DumpDir))) jobs.Add((p.Name, p.DumpDir, p.OpKey));
+                if (seen.Add((p.Name, p.DumpDir))) jobs.Add((p.Name, p.DumpDir, p.OpKey, true));
             foreach (var t in pipe.Tiers ?? Array.Empty<PoolTier>())
-                if (seen.Add((t.Name, t.DumpDir))) jobs.Add((t.Name, t.DumpDir, t.OpKey));
-            foreach (var m in GroupMeshes(pipe))
-                if (seen.Add((m.Name, m.DumpDir))) jobs.Add((m.Name, m.DumpDir, m.OpKey));
+                if (seen.Add((t.Name, t.DumpDir))) jobs.Add((t.Name, t.DumpDir, t.OpKey, true));
         }
+        foreach (var pipe in req.Pipelines)
+            foreach (var m in GroupMeshes(pipe))
+                if (seen.Add((m.Name, m.DumpDir))) jobs.Add((m.Name, m.DumpDir, m.OpKey, false));
         if (retainedRows is not null)
             jobs = jobs.Where(j => retainedRows.TryGetValue((j.Name, j.Dir), out var rows)
                     && rows.Count > 0).ToList();
@@ -4898,12 +7283,12 @@ public sealed partial class MigotoEmitter
                     var rows = retainedRows is not null
                         ? retainedRows[(job.Name, job.Dir)].OrderBy(i => i).ToArray()
                         : Enumerable.Range(0, load(job.Dir).Nb).ToArray();
-                    string? key = OperatorCacheKey(job.OpKey, job.Name, conversion(job.Dir), rows);
+                    string? key = OperatorCacheKey(job.OpKey, job.Name, conversion(job.Dir), rows, job.TieSlim);
                     var art = key is null ? null : ReadCachedOperator(OperatorCachePath(key), key);
                     if (art is null)
                     {
                         art = BuildOperator(load(job.Dir), unionInput(job.Dir).Hashes, job.Name, rows,
-                            classificationOnly);
+                            classificationOnly, job.TieSlim, BonePathsOf(req));
                         // Classification artifacts deliberately stop before the shipped operator exists, so
                         // they cannot stand under the retained solve's unchanged persistent-cache identity.
                         if (!classificationOnly && key is not null)
@@ -4923,10 +7308,12 @@ public sealed partial class MigotoEmitter
     /// of <c>width</c> coefficients start at float index <c>4*base</c>. Null = the DENSE all-vertex operator
     /// shipped, its rows spanning all <see cref="N"/> vertices. Dense is always computed — it is the
     /// conditioning authority — but ships only when the slim layout would not be smaller.
-    /// <see cref="Weak"/> membership comes from the dense residual and nothing else: a deterministic
-    /// synthetic-palette measurement that depends only on bind positions and weights, never on pose. The
-    /// slim rows carry a separate gate; a bone that cannot hold it widens to every vertex on its own,
-    /// which is why no bone's conditioning can decline slimming for the part.
+    /// <see cref="Weak"/> marks the bones whose rows a tie replaced. The dense residual decides it first: a
+    /// deterministic synthetic-palette measurement that depends only on bind positions and weights, never on
+    /// pose. The slim rows carry a separate gate; a pool part's or tier's bone that cannot hold it takes a tie
+    /// to a sound bone that can, and joins <see cref="Weak"/> (a classification-only art never carries these);
+    /// a bone with no such bone, or a wardrobe member's, widens to every vertex on its own, which is why no
+    /// bone's conditioning can decline slimming for the part.
     /// A weak bone's rows AND its Sel segment are replaced by its <see cref="TieFullRows"/> bone's, so its geometry
     /// rides that bone rigidly instead of taking a min-norm estimate — valid without space conversion,
     /// since every palette row maps the mesh's bind space to the posed space. <see cref="TieFullRows"/> is
@@ -4934,7 +7321,7 @@ public sealed partial class MigotoEmitter
     /// nonnegative VALUE is a FULL local source row (the space recorded by <see cref="SourceRows"/>), not
     /// a compact index. -1 means the mesh has no sound bone at all: the bone keeps its own rows, and tier
     /// scatter sentinels it to its lod0 row.</summary>
-    sealed record OperatorArt(float[] Cpinv, bool[] Weak, int[] TieFullRows, uint[] Hashes,
+    internal sealed record OperatorArt(float[] Cpinv, bool[] Weak, int[] TieFullRows, uint[] Hashes,
         int[] SourceRows, IReadOnlyList<string> Diagnostics, uint[]? Sel, uint[]? Off, int N);
 
     /// <summary>Max acceptable |recovered − true| row error in the DENSE synthetic residual (an
@@ -4978,7 +7365,8 @@ public sealed partial class MigotoEmitter
     const double OperatorRcond = 1e-8;
 
     static OperatorArt BuildOperator(StreamsLoad load, uint[] hashes, string name,
-        IReadOnlyList<int>? retainedRows = null, bool classificationOnly = false)
+        IReadOnlyList<int>? retainedRows = null, bool classificationOnly = false, bool tieSlimFailures = false,
+        IReadOnlyDictionary<uint, string>? bonePaths = null)
     {
         int nb = load.Nb, n = load.P.GetLength(0);
         var outputRows = retainedRows?.Distinct().OrderBy(i => i).ToArray()
@@ -5052,12 +7440,10 @@ public sealed partial class MigotoEmitter
             if (wsum[b] > 0)
                 for (int j = 0; j < 3; j++) centroid[b, j] /= wsum[b];
 
-        var tie = new int[nb];
-        for (int b = 0; b < nb; b++)
+        // The bone b rides when it cannot ship rows of its own: its strongest co-riding bone among those
+        // `eligible` admits, or the nearest by support centroid when co-weight is negligible. -1 = none.
+        int TieTarget(int b, Func<int, bool> eligible)
         {
-            tie[b] = b;
-            if (!weak[b]) continue;
-            // strongest co-riding sound bone; support-centroid proximity when co-weight is negligible
             var co = new double[nb];
             for (int v = 0; v < n; v++)
             {
@@ -5067,7 +7453,7 @@ public sealed partial class MigotoEmitter
                 for (int k = 0; k < 4; k++)
                 {
                     int c2 = load.BI[v, k];
-                    if (load.W[v, k] > 0 && c2 != b && !weak[c2]) co[c2] += wb * load.W[v, k];
+                    if (load.W[v, k] > 0 && c2 != b && eligible(c2)) co[c2] += wb * load.W[v, k];
                 }
             }
             int best = -1;
@@ -5078,14 +7464,18 @@ public sealed partial class MigotoEmitter
                 double bestD = double.MaxValue;
                 for (int c2 = 0; c2 < nb; c2++)
                 {
-                    if (weak[c2] || wsum[c2] <= 0) continue;
+                    if (c2 == b || !eligible(c2) || wsum[c2] <= 0) continue;
                     double d = 0;
                     for (int j = 0; j < 3; j++) { double dd = centroid[b, j] - centroid[c2, j]; d += dd * dd; }
                     if (d < bestD) { bestD = d; best = c2; }
                 }
             }
-            tie[b] = best;                             // -1 = no sound bone anywhere on this mesh
+            return best;
         }
+
+        // a weak bone rides a sound one; -1 = no sound bone anywhere on this mesh
+        var tie = new int[nb];
+        for (int b = 0; b < nb; b++) tie[b] = weak[b] ? TieTarget(b, c => !weak[c]) : b;
 
         // Palette planning consumes only the dense weak verdict, the rigid-tie sign/value, and bone hashes.
         // Stop before the slim selection/K-escalation and before a dense operator can be materialized.
@@ -5106,6 +7496,47 @@ public sealed partial class MigotoEmitter
         var picked = slim.Picked;
         var slimRows = slim.Rows;
         var slimErr = slim.Err;
+        var denseWidth = slim.DenseWidth;
+
+        // A sound bone no slim selection holds would ship every vertex of the mesh, and a recover row lasts
+        // as long as its anchor list. With tieSlimFailures it rides a co-riding bone that IS held, the same
+        // rigid tie a weak bone takes; only a bone with no such bone keeps the dense width. A stand-in the
+        // search above did not solve is solved on its own first.
+        var slimTie = Enumerable.Repeat(-1, nb).ToArray();
+        if (tieSlimFailures)
+        {
+            var failing = slimRowsNeeded.Where(b => denseWidth[b]).ToHashSet();
+            if (failing.Count > 0)
+            {
+                var unsolved = failing.OrderBy(b => b)
+                    .Select(b => TieTarget(b, c => !weak[c] && !failing.Contains(c)))
+                    .Where(t => t >= 0 && picked[t] is null).Distinct().OrderBy(t => t).ToArray();
+                if (unsolved.Length > 0)
+                {
+                    var extra = SlimOperator(load, nb, kStart, kCap, weak, pinv, unsolved);
+                    foreach (int t in unsolved)
+                    {
+                        picked[t] = extra.Picked[t];
+                        slimRows[t] = extra.Rows[t];
+                        slimErr[t] = extra.Err[t];
+                        denseWidth[t] = extra.DenseWidth[t];
+                    }
+                }
+                bool Held(int c) => !weak[c] && picked[c] is not null && !denseWidth[c];
+                foreach (int b in failing.OrderBy(b => b)) slimTie[b] = TieTarget(b, Held);
+            }
+        }
+        foreach (int b in slimRowsNeeded)
+        {
+            if (slimTie[b] < 0) continue;
+            picked[b] = picked[slimTie[b]];
+            slimRows[b] = slimRows[slimTie[b]];
+            denseWidth[b] = false;
+            tie[b] = slimTie[b];
+        }
+        // a weak bone whose stand-in just took a tie of its own rides where its stand-in now rides
+        foreach (int b in outputRows)
+            if (weak[b] && tie[b] >= 0 && slimTie[tie[b]] >= 0) tie[b] = slimTie[tie[b]];
 
         // The tie copies operator rows and (when slim) the anchor-vertex segment together — slim
         // coefficients are meaningless without the vertices they index — so it is applied to the SELECTION
@@ -5119,7 +7550,8 @@ public sealed partial class MigotoEmitter
         }
 
         // Slim ships when it is SMALLER, and that is the only verdict left: a bone the anchor-local solve
-        // cannot hold widens to the whole mesh by itself, so no bone's conditioning can decline the part.
+        // cannot hold rides a tie or widens to the whole mesh by itself, so no bone's conditioning can
+        // decline the part.
         // Slim ships three buffers — 4 float rows of `width` per bone, the anchor indices those coefficients
         // are meaningless without, and the two-uint offset entry that locates both.
         long slimBytes = 8L * outputRows.Length;
@@ -5136,13 +7568,19 @@ public sealed partial class MigotoEmitter
             string width = shipsSlim && picked[b].Length == n ? $" · at dense width ({n} rows)" : "";
             // the reported number is the dense residual — the verdict that produced the tie; the bone's
             // slim defect describes rows the tie overwrites, so it never ships
-            diagnostics.Add($"{name}: bone 0x{hashes[b]:x8} recovers ill-conditioned from this mesh "
-                    + $"(err {err[b]:g2}) — tied rigidly to co-riding bone 0x{hashes[best]:x8}{width}");
+            diagnostics.Add($"{name}: bone {BoneName(bonePaths, hashes[b])} recovers ill-conditioned from this mesh "
+                    + $"(err {err[b]:g2}) — tied rigidly to co-riding bone {BoneName(bonePaths, hashes[best])}{width}");
         }
         foreach (int b in outputRows)
             if (weak[b] && tie[b] < 0)
-                diagnostics.Add($"{name}: bone 0x{hashes[b]:x8} is weakly supported (err {err[b]:g2}) and has "
+                diagnostics.Add($"{name}: bone {BoneName(bonePaths, hashes[b])} is weakly supported (err {err[b]:g2}) and has "
                         + "no sound bone to ride. Donor weight on it may distort");
+        // the reported defect is the best slim solve's, the verdict that produced the tie
+        foreach (int b in outputRows)
+            if (slimTie[b] >= 0)
+                diagnostics.Add($"{name}: no small set of vertices recovers bone {BoneName(bonePaths, hashes[b])} "
+                        + $"(defect {slimErr[b]:g2} at K={slim.LastK}), so it is tied rigidly to co-riding bone "
+                        + $"{BoneName(bonePaths, hashes[slimTie[b]])}");
 
         float[] op;
         uint[]? sel;
@@ -5153,14 +7591,15 @@ public sealed partial class MigotoEmitter
             if (slim.LastK > kStart) diagnostics.Add($"{name}: anchor rows escalated to K={slim.LastK} to hold conditioning");
             foreach (int b in outputRows)
                 if (slim.DenseWidth[b])
-                    diagnostics.Add($"{name}: bone 0x{hashes[b]:x8} ships at dense width — {picked[b].Length} rows "
+                    diagnostics.Add($"{name}: bone {BoneName(bonePaths, hashes[b])} ships at dense width — {picked[b].Length} rows "
                             + $"(defect {slimErr[b]:g2} at K={slim.LastK})");
             // what shipped next to what it replaced: a triager comparing a slim build against a dense one
             // needs both numbers. Bones whose rows the tie or the dense width replaced are not described by
             // their slim defect, so they are not candidates for the worst.
             int worst = -1;
             foreach (int b in outputRows)
-                if (!weak[b] && !slim.DenseWidth[b] && (worst < 0 || slimErr[b] > slimErr[worst])) worst = b;
+                if (!weak[b] && slimTie[b] < 0 && !slim.DenseWidth[b]
+                    && (worst < 0 || slimErr[b] > slimErr[worst])) worst = b;
             if (worst >= 0)
                 diagnostics.Add($"{name}: slim operator ships · worst defect {slimErr[worst]:g2} (dense {err[worst]:g2})");
         }
@@ -5172,16 +7611,29 @@ public sealed partial class MigotoEmitter
             for (int compact = 0; compact < outputRows.Length; compact++)
             {
                 int b = outputRows[compact];
-                int source = weak[b] && tie[b] >= 0 ? tie[b] : b;
+                int source = (weak[b] || slimTie[b] >= 0) && tie[b] >= 0 ? tie[b] : b;
                 for (int r = 0; r < 4; r++)
                     Array.Copy(dense, (4 * source + r) * n, op, (4 * compact + r) * n, n);
             }
             sel = null;
             off = null;
         }
-        return new OperatorArt(op, outputRows.Select(b => weak[b]).ToArray(),
+        return new OperatorArt(op, outputRows.Select(b => weak[b] || slimTie[b] >= 0).ToArray(),
             outputRows.Select(b => tie[b]).ToArray(), outputRows.Select(b => hashes[b]).ToArray(),
             outputRows, diagnostics, sel, off, n);
+    }
+
+    /// <summary>Whether the slim search holds <paramref name="bone"/> on this mesh, searched on its own. The
+    /// search escalates each failing bone to the cap on its own account and solves it at each level from the
+    /// bone and the level alone, so this is the verdict the full solve reaches for the bone beside any others.
+    /// A dense-weak bone is never held.</summary>
+    static bool HoldsSlim(StreamsLoad load, bool[] denseWeak, int bone)
+    {
+        if (denseWeak[bone]) return false;
+        int n = load.P.GetLength(0);
+        var slim = SlimOperator(load, load.Nb, Math.Max(1, Math.Min(KStart, n)), Math.Max(1, Math.Min(KCap, n)),
+            denseWeak, densePinv: null, new[] { bone });
+        return !FailsSlimGate(slim.Err[bone]);
     }
 
     /// <summary>Pack the per-bone selections and rows into the ragged triple the mod ships: bone b's block
@@ -5228,30 +7680,13 @@ public sealed partial class MigotoEmitter
     /// and dense-weak bones solve once at kStart. A dense-sound bone still failing at the cap takes the
     /// DENSE width — every vertex, identity selection, the dense operator's own rows — instead of costing
     /// the rest of the part its slim widths. A bone with no support at all takes a single zero-coefficient
-    /// row, which recovers the zero palette row the dense operator gives it.</summary>
+    /// row, which recovers the zero palette row the dense operator gives it. With no
+    /// <paramref name="densePinv"/> the search only answers: failing bones keep their best slim attempt and
+    /// <see cref="SlimSolve.Err"/> says they failed.</summary>
     static SlimSolve SlimOperator(StreamsLoad load, int nb, int kStart, int kCap, bool[] denseWeak,
-        PoolMath.PInvFactors densePinv, IReadOnlyList<int> activeRows)
+        PoolMath.PInvFactors? densePinv, IReadOnlyList<int> activeRows)
     {
         int n = load.P.GetLength(0);
-        // per-bone candidate counts: escalation cannot help a bone whose selection already saturated — a
-        // bigger K re-selects the same vertices and re-solves an identical system, for double the width
-        var candCount = new int[nb];
-        // one buffer for the whole loop: sc resets per vertex, so only the entries this vertex wrote are read
-        Span<int> seen = stackalloc int[4];
-        for (int v = 0; v < n; v++)
-        {
-            int sc = 0;
-            for (int j = 0; j < 4; j++)
-            {
-                if (load.W[v, j] <= 0) continue;
-                int b2 = load.BI[v, j];
-                if (b2 < 0 || b2 >= nb) continue;
-                bool dup = false;
-                for (int s = 0; s < sc; s++) if (seen[s] == b2) dup = true;
-                if (!dup) { seen[sc++] = b2; candCount[b2]++; }
-            }
-        }
-
         var picked = new int[nb][];
         var rows = new double[nb][][];
         var err = new double[nb];
@@ -5321,10 +7756,10 @@ public sealed partial class MigotoEmitter
             bool ok = true;
             foreach (int b in activeRows) if (!(denseWeak[b] || !FailsSlimGate(err[b]))) { ok = false; break; }
             if (ok || k >= kCap) break;
-            int maxCand = 0;
-            foreach (int b in activeRows)
-                if (!denseWeak[b] && FailsSlimGate(err[b])) maxCand = Math.Max(maxCand, candCount[b]);
-            if (k >= maxCand) break;               // every failing bone is saturated
+            // A failing bone escalates to the cap on its own account, even past its own candidate count: its
+            // discriminator budget grows with K, and a wider discriminator set is what separates a bone its
+            // own vertices cannot. So a bone's verdict depends on nothing but the bone — the part's other
+            // bones neither carry it further nor stop it sooner.
             k = Math.Min(k * 2, kCap);             // never overshoot the cap (nor the vertex count)
         }
 
@@ -5333,7 +7768,7 @@ public sealed partial class MigotoEmitter
         var identity = (int[]?)null;
         foreach (int b in activeRows)
         {
-            if (denseWeak[b] || !FailsSlimGate(err[b])) continue;
+            if (densePinv is null || denseWeak[b] || !FailsSlimGate(err[b])) continue;
             if (identity is null)
             {
                 identity = new int[n];
@@ -5392,6 +7827,33 @@ public sealed partial class MigotoEmitter
         return new PoolMath.UnionInput(hashes, binds, s2);
     }
 
+    /// <summary>An operator with each output bone's bind constant folded in. A recovered row is the
+    /// bind-included skin matrix, so restating it under the reference bind is <c>M' = C · M</c>: output
+    /// bone i's four operator rows become <c>row'_r = Σ_s C[r,s] · row_s</c>, coefficient by coefficient.
+    /// The product is taken in double and rounded once to the width the operator ships at.
+    /// <paramref name="constants"/> is indexed like <see cref="OperatorArt.Hashes"/>; null = that bone's
+    /// rows ship as solved.</summary>
+    internal static float[] FoldConstants(OperatorArt art, IReadOnlyList<double[]?> constants)
+    {
+        var op = (float[])art.Cpinv.Clone();
+        var y = new double[4];
+        for (int i = 0; i < constants.Count; i++)
+        {
+            if (constants[i] is not { } c) continue;
+            // the ragged slim layout files bone i at (base, width); the dense one at i·4·N, N wide
+            int width = art.Off is { } off ? (int)off[2 * i + 1] : art.N;
+            int at = art.Off is { } off2 ? 4 * (int)off2[2 * i] : 4 * i * art.N;
+            for (int t = 0; t < width; t++)
+            {
+                for (int s = 0; s < 4; s++) y[s] = art.Cpinv[at + s * width + t];
+                for (int r = 0; r < 4; r++)
+                    op[at + r * width + t] = (float)(c[r * 4] * y[0] + c[r * 4 + 1] * y[1]
+                                                     + c[r * 4 + 2] * y[2] + c[r * 4 + 3] * y[3]);
+            }
+        }
+        return op;
+    }
+
     static PoolMath.IdentityPart LoadIdentityPart(string dir, Matrix4x4? conversion) => new(
         ReadVertexStream(dir, conversion),
         File.ReadAllBytes(Path.Combine(dir, "stream1.buf")),
@@ -5421,6 +7883,9 @@ public sealed partial class MigotoEmitter
         return doc.RootElement.GetProperty("boneCount").GetInt32();
     }
 
+    /// <summary>A mesh dump's bone table, in the order its skin indices name the bones.</summary>
+    internal static uint[] DumpBoneHashes(string dir) => ReadBindpose(dir).Hashes;
+
     static (uint[] Hashes, Dictionary<uint, double[]> Binds) ReadBindpose(string dir)
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "bindpose.json")));
@@ -5432,7 +7897,9 @@ public sealed partial class MigotoEmitter
             uint h = (uint)b.GetProperty("hash").GetInt64();
             var bp = b.GetProperty("bindpose").EnumerateArray().Select(e => e.GetDouble()).ToArray();
             hashes.Add(h);
-            binds[h] = bp;
+            // a bone a table lists twice is read at its FIRST entry, as the donor compile and the bind
+            // reference read it
+            binds.TryAdd(h, bp);
         }
         return (hashes.ToArray(), binds);
     }

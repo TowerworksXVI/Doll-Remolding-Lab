@@ -123,7 +123,7 @@ public class EditedPartInSessionTests
         var map = WritePng(g.At("cloth_d.png"));
         var ws = g.At("cloth1_lod0.glb");
         MeshGltf.ExportRiggedGlb(Part("cloth1_lod0", 5f), TwoBoneSkin(), h => Paths[h], ws);
-        Assert.All(MeshGltf.ReadSubmeshMaps(ws), m => Assert.Equal(MapOrigin.None, m.BaseColor.Origin));
+        Assert.All(MeshGltf.ReadSubmeshMaps(ws), m => Assert.Equal(MapAnswer.None, m.BaseColor.Answer));
         var edited = MeshGltf.ReadRiggedGlb(ws)!.Value;
 
         var combined = g.At("_combined.glb");
@@ -133,8 +133,8 @@ public class EditedPartInSessionTests
         }, h => Paths[h], combined);
 
         var maps = MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0");
-        Assert.Equal(MapOrigin.Vanilla, maps[0].BaseColor.Origin);
-        Assert.Equal(Path.GetFullPath(map), maps[0].BaseColor.StockPng);
+        Assert.Equal(MapAnswer.Untouched, maps[0].BaseColor.Answer);
+        Assert.Equal(Path.GetFullPath(map), maps[0].BaseColor.Sent?.Png);
     }
 
     [Fact]

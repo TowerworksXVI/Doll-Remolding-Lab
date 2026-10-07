@@ -15,6 +15,8 @@ The scene is laid out so that attribution is visible in the outliner and survive
     Scene Collection
     ├─ Mod
     │  ├─ <part>          one collection per part the session may write
+    │  ├─ Shrunk Parts    parts the game starts shrunk, in a session that names no part
+    │  │  └─ <part>
     │  └─ Armature
     └─ Reference
 
@@ -27,6 +29,15 @@ linked into both a part and `Reference` ships (`Mod` wins). The session armature
 `Mod` tree; an armature in `Reference`, or one the scene already carried before the import, is
 neither exported nor consulted. Hiding an object is working state and changes nothing about the
 export.
+
+A part the game starts shrunk out of sight (a prop an animation brings into a hand, an alternate chest
+shape) opens centred at the origin at full size, so it does not line up with the body. In a session that
+names no part, those parts sit in `Mod/Shrunk Parts`, one part collection each, and the `Shrunk Parts`
+collection starts hidden in the viewport. Showing it makes them editable like any other part; a Send
+shows it while it exports and puts it back as it was. A part in a session that cannot write it starts
+hidden per object. A mesh weighted both to bones only such a part moves and to other bones is a warning
+of Check Mesh and of the Send, beside the others, since in the game the two move apart; the game's own
+part already doing that says nothing.
 
 Every glb carries the WHOLE outfit on ONE armature, so a weight can be painted onto any bone of the
 character with the rest of the outfit visible around the edit. Which of those meshes the session may
@@ -47,11 +58,14 @@ empty deliverable instead, and blocks.
 Before an export, a sanity pass runs (also on demand via **Check Mesh**): it BLOCKS the Send on
 problems that would break the deliverable — a mesh with no part, a part holding more than one mesh, a
 part collection excluded from the view layer or squatted out of its own name, vertices no skeleton
-weight can reach, or a weighted scene with no armature — and WARNS (without blocking) on likely
+weight can reach, a weighted scene with no armature, a skinned mesh the session armature does not
+deform (a pasted mesh still bound to its own rig), or weight on a bone outside the item's skeleton
+(another rig's bone, or a session bone with no game identity) — and WARNS (without blocking) on likely
 mistakes: an Object-mode transform on a mesh with no skeleton, a mirrored scale, a reordered
-material slot, or a renamed/removed bone. Everything but the weight solve is cheap enough to drive
-the panel's live status line. On Send, any unweighted vertices are bone-heat filled from the skeleton
-(authored weights are always preserved); the app then compiles the authored skin onto the target. A
+material slot, or a renamed/removed bone. Everything but the two vertex walks is cheap enough to drive
+the panel's live status line. On Send, any vertex with no weight on a game bone is bone-heat filled
+from the skeleton (authored weights are always preserved); the app then compiles the authored skin
+onto the target. A
 part the app declares unskinned — a static prop, which ships no weights and opens with no armature —
 is outside all of that.
 
@@ -83,6 +97,9 @@ import textwrap
 MOD_COLLECTION = "Mod"
 REFERENCE_COLLECTION = "Reference"
 ARMATURE_COLLECTION = "Armature"
+# Under `Mod`: the part collections of the parts the game starts shrunk, in a session that names no part.
+# Not a part itself; hidden in the viewport at the collection level until the modder shows it.
+SHRUNK_PARTS_COLLECTION = "Shrunk Parts"
 
 # Marks a collection as a part, so a folder the modder makes under `Mod` is not silently a shipping
 # part. Set at import; it rides along in the .blend.
@@ -791,13 +808,122 @@ def _reference_root():
     return bpy.context.scene.collection.children.get(REFERENCE_COLLECTION)
 
 
-def gf2_part_collections():
-    """The part collections: the children of `Mod` the import marked as parts. Each one IS a part;
-    the one mesh in it, at any depth, ships as that part. A collection the modder made under `Mod`
-    carries no marker and is not a part, so its meshes report as unattributed instead of shipping
-    under a name the app has no target for."""
+def _shrunk_parts_root():
+    """The `Mod/Shrunk Parts` collection, or None when the session put nothing there."""
     mod = _mod_root()
-    return [] if mod is None else [c for c in mod.children if c.get(PART_MARKER)]
+    return None if mod is None else mod.children.get(SHRUNK_PARTS_COLLECTION)
+
+
+def gf2_part_collections():
+    """The part collections: the children of `Mod`, and of `Mod/Shrunk Parts`, the import marked as
+    parts. Each one IS a part; the one mesh in it, at any depth, ships as that part. A collection the
+    modder made under `Mod` carries no marker and is not a part, so its meshes report as unattributed
+    instead of shipping under a name the app has no target for."""
+    mod = _mod_root()
+    if mod is None:
+        return []
+    parts = [c for c in mod.children if c.get(PART_MARKER)]
+    hidden = mod.children.get(SHRUNK_PARTS_COLLECTION)
+    if hidden is not None:
+        parts += [c for c in hidden.children if c.get(PART_MARKER)]
+    return parts
+
+
+def gf2_hidden_part_names(session):
+    """The part names the app declared the game starts shrunk (opened centred at full size). Only an
+    EXPLICIT true counts, so a session the app did not stamp declares none."""
+    return {p.get("name") for p in ((session or {}).get("parts") or [])
+            if isinstance(p, dict) and p.get("hidden") is True and isinstance(p.get("name"), str)}
+
+
+def gf2_groups_hidden_parts(session):
+    """Whether this session gathers its hidden parts under `Mod/Shrunk Parts`: one that names no part and
+    declares at least one hidden. A session that names one part opens that part where it can be seen,
+    hidden or not."""
+    return not (session or {}).get("part") and bool(gf2_hidden_part_names(session))
+
+
+def _set_collection_hidden(coll, hidden):
+    """Hide or show `coll` in the viewport at the collection level (the outliner's eye), returning the
+    state it had, or None when the view layer does not carry it."""
+    lc = _layer_collection_for(coll) if coll is not None else None
+    if lc is None:
+        return None
+    was = lc.hide_viewport
+    lc.hide_viewport = hidden
+    return was
+
+
+def _restore_collection_hidden(coll, was):
+    """Put back what `_set_collection_hidden` changed; nothing when it changed nothing."""
+    if coll is None or was is None:
+        return
+    lc = _layer_collection_for(coll)
+    if lc is not None:
+        lc.hide_viewport = was
+
+
+def gf2_bone_hashes(group_names):
+    """The bone hashes, as lower-case eight-digit hex, that vertex group names carry. The session names
+    every bone `<leaf>_<hash8>`, and Blender's duplicate suffix is ignored; a group named any other way
+    names no bone the app knows."""
+    hashes = set()
+    for name in group_names:
+        m = _BONE_HASH.search(name or "")
+        if m is not None:
+            hashes.add(m.group(0)[1:9].lower())
+    return hashes
+
+
+def gf2_hidden_mix_line(label):
+    """The Send warning for a part weighted across a part the game starts shrunk and other parts."""
+    return (f"'{label}' has weights on a shrunk part's bones and on other bones. "
+            "In the game the two sets move apart.")
+
+
+def gf2_session_has_hidden_bones(session):
+    """Whether any part entry of the session names bones only parts the game starts shrunk weight."""
+    return any(isinstance(p, dict) and p.get("hiddenBones")
+               for p in ((session or {}).get("parts") or []))
+
+
+def gf2_hidden_mix_lines(session, sent):
+    """One warning per sent part whose mesh weights at least one bone only parts the game starts shrunk
+    move and at least one other bone, unless the game's own part already does both. `sent` is
+    ``[(part name, weighted bone hashes)]``; the hidden bones and whether the stock part mixes come from
+    the part's session entry, so a session that says nothing warns about nothing."""
+    lines = []
+    for name, weighted in sent:
+        entry = _session_part_entry(session, name)
+        hidden = {h.lower() for h in (entry.get("hiddenBones") or []) if isinstance(h, str)}
+        if not hidden or entry.get("stockMixes") is True:
+            continue
+        if weighted & hidden and weighted - hidden:
+            label = entry.get("label")
+            lines.append(gf2_hidden_mix_line(label if isinstance(label, str) and label else gf2_label(name)))
+    return lines
+
+
+def gf2_hidden_mix_issues(session, mesh_objs):
+    """The Send warning lines for `mesh_objs` weighted across a part the game starts shrunk and other
+    parts (`gf2_hidden_mix_lines`), read off their weights. The walk over every vertex runs only when the
+    session names hidden bones at all."""
+    if not gf2_session_has_hidden_bones(session):
+        return []
+    return gf2_hidden_mix_lines(session, [
+        (part.get(PART_MARKER) or part.name, _weighted_bone_hashes(mo))
+        for mo in mesh_objs for part in [_part_of(mo)] if part is not None])
+
+
+def _weighted_bone_hashes(obj):
+    """The bone hashes `obj` gives a nonzero weight to at any vertex."""
+    names = {g.index: g.name for g in obj.vertex_groups}
+    used = set()
+    for v in obj.data.vertices:
+        for g in v.groups:
+            if g.weight > 0:
+                used.add(g.group)
+    return gf2_bone_hashes(names.get(i, "") for i in used)
 
 
 def _session_armature():
@@ -1352,7 +1478,9 @@ def gf2_part_viewport_visible(session, part_name):
 def gf2_build_collections(meshes, armature, session=None):
     """Lay out the scene so each part's attribution is a collection: one collection per part under
     `Mod`, the armature in its own, and a `Reference` collection holding the rest of the outfit and
-    any scenery.
+    any scenery. In a session that names no part, the parts the game starts shrunk sit under
+    `Mod/Shrunk Parts` instead, and that collection starts hidden in the viewport: they open centred at
+    the origin and would otherwise stand inside the body.
 
     The active collection is left on the single part when the session has one and on `Mod` when it
     has several, so geometry the modder adds lands attributed where that is unambiguous and
@@ -1363,6 +1491,8 @@ def gf2_build_collections(meshes, armature, session=None):
     names = [mo.name for mo in meshes]
     writable = set(gf2_session_parts(session or {}, names))
     claims = gf2_claimed_meshes(session or {}, names)
+    grouped = gf2_hidden_part_names(session) if gf2_groups_hidden_parts(session) else set()
+    hidden_root = None
     parts = []
     for mo in meshes:
         part_name = claims.get(mo.name) or (mo.name if mo.name in writable else None)
@@ -1373,7 +1503,11 @@ def gf2_build_collections(meshes, armature, session=None):
             contract_name = part_name
             if part_name != mo.name:
                 print(f"GF2: '{mo.name}' opened as part '{part_name}'")
-            part = _ensure_collection(part_name, mod)
+            parent = mod
+            if part_name in grouped:
+                hidden_root = hidden_root or _ensure_collection(SHRUNK_PARTS_COLLECTION, mod)
+                parent = hidden_root
+            part = _ensure_collection(part_name, parent)
             part[PART_MARKER] = part_name   # marker carries the contract name; a rename is detectable
             _move_to_collection(mo, part)
             parts.append(part)
@@ -1381,6 +1515,8 @@ def gf2_build_collections(meshes, armature, session=None):
             _set_hidden(mo, True)
     if armature is not None:
         _move_to_collection(armature, _ensure_collection(ARMATURE_COLLECTION, mod))
+    if hidden_root is not None:
+        _set_collection_hidden(hidden_root, True)
     _activate_collection(parts[0] if len(parts) == 1 else mod)
 
 
@@ -1625,7 +1761,10 @@ def gf2_import(glb_path):
     names = [m.name for m in meshes]
     own = set(gf2_session_parts(session, names)) | set(gf2_claimed_meshes(session, names))
     shipping = [mo for mo in meshes if mo.name in own]
-    visible_shipping = [mo for mo in shipping if not _hide_state(mo)]
+    # a part under the hidden `Shrunk Parts` collection is not on screen, so it is neither selected nor
+    # framed until the modder shows it
+    hidden_root = _shrunk_parts_root()
+    visible_shipping = [mo for mo in shipping if not _hide_state(mo) and not _in_tree(mo, hidden_root)]
     for mo in visible_shipping:
         mo.select_set(True)
     if visible_shipping:
@@ -1646,7 +1785,7 @@ _BONE_HASH = re.compile(r"_[0-9a-fA-F]{8}(?:\.\d+)?$")
 def _demote_non_game_bones(arm_obj):
     """Mark hierarchy glue non-deform. The armature carries nodes that are not game bones —
     connector prefixes, wrapper roots — which import as bones but have no ``_<hash8>`` identity, so
-    a weight painted onto one can never ship (the send-back refuses it by name). Non-deform bones
+    a weight painted onto one can never ship (Check Mesh and Send refuse it by name). Non-deform bones
     are skipped by Automatic Weights, which is where such weights actually come from. Only demote
     when the rig carries hash-named bones at all: a hand-built or test rig with no game names keeps
     deforming as-is."""
@@ -1656,6 +1795,115 @@ def _demote_non_game_bones(arm_obj):
     for b in bones:
         if not _BONE_HASH.search(b.name):
             b.use_deform = False
+
+
+def gf2_game_bone_names(bone_names):
+    """The bones a weight can reach the game through: every bone named with a ``_<hash8>`` identity.
+    A rig with no such bone at all is not a game rig (a hand-built or test rig), and all of its bones
+    count, the line `_demote_non_game_bones` draws too."""
+    names = set(bone_names)
+    hashed = {n for n in names if _BONE_HASH.search(n)}
+    return hashed or names
+
+
+def gf2_off_skeleton_groups(group_names, session_bones, other_bones):
+    """The vertex groups whose weight cannot reach the game: a bone of the session armature that is not
+    a game bone, a bone of another armature in the file, or a game-bone name the session armature does
+    not have. The glTF export moves a weight on any of them onto a bone the game does not have, or
+    drops it and rescales the vertex's other weights. A group that names no bone at all, such as a
+    modifier's mask, is outside the skin and not returned."""
+    game = gf2_game_bone_names(session_bones)
+    session, other = set(session_bones), set(other_bones)
+    return {g for g in group_names
+            if g not in game and (g in session or g in other or _BONE_HASH.search(g))}
+
+
+def gf2_off_skeleton_line(name, vertices, groups):
+    """The blocking line for one mesh weighted to bones the session armature cannot carry into the game."""
+    example = sorted(groups)[0]
+    return (f"{vertices} {'vertex' if vertices == 1 else 'vertices'} in '{name}' "
+            f"{'is' if vertices == 1 else 'are'} weighted to {len(groups)} "
+            f"{'bone' if len(groups) == 1 else 'bones'} this item does not have, such as '{example}'. "
+            f"Weight-paint those vertices to the bones of the armature in {MOD_COLLECTION}.")
+
+
+def gf2_binding_line(name, others):
+    """The blocking line for a skinned mesh the session armature does not deform. `others` names the
+    armatures that deform it instead; empty means none does."""
+    target = f"{MOD_COLLECTION}/{ARMATURE_COLLECTION}"
+    if not others:
+        return (f"'{name}' is not deformed by the armature in {target}, so Send would lose its weights. "
+                "Parent it to that armature (Ctrl+P, Armature Deform).")
+    listed = ", ".join(f"'{o}'" for o in others)
+    return (f"'{name}' is deformed by {listed} instead of the armature in {target}. Parent it to that "
+            f"armature (Ctrl+P, Armature Deform), then delete its Armature modifier for {listed}.")
+
+
+def _binding_others(obj, armature):
+    """The armatures other than `armature` that `obj` is parented to or has an Armature modifier for,
+    or None when `armature` deforms it and nothing else does. The glTF export writes a skin only for a
+    mesh with an Armature modifier whose armature is exported, and takes an armature parent over the
+    modifier's target, so any other armature in either place changes what ships."""
+    others = set()
+    bound = False
+    for m in obj.modifiers:
+        if m.type != "ARMATURE" or m.object is None:
+            continue
+        if m.object is armature:
+            bound = True
+        else:
+            others.add(m.object.name)
+    parent = obj.parent
+    if parent is not None and parent.type == "ARMATURE" and parent is not armature:
+        others.add(parent.name)
+    if bound and not others:
+        return None
+    return sorted(others)
+
+
+def gf2_binding_issues(mesh_objs, armature, unskinned=()):
+    """One blocking line per skinned mesh the session armature does not deform. Object-level only, so
+    it runs on the live refresh. With no session armature there is nothing to bind to, and the check
+    that reports a missing armature speaks instead."""
+    if armature is None:
+        return []
+    lines = []
+    for obj in mesh_objs:
+        if _is_unskinned(obj, unskinned):
+            continue
+        others = _binding_others(obj, armature)
+        if others is not None:
+            lines.append(gf2_binding_line(obj.name, others))
+    return lines
+
+
+def gf2_off_skeleton_issues(mesh_objs, armature, unskinned=()):
+    """(mesh name, blocking line) per skinned mesh with weight on a group `gf2_off_skeleton_groups`
+    names. Walks every vertex, so it runs in the full check and the send, never on a live refresh."""
+    if armature is None:
+        return []
+    session = [b.name for b in armature.data.bones]
+    other = [b.name for o in bpy.data.objects
+             if o.type == "ARMATURE" and o is not armature for b in o.data.bones]
+    lines = []
+    for obj in mesh_objs:
+        if _is_unskinned(obj, unskinned):
+            continue
+        names = {g.index: g.name for g in obj.vertex_groups}
+        off = gf2_off_skeleton_groups(names.values(), session, other)
+        if not off:
+            continue
+        off_index = {i for i, n in names.items() if n in off}
+        hit_groups = set()
+        vertices = 0
+        for v in obj.data.vertices:
+            hit = {names[g.group] for g in v.groups if g.weight > 0 and g.group in off_index}
+            if hit:
+                vertices += 1
+                hit_groups |= hit
+        if vertices:
+            lines.append((obj.name, gf2_off_skeleton_line(obj.name, vertices, hit_groups)))
+    return lines
 
 
 def _activate_sidebar_category():
@@ -1705,31 +1953,81 @@ def _setup_viewport_ui():
     bpy.app.timers.register(_retry_sidebar_category, first_interval=0.0)
 
 
-def _vertex_total_weight(obj, vi):
-    """Sum of a vertex's weights across every vertex group (its total skin influence)."""
+def _skin_group_indices(obj, armature):
+    """The indices of `obj`'s vertex groups that are skin: the ones naming a game bone of `armature`
+    (`gf2_game_bone_names`). None with no armature, where every group counts. A group naming no bone
+    is outside the skin, and a vertex weighted only there would export onto a bone the game does not
+    have."""
+    if armature is None:
+        return None
+    game = gf2_game_bone_names(b.name for b in armature.data.bones)
+    return {g.index for g in obj.vertex_groups if g.name in game}
+
+
+def _vertex_total_weight(obj, vi, skin=None):
+    """Sum of a vertex's weights across the skin groups `skin` (every group when None)."""
     total = 0.0
     for g in obj.data.vertices[vi].groups:
-        total += g.weight
+        if skin is None or g.group in skin:
+            total += g.weight
     return total
 
 
-def _missing_verts(obj):
+def _missing_verts(obj, armature=None):
     """Indices of vertices whose total skin influence is (near-)zero — the ones that need filling."""
-    return [v.index for v in obj.data.vertices if _vertex_total_weight(obj, v.index) < 1e-4]
+    skin = _skin_group_indices(obj, armature)
+    return [v.index for v in obj.data.vertices if _vertex_total_weight(obj, v.index, skin) < 1e-4]
 
 
 # True while the weight solve's throwaway duplicate exists. The duplicate lives at the scene root and
 # fires depsgraph updates, so without this the live status handler reads it as a blocking stray.
 _SOLVING = False
 
+# How close two vertices of the throwaway duplicate must sit to be welded before bone heat. A game mesh
+# keeps an exact copy of a vertex on each side of a UV or normal seam, so the copies coincide exactly.
+_WELD_DISTANCE = 1e-6
+
+
+def _weld_throwaway(obj):
+    """Weld `obj`'s coincident vertices in place and return, per original vertex index, that vertex's
+    index after the weld. Only for the weight solve's duplicate: welding also removes faces that end up
+    on the same vertices, which the part itself must keep.
+
+    Bone heat heats a vertex only when its nearest bone is in view, and fails for every bone when some
+    piece of the mesh gets no heat at all. A game mesh is cut into pieces along its seams, so a small
+    piece hidden under another layer fails the whole solve; welded to its neighbours across the seams,
+    it takes their heat."""
+    import bmesh
+    count = len(obj.data.vertices)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    source = bm.verts.layers.int.new("gf2_source_index")
+    for v in bm.verts:
+        v[source] = v.index
+    targetmap = bmesh.ops.find_doubles(bm, verts=list(bm.verts), dist=_WELD_DISTANCE)["targetmap"]
+    kept = {v[source]: t[source] for v, t in targetmap.items()}
+    bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    bm.verts.index_update()
+    after = {v[source]: v.index for v in bm.verts}
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+    def welded(i):
+        while i in kept:
+            i = kept[i]
+        return after[i]
+    return [welded(i) for i in range(count)]
+
 
 def _solve_missing_weights(obj, armature):
-    """Bone-heat the unweighted vertices of ONE mesh on a throwaway DUPLICATE and read back what the
-    skeleton could solve — WITHOUT ever mutating obj. Returns (missing, solved) where missing is the list
-    of unweighted vertex indices and solved maps vi -> [(group_name, weight), ...] for those the skeleton
-    gave positive weight. Shared by the auto-fill (which writes solved back) and the pre-send check (which
-    only counts), so both agree to the vertex on what is fillable."""
-    missing = _missing_verts(obj)
+    """Bone-heat the unweighted vertices of ONE mesh on a throwaway DUPLICATE, welded across its seams
+    (`_weld_throwaway`), and read back what the skeleton could solve — WITHOUT ever mutating obj. Every
+    copy of a welded vertex reads the one solved vertex. Returns (missing, solved) where missing is the
+    list of unweighted vertex indices and solved maps vi -> [(group_name, weight), ...] for those the
+    skeleton gave positive weight. Shared by the auto-fill (which writes solved back) and the pre-send
+    check (which only counts), so both agree to the vertex on what is fillable."""
+    missing = _missing_verts(obj, armature)
     solved = {}
     if not missing or armature is None:
         return missing, solved
@@ -1741,6 +2039,7 @@ def _solve_missing_weights(obj, armature):
     dup.data = obj.data.copy()
     bpy.context.scene.collection.objects.link(dup)
     try:
+        welded = _weld_throwaway(dup)
         for o in bpy.data.objects:
             o.select_set(False)
         dup.select_set(True)
@@ -1751,10 +2050,13 @@ def _solve_missing_weights(obj, armature):
             bpy.ops.object.parent_set(type="ARMATURE_AUTO")
         except RuntimeError:
             return missing, solved     # bone heat could not solve this mesh — all missing count as unfillable
+        game = gf2_game_bone_names(b.name for b in armature.data.bones)
         for vg_dup in dup.vertex_groups:
+            if vg_dup.name not in game:
+                continue               # a bone the modder added: its weight would not reach the game
             for vi in missing:
                 try:
-                    w = vg_dup.weight(vi)
+                    w = vg_dup.weight(welded[vi])
                 except RuntimeError:
                     continue           # this vertex is not in this group
                 if w > 0.0:
@@ -1789,8 +2091,9 @@ def gf2_fill_missing_weights(mesh_objs, armature, unskinned=()):
                 vg = obj.vertex_groups.get(name) or obj.vertex_groups.new(name=name)
                 vg.add([vi], w, "REPLACE")
         obj.data.update()
+        skin = _skin_group_indices(obj, armature)
         for vi in missing:
-            if _vertex_total_weight(obj, vi) >= 1e-4:
+            if _vertex_total_weight(obj, vi, skin) >= 1e-4:
                 filled += 1
             else:
                 still += 1
@@ -1894,7 +2197,7 @@ def _is_selected(obj):
         return False
 
 
-def gf2_send(out_dir, glb_path, edit_targets=None):
+def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
     """Export the edited mesh(es) back to the watched folder with the loader's required
     settings, plus a write-complete sidecar. Returns the written .glb path.
 
@@ -1946,7 +2249,14 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
     if renamed:
         raise RuntimeError("GF2: renamed or suffixed part collection(s): " + ", ".join(renamed)
                            + ". The mesh would ship as a part the app has no target for.")
-    filled, still = gf2_fill_missing_weights(mesh_objs, session_arm, gf2_unskinned_parts(session))
+    # The skin checks HARD on the same two cases, refused here before the fill writes anything: the glTF
+    # export would drop the skin, or move a weight onto a bone the game does not have.
+    unskinned = gf2_unskinned_parts(session)
+    skin_refusals = (gf2_binding_issues(mesh_objs, session_arm, unskinned)
+                     + [line for _, line in gf2_off_skeleton_issues(mesh_objs, session_arm, unskinned)])
+    if skin_refusals:
+        raise RuntimeError("GF2: " + " ".join(skin_refusals))
+    filled, still = gf2_fill_missing_weights(mesh_objs, session_arm, unskinned)
     if filled or still:
         print(f"GF2: auto-filled {filled} {'vertex' if filled == 1 else 'vertices'} from the skeleton"
               + (f"; {still} still have no weight (they will be flagged)" if still else ""))
@@ -1955,6 +2265,11 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
     shipping = mesh_objs + arms
     texture_transport, duplicate_tags = _gf2_collect_texture_transport(mesh_objs)
     standard_channels, standard_warnings = _gf2_collect_standard_channels(mesh_objs)
+    # A part weighted across a part the game starts shrunk and other parts does not line up in the game.
+    # The Send operator's gate already read it off the weights that ship and reports it beside its other
+    # warnings; a send run any other way reads it here, before the export, and says it after, since the
+    # send still goes.
+    own_mix_lines = [] if hidden_mix_lines is not None else gf2_hidden_mix_issues(session, mesh_objs)
 
     want = dict(
         filepath=out_glb, export_format="GLB",
@@ -1986,9 +2301,15 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
     dropped = [k for k in want if k not in valid]
     hidden = []
     saved_names = None
+    hidden_root = _shrunk_parts_root()
+    hidden_root_was = None
     # Everything from here on mutates the scene, so it all runs under the try: the finally is the only
     # thing that gives the modder their scene back, and a send can fail at any of these steps.
     try:
+        # A part under `Shrunk Parts` ships like any other: the collection is shown while the send
+        # selects and exports, since nothing under a hidden collection can be selected, and put back
+        # after.
+        hidden_root_was = _set_collection_hidden(hidden_root, False)
         # An object that must ship is unhidden first and restored after — select_set on a hidden object
         # is silently ignored by Blender, so without this a hidden object would drop out of the
         # deliverable, and hiding is transient working state that must not decide what ships. The
@@ -2016,6 +2337,7 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
             _restore_export_names(saved_names)
         for o, was_hidden in hidden:
             _set_hidden(o, was_hidden)
+        _restore_collection_hidden(hidden_root, hidden_root_was)
 
     # Blender does not export node custom properties. Re-append the exact property records — changed
     # pixels, or a hash-only marker per untouched picture — after its geometry writer has produced the
@@ -2058,6 +2380,7 @@ def gf2_send(out_dir, glb_path, edit_targets=None):
     warning_lines.extend(gf2_duplicate_tag_lines(duplicate_tags))
     # An untagged picture the send skipped or could not read — silence would read as a clean send.
     warning_lines.extend(standard_warnings)
+    warning_lines.extend(own_mix_lines)
     if warning_lines:
         for line in warning_lines:
             print("GF2: " + line)
@@ -2207,6 +2530,10 @@ def _attribution_issues(mesh_objs):
             issues.append(("SOFT", f"The {gf2_label(o.name)} mesh is in the {gf2_label(part.name)} "
                                    f"collection and is sent as {gf2_label(part.name)}. Move it into "
                                    f"{gf2_label(o.name)} if that is a mistake."))
+    hidden_root = _shrunk_parts_root()
+    if hidden_root is not None and _is_excluded(hidden_root):
+        issues.append(("HARD", f"'{SHRUNK_PARTS_COLLECTION}' is excluded from the view layer. The part "
+                               "meshes in it cannot be sent. Re-enable the collection in the outliner."))
     for part in parts:
         if _is_excluded(part):
             issues.append(("HARD", f"'{part.name}' is excluded from the view layer. The part meshes "
@@ -2258,11 +2585,14 @@ def gf2_cheap_checks(mesh_objs, armature):
         issues.append(("HARD", f"{len(weighted)} weighted part{'' if len(weighted) == 1 else 's'} but "
                                f"no armature in {MOD_COLLECTION}, so Send would lose the skin. "
                                f"Keep the skeleton in {MOD_COLLECTION}/{ARMATURE_COLLECTION}."))
+    # HARD — a skinned mesh the session armature does not deform exports skinless or deforms apart from
+    # what the viewport shows.
+    unskinned = gf2_unskinned_parts(load_session())
+    issues.extend(("HARD", line) for line in gf2_binding_issues(shipping, armature, unskinned))
     base = _load_baseline()
     # SOFT — the export bakes a skinned mesh's object transform into its vertices once, so only a
     # mirroring scale is worth saying; an unskinned mesh carries its transform on the glb node, which
     # the app does not read, so the whole of it is dropped.
-    unskinned = gf2_unskinned_parts(load_session())
     for mo in shipping:
         before = {k: (base.get(k) or {}).get(mo.name) for k in ("location", "rotation", "scale")}
         issue = gf2_transform_warning(mo.name, before, _object_transform(mo),
@@ -2290,27 +2620,38 @@ def gf2_cheap_checks(mesh_objs, armature):
     return issues
 
 
-def gf2_run_checks(mesh_objs, armature):
+def gf2_run_checks(mesh_objs, armature, hidden_mix=None):
     """Pre-send sanity pass. Returns a list of (severity, message) with severity in {"HARD","SOFT"}:
     HARD is what will be REJECTED downstream (surfaced here first so the modder is not bounced after a
     round-trip); SOFT is a likely-mistake warning that still exports.
 
-    The full pass = the cheap checks (pure) plus the unweighted-vertex count, which bone-heats a
-    duplicate per mesh and so runs only here, never on a live refresh. That solve leaves geometry and
-    weights untouched but borrows the selection and the active object without restoring them. The
-    blocker joins the leading run of HARD entries, so a blocked send still reads its blockers before
-    its warnings."""
+    The full pass = the cheap checks (pure) plus the two vertex walks: weight on bones outside the
+    item's skeleton, and the unweighted-vertex count, which bone-heats a duplicate per mesh. Both run
+    only here, never on a live refresh. The solve leaves geometry and weights untouched but borrows the
+    selection and the active object without restoring them. A mesh blocked for off-skeleton weight is
+    left out of the count: its vertices carry weight, and saying they have none would misname the fix.
+    The blockers join the leading run of HARD entries, so a blocked send still reads its blockers
+    before its warnings."""
     issues = gf2_cheap_checks(mesh_objs, armature)
     shipping = gf2_shipping_meshes()
-    unsolvable = (_unsolvable_weights_by_object(shipping, armature, gf2_unskinned_parts(load_session()))
-                  if shipping else [])
+    unskinned = gf2_unskinned_parts(load_session())
+    off_skeleton = gf2_off_skeleton_issues(shipping, armature, unskinned)
+    off_names = {name for name, _ in off_skeleton}
+    counted = [o for o in shipping if o.name not in off_names] if off_names else shipping
+    unsolvable = _unsolvable_weights_by_object(counted, armature, unskinned) if counted else []
+    blockers = [line for _, line in off_skeleton]
     if unsolvable:
         total = sum(n for _, n in unsolvable)
         named = ", ".join(f"'{n}'" for n, _ in unsolvable)
-        lead = next((i for i, (sev, _) in enumerate(issues) if sev != "HARD"), len(issues))
-        issues.insert(lead, ("HARD", f"{total} {'vertex has' if total == 1 else 'vertices have'} no "
-                                     f"weight in {named} and cannot be filled from the skeleton, so "
-                                     "Send is blocked. Weight-paint or delete the affected vertices."))
+        blockers.append(f"{total} {'vertex has' if total == 1 else 'vertices have'} no "
+                        f"weight in {named} and cannot be filled from the skeleton, so "
+                        "Send is blocked. Weight-paint or delete the affected vertices.")
+    lead = next((i for i, (sev, _) in enumerate(issues) if sev != "HARD"), len(issues))
+    issues[lead:lead] = [("HARD", line) for line in blockers]
+    # SOFT — weight across a part the game starts shrunk and other parts. It walks every vertex's weights,
+    # so it runs here and never on a live refresh; a caller that already read it hands it in.
+    mix = hidden_mix if hidden_mix is not None else gf2_hidden_mix_issues(load_session(), shipping)
+    issues.extend(("SOFT", line) for line in mix)
     return issues
 
 
@@ -2609,6 +2950,7 @@ def _register_ui(glb_path, send_dir):
         _overwrite = None
         _emptied = None
         _targets = None
+        _mix = None
 
         def _gate(self, ctx):
             """Run the full pre-send pass and keep its warnings for the send. Returns a result set when
@@ -2621,7 +2963,9 @@ def _register_ui(glb_path, send_dir):
                 self.report({'ERROR'}, "No send directory is set.")
                 return {'CANCELLED'}
             meshes, arm = _scene_meshes_arm()
-            issues = gf2_run_checks(meshes, arm)
+            # read once: the checks list it, and the send is handed it rather than reading it again
+            self._mix = gf2_hidden_mix_issues(session, gf2_shipping_meshes())
+            issues = gf2_run_checks(meshes, arm, hidden_mix=self._mix)
             hard = [m for sev, m in issues if sev == "HARD"]
             self._emptied = gf2_emptied_parts()
             emptied_lines = {gf2_emptied_part_line(name) for name in self._emptied}
@@ -2673,7 +3017,7 @@ def _register_ui(glb_path, send_dir):
                 if blocked is not None:
                     return blocked
             s = ctx.scene
-            out = gf2_send(s.gf2_send_dir, s.gf2_glb_path, self._targets)
+            out = gf2_send(s.gf2_send_dir, s.gf2_glb_path, self._targets, hidden_mix_lines=self._mix)
             soft = self._soft
             sent_line = f"Sent: {os.path.basename(out)}"
             emptied = [gf2_emptied_part_confirm_line(name) for name in (self._emptied or ())]

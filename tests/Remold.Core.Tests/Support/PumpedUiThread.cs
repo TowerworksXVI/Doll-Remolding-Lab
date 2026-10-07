@@ -28,6 +28,7 @@ internal sealed class PumpedUiThread : IDisposable
     private int _pending;
     private readonly ManualResetEventSlim _idle = new(initialState: true);
     private long _longestActionTicks;
+    [ThreadStatic] private static PumpedUiThread? t_current;
 
     public PumpedUiThread()
     {
@@ -35,6 +36,11 @@ internal sealed class PumpedUiThread : IDisposable
         _thread = new Thread(Run) { IsBackground = true, Name = "test-ui-pump" };
         _thread.Start();
     }
+
+    /// <summary>The pump the calling code is running ON, or null off every pump. A test body hosted by
+    /// <see cref="UiFactAttribute"/> reads its own pump here to hand the page under test the same
+    /// dispatch the body itself is running under.</summary>
+    public static PumpedUiThread? Current => t_current;
 
     /// <summary>The <c>pageDispatch</c> seam to hand the window: inline on this thread, queued off it.</summary>
     public Action<Action> Dispatch => Post;
@@ -87,6 +93,7 @@ internal sealed class PumpedUiThread : IDisposable
 
     private void Run()
     {
+        t_current = this;
         SynchronizationContext.SetSynchronizationContext(_context);
         foreach (var work in _queue.GetConsumingEnumerable())
         {

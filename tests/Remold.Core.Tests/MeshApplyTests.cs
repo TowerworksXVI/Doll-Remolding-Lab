@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -36,7 +37,7 @@ public class MeshApplyTests
     public void Skinned_WeightHealth_FlagsLowWeightVertices()
     {
         // Weights summing below 0.5 collapse the vertex to the bind pose and must be flagged. The authored
-        // joints resolve, so no fallback masks the low sum.
+        // joints resolve.
         var orig = Orig();
         var glb = new MeshApply.Payload
         {
@@ -83,56 +84,61 @@ public class MeshApplyTests
         Assert.Empty(built.Warnings);
     }
 
-    [Fact]
-    public void Skinned_FallsBackToOriginalWeights_WhenAGlbBoneIsMissingFromTarget()
+    private static MeshApply.Payload TwoVertexSkin(uint[] jointHashes, int[] indices, float[] weights) => new()
     {
-        var orig = Orig();
-        var targetHashes = new uint[] { 0xAAAAAAAA, 0xBBBBBBBB };   // 0xDDDD is NOT here
-        var glb = new MeshApply.Payload
-        {
-            Mesh = Mesh(2,
-                new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
-                new Dictionary<string, int> { ["Vertex"] = 3 },
-                new List<int[]> { new[] { 0, 1, 0 } }),
-            SkinJointHashes = new uint[] { 0xDDDDDDDD },            // unresolved
-            JointIndices = new[] { 0, 0, 0, 0, 0, 0, 0, 0 },
-            JointWeights = new float[] { 1, 0, 0, 0, 1, 0, 0, 0 }, // real weight on the missing bone
-        };
+        Mesh = Mesh(2,
+            new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
+            new Dictionary<string, int> { ["Vertex"] = 3 },
+            new List<int[]> { new[] { 0, 1, 0 } }),
+        SkinJointHashes = jointHashes,
+        JointIndices = indices,
+        JointWeights = weights,
+    };
 
-        var built = MeshApply.BuildSkinned(orig, glb, targetHashes);
+    [Fact]
+    public void Skinned_RefusesWeightOnABoneTheTargetLacks()
+    {
+        var glb = TwoVertexSkin(new uint[] { 0xDDDDDDDD },                   // absent from the target
+            new[] { 0, 0, 0, 0, 0, 0, 0, 0 }, new float[] { 1, 0, 0, 0, 1, 0, 0, 0 });
 
-        Assert.Equal(orig.Channels["BlendIndices"], built.Arrays["BlendIndices"]);
-        Assert.Equal(orig.Channels["BlendWeight"], built.Arrays["BlendWeight"]);
-        Assert.NotEmpty(built.Warnings);
+        var ex = Assert.Throws<MeshApply.OffSkeletonWeightException>(
+            () => MeshApply.BuildSkinned(Orig(), glb, new uint[] { 0xAAAAAAAA, 0xBBBBBBBB }));
+
+        Assert.Equal(2, ex.Vertices);
+        Assert.Equal(1, ex.Bones);
+        Assert.IsAssignableFrom<AuthoredRefusalException>(ex);
     }
 
     [Fact]
-    public void Skinned_ZeroWeightResolvedSlot_DoesNotMaskTheFallback()
+    public void Skinned_RefusesAVertexSplitBetweenAPresentAndAnAbsentBone()
     {
-        // v0 carries ALL its weight on a missing bone plus a ZERO-weight slot on a valid one. The
-        // zero-weight slot must not count as "resolved", or the compile drops v0's only real influence and
-        // ships an all-zero skin.
+        // Dropping the absent half and rescaling the rest would move the vertex somewhere it was not painted.
+        var glb = TwoVertexSkin(new uint[] { 0xAAAAAAAA, 0xDDDDDDDD },
+            new[] { 0, 1, 0, 0, /*v1*/ 0, 0, 0, 0 }, new float[] { 0.5f, 0.5f, 0, 0, /*v1*/ 1, 0, 0, 0 });
+
+        var ex = Assert.Throws<MeshApply.OffSkeletonWeightException>(
+            () => MeshApply.BuildSkinned(Orig(), glb, new uint[] { 0xAAAAAAAA }));
+
+        Assert.Equal(1, ex.Vertices);
+        Assert.Equal(1, ex.Bones);
+    }
+
+    [Fact]
+    public void Skinned_ATargetStoringNoInfluencesIgnoresBonesItLacks()
+    {
+        // The skin is never written to such a target, so a bone it lacks deforms nothing.
         var orig = Orig();
-        var targetHashes = new uint[] { 0xAAAAAAAA };
-        var glb = new MeshApply.Payload
+        foreach (var channel in new[] { "BlendIndices", "BlendWeight" })
         {
-            Mesh = Mesh(2,
-                new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
-                new Dictionary<string, int> { ["Vertex"] = 3 },
-                new List<int[]> { new[] { 0, 1, 0 } }),
-            SkinJointHashes = new uint[] { 0xAAAAAAAA, 0xDDDDDDDD },   // D is not in the target
-            JointIndices = new[] { 0, 1, 0, 0, /*v1*/ 0, 0, 0, 0 },
-            JointWeights = new float[] { 0f, 1f, 0, 0, /*v1*/ 1, 0, 0, 0 },   // v0: valid w=0, missing w=1
-        };
+            orig.Channels.Remove(channel);
+            orig.Dims.Remove(channel);
+        }
+        var glb = TwoVertexSkin(new uint[] { 0xDDDDDDDD },
+            new[] { 0, 0, 0, 0, 0, 0, 0, 0 }, new float[] { 1, 0, 0, 0, 1, 0, 0, 0 });
 
-        var built = MeshApply.BuildSkinned(orig, glb, targetHashes);
+        var built = MeshApply.BuildSkinned(orig, glb, new uint[] { 0xAAAAAAAA });
 
-        var bi = built.Arrays["BlendIndices"]; var bw = built.Arrays["BlendWeight"];
-        Assert.Equal(new float[] { 5, 0, 0, 0 }, new[] { bi[0], bi[1], bi[2], bi[3] });   // v0: original skin
-        Assert.Equal(new float[] { 1, 0, 0, 0 }, new[] { bw[0], bw[1], bw[2], bw[3] });
-        Assert.Equal(0f, bi[4]);   // v1: authored, resolved to target index 0
-        Assert.Equal(1f, bw[4]);
-        Assert.Contains(built.Warnings, w => w.Contains("1 fell back to the original weights"));
+        Assert.Equal(2, built.VertexCount);
     }
 
     [Fact]
@@ -158,48 +164,28 @@ public class MeshApplyTests
     }
 
     [Fact]
-    public void Skinned_ZeroWeightAbsentBone_StaysSilent()
+    public void Skinned_ZeroWeightAbsentBone_IsNotRefused()
     {
-        // An absent bone carrying NO weight is harmless and must NOT warn. Only a WEIGHTED absent bone is.
-        var orig = Orig();
-        var targetHashes = new uint[] { 0xAAAAAAAA, 0xBBBBBBBB };
-        var glb = new MeshApply.Payload
-        {
-            Mesh = Mesh(2,
-                new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
-                new Dictionary<string, int> { ["Vertex"] = 3 },
-                new List<int[]> { new[] { 0, 1, 0 } }),
-            SkinJointHashes = new uint[] { 0xAAAAAAAA, 0xDDDDDDDD },   // 0xDDDD is absent from the target
-            JointIndices = new[] { 0, 1, 0, 0, 0, 1, 0, 0 },
-            JointWeights = new float[] { 1, 0, 0, 0, 1, 0, 0, 0 },    // ...but the absent bone carries ZERO weight
-        };
+        // An absent bone carrying NO weight deforms nothing. Only a WEIGHTED absent bone is refused.
+        var glb = TwoVertexSkin(new uint[] { 0xAAAAAAAA, 0xDDDDDDDD },   // 0xDDDD is absent from the target
+            new[] { 0, 1, 0, 0, 0, 1, 0, 0 },
+            new float[] { 1, 0, 0, 0, 1, 0, 0, 0 });                     // ...but carries ZERO weight
 
-        var built = MeshApply.BuildSkinned(orig, glb, targetHashes);
+        var built = MeshApply.BuildSkinned(Orig(), glb, new uint[] { 0xAAAAAAAA, 0xBBBBBBBB });
 
-        Assert.DoesNotContain(built.Warnings, w => w.Contains("skeleton doesn't have"));
+        Assert.Equal(new float[] { 1, 0, 0, 0, 1, 0, 0, 0 }, built.Arrays["BlendWeight"]);
     }
 
     [Fact]
-    public void Skinned_WeightedAbsentBone_WarnsByAffectedVertices()
+    public void OffSkeletonRefusal_NamesTheEditAndTheCounts()
     {
-        // A weighted influence on an absent bone IS flagged, worded by affected VERTICES rather than a raw
-        // bone count.
-        var orig = Orig();
-        var targetHashes = new uint[] { 0xAAAAAAAA, 0xBBBBBBBB };
-        var glb = new MeshApply.Payload
-        {
-            Mesh = Mesh(2,
-                new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
-                new Dictionary<string, int> { ["Vertex"] = 3 },
-                new List<int[]> { new[] { 0, 1, 0 } }),
-            SkinJointHashes = new uint[] { 0xDDDDDDDD },
-            JointIndices = new[] { 0, 0, 0, 0, 0, 0, 0, 0 },
-            JointWeights = new float[] { 1, 0, 0, 0, 1, 0, 0, 0 },
-        };
+        var ex = new MeshApply.OffSkeletonWeightException(12, 3);
 
-        var built = MeshApply.BuildSkinned(orig, glb, targetHashes);
-
-        Assert.Contains(built.Warnings, w => w.Contains("2 vertex(es)") && w.Contains("skeleton doesn't have"));
+        Assert.Equal("the mesh edit on 'c_Body' has 12 vertices weighted to 3 bones this item doesn't have. "
+            + "Open the edit in Blender, run Check Mesh, and send it again", ex.For("c_Body"));
+        Assert.StartsWith("the new mesh has 12 vertices weighted to 3 bones", ex.Message);
+        Assert.StartsWith("the new mesh has 1 vertex weighted to 1 bone this item",
+            new MeshApply.OffSkeletonWeightException(1, 1).Message);
     }
 
     [Fact]

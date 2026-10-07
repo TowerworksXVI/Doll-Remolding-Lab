@@ -146,13 +146,15 @@ public class SharingIndexTests : IDisposable
         Assert.Null(SharingIndex.TryLoad(path, TwoWearerRoster()));
     }
 
-    [Fact]
-    public void A_persisted_schema_seven_file_loads_as_null()
+    [Theory]
+    [InlineData(7)]
+    [InlineData(8)]
+    public void A_persisted_file_with_an_older_measurement_rule_loads_as_null(int schema)
     {
         string path = Path.Combine(_root, "sharing_schema7.json");
         TwoWearers().Save(path);
         var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-        json["SchemaVersion"] = 7;
+        json["SchemaVersion"] = schema;
         File.WriteAllText(path, json.ToJsonString());
 
         Assert.Null(SharingIndex.TryLoad(path, TwoWearerRoster()));
@@ -317,10 +319,10 @@ public class SharingIndexTests : IDisposable
             deobfuscate, "25180", previous, progress);
         var reader = new BundleReader();
         return (idx,
-            BufferHash.Compute(deobfuscate("vbody.bundle")!, body, 0, reader).Ib.ToString("x8"),
-            BufferHash.Compute(deobfuscate("vhair.bundle")!, hair, 0, reader).Ib.ToString("x8"),
+            BufferHash.Compute(deobfuscate("vbody.bundle")!, body, 0, reader).Selector.Key,
+            BufferHash.Compute(deobfuscate("vhair.bundle")!, hair, 0, reader).Selector.Key,
             hasTier
-                ? BufferHash.Compute(deobfuscate("vbodytier.bundle")!, bodyTierName, 0, reader).Ib.ToString("x8")
+                ? BufferHash.Compute(deobfuscate("vbodytier.bundle")!, bodyTierName, 0, reader).Selector.Key
                 : null);
     }
 
@@ -521,7 +523,7 @@ public class SharingIndexTests : IDisposable
         string path = Path.Combine(_root, "sharing_schema.json");
         idx.Save(path);
         var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-        Assert.Equal(8, (int)json["SchemaVersion"]!);
+        Assert.Equal(SharingIndex.SchemaVersion, (int)json["SchemaVersion"]!);
         Assert.All(json["Outfits"]!.AsArray(), row => Assert.NotNull(row!["R"]));
         Assert.All(json["Outfits"]!.AsArray(), row => Assert.NotNull(row!["A"]));
     }
@@ -707,7 +709,7 @@ public class SharingIndexTests : IDisposable
         Assert.Equal(oldBytes, File.ReadAllBytes(oldPath));
         var reader = new BundleReader();
         string newIb = BufferHash.Compute(FixtureCrawl.DeobfuscateOver(abw)("vmesh-next.bundle")!,
-            slot, 0, reader).Ib.ToString("x8");
+            slot, 0, reader).Selector.Key;
         Assert.Contains(second.MeshOtherWearers(newIb, "Nobody", "Nobody"),
             wearer => wearer.Character == "Vesna");
     }
@@ -881,7 +883,7 @@ public class SharingIndexTests : IDisposable
         const string slot = "c_VesnaSSR01_slg_body_lod0";
         var reader = new BundleReader();
         string VesnaIb() => BufferHash.Compute(
-            FixtureCrawl.DeobfuscateOver(abw)("vmesh.bundle")!, slot, 0, reader).Ib.ToString("x8");
+            FixtureCrawl.DeobfuscateOver(abw)("vmesh.bundle")!, slot, 0, reader).Selector.Key;
 
         var first = SharingIndex.Build(population, catalog, BundleReads.ContentHashLookup(m1),
             FixtureCrawl.DeobfuscateOver(abw), "25180");
@@ -1647,10 +1649,9 @@ public class SharingIndexTests : IDisposable
     }
 
     [Fact]
-    public void A_schema_seven_file_is_no_base_at_all_and_the_pass_rewrites_it_at_eight()
+    public void An_older_measurement_is_no_base_and_the_pass_rewrites_it_with_the_current_rules()
     {
-        // Both regenerable, so neither gets a migration: a cache or a seed from before lodm measurement is
-        // refused whole, the population is measured once, and what lands on disk is schema 8.
+        // Regenerable observations are measured again when the app's ownership rules change.
         using var g = new TempGame();
         string abw = g.At("AssetBundles_Windows");
         var (population, rows, deps) = TwoIndependentOutfits(abw);
@@ -1661,7 +1662,7 @@ public class SharingIndexTests : IDisposable
         SharingIndex.Build(population, catalog, BundleReads.ContentHashLookup(manifest),
             FixtureCrawl.DeobfuscateOver(abw), "26109").Save(path);
         var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
-        json["SchemaVersion"] = 7;
+        json["SchemaVersion"] = 8;
         File.WriteAllText(path, json.ToJsonString());
 
         // neither door opens: the cache path and the seed path both point at it
@@ -1675,7 +1676,7 @@ public class SharingIndexTests : IDisposable
         Assert.Equal(2, built.MeasuredOutfitCount);
 
         built.Save(path);
-        Assert.Equal(8, (int)System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!["SchemaVersion"]!);
+        Assert.Equal(SharingIndex.SchemaVersion, (int)System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!["SchemaVersion"]!);
     }
 
     [Fact]

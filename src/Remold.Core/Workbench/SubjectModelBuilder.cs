@@ -99,7 +99,11 @@ public static class SubjectModelBuilder
             var byLeaf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var e in candidates[i].Prefab.Recipe)
                 if (!byLeaf.ContainsKey(Leaf(e.SlotPath))) byLeaf[Leaf(e.SlotPath)] = e.MeshAddress;
-            candidates[i] = candidates[i] with { MeshAddressByLeaf = byLeaf };
+            // and each slot's geometry, once — see Candidate.GeometryByPathId
+            var geometry = new Dictionary<long, SlotGeometry>(candidates[i].Prefab.Slots.Count);
+            foreach (var s in candidates[i].Prefab.Slots)
+                geometry[s.PathId] = GeometryOf(catalog, byLeaf.GetValueOrDefault(s.Name, ""), s);
+            candidates[i] = candidates[i] with { MeshAddressByLeaf = byLeaf, GeometryByPathId = geometry };
         }
 
         // The dorm visibility lists come from the SCOPE, not from this candidate list: the context copies of
@@ -176,17 +180,67 @@ public static class SubjectModelBuilder
                 continue;
             }
             var meshAddress = cand.MeshAddressByLeaf.TryGetValue(spec.Slot.Name, out var addr) ? addr : "";
-            var materials = ResolveSlotMaterials(
-                scope, reader, Deobfuscate, cand.Bundle, cand.Dec, spec.Slot, spec.Token, outfit, problems,
-                materialBundles);
 
-            // smr-body mesh identity: a slot with NO recipe address but a serialized renderer mesh resolves
-            // its CAB to the owning scope bundle here, so the part carries bundle+path-id down to the
-            // exporter. A CAB nothing in scope provides is a LOUD per-part problem, not a blank.
+            // Candidates can serialize DIFFERENT m_Materials for one renderer slot, and every reader —
+            // the tree, the Edit page, the build — has to consume the same arrays or they disagree about
+            // which material a submesh binds. One candidate supplies all of this part's arrays: the one
+            // they agree on, or the one whose array fills another's empty slots (the game draws no
+            // material at an empty slot, so the filled array is right wherever either is). Where they
+            // genuinely differ, the highest-priority candidate stands and the part is marked: only a Build
+            // acting on it can say which configuration the modder is looking at.
+            var holders = candidates.OrderBy(c => ReferenceEquals(c, cand) ? 0 : 1)
+                .Select(c => (Cand: c, Slots: OwnedMeshSlots(c.Prefab, outfit)
+                    .Where(s => tokenOf(s.Name).Equals(spec.Token, StringComparison.OrdinalIgnoreCase))
+                    .GroupBy(s => s.Name, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal)))
+                .Where(h => h.Slots.Count > 0).ToList();
+            var arraysByHolder = holders
+                .Select(h => (IReadOnlyDictionary<string, IReadOnlyList<TierMaterialRef>>)h.Slots
+                    .ToDictionary(kv => kv.Key,
+                        kv => (IReadOnlyList<TierMaterialRef>)TierMaterialIdentities(scope, h.Cand.Bundle, kv.Value),
+                        StringComparer.Ordinal))
+                .ToList();
+            var (chosen, ambiguousMaterials) = ReconcileMaterialArrays(arraysByHolder);
+
+            // the chosen candidate's array for one of the part's slots; a slot only the others carry falls
+            // back to the same three rules among the candidates that do carry it
+            IReadOnlyList<TierMaterialRef>? ChosenMaterials(string slotName)
+            {
+                if (holders.Count == 0) return null;
+                if (arraysByHolder[chosen].TryGetValue(slotName, out var own)) return own;
+                var carriers = Enumerable.Range(0, holders.Count)
+                    .Where(i => arraysByHolder[i].ContainsKey(slotName)).ToList();
+                if (carriers.Count == 0) return null;
+                var only = carriers
+                    .Select(i => (IReadOnlyDictionary<string, IReadOnlyList<TierMaterialRef>>)
+                        new Dictionary<string, IReadOnlyList<TierMaterialRef>>(StringComparer.Ordinal)
+                        { [slotName] = arraysByHolder[i][slotName] })
+                    .ToList();
+                var (pick, ambiguousHere) = ReconcileMaterialArrays(only);
+                ambiguousMaterials |= ambiguousHere;
+                return arraysByHolder[carriers[pick]][slotName];
+            }
+
+            // the representative slot's own materials are read from the same candidate, so a part's lod0
+            // and its reduced tiers cannot state different material identities for one region
+            var lod0Owner = holders.Count > 0 && holders[chosen].Slots.TryGetValue(spec.Slot.Name, out var own0)
+                ? (Cand: holders[chosen].Cand, Slot: own0)
+                : (Cand: cand, Slot: spec.Slot);
+            var materials = ResolveSlotMaterials(
+                scope, reader, Deobfuscate, lod0Owner.Cand.Bundle, lod0Owner.Cand.Dec, lod0Owner.Slot,
+                spec.Token, outfit, problems, materialBundles);
+
+            // smr-body mesh identity: a slot whose geometry is its serialized renderer mesh (no recipe
+            // address, or one the catalog does not resolve — see GeometryOf) resolves its CAB to the owning
+            // scope bundle here, so the part carries bundle+path-id down to the exporter. A CAB nothing in
+            // scope provides is a LOUD per-part problem, not a blank. A slot backed neither way keeps the
+            // recipe's answer as it stands, dead address included, so the build's own refusal names it.
             string? partProblem = null;
-            var (meshBundle, meshPathId) = meshAddress.Length > 0 || spec.Slot.Mesh is null
-                ? (null, 0L)
-                : ResolveSlotMesh(scope, cand, spec.Slot.Mesh, spec.Token, problems, out partProblem);
+            var geometry = cand.GeometryByPathId[spec.Slot.PathId];
+            if (geometry == SlotGeometry.Serialized) meshAddress = "";
+            var (meshBundle, meshPathId) = geometry == SlotGeometry.Serialized
+                ? ResolveSlotMesh(scope, cand, spec.Slot.Mesh!, spec.Token, problems, out partProblem)
+                : (null, 0L);
 
             // The part's OTHER tier slots (same token) for the prefab-exact LOD fan-out, single-sourced off
             // the SAME TokenRule grouping that claims the representative, so a part's tiers can't drift
@@ -205,17 +259,27 @@ public static class SubjectModelBuilder
                     if (!tierNames.Add(x.Name)) continue;
                     var tierAddr = tierCand.MeshAddressByLeaf.GetValueOrDefault(x.Name, "");
                     // each tier's shadow-pass flag and visibility override are its OWN node's: the tiers are
-                    // separate draws, and the dorm lists name them one tier at a time
-                    if (tierAddr.Length > 0 || x.Mesh is null)
+                    // separate draws, and the dorm lists name them one tier at a time. A tier the same
+                    // GeometryOf rule backs neither way is not a tier: the prefab names a detail level the
+                    // install ships no mesh for, so there is no draw for a mod to cover and nothing to
+                    // report — the part stands on the tiers that exist.
+                    switch (tierCand.GeometryByPathId[x.PathId])
                     {
-                        siblingTiers.Add(new RecipeTierSlot(x.Name, tierAddr, CastsShadows: x.CastsShadows,
-                            Visibility: VisibilityOf(x.Name), RendererBundle: tierCand.Bundle,
-                            RendererPathId: x.PathId));
-                        continue;
+                        case SlotGeometry.RecipeResolved:
+                            siblingTiers.Add(new RecipeTierSlot(x.Name, tierAddr, CastsShadows: x.CastsShadows,
+                                Visibility: VisibilityOf(x.Name), RendererBundle: tierCand.Bundle,
+                                RendererPathId: x.PathId,
+                                Materials: ChosenMaterials(x.Name)
+                                    ?? TierMaterialIdentities(scope, tierCand.Bundle, x)));
+                            break;
+                        case SlotGeometry.Serialized:
+                            var (tb, tp) = ResolveSlotMesh(scope, tierCand, x.Mesh!, spec.Token, problems, out _);
+                            siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp, x.CastsShadows,
+                                VisibilityOf(x.Name), tierCand.Bundle, x.PathId,
+                                ChosenMaterials(x.Name)
+                                    ?? TierMaterialIdentities(scope, tierCand.Bundle, x)));
+                            break;
                     }
-                    var (tb, tp) = ResolveSlotMesh(scope, tierCand, x.Mesh, spec.Token, problems, out _);
-                    siblingTiers.Add(new RecipeTierSlot(x.Name, "", tb, tp, x.CastsShadows,
-                        VisibilityOf(x.Name), tierCand.Bundle, x.PathId));
                 }
             // Mirror the exporter's whole-part texture miss: a part whose real materials ALL resolved cleanly
             // yet bind ZERO texture maps will export untextured, so flag it for the tree's ⚠ badge. A part
@@ -231,7 +295,9 @@ public static class SubjectModelBuilder
                 IsStatic: spec.Slot.Renderer == SlotRenderer.Static,
                 CastsShadows: spec.Slot.CastsShadows,
                 Visibility: VisibilityOf(spec.Slot.Name),
-                RendererBundle: cand.Bundle, RendererPathId: spec.Slot.PathId));
+                RendererBundle: cand.Bundle, RendererPathId: spec.Slot.PathId,
+                AmbiguousMaterials: ambiguousMaterials,
+                Pose: RigPoseOf(scope, cand, spec.Slot)));
         }
 
         // Defensive: renderer slots existed but nothing became a part — loud rather than a silent empty
@@ -274,10 +340,20 @@ public static class SubjectModelBuilder
     {
         var recipeLeaves = prefab.Recipe.Select(e => Leaf(e.SlotPath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return prefab.Slots
-            .Where(s => SlotIsOwned(prefab.RootName, s.Name, outfit)
+            .Where(s => SlotIsOwned(prefab.RootName, s, outfit)
                      && (recipeLeaves.Contains(s.Name) || (s.Mesh is not null && !IsBuiltinMesh(s.Mesh))))
             .ToList();
     }
+
+    /// <summary><see cref="SlotIsOwned(string, string, Outfit)"/> on the slot itself: the root-name clause
+    /// claims only a renderer that sits under the root's own Transform (<see cref="PrefabSlot.InRoot"/>).
+    /// In a bundle shipping several container roots — a support team's three members, a weapon beside
+    /// its ammunition — a sibling root's renderers share the file but are that sibling's parts, and a
+    /// name-only clause would hand every member all three members. The prefix clause is unchanged: a
+    /// slot named for this subject is this subject's wherever it hangs.</summary>
+    internal static bool SlotIsOwned(string candidateRoot, PrefabSlot slot, Outfit outfit) =>
+        (slot.InRoot && string.Equals(candidateRoot, outfit.Stem, StringComparison.Ordinal))
+        || slot.Name.StartsWith(outfit.MeshPrefix, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether a serialized mesh reference points into one of Unity's engine-shipped archives
     /// rather than a game bundle.</summary>
@@ -364,6 +440,23 @@ public static class SubjectModelBuilder
             return (null, 0);
         }
         return (bundle, mesh.PathId);
+    }
+
+    /// <summary>The saved rest pose the rig drawing a skinned slot names, resolved to the bundle holding it.
+    /// An Avatar is a rig asset rather than a material, so an external one resolves through
+    /// <see cref="SubjectScope.BundleForRigCab"/>. A renderer with no Avatar answers with no pose, and its rig
+    /// rests at the prefab's saved Transforms; so does one this read can't follow, whose placement read then
+    /// finds no rig at all (<see cref="RigPlacement.Read"/>). A read that throws answers with a pose that can't
+    /// be read.</summary>
+    private static RigPose? RigPoseOf(SubjectScope scope, Candidate cand, PrefabSlot slot)
+    {
+        if (slot.Renderer != SlotRenderer.Skinned) return null;
+        try
+        {
+            if (scope.Reader.RendererRig(cand.Dec, slot.PathId) is not { Avatar: { } avatar }) return null;
+            return new RigPose(avatar.Cab is null ? cand.Bundle : scope.BundleForRigCab(avatar.Cab), avatar.PathId);
+        }
+        catch (Exception) { return new RigPose(null, 0); }
     }
 
     /// <summary>The part a part-less summon or prop reads as: its mesh set carries no part segment at all, so
@@ -472,6 +565,48 @@ public static class SubjectModelBuilder
         return tokens;
     }
 
+    /// <summary>What geometry a renderer slot is backed by, as the exporter will read it. This is the ONE
+    /// rule for recipe-versus-serialized precedence, read by <see cref="Build"/> for the representative slot
+    /// and every sibling tier and by <see cref="HasGeometryBackedSlot"/> for the roster's confirm gate.</summary>
+    internal enum SlotGeometry
+    {
+        /// <summary>The recipe names a mesh address the catalog resolves: recipe-backed, the address wins.</summary>
+        RecipeResolved,
+        /// <summary>The renderer carries a serialized mesh and no resolving address: smr-backed. A recipe
+        /// address the catalog does NOT resolve is inert data — a prefab family ships its meshes as local
+        /// objects under dead addresses, and the serialized pointer is the only route that can draw.</summary>
+        Serialized,
+        /// <summary>Neither: no serialized mesh, and no address or one the catalog does not resolve.</summary>
+        None,
+    }
+
+    /// <summary>See <see cref="SlotGeometry"/>. <paramref name="recipeAddress"/> is the recipe's address for
+    /// the slot, or "" when the recipe names none.</summary>
+    internal static SlotGeometry GeometryOf(CatalogIndex catalog, string recipeAddress, PrefabSlot slot)
+    {
+        if (recipeAddress.Length > 0 && catalog.ResolveAddress(recipeAddress) is not null)
+            return SlotGeometry.RecipeResolved;
+        return slot.Mesh is not null ? SlotGeometry.Serialized : SlotGeometry.None;
+    }
+
+    /// <summary>Whether any owned renderer slot across the candidates is geometry-backed — the roster's
+    /// confirm gate: a subject lists iff the forward route yields at least one mesh a mod can reach.
+    /// Recipe rows alone confirm nothing, because a prefab can name meshes an install does not ship.</summary>
+    public static bool HasGeometryBackedSlot(IReadOnlyList<SubjectCandidate> candidates, Outfit outfit,
+        CatalogIndex catalog)
+    {
+        foreach (var c in candidates)
+        {
+            var byLeaf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in c.Prefab.Recipe)
+                if (!byLeaf.ContainsKey(Leaf(e.SlotPath))) byLeaf[Leaf(e.SlotPath)] = e.MeshAddress;
+            foreach (var s in OwnedMeshSlots(c.Prefab, outfit))
+                if (GeometryOf(catalog, byLeaf.GetValueOrDefault(s.Name, ""), s) != SlotGeometry.None)
+                    return true;
+        }
+        return false;
+    }
+
     /// <summary>One parsed candidate assembly prefab: the logical bundle + deobfuscated bytes it came from
     /// (materials/mesh addresses resolve against THESE, not the primary's), the parsed prefab, and its
     /// recipe leaf→mesh-address map, filled after parse.</summary>
@@ -479,11 +614,107 @@ public static class SubjectModelBuilder
     {
         public IReadOnlyDictionary<string, string> MeshAddressByLeaf { get; init; }
             = new Dictionary<string, string>();
+
+        /// <summary>Each slot's <see cref="SlotGeometry"/> by the slot's path id, decided ONCE per slot
+        /// when the candidate is prepared: the answer does not depend on the part, and the parts loop
+        /// asks it for every slot of every part. Keyed by path id, not name — a file can carry one slot
+        /// name under two container roots.</summary>
+        public IReadOnlyDictionary<long, SlotGeometry> GeometryByPathId { get; init; }
+            = new Dictionary<long, SlotGeometry>();
     }
 
     /// <summary>A resolved part before materials are read: its token, the owning candidate, its representative
     /// slot (null for a FindSlot anomaly or a recipe orphan), and any per-part problem.</summary>
     private readonly record struct PartSpec(string Token, Candidate Owner, PrefabSlot? Slot, string? Problem);
+
+    /// <summary>Which candidate's material arrays a part takes, and whether the candidates disagree about
+    /// them in a way nothing here can settle. <paramref name="byHolder"/> is one entry per candidate
+    /// carrying any of the part's slots, in the order the part reads them (its own candidate first), each
+    /// mapping slot name to that candidate's ordered material identities.
+    ///
+    /// <para>Three rules, in order. AGREEMENT: every candidate states the same identities for every slot
+    /// two of them share — the first candidate's arrays are everyone's. COMPLETION: one candidate's arrays
+    /// are another's with empty slots filled in; the filled arrays win, because the game draws nothing at
+    /// an empty slot and the filled array is therefore correct wherever the other is. Otherwise the
+    /// candidates state genuinely different configurations: the first stands, and the part is marked so a
+    /// Build acting on it can say so.</para></summary>
+    private static (int Chosen, bool Ambiguous) ReconcileMaterialArrays(
+        IReadOnlyList<IReadOnlyDictionary<string, IReadOnlyList<TierMaterialRef>>> byHolder)
+    {
+        if (byHolder.Count <= 1) return (0, false);
+
+        bool agree = true;
+        for (int i = 0; i < byHolder.Count && agree; i++)
+            for (int j = i + 1; j < byHolder.Count && agree; j++)
+                foreach (var (name, mine) in byHolder[i])
+                    if (byHolder[j].TryGetValue(name, out var theirs) && !mine.SequenceEqual(theirs))
+                    {
+                        agree = false;
+                        break;
+                    }
+        if (agree) return (0, false);
+
+        for (int r = 0; r < byHolder.Count; r++)
+        {
+            bool fills = true;
+            for (int o = 0; o < byHolder.Count && fills; o++)
+            {
+                if (o == r) continue;
+                foreach (var (name, mine) in byHolder[r])
+                    if (byHolder[o].TryGetValue(name, out var theirs) && !Completes(mine, theirs))
+                    {
+                        fills = false;
+                        break;
+                    }
+            }
+            if (fills) return (r, false);
+        }
+        return (0, true);
+    }
+
+    /// <summary>The same ordered materials as <paramref name="other"/>, except that where the other holds
+    /// an empty renderer slot this one binds a material. Same length and same identity everywhere else:
+    /// a different material at a position, a different ORDER, or a different count is a different
+    /// configuration, not a completed one.</summary>
+    private static bool Completes(IReadOnlyList<TierMaterialRef> filled, IReadOnlyList<TierMaterialRef> other)
+    {
+        if (filled.Count != other.Count) return false;
+        for (int i = 0; i < filled.Count; i++)
+        {
+            if (filled[i] == other[i]) continue;
+            if (other[i].IsPlaceholder && !filled[i].IsPlaceholder) continue;
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>One tier renderer slot's ordered <c>m_Materials</c> reduced to <see cref="TierMaterialRef"/>
+    /// identities, resolved by the SAME rule <see cref="ResolveSlotMaterials"/> applies to the
+    /// representative slot's materials: a null CAB means the prefab's own bundle, anything else goes
+    /// through the scope. Nothing is read out of the resolved bundle — the correspondence question is
+    /// answered by bundle + path id, and opening every tier material to learn its name would cost a read
+    /// per tier material for nothing.</summary>
+    private static List<TierMaterialRef> TierMaterialIdentities(
+        SubjectScope scope, string prefabBundle, PrefabSlot slot)
+    {
+        var refs = new List<TierMaterialRef>(slot.Materials.Count);
+        foreach (var mref in slot.Materials)
+        {
+            // empty renderer slot (PPtr 0:0): a placeholder that HOLDS the submesh order
+            if (mref.Cab is null && mref.PathId == 0)
+            {
+                refs.Add(new TierMaterialRef(null, 0, true));
+                continue;
+            }
+            string? bundle = mref.Cab is null ? prefabBundle : scope.BundleForCab(mref.Cab);
+            // a CAB nothing in scope provides names a material this install cannot identify; it is kept in
+            // position (order IS the submesh binding) but marked unresolved, so no correspondence rests on it
+            refs.Add(bundle is null
+                ? new TierMaterialRef(null, mref.PathId, false)
+                : new TierMaterialRef(bundle, mref.PathId, true));
+        }
+        return refs;
+    }
 
     /// <summary>Resolve one renderer slot's ordered <c>m_Materials</c> to <see cref="SubjectMaterial"/>s,
     /// preserving order and placeholders. Unlike the exporter's renderer tier, which silently emits an empty

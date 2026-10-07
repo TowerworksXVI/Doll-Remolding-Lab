@@ -88,6 +88,7 @@ public enum BuildEmissionKind
     NeutralBinding,
     Suppression,
     MaterialValuePatch,
+    MaterialEffect,
 }
 
 /// <summary>One independently named role in a runtime operation. Not-applicable is explicit so a
@@ -172,7 +173,8 @@ public sealed record BuildRuntimeEmission(
     BuildEmissionGate Gate,
     IReadOnlyList<string> RenderContractIds,
     string Reason,
-    MaterialConstantBufferPatch? MaterialPatch = null);
+    MaterialConstantBufferPatch? MaterialPatch = null,
+    MaterialEffectOperation? MaterialEffect = null);
 
 /// <summary>One ordinal condition: the named key group stands in the named state. <see cref="Always"/> is
 /// the keyless term of a part no key can switch, which holds in every session.</summary>
@@ -349,6 +351,14 @@ internal static class AuthoredRenderPlanValidator
                 }
                 else if (emission.MaterialPatch is not null)
                     errors.Add($"{at} carries a material patch for {emission.Kind}");
+                if (emission.Kind == BuildEmissionKind.MaterialEffect)
+                {
+                    if (emission.MaterialEffect is null) errors.Add($"{at} has no effect operation");
+                    else foreach (string error in MaterialEffectBuildSupport.Errors(emission.MaterialEffect))
+                        errors.Add($"{at} {error}");
+                }
+                else if (emission.MaterialEffect is not null)
+                    errors.Add($"{at} carries an effect operation for {emission.Kind}");
                 if (emission.RenderContractIds is null)
                     errors.Add($"{at} has no render-contract account");
                 else
@@ -429,7 +439,7 @@ internal static class AuthoredRenderPlanValidator
                             errors.Add($"{at} names missing runtime emission '{emissionId}'");
                 }
             }
-            if (requireComplete && expectedKind != BuildEmissionKind.Suppression
+            if (requireComplete && expectedKind is not (BuildEmissionKind.Suppression or BuildEmissionKind.MaterialEffect)
                 && !outputs.Any(o => o.Included))
                 errors.Add("the resolved action has no included output artifact");
             if (!requireComplete && outputs.Any(o => o.Included))

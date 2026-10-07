@@ -19,6 +19,8 @@ using Remold.Core.Project;
 using Remold.Core.Tables;
 using Remold.Core.Textures;
 using Remold.Core.Workbench;
+// The Edit page's own type, aliased: `EditPage` alone names this class's property, not the namespace.
+using EditPageStrings = Remold.App.ViewModels.EditPage.EditPageVm;
 namespace Remold.App.ViewModels;
 
 public partial class MainWindowViewModel : ObservableObject
@@ -88,6 +90,11 @@ public partial class MainWindowViewModel : ObservableObject
     public ObservableCollection<CharacterVm> Weapons { get; } = new();
     [ObservableProperty] private string _weaponSearchText = "";
 
+    // The Support Teams tab: one row per support team, its three members and its weapon as the subjects.
+    // Same VM shape, same candidate/confirm fill.
+    public ObservableCollection<CharacterVm> SupportTeams { get; } = new();
+    [ObservableProperty] private string _supportSearchText = "";
+
     // Output folder (the mod's project dir) — for "Open output folder".
     [ObservableProperty] private string _exportOutDir = "";
     public string CharactersTabHeader
@@ -102,17 +109,21 @@ public partial class MainWindowViewModel : ObservableObject
     {
         get { var n = _allWeapons.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Weapons ({n})" : "Weapons"; }
     }
+    public string SupportTeamsTabHeader
+    {
+        get { var n = _allSupportTeams.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Support Teams ({n})" : "Support Teams"; }
+    }
     private void RefreshTabHeaders()
     {
         OnPropertyChanged(nameof(CharactersTabHeader));
         OnPropertyChanged(nameof(EnemiesTabHeader));
         OnPropertyChanged(nameof(WeaponsTabHeader));
+        OnPropertyChanged(nameof(SupportTeamsTabHeader));
     }
 
     // Edit — the Blender bridge
     [ObservableProperty] private string _blenderPath = "";
     private BlenderSendWatcher? _watcher;
-    private readonly List<EditPage.PictureTransportWatcher> _pictureTransports = new();
     private string? _modRoot;
 
     // Mod identity form (the Name/Author/Version/Description carried in the project manifest).
@@ -137,13 +148,19 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>An open-mod load is in flight — gates re-entry so a second open can't race the first.</summary>
     [ObservableProperty] private bool _isOpeningMod;
 
+    /// <summary>An import is running. The Home page's own start buttons and the File menu's read off this:
+    /// a second one started mid-import would mint a folder the first is still writing into.</summary>
+    [ObservableProperty] private bool _isImporting;
+
     private List<CharacterVm> _allCharacters = new();
     private List<CharacterVm> _allEnemies = new();
     private List<CharacterVm> _allWeapons = new();
+    private List<CharacterVm> _allSupportTeams = new();
     /// <summary>Every roster-tab pick grid. INVARIANT: any new roster-shaped tab adds its backing list to
     /// this concat, and tab-shared behavior enumerates AllPickRows and never a per-tab list — otherwise the
     /// new tab's picks silently fall out of the queue/ledger/restore.</summary>
-    private IEnumerable<CharacterVm> AllPickRows => _allCharacters.Concat(_allEnemies).Concat(_allWeapons);
+    private IEnumerable<CharacterVm> AllPickRows =>
+        _allCharacters.Concat(_allEnemies).Concat(_allWeapons).Concat(_allSupportTeams);
     // The forward view of the install. Null (install unreadable) disables session resolver routes.
     private GameVfs? _vfs;
     private string _pkgCharacter = "", _pkgOutfit = "";
@@ -284,6 +301,7 @@ public partial class MainWindowViewModel : ObservableObject
         PackageAuthor = _settings.Author;   // remembered across sessions
         PackageIncludesRepairData = _settings.IncludeRepairData;   // the same, for the untitled first project
         RefreshRecent();
+        DropMissingRecents();
         // Settled before the sweep below can read it. The field stays assignable after construction — that
         // is how a test drives the RELOAD's sweep — but the construction path's sweep runs inside this ctor,
         // where no caller has the instance to assign to yet, so it can only be redirected from here.
@@ -302,6 +320,17 @@ public partial class MainWindowViewModel : ObservableObject
         {
             BeginForceRescanPurge();
             _ = Task.Run(LoadAsync);
+            // Round-trip content nobody has touched for a week goes, once per launch and off the UI thread.
+            string roundTrips = RoundTrips.Root;
+            _ = Task.Run(() => RoundTripSweep.Run(roundTrips, DateTime.UtcNow, TimeSpan.FromDays(7),
+                (what, e) => AppLog.Write(what, e)));
+            // Saves meant for a mod that is not open are news from the moment the app runs, Home screen
+            // included.
+            try { EnsureArrivalWatch(); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                AppLog.Write("The round-trip arrival watch couldn't start", e);
+            }
         }
     }
 
@@ -419,7 +448,10 @@ public partial class MainWindowViewModel : ObservableObject
         // form
         _loadingIdentityForm = true;
         PackageName = info.Name;
-        PackageAuthor = string.IsNullOrWhiteSpace(info.Author) ? _settings.Author : info.Author!;
+        // An IMPORTED project's blank author is the mod's own answer — it listed nobody — so this app's
+        // name never fills it in. Every project made here keeps the fallback.
+        PackageAuthor = string.IsNullOrWhiteSpace(info.Author) && !info.Imported
+            ? _settings.Author : info.Author ?? "";
         PackageDescription = info.Description ?? "";
         PackageVersion = string.IsNullOrWhiteSpace(info.Version) ? "1.0" : info.Version;
         PackageToggleKey = ModKeys.Normalize(info.ToggleKey);
@@ -432,6 +464,7 @@ public partial class MainWindowViewModel : ObservableObject
 
         _modRoot = authored.RootDir;
         ExportOutDir = _modRoot ?? "";
+        if (_modRoot is not null) ClearLegacyRoundTrips(_modRoot);
         EnsureWatcher();
 
         // re-check the saved parts once the roster resolves them (or now, if it already has)
@@ -443,9 +476,9 @@ public partial class MainWindowViewModel : ObservableObject
         IsDirty = false;
         int replacementCount = authored.EditDefinitions.Count(
             edit => edit.Kind == EditDefinitionKind.Content);
-        EditPage.ReportStatus(replacementCount > 0
-            ? $"Opened '{info.Name}'. {replacementCount} edit{(replacementCount == 1 ? "" : "s")}."
-            : $"Opened '{info.Name}'.");
+        EditPage.ReportStatus(LandedLine("Opened", info.Name, replacementCount));
+        // After the open's own line, so a save the mod takes now is the line the modder reads.
+        ScanPictureSaves();
         SelectedStep = "② Edit";
         ShowHome = false;   // enter the flow
         // Not awaited: the page is usable while it reads, and every row it draws stands on the project's own
@@ -492,10 +525,13 @@ public partial class MainWindowViewModel : ObservableObject
             if (CurrentProjectRoot is null)
             {
                 _projectDocument.RebaseRoot(UniqueDir(_settings.ResolvedLibraryRoot, ModNaming.Slug(ProjectName)));
-                PersistProject();
                 _modRoot = CurrentProjectRoot; ExportOutDir = CurrentProjectRoot!;
+                // Bound before the first write, so the round-trip id binding gives the mod is in that write.
+                EnsureWatcher();
+                PersistProject();
             }
             else { EnsureFolderMatchesName(); PersistProject(); }
+            _roundTripIdUnsaved = false;
             RememberRecent();
             IsDirty = false;
             EditPage.ReportStatus($"Saved to {CurrentProjectRoot}.");
@@ -550,17 +586,179 @@ public partial class MainWindowViewModel : ObservableObject
 
             var dest = UniqueDir(_settings.ResolvedLibraryRoot, ModNaming.Slug(newName));
             PersistProject();   // ensure the source is complete (and current-schema) before copying
-            var copy = _projectDocument.CopyTo(dest);
-            copy.Session.SetName(newName.Trim());
-            SaveDocument(copy, dest);
+            _projectDocument.SaveCopyAs(dest, newName.Trim());
             await OpenModAsync(dest);   // switch to the copy (clean reload from disk)
             EditPage.ReportStatus($"Saved a copy as '{newName.Trim()}'.");
+        }
+        catch (PartialCopyException e)
+        {
+            AppLog.Write("Couldn't save a copy", e);
+            EditPage.ReportStatus($"Couldn't save a copy. The unfinished copy is still in the projects folder "
+                + $"as '{Path.GetFileName(e.Folder)}'. Delete that folder.");
         }
         catch (Exception e)
         {
             AppLog.Write("Couldn't save a copy", e);
             EditPage.ReportStatus($"Couldn't save a copy. {SaveFailedSteer}");
         }
+    }
+
+    /// <summary>The notice cell entry an import leaves when the game files behind the mod have moved.
+    /// Project-scoped, so it lasts as long as the imported mod is open and no longer — like every other
+    /// notice the cell carries, none of which outlives the session that raised it.</summary>
+    internal const string ImportChangedTargetsNoticeId = "project.import-changed-targets";
+
+    internal const string ImportConfirmTitle = "Import mod?";
+
+    /// <summary>The acceptable-use paragraph the import confirmation carries, in its approved words. It is
+    /// what the person is agreeing to, not a description of the mod, so it is never reworded to fit a
+    /// case.</summary>
+    internal const string ImportConfirmTerms =
+        "This tool is intended for personal use only, or to repair orphaned mods broken by game updates. "
+        + "Do not distribute works originally authored by someone else without their permission.";
+
+    /// <summary>What the import confirmation says: what is about to happen and whose work it is, then the
+    /// terms. A person with no name of their own set gets the one line that stops the question coming back
+    /// on every mod they made themselves.</summary>
+    internal static string ImportConfirmBody(string modName, string? author, string? settingsAuthor)
+    {
+        string opening = string.IsNullOrWhiteSpace(author)
+            ? $"'{modName}' (no author listed) will be added to your mods library as a new project."
+            : $"'{modName}' by {author!.Trim()} will be added to your mods library as a new project.";
+        string body = opening + "\n\n" + ImportConfirmTerms;
+        return string.IsNullOrWhiteSpace(settingsAuthor)
+            ? body + "\n\nSet your name under Settings · Author to skip this for your own mods."
+            : body;
+    }
+
+    /// <summary>What the status line says when a mod lands in the workspace: the verb, the mod's name, and
+    /// how many edits came with it. One shape for Open and Import, so the two routes read alike.</summary>
+    private static string LandedLine(string verb, string name, int edits) => edits > 0
+        ? $"{verb} '{name}'. {EditPageStrings.Count(edits, "edit")}."
+        : $"{verb} '{name}'.";
+
+    /// <summary>What the changed-parts notice says. Each part is named the way the Edit page names it —
+    /// the install's short token, the renderer slot where the subject model has not loaded — so the notice
+    /// and the page it sends the person to call the same part the same thing.</summary>
+    internal string ChangedTargetsDetail(IReadOnlyList<TargetPart> parts) =>
+        $"{EditPageStrings.Count(parts.Count, "part")} changed in the game since this mod was built: "
+        + string.Join(", ", parts.Select(part =>
+            PartToken(part) is { Length: > 0 } token ? token : part.RendererSlot))
+        + ". Build the mod to check them.";
+
+    /// <summary>Read a BUILT mod — a folder or a distribution zip — back into a new project and open it.
+    /// The folder is inspected before anything is written, so the question about its author is asked while
+    /// the library is still untouched.</summary>
+    public async Task<bool> ImportModAsync(string folderOrZip)
+    {
+        if (IsImporting || IsOpeningMod) return false;
+        IsImporting = true;
+        ImportableMod? mod = null;
+        try
+        {
+            // An import needs the game files — a hide states only that a part does not draw, and which
+            // objects that is comes from the install — so the read's own state is the first thing asked
+            // about, before the person is asked anything. A roster fill still running counts as not read:
+            // its partial roster resolves a part to nothing, which would refuse the hide by name instead
+            // of saying the install is not ready. Captured, because a rescan can drop it mid-import.
+            var vfs = IsScanning ? null : _vfs;
+            ImportInspection inspection;
+            try { inspection = await Task.Run(() => ModImport.Inspect(folderOrZip, vfs is not null)); }
+            catch (Exception e)
+            {
+                return await ImportFailed(folderOrZip, ModImport.ImportFailedMessage(
+                    Path.GetFileName(Path.TrimEndingDirectorySeparator(folderOrZip)),
+                    ModImport.FailureReason(e, folderOrZip)), e);
+            }
+            if (inspection.Refusal is { } refusal)
+            {
+                await NoticeAsync("Couldn't import the mod", refusal.Message);
+                return false;
+            }
+
+            mod = inspection.Mod!;
+            // The picture is how a mod manager lists the mod and no part of what the mod changes, so one
+            // the folder no longer holds is imported around rather than refused over.
+            if (mod.MissingPreviewFile is { } missingPreview)
+                AppLog.Write($"Importing '{mod.ModName}' without a preview picture",
+                    $"The mod names '{missingPreview}' and the folder does not hold it.");
+            if (ModImport.AuthorDiffers(mod.Author, _settings.Author)
+                // Enter confirms: this dialog adds a project and changes nothing the person already has,
+                // so it is not one of the destructive questions that make Cancel the default.
+                && !await ConfirmAsync(ImportConfirmTitle,
+                    ImportConfirmBody(mod.ModName, mod.Author, _settings.Author), "Import"))
+                return false;
+
+            // A second import of the same mod mints a second project, exactly as Save mod as does. That is
+            // the intent: the mod on disk is the input, and nothing about it says which project it belongs
+            // to.
+            string dest = UniqueDir(_settings.ResolvedLibraryRoot, ModNaming.Slug(mod.ModName));
+            var install = vfs!;   // the refusal above is the gate: an install is in hand here
+            var contentHash = BundleReads.BundleContentHashLookup(install.Catalog, install.Manifest);
+            var resolver = new LegacyProjectResolver(NewResolverEnvironment(install));
+            var roster = _roster;   // the roster the resolver's subjects come from, read on this thread
+            bool shipsRepairData = _settings.IncludeRepairData;
+            ImportResult result;
+            var importing = mod;
+            try
+            {
+                result = await Task.Run(() => ModImport.Materialize(importing, dest, contentHash,
+                    resolver.ResolvePart, resolver.RosterSlots,
+                    character => RosterLookup.OutfitStems(roster, character), shipsRepairData));
+            }
+            catch (Exception e)
+            {
+                // Materialize takes its own destination with it when it throws, so there is nothing here
+                // to sweep.
+                return await ImportFailed(folderOrZip,
+                    ModImport.ImportFailedMessage(mod.ModName, ModImport.FailureReason(e, folderOrZip)), e);
+            }
+
+            if (!await OpenModAsync(result.ProjectFolder))
+            {
+                // The open route has already said why. The folder is this import's own and holds nothing
+                // the person put there, so it goes rather than sitting in the library unopenable.
+                TryDeleteMinted(dest);
+                return false;
+            }
+            EditPage.ReportStatus(LandedLine("Imported", mod.ModName,
+                _projectDocument?.Authored.EditDefinitions.Count(
+                    edit => edit.Kind == EditDefinitionKind.Content) ?? 0));
+            if (result.ChangedTargets.Count > 0)
+            {
+                string detail = ChangedTargetsDetail(result.ChangedTargets);
+                AppLog.Write("Game files changed", detail);
+                MergeNoticeIntoCell(new NoticeMessage(ImportChangedTargetsNoticeId, "Game files changed",
+                    detail, ProjectScoped: true));
+            }
+            return true;
+        }
+        finally
+        {
+            mod?.Dispose();
+            IsImporting = false;
+        }
+    }
+
+    /// <summary>Remove a folder an import minted and could not open. Only ever that import's own
+    /// destination, which holds nothing the person put there.</summary>
+    private static void TryDeleteMinted(string folder)
+    {
+        try { if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true); }
+        catch (Exception e) { AppLog.Write($"Couldn't remove the imported project at {folder}", e); }
+    }
+
+    private async Task<bool> ImportFailed(string source, string body, Exception e)
+    {
+        AppLog.Write($"Couldn't import the mod at {source}", e);
+        await NoticeAsync("Couldn't import the mod", body);
+        return false;
+    }
+
+    /// <summary>Show a one-button notice, or say nothing when there is no window to parent it to.</summary>
+    private static async Task NoticeAsync(string title, string body)
+    {
+        if (MainWindow is { } owner) await ConfirmWindow.Notice(owner, title, body);
     }
 
     /// <summary>Close the current mod and return home, staging a fresh in-memory project.</summary>
@@ -631,8 +829,10 @@ public partial class MainWindowViewModel : ObservableObject
             $"{leaveVerb} anyway", "Cancel", danger: true);
     }
 
-    /// <summary>Move the mod folder to match a renamed mod and rebase the in-memory paths + watchers. A
-    /// failed move (folder in use, cross-volume) is non-fatal — the old folder is kept.</summary>
+    /// <summary>Move the mod folder to match a renamed mod and rebase the in-memory paths. The mod's round
+    /// trips live outside the folder and follow it, so an editor still open is untouched. A failed move
+    /// (a file in the folder held open, a read-only folder) keeps the old folder and says so in the notice
+    /// cell until the folder matches the name again.</summary>
     private void EnsureFolderMatchesName()
     {
         if (CurrentProjectRoot is not { } currentRoot) return;
@@ -643,32 +843,64 @@ public partial class MainWindowViewModel : ObservableObject
         // A dedup form (`desired-2`, `desired-5`, …) is ALREADY the right home. Treating one as a mismatch
         // makes every autosave re-move the folder to a fresh UniqueDir and strand files behind it.
         if (desired.Length == 0 || ModProject.FolderMatchesSlug(Path.GetFileName(root), desired))
+        {
+            // Nothing is owed any more, whether a move succeeded or the name went back to the folder's.
+            if (_folderRenameFailedFor is not null)
+            {
+                _folderRenameFailedFor = null;
+                RemoveNotice(FolderNotRenamedNoticeId);
+            }
             return;
+        }
 
         var old = currentRoot;
         var target = UniqueDir(Path.GetDirectoryName(root)!, desired);
-        try
+        try { _projectDocument.MoveTo(target); }
+        catch (Exception e)
         {
-            _watcher?.Dispose(); _watcher = null;   // release the folder before moving it
-            _projectDocument.MoveTo(target);
+            // Logged once per folder name, not once per autosave that retries it.
+            if (!string.Equals(_folderRenameFailedFor, target, StringComparison.OrdinalIgnoreCase))
+                AppLog.Write("Couldn't rename the mod folder", e);
+            _folderRenameFailedFor = target;
+            MergeNoticeIntoCell(FolderNotRenamedNotice(Path.GetFileName(target), Path.GetFileName(root)));
+            return;
         }
-        catch { EnsureWatcher(); return; }          // couldn't move — keep the old folder
+        _folderRenameFailedFor = null;
+        RemoveNotice(FolderNotRenamedNoticeId);
 
         // rebase the in-memory absolute paths to the new location
         _modRoot = CurrentProjectRoot;
         ExportOutDir = CurrentProjectRoot!;
-        EnsureWatcher();
+        try
+        {
+            if (_projectDocument.Session.RoundTripId is { } roundTripId)
+                RoundTrips.Retarget(roundTripId, CurrentProjectRoot!);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The mod still finds its round trips by the id it carries: the next open sees the recorded folder
+            // gone and takes them. What is lost is only the guard against a copy made before that open.
+            AppLog.Write("Couldn't record the renamed mod folder for its round trips", e);
+        }
+
+        // The recent entry follows the folder, or it is left pointing at a path that no longer exists.
+        // Recorded here, where the folder moves, so every save that moves it leaves one row for the mod.
+        if (_settings.RetargetRecent(old, CurrentProjectRoot!, CurrentProjectInfo.Name))
+        {
+            SaveSettings();
+            RefreshRecent();
+        }
     }
 
     /// <summary>Whether the project folder may be renamed to match the mod name right now. Every holder
-    /// captured the old path and is still writing into it — the rig build that an Open-all runs off-thread
-    /// included: the rule turns on the writing, not on who asked, and a rename under it strands its glb in
-    /// a folder the session sends back to. A rig-cache prewarm does NOT count: it has no project path and
-    /// writes only below the derived cache root. The next autosave picks a deferred rename up.
+    /// captured the old path and is still reading the mod's files through it — the rig build that an
+    /// Open-all runs off-thread included: the rule turns on the work, not on who asked. A rig-cache prewarm
+    /// does NOT count: it has no project path and writes only below the derived cache root. The next
+    /// autosave picks a deferred rename up. Round trips are not holders: they live outside the mod folder.
     ///
-    /// <para>A Blender return being applied is the same holder from the other end: every path it carries —
-    /// the prepared workspace glbs, the ingress artifacts, its staging — was made absolute against the root
-    /// it started on, and its own first publish is what fires the autosave that would move that root. A
+    /// <para>A Blender return being applied is the same holder from the other end: the mod files it
+    /// publishes were resolved against the root it started on, and its own first publish is what fires the
+    /// autosave that would move that root. A
     /// first open-all send into an unnamed mod is exactly that shape, and the rows after the first would
     /// land nowhere.</para></summary>
     internal static bool CanRenameProjectFolder(bool buildingCombinedRig, bool buildingMod,
@@ -687,8 +919,7 @@ public partial class MainWindowViewModel : ObservableObject
         // must not keep reading for a project the app has replaced.
         CancelRiggedGlbPrewarm();
         _watcher?.Dispose(); _watcher = null;
-        foreach (var transport in _pictureTransports) transport.Dispose();
-        _pictureTransports.Clear();
+        ForgetRoundTrips();
         ExportOutDir = ""; _modRoot = null;
         _pkgCharacter = ""; _pkgOutfit = "";
         if (clearSelection) ClearSelection();
@@ -998,6 +1229,7 @@ public partial class MainWindowViewModel : ObservableObject
         try
         {
             SyncFormToProject(); EnsureFolderMatchesName(); PersistProject(); RememberRecent();
+            _roundTripIdUnsaved = false;
             ProjectSaves++;
             IsDirty = false;
         }
@@ -1028,6 +1260,27 @@ public partial class MainWindowViewModel : ObservableObject
         foreach (var m in _settings.RecentMods) RecentMods.Add(new RecentModVm(m));
         OnPropertyChanged(nameof(HasRecentMods));
         FillRecentThumbs();
+    }
+
+    /// <summary>Drop the recent entries whose project folder is gone (see
+    /// <see cref="LabSettings.IsMissingProject"/>), once per launch. Silent: such a row opens nothing, so
+    /// removing it takes nothing away. The disk is asked off the UI thread and the answer applied back on
+    /// it, by entry identity, so an entry re-listed in between is never the one removed.</summary>
+    private void DropMissingRecents()
+    {
+        var listed = _settings.RecentMods.ToList();
+        if (listed.Count == 0) return;
+        Task.Run(() => listed.Where(m => LabSettings.IsMissingProject(m.Path)).ToList())
+            .ContinueWith(check =>
+            {
+                if (check.Result.Count == 0) return;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (_settings.RemoveRecents(check.Result) == 0) return;
+                    SaveSettings();
+                    RefreshRecent();
+                });
+            }, TaskContinuationOptions.OnlyOnRanToCompletion);
     }
 
     /// <summary>A collision-free project folder under <paramref name="root"/> for <paramref name="slug"/>.</summary>
@@ -1109,15 +1362,18 @@ public partial class MainWindowViewModel : ObservableObject
         else if (value == "③ Build") BuildPage.Enter();
     }
 
+    /// <summary>Bind the open mod to its round-trip folder and watch it for what Blender and the image
+    /// editor send back.</summary>
     private void EnsureWatcher()
     {
         if (_modRoot is null) return;
+        string transports = BindRoundTrips(_modRoot);
         if (_watcher is null)
         {
-            var w = new BlenderSendWatcher(_modRoot, includeSubdirectories: true);
+            var w = new BlenderSendWatcher(transports, includeSubdirectories: true);
             // The mod this watcher belongs to, captured HERE. A send lands physically inside its own mod's
-            // folder and this watcher is rooted there, so the document open when the watcher was armed is
-            // the document that send addresses — for as long as it stays open. Reading the field later,
+            // round-trip folder and this watcher is rooted there, so the document open when the watcher was
+            // armed is the document that send addresses — for as long as it stays open. Reading the field later,
             // when the queued return finally starts, reads whichever mod is open THEN, which is how a
             // return from one mod came to be minted into another.
             var owner = _projectDocument;
@@ -1136,6 +1392,7 @@ public partial class MainWindowViewModel : ObservableObject
             // stale snapshot is the wait that action takes on PendingBlenderReturns.
             w.ScanExisting();
         }
+        EnsurePictureWatch();
     }
 
     /// <summary>Run on the UI thread, inline when the caller is already there — which is what a caller
@@ -1213,11 +1470,11 @@ public partial class MainWindowViewModel : ObservableObject
     /// out, which is what a send-all does with the parts the modder never touched.</summary>
     internal const string BlenderReturnNoChanges = "Blender sent back no changes.";
 
-    /// <summary>What a return says when the mod it belongs to was closed while it waited. Its intent is left
-    /// alone rather than landed on whatever is open now: a part route addresses by subject and outfit,
-    /// and those resolve just as well in the wrong mod.</summary>
+    /// <summary>What a Blender send for a mod that is not the open one says. It is never landed on whatever
+    /// is open (a part route addresses by subject and outfit, and those resolve just as well in the wrong
+    /// mod); it waits in that mod's round-trip folder, and the mod takes it when it next opens.</summary>
     internal static string BlenderReturnModClosed(string mod) =>
-        $"Couldn't apply the file sent back from Blender: {mod} is no longer open. Nothing was changed.";
+        $"Blender sent back changes for '{mod}'. Open '{mod}' to apply them.";
 
     private readonly object _blenderReturnGate = new();
 
@@ -1393,19 +1650,28 @@ public partial class MainWindowViewModel : ObservableObject
     ///
     /// <para>What keeps this from looping is not that nobody is watching — reopening the SAME mod re-ingests
     /// the restored send at once, which is the whole point of putting it back, and it lands correctly there.
-    /// It is that the send can only ever be ingested by a watcher rooted on ITS OWN mod: a watcher whose
-    /// root merely contains that mod's folder skips a sidecar sitting under a folder with a project of its
-    /// own (<see cref="BlenderSendWatcher"/>), so a restored send is never taken for the wrong
-    /// document.</para>
+    /// It is that the send sits in its own mod's round-trip folder, and only that mod's watcher is rooted
+    /// there, so a restored send is never taken for the wrong document.</para>
     ///
-    /// <para>Best-effort in full: a send that cannot be put back has still landed nothing, and the raw
-    /// return glb is where Blender left it either way.</para></summary>
+    /// <para>A send that cannot be put back has landed nothing, and says so: the raw return glb is where
+    /// Blender left it, but nothing will pick it up.</para></summary>
     private void RefuseClosedModReturn(AuthoredProjectDocument document, IncomingEdit edit)
     {
+        string mod = ClosedModName(document);
         try { BlenderBridge.WriteSendSidecar(edit.GlbPath, edit.HiddenParts, edit.EditIds); }
-        catch (Exception e) when (e is not OutOfMemoryException) { /* best-effort */ }
-        EditPage.ReportStatus(BlenderReturnModClosed(ClosedModName(document)));
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            AppLog.Write("Couldn't keep a Blender send for a closed mod", e);
+            EditPage.ReportStatus(BlenderReturnLost(mod));
+            return;
+        }
+        EditPage.ReportStatus(BlenderReturnModClosed(mod));
     }
+
+    /// <summary>What a Blender send for a closed mod says when it could not be kept for that mod.</summary>
+    internal static string BlenderReturnLost(string mod) =>
+        $"Couldn't keep the changes Blender sent back for '{mod}'. Nothing was changed. "
+        + $"Open '{mod}' and send again from Blender.";
 
     /// <summary>What to call a mod that is no longer open: the name the modder gave it, or the same
     /// <see cref="UntitledMod"/> the rest of the app calls an unnamed one. The folder it happens to live in
@@ -1474,9 +1740,11 @@ public partial class MainWindowViewModel : ObservableObject
         Characters.Clear();
         Enemies.Clear();
         Weapons.Clear();
+        SupportTeams.Clear();
         _allCharacters = new();
         _allEnemies = new();
         _allWeapons = new();
+        _allSupportTeams = new();
         _vfs = null;
         _ = BuildPage.ReplanAsync();
         _subjectModels.Clear();   // a memoized model describes the forward view being dropped here
@@ -1495,6 +1763,7 @@ public partial class MainWindowViewModel : ObservableObject
         BeginForceRescanPurge();
         SearchText = "";
         EnemySearchText = "";
+        SupportSearchText = "";
         RefreshTabHeaders();   // the discarded trees held checked subjects — no stale "(N)" count
         IsLoading = true;
         IsScanning = true;
@@ -1809,6 +2078,7 @@ public partial class MainWindowViewModel : ObservableObject
     partial void OnSearchTextChanged(string value) => ApplyFilter();
     partial void OnEnemySearchTextChanged(string value) => ApplyFilter();
     partial void OnWeaponSearchTextChanged(string value) => ApplyFilter();
+    partial void OnSupportSearchTextChanged(string value) => ApplyFilter();
 
     // Opt-in launch timing (GF2_LAUNCH_TIMING=1): each LoadAsync phase's wall time to a log file. The app
     // is a WinExe — no console, and Debug trace is invisible without a debugger.
@@ -1896,6 +2166,22 @@ public partial class MainWindowViewModel : ObservableObject
             for (int i = 0; i < dbRoster.Count; i++)
                 vms[i].Populate(dbRoster[i].Outfits.Select(o => (o, (IEnumerable<string>)Array.Empty<string>())), lightUp: false);
 
+            // The Support Teams tab roster: one row per SupportData team, its members and weapon as the
+            // subjects. Best-effort like localization: an unreadable SupportData table empties the tab with
+            // a status note, never fails the load. Read BEFORE the enemy roster so the member stems join
+            // its exclusion set the way playable stems do.
+            List<Character> teamRoster = new();
+            bool teamRosterUnreadable = false;
+            try
+            {
+                teamRoster = SupportTeamRoster.ReadTeams(nameDb, loc);
+            }
+            catch (Exception e) { teamRosterUnreadable = true; AppLog.Write("The support team list couldn't be read", e); }
+            foreach (var outfit in teamRoster.SelectMany(team => team.Outfits)) playableStems.Add(outfit.Stem);
+            var teamVms = teamRoster.Select(c => new CharacterVm(c, OnSubjectToggled, OnCharacterToggled)).ToList();
+            for (int i = 0; i < teamRoster.Count; i++)
+                teamVms[i].Populate(teamRoster[i].Outfits.Select(o => (o, (IEnumerable<string>)Array.Empty<string>())), lightUp: false);
+
             // The Enemies tab roster. Best-effort like localization: an unreadable EnemyData table empties
             // the tab with a status note, never fails the load. Stems the playable roster already shows are
             // excluded, so a summon the enemy tables also reference can't appear in both tabs.
@@ -1939,9 +2225,10 @@ public partial class MainWindowViewModel : ObservableObject
                 _allCharacters = vms;
                 _allEnemies = enemyVms;
                 _allWeapons = weaponVms;
-                _roster = dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList();   // full roster until finalize narrows it
+                _allSupportTeams = teamVms;
+                _roster = dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList();   // full roster until finalize narrows it
                 // Built from the full roster so a mod OPENED DURING the load already reads friendly.
-                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList());
+                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList());
                 GameStatus = StatusFacet.Good("Game");
                 StatusChars = "Reading game files…";
                 ReplaceLoadNotices(Array.Empty<NoticeMessage>());   // retire notices from a prior load
@@ -1995,40 +2282,48 @@ public partial class MainWindowViewModel : ObservableObject
 
             // The install's existing sharing data, joined HERE and not earlier: the file carries no
             // names, only keys onto the roster's own. The measurement decides which enemy doors are
-            // duplicates, so the roster needs it before it paints. The weapon roster stays OUT: weapon
-            // parts draw independently of everything, so they hold no sharing rows and no witness roles.
-            var population = SharingPopulation.Of(dbRoster, enemyRoster);
+            // duplicates, so the roster needs it before it paints. Support teams join on the playable side:
+            // their members share textures and mesh bytes with each other, which is exactly what the
+            // measurement exists to say. The weapon roster stays OUT: weapon parts draw independently of
+            // everything, so they hold no sharing rows and no witness roles.
+            var population = SharingPopulation.Of(dbRoster.Concat(teamRoster).ToList(), enemyRoster);
             var sharingBase = LoadSharingBase(LabPaths.SharingIndexFile(vfs.CatalogVersion),
                 LabPaths.SharingSeedFile, vfs.CatalogVersion, population, AppLog.Write,
                 vfs.InstallIdentity);
             PhaseTime(_lt, "Phase 2: sharing base load");
 
             // PHASE 3, existence — a candidate iff the prefab-address formula resolves its stem in some
-            // context (catalog dictionary hits, no file reads). All three tabs ride ONE candidate list;
+            // context (catalog dictionary hits, no file reads). All four tabs ride ONE candidate list;
             // the Tab field only routes the row back to its own grid at the marshals.
-            var candidates = new List<(CharacterVm Vm, Character Character, List<Outfit> Outfits, bool IsEnemy, bool IsWeapon)>();
+            var candidates = new List<(CharacterVm Vm, Character Character, List<Outfit> Outfits, bool IsEnemy, bool IsWeapon, bool IsTeam)>();
             for (int i = 0; i < dbRoster.Count; i++)
             {
                 // by OUTFIT, not stem: a curated subject's prefab is found through its own route
                 var outfits = dbRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
-                if (outfits.Count > 0) candidates.Add((vms[i], dbRoster[i], outfits, false, false));
+                if (outfits.Count > 0) candidates.Add((vms[i], dbRoster[i], outfits, false, false, false));
             }
             for (int i = 0; i < enemyRoster.Count; i++)
             {
                 var outfits = enemyRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
-                if (outfits.Count > 0) candidates.Add((enemyVms[i], enemyRoster[i], outfits, true, false));
+                if (outfits.Count > 0) candidates.Add((enemyVms[i], enemyRoster[i], outfits, true, false, false));
             }
             for (int i = 0; i < weaponRoster.Count; i++)
             {
                 var outfits = weaponRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
-                if (outfits.Count > 0) candidates.Add((weaponVms[i], weaponRoster[i], outfits, false, true));
+                if (outfits.Count > 0) candidates.Add((weaponVms[i], weaponRoster[i], outfits, false, true, false));
+            }
+            for (int i = 0; i < teamRoster.Count; i++)
+            {
+                var outfits = teamRoster[i].Outfits.Where(o => vfs.PrefabsFor(o).Count > 0).ToList();
+                if (outfits.Count > 0) candidates.Add((teamVms[i], teamRoster[i], outfits, false, false, true));
             }
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                _allCharacters = candidates.Where(c => !c.IsEnemy && !c.IsWeapon).Select(c => c.Vm).ToList();
+                _allCharacters = candidates.Where(c => !c.IsEnemy && !c.IsWeapon && !c.IsTeam).Select(c => c.Vm).ToList();
                 _allEnemies = candidates.Where(c => c.IsEnemy).Select(c => c.Vm).ToList();
                 _allWeapons = candidates.Where(c => c.IsWeapon).Select(c => c.Vm).ToList();
+                _allSupportTeams = candidates.Where(c => c.IsTeam).Select(c => c.Vm).ToList();
                 ApplyFilter();
                 StatusChars = $"Reading models… 0/{candidates.Count}";
                 // …and the Edit page, whose rows read the install through the model memo: redrawn now for
@@ -2045,12 +2340,16 @@ public partial class MainWindowViewModel : ObservableObject
             var catalog = vfs.Catalog;
             var fillErrors = new System.Collections.Concurrent.ConcurrentQueue<string>();
             var confirmedByVm = new System.Collections.Concurrent.ConcurrentDictionary<CharacterVm, List<(Outfit Outfit, IReadOnlyList<string> Parts)>>();
-            // The Enemies TAB drops a duplicate door; nothing else does. See SplitDuplicateDoors.
+            // The Enemies TAB drops a duplicate door, and a support team lists only once a MEMBER confirmed —
+            // a team whose only confirmed subject is its weapon is not a team the modder can edit. Nothing
+            // else filters. See SplitDuplicateDoors and ListedTeamSubjects.
             IReadOnlyList<(Outfit Outfit, IReadOnlyList<string> Parts)> Listed(
-                Character character, bool isEnemy,
+                Character character, bool isEnemy, bool isTeam,
                 IReadOnlyList<(Outfit Outfit, IReadOnlyList<string> Parts)> confirmed) =>
-                SplitDuplicateDoors(sharingBase.Index, character.Name, isEnemy, confirmed, x => x.Outfit.Stem)
-                    .Listed;
+                isTeam
+                    ? ListedTeamSubjects(confirmed, x => x.Outfit.Stem)
+                    : SplitDuplicateDoors(sharingBase.Index, character.Name, isEnemy, confirmed, x => x.Outfit.Stem)
+                        .Listed;
 
             var snapshotPath = LabPaths.RosterSnapshotFile(vfs.CatalogVersion);
             var contentHashOf = BundleReads.ContentHashLookup(vfs.Manifest);
@@ -2075,7 +2374,7 @@ public partial class MainWindowViewModel : ObservableObject
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
                     foreach (var cand in candidates)
-                        if (Listed(cand.Character, cand.IsEnemy, confirmedByVm[cand.Vm]) is { Count: > 0 } listed)
+                        if (Listed(cand.Character, cand.IsEnemy, cand.IsTeam, confirmedByVm[cand.Vm]) is { Count: > 0 } listed)
                             cand.Vm.Populate(listed.Select(x => (x.Outfit, (IEnumerable<string>)x.Parts)));
                 });
                 PhaseTime(_lt, "Phase 3: roster snapshot hit (no reads)");
@@ -2105,13 +2404,14 @@ public partial class MainWindowViewModel : ObservableObject
                             {
                                 var scope = SubjectScope.Build(catalog, fillCache.Read, outfit, fillCache);
                                 var prefabs = scope.Candidates;
-                                // Confirms iff a candidate carries recipe rows (character/RX shape) OR
-                                // mesh-bearing renderer slots, skinned (the enemy smr-body shape) or static
-                                // (the prop shape). Neither = UNCONFIRMED: it never lights up and is
-                                // removed at finalize.
+                                // Confirms iff an OWNED renderer slot is geometry-backed the way the
+                                // exporter reads it: a recipe address the catalog resolves (the
+                                // character/RX shape) or a serialized mesh, skinned (the enemy smr-body
+                                // shape) or static (the prop shape). Recipe rows alone do not confirm —
+                                // a prefab can name meshes this install never ships. UNCONFIRMED never
+                                // lights up and is removed at finalize.
                                 List<string>? parts = null;
-                                if (prefabs.Any(c => c.Prefab.Recipe.Count > 0
-                                                     || c.Prefab.Slots.Any(s => s.HasMesh)))
+                                if (SubjectModelBuilder.HasGeometryBackedSlot(prefabs, outfit, catalog))
                                 {
                                     parts = SubjectModelBuilder.OwnedSlotTokens(prefabs, outfit).ToList();
                                     confirmed.Add((outfit, parts));
@@ -2129,7 +2429,7 @@ public partial class MainWindowViewModel : ObservableObject
                             .Where(outfit => confirmedById.ContainsKey(outfit.ModelConfigId))
                             .Select(outfit => confirmedById[outfit.ModelConfigId]).ToList();
                         confirmedByVm[cand.Vm] = confirmed;
-                        var listed = Listed(cand.Character, cand.IsEnemy, confirmed);
+                        var listed = Listed(cand.Character, cand.IsEnemy, cand.IsTeam, confirmed);
                         if (listed.Count == 0) return;
                         // one post per character: confirmed outfits swap in resolved and the row lights up
                         Dispatcher.UIThread.Post(() =>
@@ -2159,26 +2459,31 @@ public partial class MainWindowViewModel : ObservableObject
                 var surviving = new List<CharacterVm>();
                 var survivingEnemies = new List<CharacterVm>();
                 var survivingWeapons = new List<CharacterVm>();
+                var survivingTeams = new List<CharacterVm>();
                 var confirmedRoster = new List<Character>();
                 foreach (var cand in candidates)
                 {
                     if (!confirmedByVm.TryGetValue(cand.Vm, out var confirmed) || confirmed.Count == 0) continue;
-                    // The roster keeps every confirmed outfit, filtered doors included — it is what resolves
-                    // a picked subject — while the tab lists only what survives the filter.
+                    // The roster keeps every confirmed outfit, filtered doors and member-less teams included
+                    // — it is what resolves a picked subject, and a subject picked before this launch must
+                    // keep resolving — while the tab lists only what survives its own filter.
                     confirmedRoster.Add(cand.Character with { Outfits = confirmed.Select(x => x.Outfit).ToList() });
-                    if (Listed(cand.Character, cand.IsEnemy, confirmed).Count == 0) continue;
-                    (cand.IsEnemy ? survivingEnemies : cand.IsWeapon ? survivingWeapons : surviving).Add(cand.Vm);
+                    var listed = Listed(cand.Character, cand.IsEnemy, cand.IsTeam, confirmed);
+                    if (listed.Count == 0) continue;
+                    (cand.IsEnemy ? survivingEnemies : cand.IsWeapon ? survivingWeapons
+                        : cand.IsTeam ? survivingTeams : surviving).Add(cand.Vm);
                 }
                 _allCharacters = surviving;
                 _allEnemies = survivingEnemies;
                 _allWeapons = survivingWeapons;
+                _allSupportTeams = survivingTeams;
                 _roster = confirmedRoster;
 
                 // Rebuilt from the same phase-1 roster, so the resolver covers every subject the fill saw
                 // and not just the ones that survived it.
-                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).ToList());
+                RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList());
 
-                StatusChars = $"Characters: {surviving.Count} · Enemies: {survivingEnemies.Count} · Weapons: {survivingWeapons.Count} · game data v{vfs.CatalogVersion}";
+                StatusChars = $"Characters: {surviving.Count} · Enemies: {survivingEnemies.Count} · Weapons: {survivingWeapons.Count} · Support Teams: {survivingTeams.Count} · game data v{vfs.CatalogVersion}";
                 // Warnings ride the notice cell, not the roster line — full detail in its tooltip.
                 var notices = new List<NoticeMessage>();
                 if (_settings.LoadedFromDefaultsAfterError)
@@ -2200,6 +2505,10 @@ public partial class MainWindowViewModel : ObservableObject
                 if (weaponRosterUnreadable)
                     notices.Add(new NoticeMessage("game.weapon-list-unreadable", "Weapon list unreadable",
                         "The weapon list couldn't be read, so the Weapons tab is empty. "
+                        + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
+                if (teamRosterUnreadable)
+                    notices.Add(new NoticeMessage("game.support-team-list-unreadable", "Support team list unreadable",
+                        "The support team list couldn't be read, so the Support Teams tab is empty. "
                         + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
                 if (missing.Count > 0)
                 {
@@ -2228,6 +2537,8 @@ public partial class MainWindowViewModel : ObservableObject
                 SyncSubjectsFromLedger();
                 _pendingSelection = null;
                 FinishRosterLoadBackgroundWork();
+                // Image-editor saves a scan at open had to leave while the game was still loading.
+                ScanPictureSaves();
             });
             PhaseTime(_lt, "Phase 3: finalize marshal");
 
@@ -2332,6 +2643,14 @@ public partial class MainWindowViewModel : ObservableObject
                                    || o.Stem.Contains(wq, StringComparison.OrdinalIgnoreCase)))
                 Weapons.Add(c);
 
+        // Support teams by team name and stem only. The member rows carry nothing a search wants: their
+        // labels are shared by every team, and their stems contain the team's.
+        var sq = SupportSearchText?.Trim() ?? "";
+        SupportTeams.Clear();
+        foreach (var c in _allSupportTeams.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+            if (sq.Length == 0 || MatchesCharacter(c, sq))
+                SupportTeams.Add(c);
+
         RefreshEmptyStates();
     }
 
@@ -2354,6 +2673,13 @@ public partial class MainWindowViewModel : ObservableObject
             ? (confirmed, confirmed)
             : (confirmed, confirmed.Where(x => !sharing.IsDuplicateDoor(character, stemOf(x))).ToList());
 
+    /// <summary>What the Support Teams tab lists of one team's confirmed subjects: everything, once at
+    /// least one MEMBER confirmed; nothing otherwise. A team whose member prefabs carry no geometry on
+    /// this install confirms only its weapon, and a weapon-only team row would offer a subject with no
+    /// team behind it. No message: the team simply is not on this install.</summary>
+    internal static IReadOnlyList<T> ListedTeamSubjects<T>(IReadOnlyList<T> confirmed, Func<T, string> stemOf) =>
+        confirmed.Any(x => SupportTeamRoster.IsMemberStem(stemOf(x))) ? confirmed : Array.Empty<T>();
+
     // ---- the Pick tabs' empty states ---------------------------------------------------------------
 
     /// <summary>What a search that matched nothing leaves in the empty list, or "" when there is nothing to
@@ -2373,9 +2699,11 @@ public partial class MainWindowViewModel : ObservableObject
     public string CharactersNoMatch => NoMatchLine(SearchText, Characters.Count);
     public string EnemiesNoMatch => NoMatchLine(EnemySearchText, Enemies.Count);
     public string WeaponsNoMatch => NoMatchLine(WeaponSearchText, Weapons.Count);
+    public string SupportTeamsNoMatch => NoMatchLine(SupportSearchText, SupportTeams.Count);
     public bool HasCharactersNoMatch => CharactersNoMatch.Length > 0;
     public bool HasEnemiesNoMatch => EnemiesNoMatch.Length > 0;
     public bool HasWeaponsNoMatch => WeaponsNoMatch.Length > 0;
+    public bool HasSupportTeamsNoMatch => SupportTeamsNoMatch.Length > 0;
     /// <summary><see cref="EnemyDoorNote"/> for the view, so the sentence has one home.</summary>
     public string EnemiesNoMatchNote => EnemyDoorNote;
 
@@ -2384,9 +2712,11 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(CharactersNoMatch));
         OnPropertyChanged(nameof(EnemiesNoMatch));
         OnPropertyChanged(nameof(WeaponsNoMatch));
+        OnPropertyChanged(nameof(SupportTeamsNoMatch));
         OnPropertyChanged(nameof(HasCharactersNoMatch));
         OnPropertyChanged(nameof(HasEnemiesNoMatch));
         OnPropertyChanged(nameof(HasWeaponsNoMatch));
+        OnPropertyChanged(nameof(HasSupportTeamsNoMatch));
     }
 
     /// <summary>The measurement data already on this machine for the loaded catalog: the cache first,
@@ -2608,7 +2938,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>Autosave, handing back the failure text (null on success) for a caller with its own
     /// surface.</summary>
-    private string? TryAutoSaveProject() { MarkDirty(); return AutoSave(); }
+    internal string? TryAutoSaveProject() { MarkDirty(); return AutoSave(); }
 
     /// <summary>Name an unnamed project from the FIRST subject it takes. Must run BEFORE the folder is
     /// minted so the slug matches; a user-named project is NEVER overwritten.</summary>
@@ -2724,12 +3054,20 @@ public partial class MainWindowViewModel : ObservableObject
         "Edits may also change other outfits that share the same textures or meshes. "
         + "Use Tools · Rescan game files to try again.";
 
+    /// <summary>What the cell says while a built mod is being read back into a project.</summary>
+    internal const string ImportingModLine = "Reading the mod…";
+    internal const string ImportingModTip = "Reading a built mod back into a new project.";
+
     /// <summary>The background-work cell, as a pure rule. Running work outranks a past failure — a pass is
     /// answering the question the failure raised — and a failure that nothing is replacing STAYS, since a
     /// long visible run ending in a blank cell reads as success.</summary>
     internal static StatusFacet BackgroundFacet(SharingProgress? sharing, bool sharingFailed,
-        RiggedGlbPrewarmProgress? riggedGlbPrewarm = null, bool riggedGlbPrewarmFailed = false)
+        RiggedGlbPrewarmProgress? riggedGlbPrewarm = null, bool riggedGlbPrewarmFailed = false,
+        bool importingMod = false)
     {
+        // An import outranks both measurements: it is the one thing here the person asked for and is
+        // waiting on, and it is the only cell they can see from the Home page.
+        if (importingMod) return StatusFacet.Loading(ImportingModLine, ImportingModTip);
         if (riggedGlbPrewarm is { } prewarm)
             return StatusFacet.Loading(RiggedGlbPrewarmLine(prewarm), RiggedGlbPrewarmTip);
         if (sharing is { } s) return StatusFacet.Loading(SharingLine(s), SharingCellTip);
@@ -2743,14 +3081,12 @@ public partial class MainWindowViewModel : ObservableObject
     {
         SubjectModel? ResolveSubject(string character, string outfit)
         {
+            if (!ReferenceEquals(vfs, _vfs)) return null;
             if (_subjectModels.TryGet(character, outfit) is { } hit) return hit;
             if (PickOutfit(character, outfit) is not { } model) return null;
             var warmed = _subjectModels.GetOrBuild(character, outfit, () =>
-                SubjectModelBuilder.Build(vfs.Catalog, logical =>
-                {
-                    try { return vfs.TryDeobfuscateLogical(logical); }
-                    catch { return null; }
-                }, model, character));
+                PrepareCurrentSubject(vfs, SubjectModelBuilder.Build(vfs.Catalog,
+                    logical => ReadSubjectBundle(vfs, logical), model, character)));
             SubjectModelWarmCompleted();
             return warmed;
         }
@@ -2764,12 +3100,16 @@ public partial class MainWindowViewModel : ObservableObject
                 catch { return null; }
             },
             vfs.CatalogVersion,
-            System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString());
+            System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(),
+            DependenciesOf: vfs.Catalog.DepsForBundle,
+            LoadKeyOf: vfs.Catalog.LoadKeyForAddress);
     }
 
     private void RefreshBackgroundStatus() =>
         BackgroundStatus = BackgroundFacet(_sharingProgress, _sharingFailed,
-            _riggedGlbPrewarmProgress, _riggedGlbPrewarmFailed);
+            _riggedGlbPrewarmProgress, _riggedGlbPrewarmFailed, IsImporting);
+
+    partial void OnIsImportingChanged(bool value) => RefreshBackgroundStatus();
 
     private Outfit? PickOutfit(string character, string stem) =>
         RosterLookup.FindOutfit(_roster, character, stem);

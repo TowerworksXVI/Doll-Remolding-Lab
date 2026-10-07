@@ -95,35 +95,70 @@ public sealed class PreviewBlobMemo
     }
 }
 
-/// <summary>Where a submesh's map came from once an edited glb is read back.</summary>
+/// <summary>What a recorded picture IS: the provenance an export writes beside every image it embeds, and a
+/// transport binding names for the picture it sent. Only <see cref="Vanilla"/> is the game's original. What a
+/// RETURNED picture classified as is a <see cref="MapAnswer"/>, never this — a picture that came back as
+/// sent is "untouched", and whether it was the game's or the modder's is the provenance it carries.</summary>
 public enum MapOrigin
 {
-    /// <summary>No image in that slot; the submesh inherits the anchor's maps.</summary>
+    /// <summary>No picture.</summary>
     None,
-    /// <summary>Byte-identical to what was embedded; the submesh keeps its stock map.</summary>
+    /// <summary>The game's original picture, as the workspace PNG the export embedded.</summary>
     Vanilla,
+    /// <summary>The modder's own picture: a project asset the export embedded or carried in a stock map's
+    /// place.</summary>
+    Authored,
+    /// <summary>The shipped neutral normal, never embedded and recorded only so a return can recognize it
+    /// plugged in.</summary>
+    Neutral,
+}
+
+/// <summary>What a returned picture classified as, against what the session sent that slot.</summary>
+public enum MapAnswer
+{
+    /// <summary>No image on the slot.</summary>
+    None,
+    /// <summary>The picture the session sent, back as sent — byte for byte, or pixel for pixel through a
+    /// re-encode. Not an ask: the slot keeps the binding it has. <see cref="ResolvedMap.Sent"/> names the
+    /// picture, the game's original or the modder's own as its origin says.</summary>
+    Untouched,
     /// <summary>Swapped or painted; ships as an authored map.</summary>
     Authored,
     /// <summary>The shipped neutral normal, plugged in deliberately. Nothing ships: the build binds its
     /// own neutral resource on that slot.</summary>
     Neutral,
+    /// <summary>The session sent this slot a picture and the send-back, which carries rows for this part,
+    /// has none for it: the modder took the picture off, or rebuilt the material without it. What Blender
+    /// showed is a material with nothing there, and that is what lands — flat where a flat map exists
+    /// (normal, RMO), the original picture where none does (base colour, other properties).</summary>
+    Removed,
 }
 
-/// <summary><see cref="Origin"/> plus its payload (both null for <see cref="MapOrigin.None"/> and
-/// <see cref="MapOrigin.Neutral"/>). <see cref="AuthoredPng"/> comes back in STOCK-PNG space — top-down
-/// rows, packed channels — so it encodes by the same rule as an exported map.</summary>
-public readonly record struct ResolvedMap(MapOrigin Origin, string? StockPng = null, byte[]? AuthoredPng = null);
+/// <summary>The picture a session sent one slot, as an untouched answer names it: the file, and whether it
+/// is the game's original or the modder's own. A re-split re-embeds it either way and has to record which,
+/// or the modder's picture is written into the next record as the game's.</summary>
+public readonly record struct SentPicture(string Png, MapOrigin Origin);
+
+/// <summary><see cref="Answer"/> plus its payload: <see cref="Sent"/> for an untouched slot,
+/// <see cref="AuthoredPng"/> for an authored one, neither for <see cref="MapAnswer.None"/> and
+/// <see cref="MapAnswer.Neutral"/>. The authored bytes come back in STOCK-PNG space — top-down rows, packed
+/// channels — so they encode by the same rule as an exported map.</summary>
+public readonly record struct ResolvedMap(MapAnswer Answer, SentPicture? Sent = null, byte[]? AuthoredPng = null)
+{
+    public static ResolvedMap Untouched(string png, MapOrigin origin) =>
+        new(MapAnswer.Untouched, new SentPicture(png, origin));
+}
 
 /// <summary>One submesh's resolved map slots, in the order the glb's primitives appear.
 /// <paramref name="MaterialName"/> is the returned primitive's own material name (what the modder sees
-/// in Blender's slot list), empty when it has none. <paramref name="RmoStockSource"/> is the picture the
-/// session sent this primitive's RMO slot — the stock map, or the modder's own — as the alpha an authored
+/// in Blender's slot list), empty when it has none. <paramref name="RmoSentSource"/> is the picture the
+/// session sent this primitive's RMO slot — the game's map, or the modder's own — as the alpha an authored
 /// RMO is rebuilt over where the record's per-submesh RMO rows stop short (a replacement's submesh past
 /// the ones the record was written for).</summary>
 public readonly record struct IncomingMaps(ResolvedMap BaseColor, ResolvedMap Normal, ResolvedMap Rmo = default,
     string MaterialName = "", IReadOnlyList<IncomingTexture>? Textures = null,
     string? BaseColorName = null, string? NormalName = null, string? RmoName = null,
-    string? RmoStockSource = null);
+    string? RmoSentSource = null);
 
 /// <summary>One property-keyed image returned for a material/primitive owner. <see cref="ShaderProperty"/>
 /// is authoritative; <see cref="Kind"/> describes the transform only and never selects a slot.</summary>
@@ -148,8 +183,9 @@ public readonly record struct IncomingTexture(int MaterialIndex, int? PrimitiveI
 /// exported on is a link the modder made by hand — inside one part exactly as across two — and it publishes
 /// like a painted map. A record with no slot rows keeps the older, content-only answer.</para>
 ///
-/// <para>The sidecar also records, per (mesh, submesh), the stock RMO that submesh's material was built
-/// over. The ORM image physically carries alpha, but glTF assigns it no material semantic, so the default
+/// <para>The sidecar also records, per (mesh, submesh), the RMO that submesh's material was built over —
+/// the game's, or the modder's own re-embedded by a re-split. The ORM image physically carries alpha, but
+/// glTF assigns it no material semantic, so the default
 /// intake rebuild reads the mask from that recorded map rather than trusting a Blender workflow to preserve
 /// it. An explicit authored-alpha answer can override that default.</para>
 ///
@@ -188,10 +224,11 @@ public static class PreviewMaps
         [property: JsonPropertyName("origin")] MapOrigin Origin = MapOrigin.Vanilla,
         [property: JsonPropertyName("owner")] string Owner = "");
 
-    /// <summary>The stock RMO one submesh's preview material was built over: the mesh it belongs to, its
-    /// primitive index within that mesh, and the workspace PNG. Alpha carries the emissive mask but has no
-    /// glTF material semantic, so the default authored-RMO intake rebuilds from the map recorded here.
-    /// A combined glb holds several meshes, so the mesh name is part of the identity.</summary>
+    /// <summary>The RMO one submesh's preview material was built over — the game's map, or the modder's own
+    /// where a re-split re-embedded it: the mesh it belongs to, its primitive index within that mesh, and the
+    /// PNG. Alpha carries the emissive mask but has no glTF material semantic, so the default authored-RMO
+    /// intake rebuilds from the map recorded here. A combined glb holds several meshes, so the mesh name is
+    /// part of the identity.</summary>
     public readonly record struct SubmeshSource(
         [property: JsonPropertyName("mesh")] string Mesh,
         [property: JsonPropertyName("index")] int Index,
@@ -272,7 +309,34 @@ public static class PreviewMaps
         [JsonPropertyName("baked_rest")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<float>? BakedRest { get; set; }
+        /// <summary>The centre a part the game starts hidden was moved by so it opens centred
+        /// (<see cref="Workbench.HiddenPart"/>, 3 floats), after the rest above; absent on geometry left where
+        /// it was modelled.</summary>
+        [JsonPropertyName("shift")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<float>? Shift { get; set; }
+        /// <summary>The bones of the part's SUBJECT that only parts the game starts hidden weight, as
+        /// eight-digit hex hashes; absent where the subject has none or the export could not say.</summary>
+        [JsonPropertyName("hidden_bones")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<string>? HiddenBones { get; set; }
+        /// <summary>Whether the game's own part already weights one of <see cref="HiddenBones"/> and one other
+        /// bone; written only when it does.</summary>
+        [JsonPropertyName("stock_mixes")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? StockMixes { get; set; }
+        /// <summary>True on a file prepared for a Blender session in which parts the game starts hidden
+        /// open centred; a send-back through it is authored under that relation. Written only when
+        /// true.</summary>
+        [JsonPropertyName("hidden_centred")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? HiddenCentred { get; set; }
     }
+
+    /// <summary>What an export says beside a part's glb about the parts its subject starts hidden: the
+    /// bones only those parts weight (eight-digit hex hashes), and whether the game's own part already
+    /// weights one of them together with another bone.</summary>
+    public sealed record HiddenFacts(IReadOnlyList<string> Bones, bool StockMixes);
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -333,6 +397,10 @@ public static class PreviewMaps
                 Bindings = doc.Bindings?.Select(binding => binding with
                     { Source = Content(binding.Source) }).ToList(),
                 BakedRest = doc.BakedRest,
+                Shift = doc.Shift,
+                HiddenBones = doc.HiddenBones,
+                StockMixes = doc.StockMixes,
+                HiddenCentred = doc.HiddenCentred,
             };
             Bytes(JsonSerializer.SerializeToUtf8Bytes(contentAddressed, JsonOpts));
             return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
@@ -396,6 +464,10 @@ public static class PreviewMaps
             Bindings = doc.Bindings?.Select(binding => binding with
                 { Source = Portable(binding.Source) }).ToList(),
             BakedRest = doc.BakedRest,
+            Shift = doc.Shift,
+            HiddenBones = doc.HiddenBones,
+            StockMixes = doc.StockMixes,
+            HiddenCentred = doc.HiddenCentred,
         };
         File.WriteAllText(SidecarPath(destination), JsonSerializer.Serialize(portable, JsonOpts));
     }
@@ -737,13 +809,17 @@ public static class PreviewMaps
 
     // ---------------------------------------------------------------- sidecar
 
-    /// <summary>Record what was embedded beside the glb: the images by content, the stock RMO behind each
+    /// <summary>Record what was embedded beside the glb: the images by content, the RMO behind each
     /// submesh that got one, and the stock image behind each primitive's every slot
     /// (<paramref name="slots"/>). Sources are stored relative to the glb so a mod folder stays movable;
-    /// slot rows carry content hashes, which no move touches.</summary>
+    /// slot rows carry content hashes, which no move touches. <paramref name="bakedRest"/> and
+    /// <paramref name="shift"/> say which space the geometry is in; <paramref name="hidden"/> says what the
+    /// export read about the subject's hidden parts; <paramref name="hiddenCentred"/> marks a file prepared
+    /// for a session in which hidden parts open centred.</summary>
     public static void WriteSidecar(string glbPath, IEnumerable<Entry> entries,
         IEnumerable<SubmeshSource> submeshes, IEnumerable<SlotSource>? slots = null,
-        IEnumerable<TransportBinding>? bindings = null, IReadOnlyList<float>? bakedRest = null)
+        IEnumerable<TransportBinding>? bindings = null, IReadOnlyList<float>? bakedRest = null,
+        IReadOnlyList<float>? shift = null, HiddenFacts? hidden = null, bool hiddenCentred = false)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(glbPath))!;
         var embedded = entries as IReadOnlyCollection<Entry> ?? entries.ToList();
@@ -754,7 +830,8 @@ public static class PreviewMaps
         var transport = (bindings ?? Array.Empty<TransportBinding>())
             .Select(binding => binding with { Source = Rel(dir, binding.Source) })
             .ToList();
-        if (rel.Count == 0 && transport.Count == 0 && bakedRest is null)
+        if (rel.Count == 0 && transport.Count == 0 && bakedRest is null && shift is null && hidden is null
+            && !hiddenCentred)
         {
             // nothing to record: clear the sidecar — a stale one would resolve an authored image as stock
             var stale = SidecarPath(glbPath);
@@ -771,8 +848,42 @@ public static class PreviewMaps
                     Slots = slots?.ToList() ?? new List<SlotSource>(),
                     Bindings = transport.Count == 0 ? null : transport,
                     BakedRest = bakedRest?.ToList(),
+                    Shift = shift?.ToList(),
+                    HiddenBones = hidden?.Bones.ToList(),
+                    StockMixes = hidden is { StockMixes: true } ? true : null,
+                    HiddenCentred = hiddenCentred ? true : null,
                 },
                 JsonOpts));
+    }
+
+    /// <summary>The centre a glb's geometry was moved by to open centred (see
+    /// <see cref="Workbench.HiddenPart"/>), as its record states it; null where the record says nothing,
+    /// which is geometry left where it was modelled.</summary>
+    public static IReadOnlyList<float>? ReadShift(string glbPath)
+    {
+        var path = SidecarPath(glbPath);
+        if (!File.Exists(path)) return null;
+        return JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts)?.Shift;
+    }
+
+    /// <summary>Whether a glb was prepared for a Blender session in which parts the game starts hidden open
+    /// centred, as its record states; false where the record says nothing, which is a file prepared before
+    /// such parts opened centred.</summary>
+    public static bool ReadHiddenCentred(string glbPath)
+    {
+        var path = SidecarPath(glbPath);
+        if (!File.Exists(path)) return false;
+        return JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts)?.HiddenCentred == true;
+    }
+
+    /// <summary>What the export recorded beside a glb about its subject's hidden parts; null where it
+    /// recorded nothing.</summary>
+    public static HiddenFacts? ReadHiddenFacts(string glbPath)
+    {
+        var path = SidecarPath(glbPath);
+        if (!File.Exists(path)) return null;
+        var doc = JsonSerializer.Deserialize<Sidecar>(File.ReadAllText(path), JsonOpts);
+        return doc?.HiddenBones is { } bones ? new HiddenFacts(bones, doc.StockMixes == true) : null;
     }
 
     /// <summary>The scene-rest uprighting a glb's geometry is baked by, as its record states it (see
@@ -828,8 +939,9 @@ public static class PreviewMaps
         return map;
     }
 
-    /// <summary>The stock RMO behind each submesh of one mesh in a glb, by primitive index — the alpha source
-    /// an authored RMO ships over. <paramref name="meshName"/> null reads the glb's FIRST mesh, the same one
+    /// <summary>The RMO behind each submesh of one mesh in a glb, by primitive index — the game's or the
+    /// modder's own, and the alpha source an authored RMO ships over. <paramref name="meshName"/> null reads
+    /// the glb's FIRST mesh, the same one
     /// <see cref="MeshGltf.ReadSubmeshMaps"/> reads with no name — the two must key the same part, or a
     /// no-name caller pairs one part's slots with another's alpha. Empty where the glb embedded no RMO, and
     /// a submesh past the recorded ones is simply absent: the intake then ships a zero mask rather than
@@ -906,7 +1018,7 @@ public static class PreviewMaps
     ///
     /// <para>A byte miss falls through to a PIXEL comparison against the images recorded for the slot's kind,
     /// so a re-encode of an untouched map still classifies as whatever it reproduces — a stock map, or the
-    /// neutral normal (see <see cref="SamePixelsAsRecorded"/>).</para>
+    /// neutral normal (see <see cref="SamePixelsAs"/>).</para>
     ///
     /// <para><paramref name="owner"/> is the mesh whose material carries the slot, which decides ties in that
     /// fallback; <paramref name="stock"/> carries what earlier slots already measured about the recorded
@@ -921,22 +1033,21 @@ public static class PreviewMaps
         IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, string? owner = null,
         StockPixels? stock = null, SlotStock? slot = null)
     {
-        if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapOrigin.None);
+        if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapAnswer.None);
         var hash = Hash(imageBytes);
         if (sidecar.TryGetValue((hash, kind), out var hit)
             && (hit.Origin == MapOrigin.Neutral || Owns(slot, hash)))
-            return hit.Origin == MapOrigin.Neutral
-                ? new ResolvedMap(MapOrigin.Neutral)
-                : new ResolvedMap(MapOrigin.Vanilla, StockPng: hit.Source);
-        if (SamePixelsAsRecorded(imageBytes, kind, sidecar, owner, stock ?? new StockPixels(), slot) is { } same)
-            return same;
-        return new ResolvedMap(MapOrigin.Authored, AuthoredPng: FromPreview(imageBytes, kind));
+            return Reproduces(hit);
+        if (SamePixelsAs(imageBytes, Candidates(sidecar, kind, owner, slot), stock ?? new StockPixels())
+                is { } same)
+            return Reproduces(same);
+        return new ResolvedMap(MapAnswer.Authored, AuthoredPng: FromPreview(imageBytes, kind));
     }
 
-    /// <summary>Classify a returned carrier image against its exact outbound property row. The outbound
-    /// bytes are the comparison baseline even when the project authored them: returning that picture
-    /// untouched is not a new ask, while changing it still is. The classifier is scoped to this one
-    /// binding's outbound hash so another property with identical content cannot claim the slot.</summary>
+    /// <summary>Classify a returned carrier image against its exact outbound property row. The one picture
+    /// it can come back as untouched is the picture the session sent THAT slot — the game's original or the
+    /// modder's own, as the binding's origin says — and changing it is the modder's ask either way. Scoped
+    /// to this one binding so another property with identical content cannot claim the slot.</summary>
     /// <para><paramref name="neutrals"/> are the record's own neutral entries (see <see cref="ReadSidecar"/>),
     /// the candidates that make "plug the neutral" answer on every normal slot: a slot whose outbound picture
     /// is the modder's own authored normal has no <see cref="NeutralN"/> beside that picture, and the record
@@ -944,27 +1055,39 @@ public static class PreviewMaps
     public static ResolvedMap ResolveTransport(byte[]? imageBytes, TransportBinding binding,
         IEnumerable<Entry>? neutrals = null)
     {
-        if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapOrigin.None);
+        if (imageBytes is null || imageBytes.Length == 0) return new ResolvedMap(MapAnswer.None);
 
-        var recorded = new Dictionary<(string Hash, MapKind Kind), Entry>
-        {
-            [(binding.OutboundHash.ToLowerInvariant(), binding.Kind)] = new Entry(binding.OutboundHash,
-                binding.Source, binding.Kind, MapOrigin.Vanilla, binding.Mesh),
-        };
+        var sent = new Entry(binding.OutboundHash, binding.Source, binding.Kind, binding.Origin, binding.Mesh);
+        var candidates = new List<Entry> { sent };
         if (binding.Kind == MapKind.Normal)
         {
-            string? directory = Path.GetDirectoryName(binding.Source);
-            string neutral = Path.Combine(directory ?? "", NeutralN);
+            string neutral = Path.Combine(Path.GetDirectoryName(binding.Source) ?? "", NeutralN);
             if (File.Exists(neutral))
-                recorded.TryAdd((Hash(File.ReadAllBytes(neutral)), MapKind.Normal),
-                    new Entry(Hash(File.ReadAllBytes(neutral)), neutral, MapKind.Normal, MapOrigin.Neutral));
-            foreach (var entry in neutrals ?? Array.Empty<Entry>())
-                if (entry.Origin == MapOrigin.Neutral && entry.Kind == MapKind.Normal)
-                    recorded.TryAdd((entry.Hash.ToLowerInvariant(), MapKind.Normal), entry);
+                candidates.Add(new Entry(Hash(File.ReadAllBytes(neutral)), neutral, MapKind.Normal,
+                    MapOrigin.Neutral));
+            candidates.AddRange((neutrals ?? Array.Empty<Entry>())
+                .Where(entry => entry.Origin == MapOrigin.Neutral && entry.Kind == MapKind.Normal));
         }
-        return Resolve(imageBytes, binding.Kind, recorded, binding.Mesh, new StockPixels(),
-            new SlotStock(binding.OutboundHash));
+        var hash = Hash(imageBytes);
+        foreach (var candidate in candidates)
+            if (string.Equals(candidate.Hash, hash, StringComparison.OrdinalIgnoreCase))
+                return Answer(candidate);
+        if (SamePixelsAs(imageBytes, candidates, new StockPixels()) is { } same) return Answer(same);
+        return new ResolvedMap(MapAnswer.Authored, AuthoredPng: FromPreview(imageBytes, binding.Kind));
+
+        // The sent picture back as sent is untouched whatever origin its row recorded: a row cannot turn
+        // its own return into an ask (a base colour answering "neutral" would refuse the whole return).
+        // Only the neutral candidates answer that the neutral was plugged in.
+        ResolvedMap Answer(Entry candidate) => candidate.Equals(sent)
+            ? ResolvedMap.Untouched(sent.Source, sent.Origin)
+            : Reproduces(candidate);
     }
+
+    /// <summary>The answer a returned picture earns by reproducing a recorded one: the neutral plugged in,
+    /// or the recorded picture untouched — which the answer names, origin and all.</summary>
+    private static ResolvedMap Reproduces(Entry recorded) => recorded.Origin == MapOrigin.Neutral
+        ? new ResolvedMap(MapAnswer.Neutral)
+        : ResolvedMap.Untouched(recorded.Source, recorded.Origin);
 
     /// <summary>What ONE slot of one primitive was exported over: the content hash of the stock image the
     /// export embedded there, or null where it embedded none of the part's own stock — an authored map of the
@@ -978,8 +1101,8 @@ public static class PreviewMaps
     private static bool Owns(SlotStock? slot, string hash) =>
         slot is not { } s || string.Equals(s.Hash, hash, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>What this returned image reproduces PIXEL for pixel, alpha included — as the classification a
-    /// match earns — or null when nothing recorded does. An encoder that re-compresses an image it never
+    /// <summary>The recorded image this returned image reproduces PIXEL for pixel, alpha included — the
+    /// caller says what that match earns — or null when nothing recorded does. An encoder that re-compresses an image it never
     /// edited changes its bytes and nothing else, and the hash cannot tell that from a repaint, so what the
     /// image SHOWS decides where the bytes could not. Identical pixels mean the recorded map and the returned
     /// one put the same picture in the slot, so this only ever widens the recorded answer; a single changed
@@ -988,9 +1111,7 @@ public static class PreviewMaps
     /// <para>Reached only on a byte miss, and a candidate is measured once per <paramref name="stock"/>
     /// however many slots ask about it. A candidate whose file is gone or won't decode is skipped — it cannot
     /// settle the slot, and the authored answer stands if nothing else does.</para></summary>
-    private static ResolvedMap? SamePixelsAsRecorded(byte[] imageBytes, MapKind kind,
-        IReadOnlyDictionary<(string Hash, MapKind Kind), Entry> sidecar, string? owner, StockPixels stock,
-        SlotStock? slot)
+    private static Entry? SamePixelsAs(byte[] imageBytes, IEnumerable<Entry> candidates, StockPixels stock)
     {
         Image<Rgba32> returned;
         try { returned = Image.Load<Rgba32>(imageBytes); }
@@ -998,14 +1119,12 @@ public static class PreviewMaps
         using (returned)
         {
             var want = Fingerprint(returned);
-            foreach (var e in Candidates(sidecar, kind, owner, slot))
+            foreach (var e in candidates)
             {
                 if (stock.Measure(e) != want) continue;
                 using var recorded = RecordedPixels(e);
                 if (recorded is null || !SamePixels(returned, recorded)) continue;
-                return e.Origin == MapOrigin.Neutral
-                    ? new ResolvedMap(MapOrigin.Neutral)
-                    : new ResolvedMap(MapOrigin.Vanilla, StockPng: e.Source);
+                return e;
             }
         }
         return null;
@@ -1031,10 +1150,10 @@ public static class PreviewMaps
             .ThenBy(e => e.Source, StringComparer.Ordinal);
 
     /// <summary>A recorded image's pixels in the space the returned image is compared in. A
-    /// <see cref="MapOrigin.Vanilla"/> entry records the stock PNG an export EMBEDDED, so its file goes
-    /// through the preview transform first; a <see cref="MapOrigin.Neutral"/> entry records the flat file the
-    /// modder plugs in unchanged, which is already in that space. Null when the file is gone or won't
-    /// decode.</summary>
+    /// <see cref="MapOrigin.Vanilla"/> or <see cref="MapOrigin.Authored"/> entry records a stock-space PNG an
+    /// export EMBEDDED or sent, so its file goes through the preview transform first; a
+    /// <see cref="MapOrigin.Neutral"/> entry records the flat file the modder plugs in unchanged, which is
+    /// already in that space. Null when the file is gone or won't decode.</summary>
     private static Image<Rgba32>? RecordedPixels(Entry e)
     {
         try

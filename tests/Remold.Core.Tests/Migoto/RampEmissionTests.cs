@@ -128,10 +128,14 @@ public class RampEmissionTests : IDisposable
 
         foreach (int s in union)
         {
-            // one declaration and one save per register: the two ranges overlap, and a second section on
-            // one name would be dropped at parse time
+            // one declaration per register: the two ranges overlap, and a second section on one name would
+            // be dropped at parse time. The save is taken per bound kind, at the register that kind's
+            // probe answered, so a register in both ranges is saved under either kind's answer
             Assert.Equal(1, Count(ini, $"[Resource_SaveT{s}]\n"));
-            Assert.Equal(1, Count(ini, $"Resource_SaveT{s} = ref ps-t{s}\n"));
+            int saves = Count(ini, $"Resource_SaveT{s} = ref ps-t{s}\n");
+            Assert.True(saves >= 1);
+            Assert.Equal(saves, System.Text.RegularExpressions.Regex.Matches(ini,
+                $@"if \$zz_slot_\w+ == {s}\nResource_SaveT{s} = ref ps-t{s}\n").Count);
             // restored at the end of the list, and wherever a later submesh takes its slot back
             Assert.True(Count(ini, $"ps-t{s} = Resource_SaveT{s}\n") >= 1);
         }
@@ -248,7 +252,7 @@ public class RampEmissionTests : IDisposable
             Assert.Contains("$zz_slot_rm = -1\n", list);
             foreach (int s in RampSlots)
                 Assert.Contains($"$zz_t = ps-t{s}\nif $zz_t == 3304\n$zz_slot_rm = {s}\nendif\n", list);
-            Assert.Equal(1, Count(list, "drawindexed = "));
+            Assert.Equal(1, Count(list, "drawindexed"));
         }
         // range 0 binds its authored ramp; range 1 inherits, and alone in its list it binds nothing
         Assert.Contains("ps-t", RangeList(ini, 0)[RangeList(ini, 0).IndexOf("$zz_slot_rm =", StringComparison.Ordinal)..]);

@@ -77,6 +77,7 @@ public sealed class AuthoredEditSessionOutputTests : IDisposable
     {
         var session = SessionWithInventory();
         session.SetRootDir(_root);
+        session.SetTransportRoot(Path.Combine(_root, "round-trips"));
         session.RecordReplacementOutputs("edit-long", 2);
         string base_ = Outputs(session, "edit-long")
             .First(slot => slot.SubmeshIndex == 1 && slot.Input == TargetInputKind.BaseColor).Id;
@@ -96,6 +97,7 @@ public sealed class AuthoredEditSessionOutputTests : IDisposable
     {
         var session = SessionWithInventory();
         session.SetRootDir(_root);
+        session.SetTransportRoot(Path.Combine(_root, "round-trips"));
         session.RecordReplacementOutputs("edit-long", 2);
         var outputs = Outputs(session, "edit-long");
         string kept = outputs.First(slot => slot.SubmeshIndex == 0 && slot.Input == TargetInputKind.Rmo).Id;

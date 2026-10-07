@@ -82,12 +82,12 @@ public class SharingScopeTests : IDisposable
         Assert.DoesNotContain("[TextureOverride_Retex_", ini);
         Assert.Contains($"[TextureOverride_RetexTag_{_world.StockTexHash}]\nhash = {_world.StockTexHash}\n"
             + $"filter_index = {MigotoEmitter.RetexTag(_world.StockTexHash)}\nmatch_priority = 100\n", ini);
-        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod0]\nhash = {lod0}\nmatch_priority = 0\n", ini);
-        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod0]\nhash = {lod0}\nmatch_priority = 0\n{ModBuilderTests.DrawGuard(ini, lod0)}", ini);
+        Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n{ModBuilderTests.DrawGuard(ini, lod1)}", ini);
         // the probe/bind/restore shape: save by ref, find the tagged slot, bind only there, restore post
         Assert.Contains("Resource_RtxSave0 = ref ps-t0\n", ini);
         Assert.Contains($"if $zz_rt == {MigotoEmitter.RetexTag(_world.StockTexHash)}\n$zz_rslot = 0\nendif\n", ini);
-        Assert.Contains("if $zz_rslot == 0\nps-t0 = Resource_Rtx0\nendif\n", ini);
+        Assert.Contains("if $zz_rslot == 0\nps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
         Assert.Contains("post ps-t0 = Resource_RtxSave0\n", ini);
         // no latch: the anchors are private. And no disclosure — the scoping matches what the author
         // asked for, so there is nothing to say
@@ -173,7 +173,7 @@ public class SharingScopeTests : IDisposable
         Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aabbccdd\nmatch_priority = 0\n$zz_seen_vesnassr01 = 1\n", ini);
         Assert.Contains("[TextureOverride_Witness_vesnassr01_1]\nhash = eeff0011\nmatch_priority = 0\n$zz_seen_vesnassr01 = 1\n", ini);
         // the bind sits under the latch; the save/restore does not (a gated-off draw must not restore stale refs)
-        Assert.Contains("if $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx0\nendif\n", ini);
+        Assert.Contains("if $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
         int save = ini.IndexOf("Resource_RtxSave0 = ref ps-t0", StringComparison.Ordinal);
         int gate = ini.IndexOf("if $zz_gate_vesnassr01 == 1", StringComparison.Ordinal);
         Assert.True(save >= 0 && gate > save, "saves are unconditional and precede the gated binds");
@@ -230,10 +230,12 @@ public class SharingScopeTests : IDisposable
         }, Skeleton: null, Problems: Array.Empty<string>());
 
         // a third wearer on both face meshes, so each anchor is measured as shared and earns its latch
+        // VesnaDorm carries the roster's Dorm kind, as the real index would; KarstDorm stands for any other
+        // character's outfit and keeps the default kind so the cross-character disclosure is exercised
         var wearers = new[]
         {
             new SharingIndex.Wearer("Vesna", "Vesna", "VesnaSSR01", null),
-            new SharingIndex.Wearer("Vesna", "Vesna", "VesnaDorm", null),
+            new SharingIndex.Wearer("Vesna", "Vesna", "VesnaDorm", null) { Kind = Remold.Core.Model.OutfitKind.Dorm },
             new SharingIndex.Wearer("Karst", "Karst", "KarstDorm", null),
         };
         var meshWearers = new Dictionary<string, int[]>(StringComparer.Ordinal)
@@ -300,7 +302,7 @@ public class SharingScopeTests : IDisposable
         // both latches declared, committed, and witnessed independently
         Assert.Contains("[TextureOverride_Witness_vesnassr01_0]\nhash = aaaa0001\nmatch_priority = 0\n", ini);
         Assert.Contains("[TextureOverride_Witness_vesnadorm_0]\nhash = aaaa0002\nmatch_priority = 0\n", ini);
-        // same character throughout — nothing to disclose
+        // the other outfit is a Dorm outfit, always shown alone — nothing to disclose
         Assert.Empty(r.Infos);
     }
 
@@ -316,14 +318,14 @@ public class SharingScopeTests : IDisposable
         string ini = ReadIni(r);
         // one section per anchor mesh, each probing the one stock tag for itself
         Assert.Equal(2, CountOf(ini, "[TextureOverride_RetexScope_"));
-        Assert.Equal(1, CountOf(ini, $"hash = {FaceIb}"));
-        Assert.Equal(1, CountOf(ini, $"hash = {DormIb}"));
+        Assert.Equal(1, CountOf(ini, $"hash = {FaceIb}\nmatch_priority = 0"));
+        Assert.Equal(1, CountOf(ini, $"hash = {DormIb}\nmatch_priority = 0"));
         Assert.Equal(2, CountOf(ini, "$zz_rslot = -1"));
         // two images shipped, each bound once, under the gate of the outfit that asked for it
         Assert.Contains("[Resource_Rtx1]", ini);
         Assert.DoesNotContain("[Resource_Rtx2]", ini);
-        Assert.Contains("if $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx0\nendif\n", ini);
-        Assert.Contains("if $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx1\nendif\n", ini);
+        Assert.Contains("if $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
+        Assert.Contains("if $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\nps-t0 = Resource_Rtx1\n$zz_bt0 = 1\nendif\n", ini);
         Assert.Equal(1, CountOf(ini, "if $zz_gate_vesnassr01 == 1\n"));
         Assert.Equal(1, CountOf(ini, "if $zz_gate_vesnadorm == 1\n"));
         // the probe precedes the bind; the save/restore still brackets the lot unconditionally
@@ -332,9 +334,9 @@ public class SharingScopeTests : IDisposable
         Assert.True(probe > 0 && first > probe, "the slot is probed before any image binds");
         Assert.Contains("Resource_RtxSave0 = ref ps-t0\n", ini);
         Assert.Contains("post ps-t0 = Resource_RtxSave0\n", ini);
-        // each face mesh is drawn by another character too, so both edits disclose the co-change
-        Assert.Equal(2, r.Infos.Count);
-        Assert.All(r.Infos, i => Assert.Contains("Karst", i));
+        // each face mesh is drawn by another character too; the combat outfit's edit discloses the co-change,
+        // while the Dorm outfit is always shown alone and discloses nothing
+        Assert.Contains("Karst", Assert.Single(r.Infos));
     }
 
     [Fact]
@@ -504,9 +506,9 @@ public class SharingScopeTests : IDisposable
         Assert.Contains("[Key_zz_key_f7]\nkey = no_modifiers F7\nrun = CommandListKey_zz_key_f7\n", ini);
         // each image's bind sits under its OWN key and its own outfit gate
         Assert.Contains("if $zz_key_f6 == 0\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
-            + "ps-t0 = Resource_Rtx0\nendif\n", ini);
+            + "ps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
         Assert.Contains("if $zz_key_f7 == 0\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
-            + "ps-t0 = Resource_Rtx1\nendif\n", ini);
+            + "ps-t0 = Resource_Rtx1\n$zz_bt0 = 1\nendif\n", ini);
         // nothing about one key applying to both: the section carries each image's own
         Assert.DoesNotContain(r.Warnings, w => w.Contains("different toggle keys"));
     }
@@ -522,9 +524,9 @@ public class SharingScopeTests : IDisposable
         string ini = ReadIni(r);
         Assert.DoesNotContain("[Resource_Rtx1]", ini);
         Assert.Contains("if $zz_key_f6 == 0\nif $zz_gate_vesnassr01 == 1\nif $zz_rslot == 0\n"
-            + "ps-t0 = Resource_Rtx0\nendif\n", ini);
+            + "ps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
         Assert.Contains("if $zz_key_f7 == 0\nif $zz_gate_vesnadorm == 1\nif $zz_rslot == 0\n"
-            + "ps-t0 = Resource_Rtx0\nendif\n", ini);
+            + "ps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", ini);
         Assert.DoesNotContain(r.Warnings, w => w.Contains("different toggle keys"));
     }
 
@@ -573,8 +575,8 @@ public class SharingScopeTests : IDisposable
 
         string ini = ReadIni(r);
         // the shared tier's skip sits under the latch; the private tier's does not
-        Assert.Contains($"hash = {lod0}\nmatch_priority = 0\nif $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\n", ini);
-        Assert.Contains($"hash = {lod1}\nmatch_priority = 0\nhandling = skip\n", ini);
+        Assert.Contains($"hash = {lod0}\nmatch_priority = 0\n{ModBuilderTests.DrawGuard(ini, lod0)}if $zz_gate_vesnassr01 == 1\nhandling = skip\nendif\n", ini);
+        Assert.Contains($"hash = {lod1}\nmatch_priority = 0\n{ModBuilderTests.DrawGuard(ini, lod1)}handling = skip\n", ini);
         Assert.Contains(r.Infos, i => i.Contains("Karst") && i.Contains("hide"));
     }
 

@@ -203,6 +203,21 @@ public class SkinLayoutTests : IDisposable
         Assert.Equal(SkinLayout.CanonicalStride, result.Streams.Single(s => s.Stream == 2).Stride);
     }
 
+    [Fact]
+    public void The_dump_records_the_meshs_channel_table()
+    {
+        // A reader comparing two dumps' verbatim streams needs the table each was sliced in.
+        string bundle = Path.Combine(_root, "layout.bundle");
+        SyntheticBundle.BuildOneSkinnedMesh(bundle, "layout", Cloud(6), Tris(6), Bones, skinWidth: 4,
+            implicitWeights: false);
+        string outDir = Path.Combine(_root, "layout-out");
+
+        StreamDump.Dump(File.ReadAllBytes(bundle), "layout", outDir);
+
+        var field = new Remold.Core.Bundles.BundleReader().GetMeshField(File.ReadAllBytes(bundle), "layout", 0)!;
+        Assert.Equal(UnityMesh.ChannelsOf(field), MetaChannels.Read(outDir));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

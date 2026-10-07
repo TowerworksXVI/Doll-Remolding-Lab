@@ -42,14 +42,6 @@ public class BoneTableTests
         Assert.Null(BoneTable.MatchingSuffix(BoneTable.Hash("Shoes01_R"), null));
     }
 
-    [Fact]
-    public void MatchingLeaf_ReturnsNullWhenTheMatchingSuffixEndsInASeparator()
-    {
-        const string suffix = "Hair01_L/";
-        Assert.Equal(suffix, BoneTable.MatchingSuffix(BoneTable.Hash(suffix), "Prefab/root/" + suffix));
-        Assert.Null(BoneTable.MatchingLeaf(BoneTable.Hash(suffix), "Prefab/root/" + suffix));
-    }
-
     [Theory]
     [InlineData("Root_M/Spring01", 0x05f0c65fu)]
     [InlineData("Root_M/Spring01/Spring02/Spring03/Spring04/Spring05/Spring06", 0x68bd228fu)]

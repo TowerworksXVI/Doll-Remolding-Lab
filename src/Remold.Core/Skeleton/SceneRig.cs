@@ -66,21 +66,19 @@ public sealed class SceneRig
     /// <summary>Read the scene rig for <paramref name="meshName"/> out of its deobfuscated bundle. Null when
     /// the bundle has no SkinnedMeshRenderer for that mesh, when the bone list doesn't line up with the skin,
     /// or on any parse trouble — the caller then keeps the plain bind-pose export.</summary>
-    public static SceneRig? TryRead(byte[] deobfuscatedBundle, string meshName, MeshSkin skin, long knownMeshPathId = 0)
+    public static SceneRig? TryRead(byte[] deobfuscatedBundle, string meshName, MeshSkin skin,
+        Bundles.MeshSelector which = default)
     {
         if (!skin.IsSkinned) return null;
         try
         {
             var (am, inst) = Load(deobfuscatedBundle);
 
-            // the Mesh asset's pathId — the SMR's m_Mesh must point at it locally. A caller that knows the
-            // exact id passes it, since enemy bundles ship same-named copies.
-            long meshPathId = knownMeshPathId;
-            if (meshPathId == 0)
-                foreach (var info in inst.file.AssetInfos.Where(i => i.TypeId == 43))
-                    try { if (am.GetBaseField(inst, info)["m_Name"].AsString == meshName) { meshPathId = info.PathId; break; } }
-                    catch { }
-            if (meshPathId == 0) return null;
+            // the Mesh asset's pathId — the SMR's m_Mesh must point at it locally — chosen as every mesh read
+            // chooses it, since bundles ship same-named copies
+            if (Bundles.BundleReader.SelectMesh(am, inst, meshName, which,
+                    () => Bundles.BundleReader.ReadContainerMeshes(am, inst)) is not { } mesh) return null;
+            long meshPathId = mesh.PathId;
 
             // the mesh is LOCAL here, so the reference must be too
             return Read(am, inst, skin, smr =>
@@ -276,6 +274,68 @@ public sealed class SceneRig
             BonePaths = paths, Uprighting = uprighting, ConnectorRests = connectors,
             MeasuredRest = consistent ? g0 : null, BoneRestWorlds = restWorlds,
         };
+    }
+
+    /// <summary>Where a mesh's own space sits in the rig that draws it: the mesh's bind for the renderer's
+    /// root bone times that bone's rest world (row-vector, mesh → rig), so two meshes of one rig relate by
+    /// <c>G_a · inverse(G_b)</c> whatever space each was authored in. <paramref name="rootChain"/> is the
+    /// root bone and its ancestors, top first (<see cref="Bundles.BundleReader.RendererRig"/>); the bone is
+    /// found in the mesh's table by the chain suffix whose hash the mesh stores. Every placement is stated in
+    /// the frame of the file the chain tops out in, so parts driven by different Animators still relate.
+    ///
+    /// <para>Where the rig names an Avatar, the bone rests where <paramref name="avatarPose"/> (relative to
+    /// the Avatar's own root) puts it, placed by <paramref name="avatarFrame"/>, the saved world of the
+    /// Animator that names the Avatar. A root bone the Avatar doesn't list (a weapon hung under a hand
+    /// attachment point) rests at its nearest listed ancestor's Avatar rest, carried down by the chain's
+    /// saved offsets below it; a chain the Avatar lists nothing of (a weapon hung off the prefab root, outside
+    /// the animated skeleton) rests at its saved pose, as a rig with no Avatar does. Null, with the reason,
+    /// when the mesh doesn't bind the root bone.</para></summary>
+    public static Matrix4x4? Placement(IReadOnlyList<(string Name, Matrix4x4 Local)> rootChain, MeshSkin skin,
+        IReadOnlyDictionary<uint, Matrix4x4>? avatarPose, Matrix4x4 avatarFrame, out string? problem)
+    {
+        problem = null;
+        int bone = -1;
+        for (int k = 0; k < rootChain.Count && bone < 0; k++)
+        {
+            uint hash = BoneTable.Hash(string.Join("/", rootChain.Skip(k).Select(c => c.Name)));
+            for (int i = 0; i < skin.BoneCount && bone < 0; i++)
+                if (skin.BoneHashes[i] == hash) bone = i;
+        }
+        if (bone < 0 || bone >= skin.BindPoses.Count)
+        {
+            problem = "its mesh doesn't list the bone its renderer is rooted at";
+            return null;
+        }
+        var rest = Matrix4x4.Identity;
+        if (avatarPose is not null && AvatarRest(rootChain, skin.BoneHashes[bone], avatarPose, out var avatarRest))
+            rest = avatarRest * avatarFrame;
+        else
+            for (int k = rootChain.Count - 1; k >= 0; k--) rest *= rootChain[k].Local;
+        return skin.BindPoses[bone] * rest;
+    }
+
+    /// <summary>The Avatar rest of the chain's last link (the root bone, whose Avatar id the mesh stores as
+    /// <paramref name="rootHash"/>): its own where the Avatar lists it, else its nearest listed ancestor's
+    /// composed with the saved local offsets of the links below that ancestor. An ancestor's Avatar id is the
+    /// hash of its path from the Avatar's root, which is some suffix of the chain down to it.</summary>
+    static bool AvatarRest(IReadOnlyList<(string Name, Matrix4x4 Local)> rootChain, uint rootHash,
+        IReadOnlyDictionary<uint, Matrix4x4> avatarPose, out Matrix4x4 rest)
+    {
+        if (avatarPose.TryGetValue(rootHash, out rest)) return true;
+        var below = Matrix4x4.Identity;   // the saved offsets from the ancestor under test down to the root
+        for (int j = rootChain.Count - 2; j >= 0; j--)
+        {
+            below *= rootChain[j + 1].Local;
+            for (int s = 0; s <= j; s++)
+                if (avatarPose.TryGetValue(BoneTable.Hash(string.Join("/", rootChain.Skip(s).Take(j - s + 1)
+                        .Select(c => c.Name))), out var ancestor))
+                {
+                    rest = below * ancestor;
+                    return true;
+                }
+        }
+        rest = Matrix4x4.Identity;
+        return false;
     }
 
     private static Vector3 V3(AssetTypeValueField f) => new(f["x"].AsFloat, f["y"].AsFloat, f["z"].AsFloat);

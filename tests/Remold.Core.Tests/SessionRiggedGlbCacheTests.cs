@@ -46,7 +46,7 @@ public class SessionRiggedGlbCacheTests
     }
 
     private static List<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-        IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> Specs(TempGame g,
+        IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb)> Specs(TempGame g,
         string run = "cold", string? edited = null) => new()
     {
         ("body", BodyLogical, BodyMesh, g.At(Path.Combine(run, "parts", "body.rigged.glb")),
@@ -60,7 +60,7 @@ public class SessionRiggedGlbCacheTests
             g.At(Path.Combine(run, "parts", "body.glb")), false, null, null);
 
     private static List<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-        IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> AllSpecs(TempGame g,
+        IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb)> AllSpecs(TempGame g,
         string run = "cold") => new()
     {
         ("body", BodyLogical, BodyMesh, g.At(Path.Combine(run, "parts", "body.rigged.glb")),
@@ -79,7 +79,7 @@ public class SessionRiggedGlbCacheTests
         };
 
     private static List<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-        IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> CombinedSpecs(
+        IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb)> CombinedSpecs(
         IReadOnlyList<MainWindowViewModel.SessionPartPlan> plans) => new()
     {
         (plans[0].Token, BodyLogical, plans[0].SlotName, null, null, 0, plans[0].Prepared),
@@ -89,7 +89,7 @@ public class SessionRiggedGlbCacheTests
     private static (AssetExporter.RiggedBuildDiagnostics Diagnostics, IReadOnlyList<string> Built)
         Build(TempGame g, Install install,
             IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-                IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> specs,
+                IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb)> specs,
             string run = "cold", string? combined = null, CancellationToken cancellationToken = default,
             IReadOnlyCollection<string>? observedGameSidePreparedGlbs = null,
             string? stockTextureCacheRoot = null)
@@ -159,7 +159,7 @@ public class SessionRiggedGlbCacheTests
             MeshName: spec.MeshName,
             GlbOut: (string?)null,
             BakedRest: spec.BakedRest,
-            PathId: spec.PathId,
+            Which: spec.Which,
             EditedGlb: spec.EditedGlb)).ToList();
         var composition = Build(g, install, compositionSpecs, "composition", g.At("composition.glb"));
         Assert.True(composition.Diagnostics.Completed);
@@ -408,7 +408,7 @@ public class SessionRiggedGlbCacheTests
             (identity, MainWindowViewModel.AuthoredCombinedArtifactKey(identity, target,
                 new[] { target })!),
             (identity, MainWindowViewModel.AuthoredCombinedArtifactKey(identity, target, plans,
-                "combined-rigged-writer-v2")!),
+                MeshGltf.CombinedWriterSpec + "-other")!),
         };
         string changedPrepared = WriteMinimalGlb(g.At("changed-target-prepared.glb"));
         var changedBytes = File.ReadAllBytes(changedPrepared);
@@ -738,13 +738,36 @@ public class SessionRiggedGlbCacheTests
 
         var sibling = b[1];
         b[1] = (sibling.Part, sibling.SourceBundle, sibling.MeshName,
-            g.At("now-visible.glb"), sibling.BakedRest, sibling.PathId, sibling.EditedGlb);
+            g.At("now-visible.glb"), sibling.BakedRest, sibling.Which, sibling.EditedGlb);
         Assert.NotEqual(sameA, AssetExporter.RiggedBuildFingerprint(Outfit, "Vesna", null, b, false));
         var roster = new AssetExporter.SubjectRoster(new[]
         {
             new AssetExporter.RosterPart(BodyMesh, "body", BodyLogical, 0, true, VisibilityOverride.None),
         });
         Assert.NotEqual(sameA, AssetExporter.RiggedBuildFingerprint(Outfit, "Vesna", roster, a, false));
+    }
+
+    /// <summary>Where a roster part sits in its rig decides where a joint it lends stands, so what places it
+    /// (its renderer and the saved rest pose its rig names) is part of the identity — and a rig with no saved
+    /// pose is not the same as one whose saved pose couldn't be read.</summary>
+    [Fact]
+    public void Canonical_spec_fingerprint_changes_with_what_places_a_roster_part()
+    {
+        using var g = new TempGame();
+        var specs = Specs(g, "run-a");
+        string Of(AssetExporter.RosterPart row) => AssetExporter.RiggedBuildFingerprint(Outfit, "Vesna",
+            new AssetExporter.SubjectRoster(new[] { row }), specs, false);
+        var plain = new AssetExporter.RosterPart(BodyMesh, "body", BodyLogical, 0, true, VisibilityOverride.None);
+
+        var fingerprints = new[]
+        {
+            Of(plain),
+            Of(plain with { RendererBundle = BodyLogical, RendererPathId = 7 }),
+            Of(plain with { RendererBundle = BodyLogical, RendererPathId = 8 }),
+            Of(plain with { RendererBundle = BodyLogical, RendererPathId = 7, Pose = new RigPose(null, 0) }),
+            Of(plain with { RendererBundle = BodyLogical, RendererPathId = 7, Pose = new RigPose("avatar.bundle", 5) }),
+        };
+        Assert.Equal(fingerprints.Length, fingerprints.Distinct().Count());
     }
 
     [Fact]

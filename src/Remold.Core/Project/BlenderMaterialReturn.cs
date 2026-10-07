@@ -11,19 +11,23 @@ namespace Remold.Core.Project;
 
 /// <summary>Normalizes the material nodes from one exact Blender return into transient, per-submesh files.
 /// It assigns no authored ownership: the caller publishes each result to the exact session slot carried by
-/// the transport. Stock identity is resolved against that target's own outbound map record before this call.</summary>
+/// the transport. What each returned picture IS — untouched, authored, the neutral — was settled against
+/// that target's own outbound map record before this call.</summary>
 public static class BlenderMaterialReturn
 {
+    /// <param name="alphaSource">The RMO an authored RMO's alpha is rebuilt from, by submesh: the picture the
+    /// session sent that submesh's RMO slot — the game's map, or the modder's own. Null where nothing was
+    /// sent, which ships the mask empty.</param>
     public static IReadOnlyList<SubmeshTextures> Normalize(IReadOnlyList<IncomingMaps> maps,
-        string stagingDirectory, Func<int, string?>? stockRmoPng = null, Action<string>? report = null)
+        string stagingDirectory, Func<int, string?>? alphaSource = null, Action<string>? report = null)
     {
         ArgumentNullException.ThrowIfNull(maps);
         var rows = new List<SubmeshTextures>();
         for (int submesh = 0; submesh < maps.Count; submesh++)
         {
-            var albedo = Take(maps[submesh].BaseColor, stagingDirectory, submesh, "base");
-            var normal = Take(maps[submesh].Normal, stagingDirectory, submesh, "normal");
-            var rmo = TakeRmo(maps[submesh].Rmo, stagingDirectory, submesh, stockRmoPng, report);
+            var albedo = Take(maps[submesh].BaseColor, stagingDirectory, submesh, "base", hasFlatMap: false);
+            var normal = Take(maps[submesh].Normal, stagingDirectory, submesh, "normal", hasFlatMap: true);
+            var rmo = TakeRmo(maps[submesh].Rmo, stagingDirectory, submesh, alphaSource, report);
             (string? File, SlotOrigin Origin) blend = default;
             var textures = new List<PropertyTextureBinding>();
             var primaryKinds = new HashSet<MapKind>();
@@ -34,11 +38,15 @@ public static class BlenderMaterialReturn
                 if (fixedKind && primaryKinds.Add(texture.Kind))
                 {
                     if (texture.Kind == MapKind.Blend)
-                        blend = Take(texture.Map, stagingDirectory, submesh, texture.ShaderProperty);
+                        blend = Take(texture.Map, stagingDirectory, submesh, texture.ShaderProperty,
+                            hasFlatMap: false);
                     continue;
                 }
-                var taken = Take(texture.Map, stagingDirectory, submesh, texture.ShaderProperty);
-                if (taken.Origin.IsAsk())
+                // Only the fixed normal and RMO slots have a flat map to go to; every other property that
+                // lost its picture goes back to the original one.
+                var taken = Take(texture.Map, stagingDirectory, submesh, texture.ShaderProperty,
+                    hasFlatMap: false);
+                if (taken.Origin != SlotOrigin.None)
                     textures.Add(new PropertyTextureBinding
                     {
                         ShaderProperty = texture.ShaderProperty,
@@ -46,8 +54,13 @@ public static class BlenderMaterialReturn
                         Origin = taken.Origin,
                     });
             }
-            if (!albedo.Origin.IsAsk() && !normal.Origin.IsAsk() && !rmo.Origin.IsAsk()
-                && !blend.Origin.IsAsk() && textures.Count == 0) continue;
+            // A row for every submesh whose slots ANSWERED — an untouched slot answers too, and its row is
+            // what keeps the publish from reading its silence as "nothing here, inherit". Whether the row
+            // asks for anything is its own question (SubmeshTextures.Asks); a submesh no slot answered on
+            // gets no row, and every slot of it inherits.
+            if (albedo.Origin == SlotOrigin.None && normal.Origin == SlotOrigin.None
+                && rmo.Origin == SlotOrigin.None && blend.Origin == SlotOrigin.None
+                && textures.Count == 0) continue;
             rows.Add(new SubmeshTextures
             {
                 Submesh = submesh,
@@ -66,38 +79,45 @@ public static class BlenderMaterialReturn
         return rows;
     }
 
+    /// <param name="hasFlatMap">Whether the slot has a flat map to go to when its picture was taken off
+    /// (<see cref="MapAnswer.Removed"/>): the fixed normal and RMO slots do, and land flat — what Blender
+    /// showed; a slot without one lands on the original picture, the only other thing it can draw.</param>
     private static (string? File, SlotOrigin Origin) Take(ResolvedMap map, string root,
-        int submesh, string input)
+        int submesh, string input, bool hasFlatMap)
     {
-        if (map.Origin == MapOrigin.Authored && map.AuthoredPng is not null)
+        if (map.Answer == MapAnswer.Authored && map.AuthoredPng is not null)
         {
             string path = PathFor(root, submesh, input);
             TextureIngress.Publish(map.AuthoredPng, path);
             return (path, SlotOrigin.Authored);
         }
-        if (map.Origin == MapOrigin.Neutral) return (null, SlotOrigin.ExplicitNeutral);
-        // A slot still bound to the map the export embedded THERE ships nothing: the build reads it off the
-        // game. A stock map plugged into a slot it was not exported on never reaches here — another part's,
-        // or another material of this one's — because the read before this call classifies it Authored, and it
-        // ships as this slot's own map. That is exactly what carries a deliberate texture link, either way.
-        if (map.Origin == MapOrigin.Vanilla) return (null, SlotOrigin.VanillaOwn);
+        if (map.Answer == MapAnswer.Neutral || (map.Answer == MapAnswer.Removed && hasFlatMap))
+            return (null, SlotOrigin.ExplicitNeutral);
+        // A slot still holding the picture the session sent it asks for nothing, and the publish leaves its
+        // binding as it stands — the game's map on a slot that had the game's map, the modder's own asset on
+        // a slot that had that. A stock map plugged into a slot it was not sent on never reaches here — another
+        // part's, or another material of this one's — because the read before this call classifies it
+        // Authored, and it ships as this slot's own map. That is exactly what carries a deliberate texture
+        // link, either way.
+        if (map.Answer == MapAnswer.Untouched) return (null, SlotOrigin.Untouched);
         return (null, SlotOrigin.None);
     }
 
     /// <summary>The RMO slot. Only the authored case differs from the others: the shipped map's alpha is
-    /// rebuilt from the stock map <paramref name="stockRmoPng"/> names rather than taken from Blender, and it
-    /// is the only case that asks.</summary>
+    /// rebuilt from the picture <paramref name="alphaSource"/> names — the RMO the session sent that submesh,
+    /// the game's or the modder's own — rather than taken from Blender, and it is the only case that
+    /// asks.</summary>
     private static (string? File, SlotOrigin Origin, RmoAlphaAnswer? Alpha) TakeRmo(
-        ResolvedMap map, string root, int submesh, Func<int, string?>? stockRmoPng,
+        ResolvedMap map, string root, int submesh, Func<int, string?>? alphaSource,
         Action<string>? report)
     {
-        if (map.Origin != MapOrigin.Authored || map.AuthoredPng is null)
+        if (map.Answer != MapAnswer.Authored || map.AuthoredPng is null)
         {
-            var taken = Take(map, root, submesh, "rmo");
+            var taken = Take(map, root, submesh, "rmo", hasFlatMap: true);
             return (taken.File, taken.Origin, null);
         }
         string path = PathFor(root, submesh, "rmo");
-        TextureIngress.Publish(WithStockAlpha(map.AuthoredPng, stockRmoPng?.Invoke(submesh), report), path);
+        TextureIngress.Publish(WithAlphaOf(map.AuthoredPng, alphaSource?.Invoke(submesh), report), path);
         return (path, SlotOrigin.Authored, RmoAlphaAnswer.Rebuild);
     }
 
@@ -110,19 +130,19 @@ public static class BlenderMaterialReturn
         return Path.Combine(directory, safe + ".png");
     }
 
-    private static byte[] WithStockAlpha(byte[] authoredPng, string? stockRmo, Action<string>? report)
+    private static byte[] WithAlphaOf(byte[] authoredPng, string? alphaSource, Action<string>? report)
     {
         using var authored = Image.Load<Rgba32>(authoredPng);
-        using var stock = LoadStockRmo(stockRmo, report);
-        int width = Math.Max(authored.Width, stock?.Width ?? 0);
-        int height = Math.Max(authored.Height, stock?.Height ?? 0);
+        using var source = LoadAlphaSource(alphaSource, report);
+        int width = Math.Max(authored.Width, source?.Width ?? 0);
+        int height = Math.Max(authored.Height, source?.Height ?? 0);
         using var result = new Image<Rgba32>(width, height);
         for (int y = 0; y < height; y++)
             for (int x = 0; x < width; x++)
             {
                 var pixel = authored[Nearest(x, width, authored.Width), Nearest(y, height, authored.Height)];
-                byte alpha = stock is null ? (byte)0
-                    : stock[Nearest(x, width, stock.Width), Nearest(y, height, stock.Height)].A;
+                byte alpha = source is null ? (byte)0
+                    : source[Nearest(x, width, source.Width), Nearest(y, height, source.Height)].A;
                 result[x, y] = new Rgba32(pixel.R, pixel.G, pixel.B, alpha);
             }
         using var stream = new MemoryStream();
@@ -130,19 +150,19 @@ public static class BlenderMaterialReturn
         return stream.ToArray();
     }
 
-    private static Image<Rgba32>? LoadStockRmo(string? stockRmo, Action<string>? report)
+    private static Image<Rgba32>? LoadAlphaSource(string? alphaSource, Action<string>? report)
     {
-        if (stockRmo is null) return null;
-        if (!File.Exists(stockRmo))
+        if (alphaSource is null) return null;
+        if (!File.Exists(alphaSource))
         {
-            report?.Invoke($"Couldn't find {Path.GetFileName(stockRmo)} for its emissive mask. "
+            report?.Invoke($"Couldn't find {Path.GetFileName(alphaSource)} for its emissive mask. "
                 + "The RMO is saved without one.");
             return null;
         }
-        try { return Image.Load<Rgba32>(stockRmo); }
+        try { return Image.Load<Rgba32>(alphaSource); }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            report?.Invoke($"Couldn't read {Path.GetFileName(stockRmo)} for its emissive mask. "
+            report?.Invoke($"Couldn't read {Path.GetFileName(alphaSource)} for its emissive mask. "
                 + $"The RMO is saved without one. ({e.Message})");
             return null;
         }

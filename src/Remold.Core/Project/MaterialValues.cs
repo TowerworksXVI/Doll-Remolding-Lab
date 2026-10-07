@@ -4,8 +4,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace Remold.Core.Project;
 
@@ -92,6 +90,10 @@ public static class MaterialValueCatalog
     /// per layout across every declaring shader variant — measured, zero conflicts.</summary>
     public static readonly IReadOnlyList<MaterialValueField> Fields = new MaterialValueField[]
     {
+        new("_BaseColor", "Base colour",
+            MaterialValueKind.Color, MaterialValueSource.SerializedValue, 'A', 0.0f, 1.0f, 176, 176),
+        new("_UseRampMap", "Toon ramp on/off",
+            MaterialValueKind.Float, MaterialValueSource.SerializedValue, 'A', 0.0f, 1.0f, 484, 484),
         new("_StockingCenterColor", "Stocking centre colour",
             MaterialValueKind.Color, MaterialValueSource.SerializedValue, 'A', 0.0f, 1.0f, 80, 80),
         new("_StockingFalloffColor", "Stocking edge colour",
@@ -223,7 +225,7 @@ public static class MaterialValueCatalog
     // prevents a static material snapshot from freezing gameplay or effect state.
     private static readonly HashSet<string> DynamicFields = new(StringComparer.Ordinal)
     {
-        "_FinalTint", "_BaseMap_ST", "_BaseColor", "_AoeSelectColor", "_BumpMap_ST",
+        "_FinalTint", "_BaseMap_ST", "_AoeSelectColor", "_BumpMap_ST",
         "_EmissiveIntensity", "_EnableHolographicScanline", "_HolographicIntensity",
         "_HolographicColor", "_HolographicWidth", "_ConcealLerp", "_ShadowBiasDistance",
         "_DissolveIntensity", "_DissolveTex_ST", "_TutorialColor", "_Tutorial", "_OnHitColor",
@@ -481,6 +483,25 @@ public static class MaterialFamilyClassifier
         StringComparison.OrdinalIgnoreCase) || family.Equals("faceuber",
         StringComparison.OrdinalIgnoreCase) || family.Equals("eyelashuber",
         StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The character passes the game's material setup switches off on every material, each
+    /// with the one family it switches back on (null: none). Every other pass stays on.</summary>
+    private static readonly IReadOnlyDictionary<string, string?> FamilyOnlyPasses =
+        new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["GFCharFaceShadow"] = "faceuber",
+            ["GFCharHairTransE"] = "fringeuber",
+            ["GFHairShadow"] = "fringeuber",
+            ["GFStencilOutline"] = null,
+            ["GFStencilBGOutline"] = null,
+            ["GFStencilUnderBG"] = null,
+        };
+
+    /// <summary>Whether the game can draw a material of <paramref name="family"/> through the named
+    /// pass. A pass it never switches on for the family is never bound at that material's draws.</summary>
+    public static bool GameDrawsPass(string? family, string passName) =>
+        !FamilyOnlyPasses.TryGetValue(passName, out var only)
+        || (only is not null && string.Equals(family, only, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>Resolves family-derived values only after exact material objects have been re-anchored.
@@ -568,7 +589,7 @@ public static class MaterialFamilyDifferences
 /// backend supplies the current render plan and exact source-game value.</summary>
 public static class MaterialValueBuildSupport
 {
-    public const string OutputPurpose = "semantic material-value patch shader";
+    public const string OutputPurpose = "semantic material-value patch";
 
     public static BuildOperationResolution Resolve(BuildBindingRequest request,
         BuildRenderPlan renderPlan, IMaterialGameValueReader? gameValues = null)
@@ -641,7 +662,6 @@ public static class MaterialValueBuildSupport
                     .ToArray(), carrierOwned)));
         }
 
-        string key = ArtifactKey(request.RowId + "|" + semantic + "|" + canonical);
         var emissions = new List<BuildRuntimeEmission>();
         var outputs = new List<BuildOutputArtifact>();
         for (int i = 0; i < patches.Count; i++)
@@ -654,9 +674,10 @@ public static class MaterialValueBuildSupport
                 $"patches only {semantic}; {carrierOwned.Count} material differences remain carrier-owned",
                 patch);
             emissions.Add(emission);
-            outputs.Add(new BuildOutputArtifact(id + ":shader", OutputPurpose,
-                $"material-patch:{semantic}:{canonical}:{patch.Layout}:live-carrier",
-                $"generated/material_patch_{key}_{i.ToString(CultureInfo.InvariantCulture)}.hlsl",
+            // The patched constants exist only at the draw: the emitter writes the pass that makes them,
+            // one per patched draw group, so the plan names no file for them.
+            outputs.Add(new BuildOutputArtifact(id + ":constants", OutputPurpose,
+                $"material-patch:{semantic}:{canonical}:{patch.Layout}:live-carrier", null,
                 true, new[] { id }, sourceReason));
         }
 
@@ -742,75 +763,6 @@ public static class MaterialValueBuildSupport
         };
     }
 
-    private static string ArtifactKey(string value)
-    {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(value));
-        return Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant();
-    }
-}
-
-public sealed record GeneratedMaterialPatchFile(
-    string OutputId,
-    string File,
-    string FunctionalIdentity,
-    string Text);
-
-/// <summary>Materializes the shader artifacts named by resolved Build-plan patch emissions. INI binding
-/// remains part of the Build-emitter cutover; this output is the semantic patch program it consumes.</summary>
-public static class MaterialValuePatchEmitter
-{
-    public static IReadOnlyList<GeneratedMaterialPatchFile> Emit(AuthoredBuildPlan plan)
-    {
-        ArgumentNullException.ThrowIfNull(plan);
-        if (!plan.CanBuild)
-            throw new InvalidOperationException("cannot emit material patches from a blocking Build plan");
-        var files = new List<GeneratedMaterialPatchFile>();
-        foreach (var planned in plan.RuntimeEmissions.Where(emission =>
-            emission.Verdict == BuildPlanVerdict.Resolved
-            && emission.Emission.Kind == BuildEmissionKind.MaterialValuePatch))
-        {
-            var patch = planned.Emission.MaterialPatch
-                ?? throw new InvalidOperationException(
-                    $"material emission '{planned.Emission.Id}' has no patch payload");
-            var outputs = plan.OutputArtifacts.Where(output => output.Artifact.Included
-                && output.Artifact.EmissionIds.Contains(planned.Emission.Id, StringComparer.Ordinal)
-                && string.Equals(output.Artifact.Purpose, MaterialValueBuildSupport.OutputPurpose,
-                    StringComparison.Ordinal)).ToList();
-            if (outputs.Count != 1 || outputs[0].Artifact.File is null)
-                throw new InvalidOperationException(
-                    $"material emission '{planned.Emission.Id}' has {outputs.Count} patch artifacts");
-            files.Add(new GeneratedMaterialPatchFile(outputs[0].Artifact.Id,
-                outputs[0].Artifact.File!,
-                outputs[0].Artifact.FunctionalIdentity, EmitShader(patch)));
-        }
-        return files;
-    }
-
-    public static string EmitShader(MaterialConstantBufferPatch patch)
-    {
-        var errors = MaterialValuePatchValidator.Errors(patch);
-        if (errors.Count > 0)
-            throw new ArgumentException("invalid material patch: " + string.Join("; ", errors),
-                nameof(patch));
-        var text = new StringBuilder();
-        text.Append("RWByteAddressBuffer material_state : register(u0);\n\n")
-            .Append("[numthreads(1, 1, 1)]\n")
-            .Append("void main(uint3 id : SV_DispatchThreadID)\n{\n")
-            .Append("    if (id.x != 0) return;\n")
-            .Append("    uint material_bytes;\n")
-            .Append("    material_state.GetDimensions(material_bytes);\n")
-            .Append("    if (material_bytes != ")
-            .Append(patch.ByteWidth.ToString(CultureInfo.InvariantCulture)).Append("u) return;\n");
-        foreach (var write in patch.Writes.OrderBy(write => write.ByteOffset))
-        {
-            uint bits = unchecked((uint)BitConverter.SingleToInt32Bits(write.Value));
-            text.Append("    material_state.Store(")
-                .Append(write.ByteOffset.ToString(CultureInfo.InvariantCulture)).Append(", 0x")
-                .Append(bits.ToString("x8", CultureInfo.InvariantCulture)).Append("u);\n");
-        }
-        text.Append("}\n");
-        return text.ToString();
-    }
 }
 
 public static class MaterialConstantBufferPatcher

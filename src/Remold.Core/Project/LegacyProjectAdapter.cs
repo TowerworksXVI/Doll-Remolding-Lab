@@ -196,31 +196,9 @@ public static class LegacyProjectAdapter
                 }, new Binding { Kind = BindingKind.ProjectAsset, ProjectAssetId = geometry.Id },
                     "geometry:lod0");
 
-                int tierIndex = 0;
-                foreach (var oldTier in target.LodSlots ?? Enumerable.Empty<Export.LodSlot>())
-                {
-                    var tier = part.Resolution?.Tiers?.SingleOrDefault(t =>
-                        string.Equals(t.LegacyRendererSlot, oldTier.ObjectName, StringComparison.OrdinalIgnoreCase));
-                    if (tier is null)
-                    {
-                        Report.Add("identity.tier", MigrationDisposition.Unresolved, Scope(route),
-                            $"The '{oldTier.ObjectName}' level of detail is not in the current game "
-                            + "files.");
-                    }
-                    else if (oldTier.PathId is { } oldPath && oldPath != 0 && tier.Mesh.PathId != oldPath)
-                        Report.Add("identity.moved", MigrationDisposition.Inferred, Scope(route),
-                            $"The game's mesh for '{oldTier.ObjectName}' changed in a game update, "
-                            + "and the mod now uses the current one.");
-                    AddBinding(part, new TargetSlot
-                    {
-                        Part = Clone(part.Route),
-                        Tier = tier?.Tier ?? $"legacy-{++tierIndex}",
-                        Input = TargetInputKind.Geometry,
-                        Renderer = tier is null ? MissingRef(oldTier.ObjectName) : Clone(tier.Renderer),
-                        Mesh = tier is null ? MissingRef(oldTier.ObjectName, oldTier.PathId) : Clone(tier.Mesh),
-                    }, new Binding { Kind = BindingKind.ProjectAsset, ProjectAssetId = geometry.Id },
-                        $"geometry:{oldTier.ObjectName}");
-                }
+                // The part's lower-detail versions get no slot of their own. They take the same replacement
+                // the closest one does, and the build reaches them from the install rather than from the
+                // project, so a slot per level would be a route the mod could never answer differently.
 
                 foreach (var row in target.DonorTextures ?? Enumerable.Empty<SubmeshTextures>())
                     AdaptDonorRow(part, edit, row, geometry);
@@ -701,7 +679,7 @@ public static class LegacyProjectAdapter
                 }
                 else binding = new Binding { Kind = BindingKind.Neutral };
             }
-            else if (origin == SlotOrigin.VanillaOwn)
+            else if (origin == SlotOrigin.Untouched)
                 binding = (input == TargetInputKind.Ramp
                     ? KeepOwnRampBinding(part, edit, row.Submesh) : null)
                     ?? new Binding { Kind = BindingKind.InheritedLiveCarrier };
@@ -1107,6 +1085,9 @@ public static class LegacyProjectAdapter
             Outfit = source.Outfit,
             Preview = source.Preview,
             ToggleKey = source.ToggleKey,
+            // whether the mod's own key keeps its position across launches is the author's choice and
+            // survives the update, exactly as the key itself does
+            PersistToggleKey = source.PersistToggleKey,
             IncludeRepairData = source.IncludeRepairData,
         };
 

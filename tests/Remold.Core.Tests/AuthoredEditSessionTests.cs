@@ -69,6 +69,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = Fixture();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         var rendererBefore = project.TargetSlots.Single(s => s.Id == "slot-geometry").Renderer;
         string currentAsset = Binding(project, "edit-long", "slot-geometry").ProjectAssetId!;
         string currentFile = project.ProjectAssets.Single(asset => asset.Id == currentAsset).File;
@@ -118,6 +119,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = Fixture();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         var binding = Binding(project, "edit-long", "slot-geometry");
         binding.Kind = BindingKind.TargetGameValue;
         binding.ProjectAssetId = null;
@@ -184,6 +186,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = FixtureWithPictureSlots();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         Binding(project, "edit-short", "slot-base").ProjectAssetId = "base-source";
         string canonical = Path.Combine(_root, "textures", "base.png");
         WritePng(canonical, 10);
@@ -216,6 +219,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = FixtureWithPictureSlots();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         Binding(project, "edit-short", "slot-base").ProjectAssetId = "base-source";
         string canonical = Path.Combine(_root, "textures", "base.png");
         WritePng(canonical, 30);
@@ -256,6 +260,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = FixtureWithPictureSlots();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         string canonical = Path.Combine(_root, "textures", "base.png");
         WritePng(canonical, 40);
         var session = new AuthoredEditSession(project);
@@ -296,11 +301,12 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = FixtureWithPictureSlots();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         WritePng(Path.Combine(_root, "textures", "base.png"), 50);
         var session = new AuthoredEditSession(project);
         string dropped = Path.Combine(_root, "drops", "replacement.png");
         WritePng(dropped, 51);
-        string standing = Path.Combine(_root, ProjectAssetIngress.DirectoryName, "sources");
+        string standing = Path.Combine(project.TransportRoot, "sources");
         Directory.CreateDirectory(standing);
 
         Assert.Throws<InvalidDataException>(() => session.Compound(change =>
@@ -311,7 +317,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
             throw new InvalidDataException("the batch refuses after its files landed");
         }));
 
-        Assert.False(Directory.Exists(Path.Combine(_root, ProjectAssetIngress.DirectoryName, "edit-long")),
+        Assert.False(Directory.Exists(Path.Combine(project.TransportRoot, "edit-long")),
             "the refused batch left its transport folder behind");
         Assert.False(Directory.Exists(Path.Combine(_root, "assets", "edits", "edit-long")),
             "the refused batch left an assets folder behind");
@@ -332,6 +338,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = FixtureWithPictureSlots();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         WritePng(Path.Combine(_root, "textures", "base.png"), 60);
         var session = new AuthoredEditSession(project);
         int changes = 0;
@@ -382,6 +389,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
     {
         var project = Fixture();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         var session = new AuthoredEditSession(project);
 
         var refused = Assert.Throws<InvalidOperationException>(() =>
@@ -394,6 +402,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
         var project = new AuthoredProject
         {
             RootDir = _root,
+            TransportRoot = Path.Combine(_root, "round-trips"),
             Info = new ProjectInfo { Name = "Ingress fixture", Version = "1.0" },
             ProjectAssets = new List<ProjectAsset>
             {

@@ -20,6 +20,20 @@ dotnet test tests/Remold.Core.Tests
   bug in the other.
 - **Synthetic-reachable surface only.** Anything that needs a real UnityFS bundle from the game is out
   of the synthetic unit suite.
+- **The test process has no Avalonia platform.** Nothing calls `SetupWithoutStarting` or starts a
+  per-assembly headless session. With no platform registered, `Dispatcher.UIThread` accepts every
+  thread and the window's marshalled work runs inline, which is what the view-model tests drive; a
+  platform registered process-wide binds that dispatcher to one thread and every later test posts to
+  a loop nobody runs. A test that needs a real picture runs its body in
+  `Support/HeadlessPictures.RunAsync`; a test that needs a window starts its own per-test
+  `HeadlessUnitTestSession`. Both are isolated to the test and leave nothing registered.
+- **Page tests run on the page's own thread.** A test that drives a page whose work lands on workers
+  (a plan, an install read) is `[UiFact]`/`[UiTheory]` (`Support/UiFact.cs`): the body runs on a
+  `PumpedUiThread`, and the page takes that pump as its dispatch, so a worker's redraw lands when the
+  body yields and never beside a read. A body must not block its own thread waiting for work that
+  needs it; wait by yielding. Every run records a trx under `out/testresults`
+  (`Directory.Build.props` pins `test.runsettings`), so a failure keeps its name even when it does
+  not reproduce.
 
 ## Coverage (foundational data-layer areas)
 

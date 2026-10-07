@@ -75,7 +75,14 @@ public enum PlannedPartDisposition
 }
 
 /// <summary>The runtime discriminator that keeps one emitted action on its intended draw.</summary>
-public sealed record BuildTargetingProof(string Kind, string Detail);
+public sealed record BuildTargetingProof(string Kind, string Detail)
+{
+    /// <summary>The proof a change on one material of a part the edit does not replace carries: the game's
+    /// own draw of that material, told apart from its sibling materials' draws by its index range. The
+    /// build reads this kind to send the change to the part's own draws rather than through a
+    /// replacement.</summary>
+    public const string StockDrawRange = "stock-material-draw-range";
+}
 
 /// <summary>A backend verdict for one effective request. Resolved runtime actions require a targeting
 /// proof; inherited values emit no action.
@@ -138,6 +145,15 @@ public interface IAuthoredBuildBackend
     BuildOperationResolution ResolveBinding(BuildBindingRequest request);
     BuildOperationResolution ResolveVisibility(BuildVisibilityRequest request);
     BuildLifecycleResolution ResolveLifecycle(BuildLifecycleRequest request);
+    BuildOperationResolution ResolveMaterialEffect(BuildMaterialEffectRequest request) =>
+        new(BuildPlanDecision.Blocked(BuildPlanVerdict.Unsupported,
+            "this effect cannot be disabled by this build backend"), null);
+
+    /// <summary>Why a change on this material cannot be kept to the game's own draws of it, or null when it
+    /// can. Those draws are told apart from the part's other materials by their index range, and a part that
+    /// lists more materials than its mesh has submeshes draws the last submesh once per extra material, over
+    /// one range. Null from a backend that cannot read the part: the build judges every tier again.</summary>
+    string? StockDrawBlock(TargetSlot currentSlot) => null;
 }
 
 public sealed record PlannedBinding(
@@ -352,11 +368,17 @@ public static class AuthoredBuildPlanner
                 foreach (var binding in activation.Edit.Bindings)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    var slot = slots[binding.SlotId];
+                    if (slot.Input == TargetInputKind.MaterialValue && slot.Semantic is { } semantic
+                        && MaterialEffectCatalog.IsValueDisabled(activation.Edit,
+                            slot.MaterialSlotIndex ?? slot.SubmeshIndex ?? -1, semantic)) continue;
                     var row = PlanBinding(project, backend, activation.Edit, binding, gate,
                         assets, slots, edits);
                     rows.Add(row);
                 }
-                rows = DropCarrierlessMaterialValues(project, activation.Edit, rows, warnings, owners);
+                foreach (var effect in activation.Edit.DisabledMaterialEffects ?? new List<DisabledMaterialEffect>())
+                    rows.Add(PlanMaterialEffect(backend, activation.Edit, effect, gate));
+                rows = RouteMaterialValues(project, backend, activation.Edit, rows, warnings, owners);
                 rows = DropGamePicturesOnReplacement(activation.Edit, rows, warnings, owners);
                 foreach (var row in rows)
                 {
@@ -477,10 +499,6 @@ public static class AuthoredBuildPlanner
         }
     }
 
-    /// <summary>Material patches ride a replacement's own submitted geometry. Remove an otherwise valid
-    /// patch when this edit has no replacement in the build, or when the replacement file proves that the
-    /// addressed material position contains no indices. This is authored residue, not a capability failure:
-    /// the rest of the edit remains buildable and the warning explains the omitted value.</summary>
     /// <summary>The edits each conflict or warning line is about, gathered as the lines are written. The
     /// alternative a page is left with otherwise is matching an edit's name against the text, which marks
     /// every edit that shares a name and every edit whose name is a word.</summary>
@@ -512,12 +530,19 @@ public static class AuthoredBuildPlanner
                 StringComparer.Ordinal);
     }
 
-    private static List<PlannedBinding> DropCarrierlessMaterialValues(AuthoredProject project,
-        EditDefinition edit, List<PlannedBinding> rows, List<string> warnings, IssueOwners owners)
+    /// <summary>Where each resolved shading value and effect of this edit reaches the game. With a mesh
+    /// replacement in the build, it runs around the replacement's own draws, and a value on a material no face
+    /// of the replacement uses is removed with a warning: authored residue, not a capability failure, so the
+    /// rest of the edit still builds. Without one, it runs at the game's own draw of that material, which the
+    /// row's proof says so the build sends it there; a material whose draw cannot be told apart from another
+    /// material's blocks the row, saying why.</summary>
+    private static List<PlannedBinding> RouteMaterialValues(AuthoredProject project,
+        IAuthoredBuildBackend backend, EditDefinition edit, List<PlannedBinding> rows, List<string> warnings,
+        IssueOwners owners)
     {
         var values = rows.Where(row => row.AuthoredSlot.Input == TargetInputKind.MaterialValue
             && row.Decision.Verdict == BuildPlanVerdict.Resolved
-            && row.Emissions.Any(emission => emission.Kind == BuildEmissionKind.MaterialValuePatch))
+            && row.Emissions.Any(emission => emission.Kind is BuildEmissionKind.MaterialValuePatch or BuildEmissionKind.MaterialEffect))
             .ToList();
         if (values.Count == 0) return rows;
 
@@ -527,14 +552,7 @@ public static class AuthoredBuildPlanner
             && !row.Decision.BlocksBuild
             && row.EffectiveValue?.ProjectAsset is { Kind: ProjectAssetKind.Geometry });
         if (replacement?.EffectiveValue?.ProjectAsset is not { } geometry)
-        {
-            string warning = $"{EditName(edit)}'s shading values will not take effect: they apply only "
-                + "through this edit's own mesh replacement, and it has none in this build. Replace the "
-                + "part's mesh in this edit, or remove its shading values.";
-            warnings.Add(warning);
-            owners.Own(warning, edit.Id);
-            return rows.Select(row => values.Contains(row) ? Drop(row, warning) : row).ToList();
-        }
+            return rows.Select(row => values.Contains(row) ? OnStockDraw(backend, row) : row).ToList();
 
         int[]? counts = ReplacementIndexCounts(project, geometry);
         var dropped = new Dictionary<PlannedBinding, string>();
@@ -567,6 +585,33 @@ public static class AuthoredBuildPlanner
         };
     }
 
+    /// <summary>One shading row sent to the game's own draw of its material: blocked where the backend says
+    /// that draw cannot be told apart from another material's, else carrying the stock-draw proof on its
+    /// decision and on every emission it makes.</summary>
+    private static PlannedBinding OnStockDraw(IAuthoredBuildBackend backend, PlannedBinding row)
+    {
+        if (backend.StockDrawBlock(row.CurrentSlot!) is { } blocked)
+            return row with
+            {
+                Operation = new BuildOperationResolution(
+                    BuildPlanDecision.Blocked(BuildPlanVerdict.Unsupported, blocked), null,
+                    Array.Empty<BuildRuntimeEmission>(), Array.Empty<BuildOutputArtifact>()),
+            };
+        var slot = row.CurrentSlot!;
+        var proof = new BuildTargetingProof(BuildTargetingProof.StockDrawRange,
+            $"{slot.Renderer?.GameBuild}:{slot.Renderer?.LogicalBundle}:{slot.Renderer?.PathId} / material "
+            + (slot.MaterialSlotIndex ?? slot.SubmeshIndex));
+        return row with
+        {
+            Operation = row.Operation with
+            {
+                Decision = row.Decision with { TargetingProof = proof },
+                Emissions = row.Emissions.Select(emission => emission with { TargetingProof = proof })
+                    .ToArray(),
+            },
+        };
+    }
+
     private static int[]? ReplacementIndexCounts(AuthoredProject project, ProjectAsset geometry)
     {
         if (project.RootDir is null) return null;
@@ -576,8 +621,9 @@ public static class AuthoredBuildPlanner
         catch { return null; }
     }
 
-    /// <summary>A replacement draws only its edit-output maps. Old development files may still bind
-    /// stock game-material pictures on the same edit; keep that residue advisory and omit its emissions.</summary>
+    /// <summary>A replacement draws only its edit-output maps. A picture the same edit binds on a stock game
+    /// material takes no effect, so the edit says so and the binding leaves the plan: the mod as built, and its
+    /// record, hold no state for it.</summary>
     private static List<PlannedBinding> DropGamePicturesOnReplacement(EditDefinition edit,
         List<PlannedBinding> rows, List<string> warnings, IssueOwners owners)
     {
@@ -601,11 +647,7 @@ public static class AuthoredBuildPlanner
             + "textures will not take effect. A replacement uses this edit's own maps instead.";
         warnings.Add(warning);
         owners.Own(warning, edit.Id);
-        return rows.Select(row => pictures.Contains(row) ? row with
-        {
-            Operation = new BuildOperationResolution(BuildPlanDecision.Inherited(warning), null,
-                Array.Empty<BuildRuntimeEmission>(), Array.Empty<BuildOutputArtifact>()),
-        } : row).ToList();
+        return rows.Where(row => !pictures.Contains(row)).ToList();
     }
 
     private sealed record AuthoredPlacement(PlanCondition Condition, string Name);
@@ -756,6 +798,27 @@ public static class AuthoredBuildPlanner
             && placement.Condition.StateIndex == offIndex));
         return new PartToggle { Key = key, StartsOff = !contentOn,
             OffState = hiddenOff ? CompositionState.Hidden : CompositionState.Vanilla };
+    }
+
+    private static PlannedBinding PlanMaterialEffect(IAuthoredBuildBackend backend, EditDefinition edit,
+        DisabledMaterialEffect effect, BuildEmissionGate gate)
+    {
+        string id = edit.Id + ":effect:" + effect.MaterialSlotIndex + ":" + effect.EffectId;
+        var slot = new TargetSlot
+        {
+            Id = id, Part = edit.Target, Domain = TargetSlotDomain.Game,
+            Input = TargetInputKind.MaterialValue, MaterialSlotIndex = effect.MaterialSlotIndex,
+            SubmeshIndex = effect.MaterialSlotIndex, Semantic = "effect:" + effect.EffectId,
+        };
+        var binding = new Binding { SlotId = id, Kind = BindingKind.TargetGameValue };
+        var current = NormalizeSlot(backend.ResolveSlot(slot), slot, id);
+        var operation = current.Verdict == BuildPlanVerdict.Resolved
+            ? NormalizeOperation(backend.ResolveMaterialEffect(new BuildMaterialEffectRequest(id,
+                edit.Id, slot, current.CurrentSlot!, effect.EffectId, gate)),
+                BuildRuntimeAction.BindProjectAsset, slot.Input, gate, id, BuildEmissionKind.MaterialEffect)
+            : new BuildOperationResolution(BuildPlanDecision.Blocked(current.Verdict, current.Reason,
+                current.Detail), null);
+        return new PlannedBinding(id, edit.Id, slot, current.CurrentSlot, binding, null, gate, operation);
     }
 
     private static PlannedBinding PlanBinding(AuthoredProject project, IAuthoredBuildBackend backend,
@@ -980,7 +1043,8 @@ public static class AuthoredBuildPlanner
     }
 
     private static BuildOperationResolution NormalizeOperation(BuildOperationResolution? resolution,
-        BuildRuntimeAction expectedAction, TargetInputKind input, BuildEmissionGate gate, string at)
+        BuildRuntimeAction expectedAction, TargetInputKind input, BuildEmissionGate gate, string at,
+        BuildEmissionKind? emissionKind = null)
     {
         if (resolution is null)
             return new BuildOperationResolution(
@@ -1000,7 +1064,7 @@ public static class AuthoredBuildPlanner
                     resolution.Emissions, resolution.OutputArtifacts);
         }
         var operationErrors = AuthoredRenderPlanValidator.OperationErrors(resolution,
-            ExpectedEmission(expectedAction, input), gate,
+            emissionKind ?? ExpectedEmission(expectedAction, input), gate,
             requireComplete: decision.Verdict == BuildPlanVerdict.Resolved);
         if (operationErrors.Count > 0)
             return new BuildOperationResolution(DecisionGuard(

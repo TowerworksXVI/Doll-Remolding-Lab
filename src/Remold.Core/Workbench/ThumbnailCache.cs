@@ -15,7 +15,7 @@ namespace Remold.Core.Workbench;
 /// The persistent, async preview cache for the Outfit Workbench: a decoded Texture2D (base mip, BGRA)
 /// downscaled to fit <see cref="MaxDim"/>×<see cref="MaxDim"/> and written as a PNG under
 /// <c>%LOCALAPPDATA%\DollRemoldingLab\thumbs\&lt;catalogVersion&gt;\&lt;bundleId&gt;\&lt;textureName&gt;.png</c>.
-/// Recipe mesh previews share that version directory under <c>meshes6\&lt;bundleId&gt;\&lt;meshName&gt;.png</c>,
+/// Recipe mesh previews share that version directory under <c>meshes7\&lt;bundleId&gt;\&lt;meshName&gt;.png</c>,
 /// with a vertex-count sidecar so a cache hit can populate the inspector without reopening the game bundle.
 ///
 /// <para><b>Keying.</b> catalog version + source bundle + asset name — the same (bundle, name) identity the
@@ -101,24 +101,28 @@ public sealed class ThumbnailCache
     public readonly record struct MeshThumb(string Path, int VertexCount);
 
     /// <summary>The on-disk PNG path for a recipe mesh. Bundle identity is part of the key because the game
-    /// carries same-named mesh copies in different bundles. The <c>meshes6</c> directory is the render-format
-    /// discriminator: textured, Blender-handed and scene-rest-uprighted like the export. It supersedes
-    /// <c>meshes5</c>, whose count-only read could cache untextured renders; the bump orphans those entries
-    /// instead of serving them as textured. A non-zero <paramref name="pathId"/> joins the key, since
-    /// smr-body parts select by exact path id.</summary>
-    public string MeshPathFor(string bundleId, string meshName, string catalogVersion, long pathId = 0) =>
-        Path.Combine(_root, Sanitize(catalogVersion), "meshes6", Sanitize(bundleId),
-            Sanitize(meshName) + (pathId != 0 ? "." + pathId.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") + ".png");
+    /// carries same-named mesh copies in different bundles. The <c>meshes7</c> directory is the render-format
+    /// discriminator: textured, Blender-handed and scene-rest-uprighted like the export, sampling the
+    /// subject model's RECONCILED materials. The key carries no texture identity, so it is only correct
+    /// while the catalog version plus the model's material reconciliation pin what each submesh samples —
+    /// a change to how a part's materials resolve must bump this directory, which orphans the old renders
+    /// instead of serving them with the wrong maps (<c>meshes6</c> predates reconciled materials,
+    /// <c>meshes5</c>'s count-only read could cache untextured renders). A selector
+    /// <paramref name="which"/> other than a read by name joins the key, since it selects among same-named
+    /// copies (<see cref="MeshSelector"/>).</summary>
+    public string MeshPathFor(string bundleId, string meshName, string catalogVersion, MeshSelector which = default) =>
+        Path.Combine(_root, Sanitize(catalogVersion), "meshes7", Sanitize(bundleId),
+            Sanitize(meshName) + (which == default ? "" : "." + Sanitize(which.Token)) + ".png");
 
-    private string MeshCountPathFor(string bundleId, string meshName, string catalogVersion, long pathId = 0) =>
-        Path.ChangeExtension(MeshPathFor(bundleId, meshName, catalogVersion, pathId), ".vertices");
+    private string MeshCountPathFor(string bundleId, string meshName, string catalogVersion, MeshSelector which = default) =>
+        Path.ChangeExtension(MeshPathFor(bundleId, meshName, catalogVersion, which), ".vertices");
 
     /// <summary>A mesh cache hit requires both the rendered PNG and its parseable vertex-count sidecar. A
     /// partial/crashed write is a miss and will be regenerated from the game bundle.</summary>
-    public MeshThumb? TryGetCachedMesh(string bundleId, string meshName, string catalogVersion, long pathId = 0)
+    public MeshThumb? TryGetCachedMesh(string bundleId, string meshName, string catalogVersion, MeshSelector which = default)
     {
-        var path = MeshPathFor(bundleId, meshName, catalogVersion, pathId);
-        var countPath = MeshCountPathFor(bundleId, meshName, catalogVersion, pathId);
+        var path = MeshPathFor(bundleId, meshName, catalogVersion, which);
+        var countPath = MeshCountPathFor(bundleId, meshName, catalogVersion, which);
         if (!File.Exists(path) || !File.Exists(countPath)) return null;
         try
         {
@@ -138,22 +142,22 @@ public sealed class ThumbnailCache
     /// <paramref name="submeshTextures"/> feeds the renderer's per-submesh base-color sampling and is baked
     /// into the cached PNG — vanilla thumbs sample vanilla maps, both pinned by the catalog version.
     ///
-    /// <para><b>Vanilla renders only.</b> The mesh key is catalog version + bundle + mesh (+ path id) and
+    /// <para><b>Vanilla renders only.</b> The mesh key is catalog version + bundle + mesh (+ selector) and
     /// carries NO texture identity, so an entry made from a modder-supplied map would be served to every
     /// later project asking for that game mesh. A render sampling ANY edited or authored map must therefore
     /// go through <see cref="RenderMeshThumb"/>, which neither reads nor writes this cache.</para></summary>
     public MeshThumb? EnsureMeshThumb(byte[] deobfuscatedBundle, string bundleId, string meshName, string catalogVersion,
-        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures = null, long pathId = 0)
+        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures = null, MeshSelector which = default)
     {
-        var hit = TryGetCachedMesh(bundleId, meshName, catalogVersion, pathId);
+        var hit = TryGetCachedMesh(bundleId, meshName, catalogVersion, which);
         if (hit is not null) return hit;
 
         try
         {
-            var render = RenderMesh(deobfuscatedBundle, meshName, submeshTextures, pathId);
+            var render = RenderMesh(deobfuscatedBundle, meshName, submeshTextures, which);
             if (render is not { } r) return null;
             using var image = r.Image;
-            return WriteMeshThumb(image, bundleId, meshName, catalogVersion, r.VertexCount, pathId);
+            return WriteMeshThumb(image, bundleId, meshName, catalogVersion, r.VertexCount, which);
         }
         catch { return null; }
     }
@@ -162,11 +166,11 @@ public sealed class ThumbnailCache
     /// persisted cache in either direction. The route for a caller that needs only the number: a render
     /// would have to run untextured here, and caching that under the game-identity key would serve an
     /// untextured picture to every later textured ask. Null when the bundle carries no such mesh.</summary>
-    public static int? MeshVertexCount(byte[] deobfuscatedBundle, string meshName, long pathId = 0)
+    public static int? MeshVertexCount(byte[] deobfuscatedBundle, string meshName, MeshSelector which = default)
     {
         try
         {
-            var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, pathId);
+            var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, which);
             return field is null ? null : UnityMesh.Decode(field).VertexCount;
         }
         catch { return null; }
@@ -177,11 +181,11 @@ public sealed class ThumbnailCache
     /// those pixels belong to one project, and this cache is keyed only by game identity. Null on any
     /// decode/render failure, exactly as the cached route.</summary>
     public MeshRender? RenderMeshThumb(byte[] deobfuscatedBundle, string meshName,
-        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures = null, long pathId = 0)
+        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures = null, MeshSelector which = default)
     {
         try
         {
-            var render = RenderMesh(deobfuscatedBundle, meshName, submeshTextures, pathId);
+            var render = RenderMesh(deobfuscatedBundle, meshName, submeshTextures, which);
             if (render is not { } r) return null;
             using var image = r.Image;
             using var stream = new MemoryStream();
@@ -191,12 +195,12 @@ public sealed class ThumbnailCache
         catch { return null; }
     }
 
-    /// <summary>The shared render core both mesh routes run: decode by name (or exact path id), upright, and
+    /// <summary>The shared render core both mesh routes run: decode the selected Mesh, upright, and
     /// rasterize. The caller owns the returned image. Null when the bundle carries no such mesh.</summary>
     private static (Image<Rgba32> Image, int VertexCount)? RenderMesh(byte[] deobfuscatedBundle, string meshName,
-        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures, long pathId)
+        IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? submeshTextures, MeshSelector which)
     {
-        var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, pathId);
+        var field = new BundleReader().GetMeshField(deobfuscatedBundle, meshName, which);
         if (field is null) return null;
         var mesh = UnityMesh.Decode(field);
         // Prefab-shipped lying-down bodies render 90° wrong from raw bind space; the mesh's own bundle
@@ -206,7 +210,7 @@ public sealed class ThumbnailCache
         {
             var skin = MeshSkin.Decode(field);
             if (skin.IsSkinned
-                && Skeleton.SceneRig.TryRead(deobfuscatedBundle, meshName, skin, pathId)?.Uprighting is { } g)
+                && Skeleton.SceneRig.TryRead(deobfuscatedBundle, meshName, skin, which)?.Uprighting is { } g)
                 mesh = RestBake.Apply(mesh, g);
         }
         catch { /* preview-only nicety — a rig read failure keeps the raw render */ }
@@ -302,10 +306,10 @@ public sealed class ThumbnailCache
     }
 
     private MeshThumb WriteMeshThumb(Image<Rgba32> image, string bundleId, string meshName,
-        string catalogVersion, int vertexCount, long pathId = 0)
+        string catalogVersion, int vertexCount, MeshSelector which = default)
     {
-        var path = MeshPathFor(bundleId, meshName, catalogVersion, pathId);
-        var countPath = MeshCountPathFor(bundleId, meshName, catalogVersion, pathId);
+        var path = MeshPathFor(bundleId, meshName, catalogVersion, which);
+        var countPath = MeshCountPathFor(bundleId, meshName, catalogVersion, which);
         var dir = Path.GetDirectoryName(path)!;
         Directory.CreateDirectory(dir);
         if (_sweptDirs.TryAdd(dir, 0)) CacheTemps.Sweep(dir);

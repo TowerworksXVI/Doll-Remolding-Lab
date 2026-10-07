@@ -19,8 +19,9 @@ public sealed record SubjectCandidate(string Root, string Bundle, byte[] Dec, Ch
 ///
 /// <para><b>Curated routes.</b> An outfit carrying a <see cref="SubjectRoute"/> replaces the formula: one
 /// explicit address (same catalog mechanics, closure included), or one logical bundle read directly at a
-/// named container root. The direct-bundle shape has NO dependency closure available, so its scope is that
-/// single bundle — see <see cref="SubjectRoute"/> for what that costs.</para>
+/// named container root. The direct-bundle shape has no address to close over, so its scope is that
+/// bundle plus the route's listed extras — see <see cref="SubjectRoute"/> for what that costs; only rig
+/// assets reach past it (<see cref="BundleForRigCab"/>).</para>
 ///
 /// <para><b>Blacklist.</b> A blacklisted stem builds an EMPTY scope — no candidates, every CAB unresolvable.
 /// Do not remove or weaken it.</para>
@@ -51,10 +52,12 @@ public sealed class SubjectScope
     private int _nextToInspect;
     // non-null only on a CURATED route (either shape): the ONE container root that is this subject
     private readonly string? _rootName;
+    // a direct route's catalog load dependencies, searched for rig assets only (see BundleForRigCab)
+    private readonly IReadOnlyList<string> _rigBundles;
 
     private SubjectScope(IReadOnlyList<string> hitBundles, IReadOnlyList<string> scopeBundles,
         Func<string, byte[]?> tryDeobfuscate, Outfit outfit, string? rootName = null,
-        RosterFillCache? fillCache = null)
+        RosterFillCache? fillCache = null, IReadOnlyList<string>? rigBundles = null)
     {
         _hitBundles = hitBundles;
         _hitSet = new HashSet<string>(hitBundles, StringComparer.Ordinal);
@@ -63,6 +66,7 @@ public sealed class SubjectScope
         _outfit = outfit;
         _rootName = rootName;
         _fillCache = fillCache;
+        _rigBundles = rigBundles ?? Array.Empty<string>();
     }
 
     /// <summary>The scope's bundles: context-hit prefab bundles in <see cref="GameVfs.ContextRoots"/>
@@ -117,7 +121,7 @@ public sealed class SubjectScope
             foreach (var extra in outfit.Route.ExtraBundles)
                 if (extras.Add(extra)) direct.Add(extra);
             return new SubjectScope(new[] { directBundle }, direct, tryDeobfuscate, outfit,
-                outfit.Route.RootName, fillCache);
+                outfit.Route.RootName, fillCache, catalog.DepsForBundle(directBundle));
         }
 
         // A curated addressable subject resolves through exactly the same catalog mechanics as a formula
@@ -294,4 +298,12 @@ public sealed class SubjectScope
         }
         return null;
     }
+
+    /// <summary><see cref="BundleForCab"/> for a rig asset (a rig's saved pose): the scope first, then, on a
+    /// direct route, the catalog's load dependencies of the routed bundle. A curated route lists only the
+    /// bundles its materials and textures come from; this search stays outside the material lookup's cache,
+    /// so it never changes which bundle a material or texture resolves to.</summary>
+    internal string? BundleForRigCab(string cab) =>
+        BundleForCab(cab) ?? _rigBundles.FirstOrDefault(bundle => _tryDeobfuscate(bundle) is { } dec
+            && string.Equals(_reader.GetBundleCab(dec), cab, StringComparison.Ordinal));
 }

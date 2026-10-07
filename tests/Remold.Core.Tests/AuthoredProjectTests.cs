@@ -24,7 +24,7 @@ public sealed class AuthoredProjectTests : IDisposable
         string json = AuthoredProjectSerializer.Serialize(project);
         var loaded = AuthoredProjectSerializer.Deserialize(json);
 
-        Assert.Contains("\"schema\": 2", json);
+        Assert.Contains("\"schema\": 3", json);
         Assert.Contains("\"kind\": \"project_asset\"", json);
         Assert.Contains("\"always\":", json);
         Assert.Equal(new[] { "edit-long", "edit-short" }, loaded.EditDefinitions.Select(e => e.Id));
@@ -405,11 +405,30 @@ public sealed class AuthoredProjectTests : IDisposable
 
         var loaded = AuthoredProjectSerializer.Load(fixture);
 
-        Assert.Equal(2, loaded.Schema);
+        // the file is schema 2, and it reads as the current schema with nothing converted
+        Assert.Equal(2, AuthoredProjectSerializer.SchemaOf(fixture));
+        Assert.Equal(AuthoredProject.CurrentSchema, loaded.Schema);
         Assert.Equal(2, loaded.EditDefinitions.Count);
         Assert.Equal("edit-long", Assert.Single(loaded.Always));
         Assert.Equal(new long[] { 91001, 91002 }, loaded.ProjectAssets.Where(a => a.Kind == ProjectAssetKind.Ramp)
             .Select(a => a.Source!.GameAsset!.PathId));
+    }
+
+    [Fact]
+    public void A_project_holding_a_mesh_place_per_detail_level_opens_holding_one()
+    {
+        // Projects saved by an earlier release hold a mesh place for every level of detail, all of them
+        // answered by the one replacement. A part's lower-detail versions take that replacement whether or
+        // not the project names them, so those places and their answers are left behind on the way in.
+        string fixture = Path.Combine(AppContext.BaseDirectory, "Project", "golden", "authored_project_v2.json");
+        Assert.Contains("slot-geometry-lod1", File.ReadAllText(fixture));
+
+        var loaded = AuthoredProjectSerializer.Load(fixture);
+
+        Assert.DoesNotContain(loaded.TargetSlots, slot => slot.Input == TargetInputKind.Geometry
+            && !string.Equals(slot.Tier, "lod0", StringComparison.OrdinalIgnoreCase));
+        Assert.All(loaded.EditDefinitions, edit => Assert.DoesNotContain(edit.Bindings,
+            binding => string.Equals(binding.SlotId, "slot-geometry-lod1", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -466,8 +485,47 @@ public sealed class AuthoredProjectTests : IDisposable
     public void Unknown_or_missing_schemas_are_refused_before_deserialization()
     {
         Assert.Throws<InvalidDataException>(() => AuthoredProjectSerializer.Deserialize("{\"schema\":1}"));
-        Assert.Throws<InvalidDataException>(() => AuthoredProjectSerializer.Deserialize("{\"schema\":3}"));
+        Assert.Throws<InvalidDataException>(() => AuthoredProjectSerializer.Deserialize("{\"schema\":4}"));
         Assert.Throws<InvalidDataException>(() => AuthoredProjectSerializer.Deserialize("{}"));
+    }
+
+    /// <summary>A project saved before geometry could record a hidden part's centre opens as it was, with
+    /// nothing converted, and its next save is written as the current version, so an older app no longer
+    /// opens it and drops those records on its own save.</summary>
+    [Fact]
+    public void A_schema_2_project_opens_unchanged_and_saves_as_schema_3()
+    {
+        string json = AuthoredProjectSerializer.Serialize(CompleteProject());
+        string dir = Path.Combine(_root, "Older Mod");
+        Directory.CreateDirectory(dir);
+        string file = ModProject.ManifestPathFor(dir);
+        File.WriteAllText(file, json.Replace("\"schema\": 3", "\"schema\": 2"));
+        Assert.Equal(2, AuthoredProjectSerializer.SchemaOf(dir));
+
+        var document = AuthoredProjectDocument.Load(dir);
+        Assert.False(document.OpenedLegacy);
+        Assert.Equal(json, AuthoredProjectSerializer.Serialize(document.Authored));
+
+        document.Save();
+        Assert.Equal(3, AuthoredProjectSerializer.SchemaOf(dir));
+        Assert.Equal(json, File.ReadAllText(file));
+        Assert.False(File.Exists(file + ".bak"));
+    }
+
+    /// <summary>A project from a newer version is refused by the mod's name, saying where it came from and
+    /// what to do.</summary>
+    [Fact]
+    public void A_schema_4_project_is_refused_as_one_from_a_newer_version()
+    {
+        string dir = Path.Combine(_root, "Newer Mod");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(ModProject.ManifestPathFor(dir), "{\"schema\": 4}");
+
+        var refused = Assert.Throws<InvalidDataException>(() => AuthoredProjectDocument.Load(dir));
+        Assert.Equal("'Newer Mod' was made with a newer version of Doll Remolding Lab. Update the app to open it.",
+            refused.Message);
+        Assert.Equal(refused.Message, Assert.Throws<InvalidDataException>(
+            () => AuthoredProjectSerializer.Load(dir)).Message);
     }
 
     private static AuthoredProject CompleteProject()

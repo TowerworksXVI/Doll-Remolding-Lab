@@ -13,10 +13,13 @@ namespace Remold.App.Views;
 /// token form a 3DMigoto <c>key =</c> line takes (<c>F6</c>, <c>CTRL SHIFT H</c>). Delete or Backspace
 /// clears the binding; Esc leaves capture with the binding as it was.
 ///
-/// <para>It is a Button so it inherits the app's chrome and focus behaviour; capture is entered on click
-/// and left on the FIRST real key, so the field can never sit armed while the rest of the pane takes
-/// typing. A modifier pressed on its own does not end capture — it is half of the binding the next key
-/// completes. Clicking away cancels: the field only writes on a key.</para>
+/// <para>It is a Button so it inherits the app's focus behaviour; capture is entered on click and left on
+/// the FIRST real key, so the field can never sit armed while the rest of the pane takes typing. A
+/// modifier pressed on its own does not end capture — it is half of the binding the next key completes.
+/// Clicking away cancels: the field only writes on a key.</para>
+///
+/// <para>It carries the <c>keyField</c> class, which dresses it as an input field with a keyboard glyph
+/// rather than as a button, so a key binding never reads as one of the board's add buttons.</para>
 /// </summary>
 public sealed class KeyCaptureButton : Button
 {
@@ -27,7 +30,7 @@ public sealed class KeyCaptureButton : Button
 
     /// <summary>What the field shows when no key is bound.</summary>
     public static readonly StyledProperty<string> EmptyLabelProperty =
-        AvaloniaProperty.Register<KeyCaptureButton, string>(nameof(EmptyLabel), "＋ key");
+        AvaloniaProperty.Register<KeyCaptureButton, string>(nameof(EmptyLabel), "No key");
 
     /// <summary>What the field shows while it is armed and waiting for a key.</summary>
     private const string CapturingLabel = "Press a key";
@@ -45,10 +48,11 @@ public sealed class KeyCaptureButton : Button
     private Key? _consumedByCapture;
     private DispatcherTimer? _flashTimer;
 
-    /// <summary>Styled as a plain Button. A derived control is styled by its own type by default, which
-    /// would leave the field with none of the button chrome its neighbours in the row carry — a control
-    /// that takes a click has to read as one.</summary>
+    /// <summary>Styled as a Button, then dressed by the <c>keyField</c> class. A derived control is styled
+    /// by its own type by default, which would leave it with no template at all.</summary>
     protected override Type StyleKeyOverride => typeof(Button);
+
+    private readonly TextBlock _text = new() { VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
 
     public string? BoundKey
     {
@@ -65,6 +69,15 @@ public sealed class KeyCaptureButton : Button
     public KeyCaptureButton()
     {
         Focusable = true;
+        Classes.Add("keyField");
+        var glyph = new TextBlock { Text = "⌨", VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+        glyph.Classes.Add("keyGlyph");
+        Content = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            Spacing = 5,
+            Children = { glyph, _text },
+        };
         UpdateContent();
     }
 
@@ -141,7 +154,7 @@ public sealed class KeyCaptureButton : Button
     /// surface the press happened on, so it is where the refusal belongs.</summary>
     private void Flash(string line)
     {
-        Content = line;
+        Show(line, empty: false);
         _flashTimer ??= new DispatcherTimer { Interval = FlashFor };
         _flashTimer.Stop();
         _flashTimer.Tick -= OnFlashElapsed;
@@ -158,8 +171,18 @@ public sealed class KeyCaptureButton : Button
     private void UpdateContent()
     {
         _flashTimer?.Stop();
+        Classes.Set("capturing", _capturing);
         // the binding holds the ini token; the field shows the keycap's own reading of it
-        Content = _capturing ? CapturingLabel : ModKeys.Display(BoundKey, EmptyLabel);
+        if (_capturing) Show(CapturingLabel, empty: false);
+        else if (ModKeys.Display(BoundKey) is { Length: > 0 } key) Show(key, empty: false);
+        else Show(EmptyLabel, empty: true);
+    }
+
+    /// <summary>Put one line in the field. An empty field's line is a placeholder and is dimmed like one.</summary>
+    private void Show(string line, bool empty)
+    {
+        _text.Text = line;
+        _text.Classes.Set("keyEmpty", empty);
     }
 
     private static bool IsModifierKey(Key k) => k

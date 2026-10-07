@@ -535,15 +535,21 @@ public class PoolMathTests
     }
 
     [Fact]
-    public void BuildUnion_InconsistentBindposeAcrossParts_Throws()
+    public void BuildUnion_lays_a_bone_two_parts_bind_differently_out_once()
     {
+        // the union is an ORDER: which bind a shared bone is stated under is BindReference's business
         var b0 = Bindpose();
         var b1 = Bindpose(); b1[0] += 1.0;   // shared bone with a different bind pose
         var part0 = new PoolMath.UnionInput(new uint[] { 5 },
             new Dictionary<uint, double[]> { [5] = b0 }, Stream2(new[] { (1.0, 0.0, 0.0, 0.0) }, new[] { (0, 0, 0, 0) }));
         var part1 = new PoolMath.UnionInput(new uint[] { 5 },
             new Dictionary<uint, double[]> { [5] = b1 }, Stream2(new[] { (1.0, 0.0, 0.0, 0.0) }, new[] { (0, 0, 0, 0) }));
-        Assert.Throws<InvalidOperationException>(() => PoolMath.BuildUnion(new[] { part0, part1 }));
+
+        var union = PoolMath.BuildUnion(new[] { part0, part1 });
+
+        Assert.Equal(new uint[] { 5 }, union.UnionHashes);
+        Assert.Equal(new uint[] { 0 }, union.FullMaps[0]);
+        Assert.Equal(new uint[] { 0 }, union.FullMaps[1]);
     }
 
     // ---- identity-body concat -----------------------------------------------------------------------

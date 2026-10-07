@@ -68,8 +68,8 @@ public sealed class GenericTextureAuthoringTests : IDisposable
         Assert.All(scopedAnchors, section => Assert.Equal(2, CountOf(section, "$zz_rslot = -1")));
         Assert.Contains("Resource_RtxSave4 = ref ps-t4", ini);
         Assert.Contains("Resource_RtxSave6 = ref ps-t6", ini);
-        Assert.Contains("if $zz_rslot == 4\nps-t4 = Resource_Rtx0\nendif", ini);
-        Assert.Contains("if $zz_rslot == 6\nps-t6 = Resource_Rtx1\nendif", ini);
+        Assert.Contains("if $zz_rslot == 4\nps-t4 = Resource_Rtx0\n$zz_bt4 = 1\nendif", ini);
+        Assert.Contains("if $zz_rslot == 6\nps-t6 = Resource_Rtx1\n$zz_bt6 = 1\nendif", ini);
     }
 
     [Fact]
@@ -174,7 +174,7 @@ public sealed class GenericTextureAuthoringTests : IDisposable
         };
 
         string root = _world.NewProject("Scoped identity").RootDir!;
-        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root });
+        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root, TransportRoot = Path.Combine(root, "round-trips") });
         var scopedTarget = new TargetPart
         {
             Subject = "Vesna", Outfit = "VesnaSSR01", RendererSlot = "c_vesna01_body_lod0",
@@ -313,7 +313,7 @@ public sealed class GenericTextureAuthoringTests : IDisposable
         {
             Subject = "Vesna", Outfit = "VesnaSSR01", RendererSlot = "c_vesna01_body_lod0",
         };
-        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root });
+        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root, TransportRoot = Path.Combine(root, "round-trips") });
         session.SetWorkspaceIndex(new AuthoredWorkspaceIndex
         {
             Selection = new List<SelectionEntry>

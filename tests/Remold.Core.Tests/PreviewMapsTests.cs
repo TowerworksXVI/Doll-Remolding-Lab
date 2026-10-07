@@ -155,7 +155,7 @@ public class PreviewMapsTests
     }
 
     [Fact]
-    public void UntouchedGlb_ResolvesEverySlotAsVanilla()
+    public void UntouchedGlb_ResolvesEverySlotAsUntouched()
     {
         using var g = new TempGame();
         var (glb, baseColor, normal, rmo) = ExportPatch(g);
@@ -163,15 +163,15 @@ public class PreviewMapsTests
         var maps = MeshGltf.ReadSubmeshMaps(glb);
 
         Assert.Equal(2, maps.Count);
-        Assert.Equal(MapOrigin.Vanilla, maps[0].BaseColor.Origin);
-        Assert.Equal(Path.GetFullPath(baseColor), maps[0].BaseColor.StockPng);
-        Assert.Equal(MapOrigin.Vanilla, maps[0].Normal.Origin);
-        Assert.Equal(Path.GetFullPath(normal), maps[0].Normal.StockPng);
-        Assert.Equal(MapOrigin.Vanilla, maps[0].Rmo.Origin);
-        Assert.Equal(Path.GetFullPath(rmo), maps[0].Rmo.StockPng);
-        Assert.Equal(MapOrigin.Vanilla, maps[1].BaseColor.Origin);
-        Assert.Equal(MapOrigin.None, maps[1].Normal.Origin);     // no normal on that submesh
-        Assert.Equal(MapOrigin.None, maps[1].Rmo.Origin);        // nor an RMO
+        Assert.Equal(MapAnswer.Untouched, maps[0].BaseColor.Answer);
+        Assert.Equal(Path.GetFullPath(baseColor), maps[0].BaseColor.Sent?.Png);
+        Assert.Equal(MapAnswer.Untouched, maps[0].Normal.Answer);
+        Assert.Equal(Path.GetFullPath(normal), maps[0].Normal.Sent?.Png);
+        Assert.Equal(MapAnswer.Untouched, maps[0].Rmo.Answer);
+        Assert.Equal(Path.GetFullPath(rmo), maps[0].Rmo.Sent?.Png);
+        Assert.Equal(MapAnswer.Untouched, maps[1].BaseColor.Answer);
+        Assert.Equal(MapAnswer.None, maps[1].Normal.Answer);     // no normal on that submesh
+        Assert.Equal(MapAnswer.None, maps[1].Rmo.Answer);        // nor an RMO
     }
 
     /// <summary>Swapped for another file or painted in place — both are a content miss, and both must ship
@@ -191,8 +191,8 @@ public class PreviewMapsTests
 
         var maps = MeshGltf.ReadSubmeshMaps(glb);
 
-        Assert.Equal(MapOrigin.Authored, maps[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, maps[0].Normal.Origin);            // the untouched slot is unaffected
+        Assert.Equal(MapAnswer.Authored, maps[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, maps[0].Normal.Answer);            // the untouched slot is unaffected
         Assert.Equal(Pixels(File.ReadAllBytes(swapped)), Pixels(maps[0].BaseColor.AuthoredPng!));
     }
 
@@ -207,8 +207,8 @@ public class PreviewMapsTests
 
         var maps = MeshGltf.ReadSubmeshMaps(glb);
 
-        Assert.All(maps.Where(m => m.BaseColor.Origin != MapOrigin.None),
-                   m => Assert.Equal(MapOrigin.Authored, m.BaseColor.Origin));
+        Assert.All(maps.Where(m => m.BaseColor.Answer != MapAnswer.None),
+                   m => Assert.Equal(MapAnswer.Authored, m.BaseColor.Answer));
     }
 
     [Fact]
@@ -221,9 +221,9 @@ public class PreviewMapsTests
         Assert.False(File.Exists(PreviewMaps.SidecarPath(glb)));
         Assert.All(MeshGltf.ReadSubmeshMaps(glb), m =>
         {
-            Assert.Equal(MapOrigin.None, m.BaseColor.Origin);
-            Assert.Equal(MapOrigin.None, m.Normal.Origin);
-            Assert.Equal(MapOrigin.None, m.Rmo.Origin);
+            Assert.Equal(MapAnswer.None, m.BaseColor.Answer);
+            Assert.Equal(MapAnswer.None, m.Normal.Answer);
+            Assert.Equal(MapAnswer.None, m.Rmo.Answer);
         });
     }
 
@@ -241,8 +241,8 @@ public class PreviewMapsTests
                 new PreviewMaps.Entry(PreviewMaps.Hash(bytes), png, MapKind.Normal),
         };
 
-        Assert.Equal(MapOrigin.Authored, PreviewMaps.Resolve(bytes, MapKind.BaseColor, sidecar).Origin);
-        Assert.Equal(MapOrigin.Vanilla, PreviewMaps.Resolve(bytes, MapKind.Normal, sidecar).Origin);
+        Assert.Equal(MapAnswer.Authored, PreviewMaps.Resolve(bytes, MapKind.BaseColor, sidecar).Answer);
+        Assert.Equal(MapAnswer.Untouched, PreviewMaps.Resolve(bytes, MapKind.Normal, sidecar).Answer);
     }
 
     // ---------------------------------------------------------------- base colour: no transform
@@ -405,7 +405,7 @@ public class PreviewMapsTests
 
         var rows = CollectFrom(glb, maps, Path.Combine(g.Root, "textures"));
 
-        Assert.Equal(MapOrigin.Authored, maps[0].Rmo.Origin);
+        Assert.Equal(MapAnswer.Authored, maps[0].Rmo.Answer);
         Assert.Equal(new Rgba32(10, 20, 30, 77), FirstPixel(Assert.Single(rows!).Rmo!));
     }
 
@@ -432,12 +432,12 @@ public class PreviewMapsTests
     {
         using var g = new TempGame();
         var glb = ExportThenRepaintRmo(g, stock: new Rgba32(9, 9, 9, 77), painted: new Rgba32(10, 20, 30, 255));
-        var none = new ResolvedMap(MapOrigin.None);
+        var none = new ResolvedMap(MapAnswer.None);
 
         var rows = CollectFrom(glb, new List<IncomingMaps>
         {
             new(none, none),
-            new(none, none, new ResolvedMap(MapOrigin.Authored, AuthoredPng: FlatPngBytes(new Rgba32(1, 2, 3, 255)))),
+            new(none, none, new ResolvedMap(MapAnswer.Authored, AuthoredPng: FlatPngBytes(new Rgba32(1, 2, 3, 255)))),
         }, Path.Combine(g.Root, "textures"));
 
         var row = Assert.Single(rows!);
@@ -478,10 +478,10 @@ public class PreviewMapsTests
         var flatN = File.ReadAllBytes(Path.Combine(g.Root, PreviewMaps.NeutralN));
         var flatRmo = File.ReadAllBytes(Path.Combine(g.Root, PreviewMaps.NeutralRmo));
 
-        Assert.Equal(MapOrigin.Neutral, PreviewMaps.Resolve(flatN, MapKind.Normal, sidecar).Origin);
-        Assert.Equal(MapOrigin.Authored, PreviewMaps.Resolve(flatRmo, MapKind.Rmo, sidecar).Origin);
+        Assert.Equal(MapAnswer.Neutral, PreviewMaps.Resolve(flatN, MapKind.Normal, sidecar).Answer);
+        Assert.Equal(MapAnswer.Authored, PreviewMaps.Resolve(flatRmo, MapKind.Rmo, sidecar).Answer);
         // the kind is part of the match, so the neutral normal in a base-colour slot is just an image
-        Assert.Equal(MapOrigin.Authored, PreviewMaps.Resolve(flatN, MapKind.BaseColor, sidecar).Origin);
+        Assert.Equal(MapAnswer.Authored, PreviewMaps.Resolve(flatN, MapKind.BaseColor, sidecar).Answer);
     }
 
     /// <summary>The neutral normal is the build's own content, not a decoration: a slot filled with it has to
@@ -524,7 +524,7 @@ public class PreviewMapsTests
         var sidecar = PreviewMaps.ReadSidecar(glb);
 
         Assert.Equal(2, sidecar.Count);
-        Assert.Equal(MapOrigin.Vanilla, MeshGltf.ReadSubmeshMaps(glb)[0].Rmo.Origin);
-        Assert.Equal(MapOrigin.Vanilla, MeshGltf.ReadSubmeshMaps(glb)[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Untouched, MeshGltf.ReadSubmeshMaps(glb)[0].Rmo.Answer);
+        Assert.Equal(MapAnswer.Untouched, MeshGltf.ReadSubmeshMaps(glb)[0].BaseColor.Answer);
     }
 }

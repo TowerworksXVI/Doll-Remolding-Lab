@@ -111,9 +111,9 @@ public static class TextureCodec
     /// byte count. Downsampling is per-channel with no alpha premultiply, so a map carrying non-colour
     /// channels (a packed normal, an RMO mask) downsamples correctly.
     ///
-    /// <para>Any dimensions are accepted, unlike <see cref="Encode"/>: a standalone container stores whole
-    /// 4×4 blocks and an edge block carries padding, whereas a Unity blob's byte size must equal
-    /// format × dims × mips exactly.</para>
+    /// <para>Any dimensions are accepted by the codec, with edge padding inside compressed blocks.
+    /// Direct3D still requires a block-compressed texture's top-level dimensions to be multiples of four;
+    /// a caller writing a DDS must enforce that or choose an uncompressed format.</para>
     ///
     /// <para>Capped at <see cref="MipChainLength"/> levels for the dimensions — the encoder can hand back
     /// more (a 1×1 input yields two), and a container declaring more mips than its size admits is rejected

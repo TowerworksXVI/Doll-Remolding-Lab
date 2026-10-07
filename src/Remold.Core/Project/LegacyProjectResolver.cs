@@ -106,6 +106,12 @@ public sealed class LegacyProjectResolver
         if (bundle is null) return Ref(null, 0, name);
         byte[]? bytes = Bundle(bundle);
         if (bytes is null) return Ref(bundle, 0, name);
+        // The object the address loads, chosen as every read chooses it. Where the catalog states no load
+        // key there is nothing to choose among same-named copies by, so only a name the bundle ships once is
+        // exact — this records an object, it doesn't read the first of several.
+        var which = MeshSelector.ByLoadKey(_env.LoadKeyOf?.Invoke(address));
+        if (which.LoadKey is not null)
+            return Ref(bundle, _reader.MeshPathId(bytes, name, which) ?? 0, name);
         var matches = _reader.ListAssets(bytes, BundleReader.ClassMesh)
             .Where(a => string.Equals(a.Name, name, StringComparison.Ordinal)).ToList();
         return Ref(bundle, matches.Count == 1 ? matches[0].PathId : 0, name);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using AssetsTools.NET;
 
@@ -7,8 +8,10 @@ namespace Remold.Core.Bundles;
 
 /// <summary>One fragment shader variant of a serialized Shader asset: which pass it belongs to, the
 /// keyword set it was compiled for, where it binds <c>UnityPerMaterial</c> and at what byte width, the
-/// buffer's vector fields (name → byte offset), and the 3DMigoto hash of its shipped DXBC. Everything
-/// here is Unity's own serialized reflection — no disassembly, no frame dump.</summary>
+/// buffer's vector fields (name → byte offset), the 3DMigoto hash of its shipped DXBC, the texture
+/// slots it binds (name → <c>ps-t</c> slot), and which bytes of <c>UnityPerMaterial</c> its instruction
+/// stream reads. Binding tables are Unity's own serialized reflection; the reads come from a walk of the
+/// program's operands, since the shipped DXBC carries no reflection chunk.</summary>
 public sealed record ShaderVariant(
     string ShaderName,
     int Pass,
@@ -17,7 +20,9 @@ public sealed record ShaderVariant(
     int? MaterialBufferSlot,
     int MaterialBufferWidth,
     IReadOnlyDictionary<string, int> VectorOffsets,
-    string DxbcHash);
+    string DxbcHash,
+    IReadOnlyDictionary<string, int>? TextureSlots = null,
+    ConstantBufferReads? MaterialReads = null);
 
 /// <summary>
 /// Reads a serialized Shader asset's fragment subprograms into <see cref="ShaderVariant"/> rows. Unity
@@ -80,9 +85,23 @@ public static class ShaderReflection
                     foreach (var vector in cb["m_VectorParams"]["Array"].Children)
                         offsets[Name(names, vector["m_NameIndex"].AsInt)] = vector["m_Index"].AsInt;
                 }
+                var textures = new Dictionary<string, int>(StringComparer.Ordinal);
+                var textureParams = sp["m_TextureParams"];
+                if (!textureParams.IsDummy)
+                    foreach (var texture in textureParams["Array"].Children)
+                        textures[Name(names, texture["m_NameIndex"].AsInt)] = texture["m_Index"].AsInt;
+                // A program the walker cannot read keeps its variant with unknown reads: the rules then
+                // offer it no numeric effect, and the read filter hides nothing on its account. Refusing
+                // the whole shader would take the released value-patch route down with one odd program.
+                ConstantBufferReads? reads = ConstantBufferReads.None;
+                if (upmSlot is { } materialSlot)
+                {
+                    try { reads = DxbcConstantReads.Scan(dxbc, materialSlot); }
+                    catch (InvalidDataException) { reads = null; }
+                }
 
                 variants.Add(new ShaderVariant(shaderName, passIndex, passName, keywords,
-                    upmSlot, upmWidth, offsets, Fnv64(dxbc).ToString("x16")));
+                    upmSlot, upmWidth, offsets, Fnv64(dxbc).ToString("x16"), textures, reads));
             }
         }
         return variants;

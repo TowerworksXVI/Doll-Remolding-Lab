@@ -50,6 +50,29 @@ public class RosterSnapshotTests
         Assert.Equal(new[] { "body" }, back[1081]);
     }
 
+    // A row file written under the previous schema — the one whose confirm gate kept a subject for recipe
+    // rows alone — is a MISS even when its fingerprint and bundle content still stand: reused, it would
+    // answer today's gate with yesterday's rule, and two installs on one game version would disagree.
+    [Fact]
+    public void Row_file_from_the_previous_schema_is_a_miss_even_when_content_stands()
+    {
+        using var g = new TempGame();
+        var outfit = new Outfit(1071, "VesnaSSR01", OutfitKind.Base);
+        var catalog = CatalogFor(outfit, "prefab.bundle");
+        var row = RosterSnapshot.CreateRow(catalog, Content(), outfit, new[] { "prefab.bundle" }, new[] { "body" });
+        var path = g.At("roster_24535.json");
+        RosterSnapshot.SaveRows(path, "24535", new[] { row });
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        int current = json["SchemaVersion"]!.GetValue<int>();
+        json["SchemaVersion"] = current - 1;
+        File.WriteAllText(path, json.ToJsonString());
+
+        var reused = RosterSnapshot.LoadReusable(path, catalog, Content(), new[] { outfit });
+
+        Assert.Empty(reused);
+        Assert.Equal(10, current);   // the schema this rule change shipped under
+    }
+
     [Fact]
     public void Per_outfit_row_survives_a_catalog_version_change_when_shape_and_bundle_content_stand()
     {

@@ -13,8 +13,7 @@ using Remold.Core.Project;
 namespace Remold.Core.Migoto;
 
 /// <summary>
-/// Compile NEW geometry (a Blender glb weighted to the target's armature — see
-/// <see cref="SwapReference"/>) ONTO the target part, then emit
+/// Compile NEW geometry (a Blender glb weighted to the target's armature) ONTO the target part, then emit
 /// the raw GPU streams a 3DMigoto swap consumes: ImportPayload → MeshApply.Apply → MeshRaw.From, which
 /// slices the result into stream0/1/2 + ib in the target's stride layout and bone order.
 ///
@@ -69,10 +68,10 @@ public static class SwapCompile
     /// <param name="reader">Shares one parse of the bundle with the caller's other reads; null opens it for
     /// this call alone.</param>
     public static Result CompilePart(byte[] deobfuscatedBundle, string meshName, string weightedGlb,
-        string outDir, long pathId = 0, MeshApply.Payload? payload = null, BundleReader? reader = null)
+        string outDir, MeshSelector which = default, MeshApply.Payload? payload = null, BundleReader? reader = null)
     {
         if (!File.Exists(weightedGlb)) throw new FileNotFoundException($"weighted glb not found: {weightedGlb}");
-        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
+        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, which)
             ?? throw new AuthoredRefusalException(
                 $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
 
@@ -85,7 +84,7 @@ public static class SwapCompile
         Directory.CreateDirectory(outDir);
 
         WriteStreams(mesh, outDir);
-        WriteMeta(outDir, $"{meshName}.swap", unionBones: null, mesh);
+        WriteMeta(outDir, $"{meshName}.swap", unionBones: null, mesh, Channels(field));
         return BuildResult($"{meshName}.swap", mesh, unionBones: 0, apply.Warnings, apply.Diagnostics, outDir,
             Channels(field));
     }
@@ -98,12 +97,12 @@ public static class SwapCompile
         CompilePool(meshNames.Select(n => new PoolMesh(deobfuscatedBundle, n)).ToList(), weightedGlb, outDir);
 
     /// <summary>One pool part's mesh identity for the per-part-bundle overload: the (already
-    /// deobfuscated, caller-FORWARD-resolved) bundle holding it, its <c>m_Name</c>, and the optional
-    /// exact path-id selector (smr-backed parts). <paramref name="MeasuredRest"/> is the part's measured
+    /// deobfuscated, caller-FORWARD-resolved) bundle holding it, its <c>m_Name</c>, and which Mesh
+    /// of that name it is (<see cref="MeshSelector"/>). <paramref name="MeasuredRest"/> is the part's measured
     /// bind→scene transform when its scene rig read consistent (see
     /// <see cref="Skeleton.SceneRig.MeasuredRest"/>) — what lets the union restate this part in the
     /// anchor's space without fitting a delta to shared bones.</summary>
-    public readonly record struct PoolMesh(byte[] DeobfuscatedBundle, string MeshName, long PathId = 0,
+    public readonly record struct PoolMesh(byte[] DeobfuscatedBundle, string MeshName, MeshSelector Which = default,
         Matrix4x4? MeasuredRest = null);
 
     /// <summary>The general pool compile: parts may live in DIFFERENT bundles — a cross-prefix part resolves
@@ -121,9 +120,13 @@ public static class SwapCompile
     /// <c>unionorder.json</c> and the reported <c>UnionBones</c> stay the union, which is what the pool
     /// parts' palette is built over. Where those indices land in the palette is the emission's own decision,
     /// so it is not re-derivable here and is not derived here.</param>
+    /// <param name="bindReference">The bind each bone is stated under (<see cref="BindReference"/>), stated for
+    /// the replaced part in the space <paramref name="payload"/>'s vertices sit in; the layout target's own
+    /// restatement carries it into the union's space, as it carries that part's binds. The emission is handed
+    /// the same one.</param>
     public static Result CompilePool(IReadOnlyList<PoolMesh> meshes, string weightedGlb, string outDir,
         int layoutTargetIndex = 0, MeshApply.Payload? payload = null, BundleReader? reader = null,
-        IReadOnlyList<uint>? extraBones = null)
+        IReadOnlyList<uint>? extraBones = null, IReadOnlyDictionary<uint, Matrix4x4>? bindReference = null)
     {
         if (!File.Exists(weightedGlb)) throw new FileNotFoundException($"weighted glb not found: {weightedGlb}");
         if (layoutTargetIndex < 0 || layoutTargetIndex >= meshes.Count)
@@ -135,14 +138,14 @@ public static class SwapCompile
         var fields = new List<AssetTypeValueField>();
         foreach (var m in meshes)
         {
-            var f = reader.GetMeshField(m.DeobfuscatedBundle, m.MeshName, m.PathId)
+            var f = reader.GetMeshField(m.DeobfuscatedBundle, m.MeshName, m.Which)
                 ?? throw new AuthoredRefusalException(
                 $"the game files no longer hold the mesh '{m.MeshName}'. Rescan, then build again");
             fields.Add(f);
         }
 
         var (unionHashes, unionBind) = BuildUnionOrder(fields, meshNames, layoutTargetIndex,
-            meshes.Select(m => m.MeasuredRest).ToList());
+            meshes.Select(m => m.MeasuredRest).ToList(), bindReference);
         // Which space that union was stated in — the same verdict BuildUnionOrder took, asked once more so
         // a caller recording the union can say which space its bind poses are in. A scene-rest union is a
         // property of the subject; an anchor-space one is a property of this pipeline's anchor.
@@ -189,18 +192,18 @@ public static class SwapCompile
         Directory.CreateDirectory(outDir);
 
         WriteStreams(mesh, outDir);
-        WriteMeta(outDir, "pool.swap", unionHashes.Count, mesh);
+        WriteMeta(outDir, "pool.swap", unionHashes.Count, mesh, Channels(target));
         File.WriteAllText(Path.Combine(outDir, "unionorder.json"),
             "[" + string.Join(",", unionHashes.Select(h => $"\"{h}\"")) + "]\n");
         return BuildResult("pool.swap", mesh, unionHashes.Count, result.Warnings, result.Diagnostics, outDir,
             Channels(target), unionHashes, unionBind, sceneRestUnion);
     }
 
-    /// <summary>Build the union bone order first-seen across <paramref name="fields"/> in argument order. A
-    /// repeated hash must carry a byte-consistent bindpose (asserted within 1e-5), since the pooled union
-    /// keeps ONE bindpose per bone. Returns the ordered hashes and their 16-float raw bindposes, copied from
-    /// the first part defining each bone. The single union-order authority: the emitted indices line up with
-    /// any consumer given the SAME parts in the SAME order.
+    /// <summary>Build the union bone order first-seen across <paramref name="fields"/> in argument order.
+    /// Returns the ordered hashes and the 16-float raw bindpose each is STATED under: the first-seen
+    /// bindpose wherever it is <paramref name="bindReference"/>'s within the width binds compare at, else the
+    /// reference, restated into the union's space. The single union-order authority: the emitted indices line
+    /// up with any consumer given the SAME parts in the SAME order.
     ///
     /// <para>The bind SPACE is a separate, explicit choice from that order: <paramref name="referenceIndex"/>
     /// names the anchor part, and the union is stated in SCENE-REST space when the anchor's measured rest
@@ -209,12 +212,12 @@ public static class SwapCompile
     /// pipelines pooling one dump state it identically — what lets two mesh edits on one subject build
     /// together. A part is restated first by the delta the parts' MEASURED scene rests compose when both
     /// carry one (<paramref name="measuredRests"/> — no shared bones needed), else by a delta fitted and
-    /// corroborated over the bones it shares with the reference (see <see cref="Mesh.BindSpace"/>). The
-    /// refusal below then covers only the differences neither could explain, which must keep refusing
-    /// rather than deform geometry on a bone-hash coincidence.</para></summary>
+    /// corroborated over the bones it shares with the reference (see <see cref="Mesh.BindSpace"/>). What
+    /// neither explains — a translated mesh space, a helper bone one part binds elsewhere — is no refusal:
+    /// the emission converts each mesh's recovered rows onto the reference bone by bone.</para></summary>
     public static (List<uint> Hashes, List<float[]> BindPoses) BuildUnionOrder(
         IReadOnlyList<AssetTypeValueField> fields, IReadOnlyList<string> names, int referenceIndex = 0,
-        IReadOnlyList<Matrix4x4?>? measuredRests = null)
+        IReadOnlyList<Matrix4x4?>? measuredRests = null, IReadOnlyDictionary<uint, Matrix4x4>? bindReference = null)
     {
         // per part: bone hashes + 16 raw bindpose floats each, in Unity declaration order
         var partHashes = new List<List<uint>>();
@@ -236,26 +239,26 @@ public static class SwapCompile
             partBinds.Add(raws);
         }
 
-        RebaseToReference(partHashes, partBinds, referenceIndex, measuredRests);
+        var anchorDelta = RebaseToReference(partHashes, partBinds, referenceIndex, measuredRests);
 
         var unionHashes = new List<uint>();
         var unionBind = new List<float[]>();                       // 16 raw floats, declaration order
-        var slotOf = new Dictionary<uint, int>();
+        var slotOf = new HashSet<uint>();
         for (int pi = 0; pi < partHashes.Count; pi++)
             for (int b = 0; b < partHashes[pi].Count; b++)
             {
+                uint h = partHashes[pi][b];
+                if (!slotOf.Add(h)) continue;
+                unionHashes.Add(h);
                 var raw = partBinds[pi][b];
-                if (slotOf.TryGetValue(partHashes[pi][b], out var slot))
+                // the anchor's own restatement carries the reference into the union's space, as it carried
+                // the anchor's binds
+                if (bindReference is not null && bindReference.TryGetValue(h, out var stated))
                 {
-                    var d0 = unionBind[slot].Zip(raw, (a, x) => Math.Abs(a - x)).Max();
-                    if (d0 > (float)BindSpace.MaxBindDisagreement)
-                        throw new InvalidDataException($"bone {partHashes[pi][b]} bind pose differs across pool parts " +
-                            $"(max diff {d0:g4}); no measured or corroborated rigid rotation relates the two spaces, " +
-                            "so the part can't be converted into the reference part's space");
-                    continue;
+                    var restated = anchorDelta is { } d ? BindSpace.Rebase(stated, d) : stated;
+                    if (!BindReference.SameBind(restated, BindSpace.FromUnityFloats(raw)))
+                        raw = BindSpace.ToUnityFloats(restated);
                 }
-                slotOf[partHashes[pi][b]] = unionHashes.Count;
-                unionHashes.Add(partHashes[pi][b]);
                 unionBind.Add(raw);
             }
         return (unionHashes, unionBind);
@@ -263,12 +266,11 @@ public static class SwapCompile
 
     /// <summary>Restate every part authored in a different bind space in the reference's, in place: the raw
     /// Unity bindpose floats adapted into <see cref="ReferenceConversions"/>' shape, and the conversion it
-    /// decides applied back onto them. A part it leaves unconverted is left alone for the union gate to
-    /// judge.</summary>
-    static void RebaseToReference(List<List<uint>> partHashes, List<List<float[]>> partBinds, int referenceIndex,
+    /// decides applied back onto them. Returns the reference part's own conversion (null for none).</summary>
+    static Matrix4x4? RebaseToReference(List<List<uint>> partHashes, List<List<float[]>> partBinds, int referenceIndex,
         IReadOnlyList<Matrix4x4?>? measuredRests = null)
     {
-        if (referenceIndex < 0 || referenceIndex >= partHashes.Count) return;
+        if (referenceIndex < 0 || referenceIndex >= partHashes.Count) return null;
 
         var parts = new List<BindPart>(partHashes.Count);
         for (int pi = 0; pi < partHashes.Count; pi++)
@@ -291,6 +293,7 @@ public static class SwapCompile
                 partBinds[pi][b] = BindSpace.ToUnityFloats(
                     BindSpace.Rebase(BindSpace.FromUnityFloats(partBinds[pi][b]), d));
         }
+        return deltas[referenceIndex];
     }
 
     /// <summary>One pool part as <see cref="ReferenceConversions"/> reads it, whichever source it came from
@@ -403,7 +406,8 @@ public static class SwapCompile
         File.WriteAllBytes(Path.Combine(outDir, "ib.buf"), mesh.Index);
     }
 
-    static void WriteMeta(string outDir, string meshField, int? unionBones, MeshRaw mesh)
+    static void WriteMeta(string outDir, string meshField, int? unionBones, MeshRaw mesh,
+        IReadOnlyList<UnityMesh.ChannelDef> channels)
     {
         var meta = new StringBuilder();
         meta.Append("{\n");
@@ -415,7 +419,9 @@ public static class SwapCompile
         meta.Append("  \"streams\": [");
         for (int s = 0; s < mesh.StreamIds.Count; s++)
             meta.Append(s > 0 ? ", " : "").Append($"{{ \"stream\": {mesh.StreamIds[s]}, \"stride\": {mesh.Stride(s)} }}");
-        meta.Append("],\n  \"submeshes\": [");
+        meta.Append("],\n");
+        MetaChannels.Append(meta, channels);
+        meta.Append(",\n  \"submeshes\": [");
         for (int s = 0; s < mesh.Submeshes.Count; s++)
             meta.Append(s > 0 ? ", " : "").Append($"{{ \"firstByte\": {mesh.Submeshes[s].FirstByte}, \"indexCount\": {mesh.Submeshes[s].IndexCount}, \"baseVertex\": {mesh.Submeshes[s].BaseVertex} }}");
         meta.Append("]\n}\n");
@@ -442,10 +448,7 @@ public static class SwapCompile
     /// component count, the same mask <see cref="UnityMesh.Decode"/> and <see cref="MeshApply"/> apply, so a
     /// reader given this table and the emitted streams slices them exactly as the encode laid them out.</summary>
     static List<UnityMesh.ChannelDef> Channels(AssetTypeValueField field) =>
-        Arr(field["m_VertexData"]["m_Channels"]).Children
-            .Select(c => new UnityMesh.ChannelDef(c["stream"].AsInt, c["offset"].AsInt,
-                c["format"].AsInt, c["dimension"].AsInt & 0xF))
-            .ToList();
+        UnityMesh.ChannelsOf(field);
 
     private static AssetTypeValueField Arr(AssetTypeValueField f) => f["Array"];
 

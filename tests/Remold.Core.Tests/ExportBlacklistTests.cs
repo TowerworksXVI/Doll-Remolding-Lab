@@ -35,7 +35,7 @@ public class ExportBlacklistTests
     {
         var done = AssetExporter.BuildRiggedGlbs(@"X:\nowhere", null!,
             new Outfit(0, stem, OutfitKind.Base), character,
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("body", "some.bundle", "c_body_lod0", null, null, 0L, null),
             },

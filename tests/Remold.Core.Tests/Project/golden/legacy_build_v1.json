@@ -20,14 +20,19 @@
     "sha256": "5246c85c54128b97f1cc558a88fb1b6e12783a7ba0d45d9951fe0c03a161eaa3"
   },
   {
-    "path": "convert_cs_vesna_body.hlsl",
-    "length": 1740,
-    "sha256": "a20762bc3cee215489266c75a0d59d8b94f047400460602e6bbdbd130810108e"
+    "path": "gather_ps.hlsl",
+    "length": 216,
+    "sha256": "9aa3a9cb891e3ddd099d0258f7e383fea08b63258ab98487840636208031eae5"
   },
   {
-    "path": "convert_witness_vesna_body.hlsl",
-    "length": 2154,
-    "sha256": "fded1d1e7578eca28941c40786a30fa63bb81b03e70d92b3b826e2dab8a8f6c0"
+    "path": "gather_vesna_body.hlsl",
+    "length": 685,
+    "sha256": "1f77ba991ced152afb172d6056b28fdc9c63d6ac0dd580f3bf77ff60df2e4fe8"
+  },
+  {
+    "path": "gather_vesna_body_lod1.hlsl",
+    "length": 685,
+    "sha256": "1f77ba991ced152afb172d6056b28fdc9c63d6ac0dd580f3bf77ff60df2e4fe8"
   },
   {
     "path": "gf2mod.json",
@@ -36,38 +41,93 @@
   },
   {
     "path": "mod.ini",
-    "length": 6212,
-    "sha256": "d596a95059e355c8214e813a99c929b2b6cf64074354e8fa5e7ffdc3aed57414"
+    "length": 9287,
+    "sha256": "010220b2c42307396ee00bd1c1b0e30540c8207a57042c97f3efe942835da860"
   },
   {
-    "path": "owner_part_vesna_body.buf",
-    "length": 8,
-    "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
-  },
-  {
-    "path": "palette_seed_vesna_body.buf",
+    "path": "packet_index_vesna_body.buf",
     "length": 128,
-    "sha256": "59160118b6ec92c768dbf108f969dc12d786fa19935201e3a3755ee1a000ff74"
+    "sha256": "afbc67011b6f94a508935ad8edcbdd3c9b56c4db336f8d3847a8a1815183828f"
   },
   {
-    "path": "recover_vesna_body_cs.hlsl",
-    "length": 2103,
-    "sha256": "006ef797b746d8e38b2348df967766d19a470c826c6c2e53adc9572cbe9f6ca2"
+    "path": "packet_index_vesna_body_lod1.buf",
+    "length": 96,
+    "sha256": "a26f2589bc817e205aed8ed29161a2538dbe40952ed97c98974e90b4b056d4b4"
   },
   {
-    "path": "recover_vesna_body_lod1_cs.hlsl",
-    "length": 2103,
-    "sha256": "006ef797b746d8e38b2348df967766d19a470c826c6c2e53adc9572cbe9f6ca2"
+    "path": "packet_lookup_vesna_body.buf",
+    "length": 128,
+    "sha256": "afbc67011b6f94a508935ad8edcbdd3c9b56c4db336f8d3847a8a1815183828f"
+  },
+  {
+    "path": "packet_lookup_vesna_body_lod1.buf",
+    "length": 96,
+    "sha256": "a26f2589bc817e205aed8ed29161a2538dbe40952ed97c98974e90b4b056d4b4"
+  },
+  {
+    "path": "packet_sel_vesna_body.buf",
+    "length": 128,
+    "sha256": "caeda60861bc9f32f375b2fe0aef9f8cfe74cca6edb38fad5e44abe67bf12b07"
+  },
+  {
+    "path": "packet_sel_vesna_body_lod1.buf",
+    "length": 96,
+    "sha256": "0c49c64790b8c671265664a37c86153db5fb7f062df30d031b753cd134d2ca23"
+  },
+  {
+    "path": "piece0_ib_vesna_body.buf",
+    "length": 8,
+    "sha256": "c5d93c76fd3b1df422591bea39f0f43e5518501780726a069e990879f18eb9a7"
+  },
+  {
+    "path": "piece0_map_vesna_body.buf",
+    "length": 12,
+    "sha256": "ad5dc1478de06a4c2728ea528bd9361a4b945e92a414bf4d180cedaaeaa5f4cc"
+  },
+  {
+    "path": "piece0_vb1_vesna_body.buf",
+    "length": 60,
+    "sha256": "d4b1db6903a421f3384294acdbb27c9a485f78f1a96e8100a998ce2e99baf059"
+  },
+  {
+    "path": "piece1_ib_vesna_body.buf",
+    "length": 8,
+    "sha256": "c5d93c76fd3b1df422591bea39f0f43e5518501780726a069e990879f18eb9a7"
+  },
+  {
+    "path": "piece1_map_vesna_body.buf",
+    "length": 12,
+    "sha256": "ce99ae045c8b2a2a8a58fd1a2120956e74e90322eef45f7dfe1ca73eefe655d4"
+  },
+  {
+    "path": "piece1_vb1_vesna_body.buf",
+    "length": 60,
+    "sha256": "5b1125eb2cafc81354fcd7b416a9303a6cd326be87fd5deddc504b775717b4a4"
+  },
+  {
+    "path": "pose_fullscreen.hlsl",
+    "length": 244,
+    "sha256": "bfba959ba759b6fd952f2d8a3e8f4f909e8e374a16c8c71ea539f2d1adbd3868"
+  },
+  {
+    "path": "pose_palette_vesna_body_lod1_vesna_body.hlsl",
+    "length": 2141,
+    "sha256": "d0c62917d54cda1bbaf349d2cb256efa4785e2fb0c77bc0e39bd06783e8a6e4c"
+  },
+  {
+    "path": "pose_palette_vesna_body_vesna_body.hlsl",
+    "length": 2141,
+    "sha256": "d0c62917d54cda1bbaf349d2cb256efa4785e2fb0c77bc0e39bd06783e8a6e4c"
+  },
+  {
+    "path": "pose_skin_vesna_body.hlsl",
+    "length": 2065,
+    "sha256": "abaa089e5358de76c8416edfe6c8ccc94968c9711ce9ce667a04b63f9c803723"
   },
   {
     "path": "repair.json",
-    "length": 7895,
-    "sha256": "0482b883162712d70f1163b201d9df67a9ed49b8f64b1323280d322b6c1473bd"
-  },
-  {
-    "path": "skin_cs_vesna_body.hlsl",
-    "length": 1576,
-    "sha256": "a207094263ed3620d715e22d358014438124de6eff3a76c0405788bc63950f17"
+    "length": 7043,
+    "sha256": "310b3454d18c902a54937cba52df226be483968a19e8edb75c84ed55325befa0"
   },
   {
     "path": "union_vesna_body.json",
@@ -95,11 +155,6 @@
     "sha256": "f9759435fe4e09726d8efa3f96a23f3a2ba93850dcbed8a3fd8ae4c28354b311"
   },
   {
-    "path": "vesna_body_lod1_sel.buf",
-    "length": 96,
-    "sha256": "0c49c64790b8c671265664a37c86153db5fb7f062df30d031b753cd134d2ca23"
-  },
-  {
     "path": "vesna_body_map_vesna_body.buf",
     "length": 8,
     "sha256": "01acecb507abfe1a354aa8064f4af5d3f1acd019e37db3c11c97523b71c76e9d"
@@ -108,10 +163,5 @@
     "path": "vesna_body_off.buf",
     "length": 16,
     "sha256": "043dcdc2cec24de4041662b31a5f885bb7419c27a7254f89a5913daacd518bed"
-  },
-  {
-    "path": "vesna_body_sel.buf",
-    "length": 128,
-    "sha256": "caeda60861bc9f32f375b2fe0aef9f8cfe74cca6edb38fad5e44abe67bf12b07"
   }
 ]

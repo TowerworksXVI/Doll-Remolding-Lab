@@ -55,6 +55,71 @@ public sealed class AuthoredEditSessionKeyGroupTests
     }
 
     [Fact]
+    public void A_state_shortcut_is_set_normalized_carried_by_the_outline_and_cleared()
+    {
+        var session = Session();
+        string group = session.CreateKeyGroup("F6", "edit-long");
+
+        session.SetStateShortcut(group, "state-0002", "ctrl f8");
+        Assert.Equal("CTRL F8", session.Snapshot().KeyGroups.Single().States[1].Shortcut);
+        Assert.Equal("CTRL F8", session.Outline().Groups.Single().States[1].Shortcut);
+        Assert.Null(session.Outline().Groups.Single().States[0].Shortcut);
+
+        session.SetStateShortcut(group, "state-0002", "  ");
+        Assert.Null(session.Snapshot().KeyGroups.Single().States[1].Shortcut);
+    }
+
+    [Fact]
+    public void A_state_shortcut_refuses_its_own_groups_key_and_a_sibling_states_shortcut()
+    {
+        var session = Session();
+        string group = session.CreateKeyGroup("F6", "edit-long");
+        session.SetStateShortcut(group, "state-0001", "F8");
+
+        var own = Assert.Throws<AuthoredRefusalException>(() =>
+            session.SetStateShortcut(group, "state-0002", "f6"));
+        Assert.Equal("Key F6 already switches this key group. Pick another key for the shortcut.", own.Message);
+        var sibling = Assert.Throws<AuthoredRefusalException>(() =>
+            session.SetStateShortcut(group, "state-0002", "F8"));
+        Assert.Equal("Key F8 is already the shortcut for State 1. Pick another key.", sibling.Message);
+        Assert.Null(session.Snapshot().KeyGroups.Single().States[1].Shortcut);
+
+        // setting a state's own shortcut again is not a clash with itself
+        session.SetStateShortcut(group, "state-0001", "F8");
+        Assert.Equal("F8", session.Snapshot().KeyGroups.Single().States[0].Shortcut);
+    }
+
+    [Fact]
+    public void A_state_shortcut_may_match_another_groups_key_and_another_groups_shortcut()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.MultiPart());
+        string body = session.CreateKeyGroup("F6", "edit-long");
+        string hair = session.CreateKeyGroup("F7", "edit-hair");
+
+        session.SetStateShortcut(body, "state-0002", "F7");
+        session.SetStateShortcut(hair, "state-0001", "F8");
+        session.SetStateShortcut(body, "state-0001", "F8");
+
+        var groups = session.Snapshot().KeyGroups;
+        Assert.Equal(new[] { "F8", "F7" }, groups.Single(group => group.Id == body).States
+            .Select(state => state.Shortcut));
+        Assert.Equal("F8", groups.Single(group => group.Id == hair).States[0].Shortcut);
+    }
+
+    [Fact]
+    public void Set_group_key_refuses_a_key_one_of_its_own_states_jumps_to()
+    {
+        var session = Session();
+        string group = session.CreateKeyGroup("F6", "edit-long");
+        session.SetStateShortcut(group, "state-0002", "F9");
+
+        var taken = Assert.Throws<AuthoredRefusalException>(() => session.SetGroupKey(group, "F9"));
+
+        Assert.Equal("Key F9 is already the shortcut for State 2. Pick another key.", taken.Message);
+        Assert.Equal("F6", session.Snapshot().KeyGroups.Single().Key);
+    }
+
+    [Fact]
     public void Delete_group_deletes_states_and_placements_never_edits_or_transfers_to_Always()
     {
         var session = Session();
@@ -212,6 +277,20 @@ public sealed class AuthoredEditSessionKeyGroupTests
         Assert.Equal(state, copy.Id);
         Assert.Equal("Copy", copy.Label);
         Assert.Equal("edit-long", Assert.Single(copy.ActiveEditIds));
+    }
+
+    [Fact]
+    public void Duplicate_state_leaves_the_shortcut_with_its_source()
+    {
+        var session = Session();
+        string group = session.CreateKeyGroup("F6", "edit-long");
+        session.SetStateShortcut(group, "state-0001", "F8");
+
+        session.DuplicateState(group, "state-0001");
+
+        var states = session.Snapshot().KeyGroups.Single().States;
+        Assert.Equal("F8", states[0].Shortcut);
+        Assert.Null(states[2].Shortcut);
     }
 
     [Fact]

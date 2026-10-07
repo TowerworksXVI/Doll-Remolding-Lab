@@ -47,6 +47,29 @@ public class BlenderReturnRoundTripTests
 
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(30);
 
+    /// <summary>Renaming the mod moves its folder and nothing Blender holds: Blender was handed files in the
+    /// mod's own round-trip folder, which follows the mod, so its next send lands.</summary>
+    [Fact]
+    public async Task A_send_after_the_mod_folder_is_renamed_lands()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui, name: "Before rename");
+
+        vm.PackageName = "After rename";
+        // A file scanner can hold the just-moved manifest for a moment; the app says so and the next save
+        // takes it, which is what a second save here stands for.
+        Assert.True(await WaitFor(() => vm.TryAutoSaveProject() is null), "the renamed mod never saved");
+        Assert.Equal("after-rename", Path.GetFileName(session.Snapshot().RootDir!));
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>());
+
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the return never finished applying — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
+        Assert.StartsWith("Blender sent back", vm.EditPage.Status);
+    }
+
     /// <summary>(a) The whole create-on-send trip. One send, no edit anywhere in the project beforehand:
     /// the return has to reach the app at all, apply to COMPLETION rather than park on the thread it was
     /// dispatched from, mint the cloth part's edit, publish geometry whose bytes read back, and keep the
@@ -96,6 +119,102 @@ public class BlenderReturnRoundTripTests
         var part = Assert.Single(Assert.Single(vm.EditPage.Nodes).Children,
             node => node.IsPart && node.Part!.RendererSlot == Cloth);
         Assert.Contains(part.Children, node => node.EditDefinitionId == edit.Id);
+    }
+
+    /// <summary>A send-back through a session file that says hidden parts opened centred, and records the
+    /// centre its part was moved by, marks the geometry it lands with both, read off that file: the build
+    /// then takes the centre back off and carries the part where Blender showed it. A send-back through a
+    /// file that says neither marks neither.</summary>
+    [Fact]
+    public async Task A_return_marks_its_geometry_with_the_centre_and_relation_its_session_file_records()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "centred",
+            moved: new[] { Cloth }, preparedShift: new[] { 0.5f, -1.25f, 3f }, preparedCentred: true);
+
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the return never landed — status: '{vm.EditPage.Status}'");
+        var centred = GeometrySlot(session.Slots(ContentEdit(session, ClothPart)!.Id)).ProjectAsset!;
+        Assert.Equal(new[] { 0.5f, -1.25f, 3f }, centred.Shift);
+        Assert.True(centred.HiddenCentred);
+    }
+
+    /// <summary>A send-back through a session file prepared before hidden parts opened centred says
+    /// neither, and the geometry it lands carries neither record.</summary>
+    [Fact]
+    public async Task A_return_through_a_file_that_says_nothing_lands_unmarked()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "older",
+            moved: new[] { Cloth });
+
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the return never landed — status: '{vm.EditPage.Status}'");
+        var plain = GeometrySlot(session.Slots(ContentEdit(session, ClothPart)!.Id)).ProjectAsset!;
+        Assert.Null(plain.Shift);
+        Assert.Null(plain.HiddenCentred);
+    }
+
+    /// <summary>A send-back whose mesh weights a bone only a shrunk part moves and another bone, where the
+    /// session file says the game's own part does not, keeps that warning on the edit it lands: the app reads
+    /// it off the weights that came back and the session file's entry for the part.</summary>
+    [Fact]
+    public async Task A_return_weighted_across_a_shrunk_part_and_other_bones_keeps_the_warning_on_its_edit()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        string returned = SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "mixed",
+            moved: new[] { Cloth }, secondBone: new[] { Cloth },
+            sessionEntry: entry => entry with { Label = "cloth", HiddenBones = new[] { "22222222" } });
+
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the return never landed — status: '{vm.EditPage.Status}'");
+        string expected = "'cloth' is weighted to a shrunk part's bones and to other bones. "
+            + "In the game the two sets move apart.";
+        Assert.Equal(expected, MainWindowViewModel.BlenderHiddenMixNote("cloth"));
+        Assert.Contains(expected, ContentEdit(session, ClothPart)!.ReturnWarning);
+
+        // the same weights say nothing where the game's own part already mixes, or where no session file
+        // could be read
+        var payload = MeshGltf.ReexportPartGlb(returned, Cloth, temp.At("mixed-reread.glb"));
+        var mixes = new BlenderSessionDocument
+        {
+            Parts = new() { new SessionPart(Cloth, false, HiddenBones: new[] { "22222222" }, StockMixes: true) },
+        };
+        Assert.Empty(MainWindowViewModel.BlenderHiddenMixNotes(new[] { (Cloth, payload) }, mixes));
+        Assert.Empty(MainWindowViewModel.BlenderHiddenMixNotes(new[] { (Cloth, payload) }, null));
+        Assert.Single(MainWindowViewModel.BlenderHiddenMixNotes(new[] { (Cloth, payload) },
+            mixes with { Parts = new() { mixes.Parts[0] with { StockMixes = false } } }));
+    }
+
+    /// <summary>A send-back whose mesh weights only bones outside the shrunk part's, through the same session
+    /// file, lands with no such warning.</summary>
+    [Fact]
+    public async Task A_return_weighted_to_other_bones_only_lands_without_the_shrunk_part_warning()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "unmixed",
+            moved: new[] { Cloth },
+            sessionEntry: entry => entry with { Label = "cloth", HiddenBones = new[] { "22222222" } });
+
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the return never landed — status: '{vm.EditPage.Status}'");
+        Assert.DoesNotContain("shrunk", ContentEdit(session, ClothPart)!.ReturnWarning ?? "");
     }
 
     [Fact]
@@ -831,6 +950,99 @@ public class BlenderReturnRoundTripTests
         Assert.Equal(assets, session.Snapshot().ProjectAssets.Select(asset => asset.Id).ToArray());
     }
 
+    /// <summary>The send that loses work in the field: a second send that changes ONE thing — here the mesh
+    /// moves — while every picture comes back exactly as the session sent it. The first send made the
+    /// pictures the edit's own assets; the second asks nothing of the picture slots, so they stay bound,
+    /// base, normal and RMO alike, with the RMO's alpha answer, while the moved mesh publishes. The test
+    /// above cannot say this: its second send changes nothing, so no publish runs, and it reads assets
+    /// rather than bindings.
+    ///
+    /// <para>The second send is a fresh session on the exact slot, the way a part with an edit is opened
+    /// again, and its pictures come back as that session handed them out. That is the untouched answer
+    /// over authored bindings — the publish path under test — whichever picture the session had sent; the
+    /// classifier's own tests cover the modder's picture going out and coming back untouched.</para></summary>
+    [Fact]
+    public async Task A_moved_second_send_keeps_the_authored_pictures_bound()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), everyMap: true);
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the authored texture send never landed — status: '{vm.EditPage.Status}'");
+        string editId = ContentEdit(session, ClothPart)!.Id;
+        string geometryBefore = GeometryAssetId(session, editId);
+        var before = PictureBindings(session, editId);
+        Assert.Equal(6, before.Values.Count(bound => bound.Kind == BindingKind.ProjectAsset
+            && bound.Input is TargetInputKind.BaseColor or TargetInputKind.Normal or TargetInputKind.Rmo));
+        Assert.Equal(2, before.Values.Count(bound => bound.Input == TargetInputKind.RmoAlpha
+            && bound.Kind == BindingKind.ProjectAsset));
+        await ReadyForResend(ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "second",
+            moved: new[] { Cloth }, everyMap: true,
+            targetFor: (part, prepared) => ExactTarget(session, editId, part, prepared));
+
+        Assert.True(await Settled(vm, () => GeometryAssetId(session, editId) != geometryBefore),
+            $"the moved send never landed — status: '{vm.EditPage.Status}'");
+        var after = PictureBindings(session, editId);
+        Assert.Equal(before.Count, after.Count);
+        Assert.All(before, pair => Assert.Equal(pair.Value, after[pair.Key]));
+    }
+
+    /// <summary>A replacement whose material carries only a base colour lands flat on its first send — no
+    /// normal, no RMO, as Blender showed it — and stays flat when a later send moves the mesh. The base is
+    /// still the modder's own and the replacement still draws on its own UVs, so the original relief
+    /// sampled through them is not what the modder sent back, on the first send or any after.</summary>
+    [Fact]
+    public async Task A_base_only_material_stays_flat_across_a_moved_second_send()
+    {
+        using var settings = new SettingsSnapshot();
+        using var temp = new TempGame();
+        using var ui = new PumpedUiThread();
+        var (vm, session) = await OpenProjectAsync(temp, ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>());
+        Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
+            $"the base-only send never landed — status: '{vm.EditPage.Status}'");
+        string editId = ContentEdit(session, ClothPart)!.Id;
+        string geometryBefore = GeometryAssetId(session, editId);
+        var before = PictureBindings(session, editId);
+        Assert.Equal(2, before.Values.Count(bound => bound.Input == TargetInputKind.BaseColor
+            && bound.Kind == BindingKind.ProjectAsset));
+        Assert.Equal(4, before.Values.Count(bound => bound.Input is TargetInputKind.Normal or TargetInputKind.Rmo
+            && bound.Kind == BindingKind.Neutral));
+        await ReadyForResend(ui);
+
+        SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(), run: "second",
+            moved: new[] { Cloth },
+            targetFor: (part, prepared) => ExactTarget(session, editId, part, prepared));
+
+        Assert.True(await Settled(vm, () => GeometryAssetId(session, editId) != geometryBefore),
+            $"the moved send never landed — status: '{vm.EditPage.Status}'");
+        var after = PictureBindings(session, editId);
+        Assert.Equal(before.Count, after.Count);
+        Assert.All(before, pair => Assert.Equal(pair.Value, after[pair.Key]));
+    }
+
+    /// <summary>What every picture slot of an edit's replacement outputs binds, keyed by submesh, input and
+    /// property: the facts a send that asks nothing of a slot must leave exactly as they were.</summary>
+    private readonly record struct PictureBound(TargetInputKind Input, BindingKind Kind, string? ProjectAssetId,
+        string? SourceSlotId);
+
+    private static Dictionary<(int Submesh, TargetInputKind Input, string Property), PictureBound> PictureBindings(
+        AuthoredEditSession session, string editId) =>
+        session.Slots(editId)
+            .Where(state => state.Slot.Domain == TargetSlotDomain.EditOutput
+                && state.Slot.SubmeshIndex is not null
+                && state.Slot.Input is TargetInputKind.BaseColor or TargetInputKind.Normal or TargetInputKind.Rmo
+                    or TargetInputKind.RmoAlpha or TargetInputKind.Blend or TargetInputKind.Texture)
+            .ToDictionary(state => (state.Slot.SubmeshIndex!.Value, state.Slot.Input, state.Slot.ShaderProperty ?? ""),
+                state => new PictureBound(state.Slot.Input, state.Binding.Kind, state.Binding.ProjectAssetId,
+                    state.Binding.SourceSlot?.SlotId));
+
     /// <summary>(i) A return belongs to the mod it arrived FOR. Two sends land in the first mod's folder and
     /// queue behind a held window; the modder then opens a second mod for the same outfit, and both returns
     /// come due in a session that has nothing to do with them. Part routes address a part by subject and
@@ -873,6 +1085,7 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => vm.PendingBlenderReturns.IsCompleted),
             $"the returns never finished — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the refused returns");
         Assert.Equal(MainWindowViewModel.BlenderReturnModClosed(refusedBy), vm.EditPage.Status);
         Assert.Empty(first.Snapshot().EditDefinitions);
         Assert.Empty(second.Snapshot().EditDefinitions);
@@ -953,6 +1166,7 @@ public class BlenderReturnRoundTripTests
         using var temp = new TempGame();
         using var ui = new PumpedUiThread();
         var (vm, session) = await OpenProjectAsync(temp, ui);
+        await OpenSettledAsync(vm, ui);
 
         using var reading = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
@@ -960,7 +1174,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(reading.Wait(Settle), "the session was never held");
 
         SendBack(temp, session, twoParts: false, emptied: Array.Empty<string>(),
-            modRoot: temp.At("mod"));   // the session is held: it cannot be asked where the mod is
+            transportRoot: RoundTripRedirect.FolderOf(temp.At("mod")));   // the session is held: it cannot be asked
         Assert.True(await Queued(vm), "the send never reached the return queue");
         var since = System.Diagnostics.Stopwatch.StartNew();
 
@@ -981,6 +1195,7 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the return never finished applying — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
         Assert.NotEqual(MainWindowViewModel.BlenderReturnApplying, vm.EditPage.Status);
         // The gate is given back with the return: a row left working would wait for the life of the app.
         Assert.True(await WaitFor(() => !vm.EditPage.Nodes.Any(node => node.IsBusy)),
@@ -998,13 +1213,15 @@ public class BlenderReturnRoundTripTests
         using var temp = new TempGame();
         using var ui = new PumpedUiThread();
         var (vm, first) = await OpenProjectAsync(temp, ui, name: FirstMod);
+        await OpenSettledAsync(vm, ui);
 
         using var reading = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var holding = Task.Run(() => first.Compound(_ => { reading.Set(); release.Wait(Settle); }));
         Assert.True(reading.Wait(Settle), "the session was never held");
 
-        SendBack(temp, first, twoParts: false, emptied: Array.Empty<string>(), modRoot: temp.At("mod"));
+        SendBack(temp, first, twoParts: false, emptied: Array.Empty<string>(),
+            transportRoot: RoundTripRedirect.FolderOf(temp.At("mod")));
         Assert.True(await Queued(vm), "the send never reached the return queue");
 
         var second = await OpenSecondModAsync(temp, vm);
@@ -1023,6 +1240,8 @@ public class BlenderReturnRoundTripTests
         await holding;
         Assert.True(await Settled(vm, () => vm.PendingBlenderReturns.IsCompleted),
             $"the return never finished — status: '{vm.EditPage.Status}'");
+        // The queue completes on the worker; the line it leaves rides the window's thread behind it.
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the refused return");
         Assert.Equal(MainWindowViewModel.BlenderReturnModClosed(FirstMod), vm.EditPage.Status);
         Assert.Empty(second.Snapshot().EditDefinitions);
     }
@@ -1048,6 +1267,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null
                 && ContentEdit(session, BodyPart) is not null),
             $"the painted parts never landed — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
         Assert.DoesNotContain(MainWindowViewModel.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
     }
 
@@ -1072,6 +1292,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null
                 && ContentEdit(session, BodyPart) is not null),
             $"a return that could not compare anything still dropped an edit — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
         Assert.Contains(MainWindowViewModel.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
         Assert.All(session.Snapshot().EditDefinitions.Where(edit => edit.Kind == EditDefinitionKind.Content),
             edit => Assert.Contains(MainWindowViewModel.BlenderReturnBaselineUnreadable,
@@ -1092,6 +1313,7 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the degraded part never landed — status: '{vm.EditPage.Status}'");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
         Assert.Null(ContentEdit(session, BodyPart));
         Assert.Contains($"Couldn't read the file {Cloth} was opened from, so every UV layer that came "
             + "back was kept.", vm.EditPage.Status);
@@ -1163,6 +1385,9 @@ public class BlenderReturnRoundTripTests
         seed.EnsurePartSlots(BodyPart, _ => PaintedPart(BodyPart));
         var saved = seed.Snapshot();
         saved.Info.Name = name;
+        // A mod sends back only after a Blender open, which saves its round-trip id; this fixture sends back
+        // without one, so it saves the id the open would have.
+        saved.RoundTripId = RoundTripStore.NewId();
         AuthoredProjectSerializer.Save(saved, ModProject.ManifestPathFor(root));
 
         var vm = new MainWindowViewModel(startLoad: false, pageDispatch: ui.Dispatch);
@@ -1281,27 +1506,33 @@ public class BlenderReturnRoundTripTests
     /// <para><paramref name="dropTheOpenedGlb"/> deletes the composition the session was exported from
     /// before the send lands, which is what a mod folder renamed while Blender was open leaves behind.
     /// <paramref name="modRoot"/> spares the caller the session read this otherwise makes, for a test that
-    /// is deliberately holding the session.</para></summary>
+    /// is deliberately holding the session.</para>
+    ///
+    /// <para><paramref name="secondBone"/> names the parts that come back weighted to a second bone as well
+    /// as the root, and <paramref name="sessionEntry"/> reshapes each part's entry in the session file.</para></summary>
     private static string SendBack(TempGame temp, AuthoredEditSession session, bool twoParts,
         IReadOnlyList<string> emptied, string run = "run", string part = Cloth,
         int submeshes = 2, int pixels = 4, bool everyMap = false,
         IReadOnlyList<string>? alsoOpen = null, IReadOnlyList<string>? unchanged = null,
         IReadOnlyList<string>? moved = null, float shift = 0.5f,
         Func<string, string, BlenderSessionTarget>? targetFor = null,
-        bool dropTheOpenedGlb = false, string? modRoot = null,
+        bool dropTheOpenedGlb = false, string? transportRoot = null,
         IReadOnlyList<string>? inventedUv1 = null, IReadOnlyList<string>? dropPrepared = null,
         IReadOnlyDictionary<string, BlenderPartTarget>? editTargets = null,
         bool corruptSession = false, bool corruptTarget = false, bool typedSession = true,
-        Action? afterSessionWritten = null, bool writeSidecar = true, Action? beforeSidecar = null)
+        Action? afterSessionWritten = null, bool writeSidecar = true, Action? beforeSidecar = null,
+        IReadOnlyList<float>? preparedShift = null, bool preparedCentred = false,
+        IReadOnlyList<string>? secondBone = null, Func<SessionPart, SessionPart>? sessionEntry = null)
     {
-        string root = modRoot ?? session.Snapshot().RootDir!;
-        string runDir = Path.Combine(root, ProjectAssetIngress.DirectoryName, "blender", run);
+        string root = transportRoot ?? ProjectAssetIngress.RootFor(session.Snapshot());
+        string runDir = Path.Combine(root, "blender", run);
         string partsDir = Path.Combine(runDir, "parts");
         Directory.CreateDirectory(partsDir);
         var untouched = (unchanged ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var remolded = (moved ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var extraUv = (inventedUv1 ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var missingPrepared = (dropPrepared ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var twoBones = (secondBone ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var opened = (twoParts ? new[] { Cloth, Body } : new[] { part })
             .Concat(alsoOpen ?? Array.Empty<string>()).ToArray();
@@ -1315,20 +1546,22 @@ public class BlenderReturnRoundTripTests
         foreach (string name in opened)
         {
             string prepared = Path.Combine(partsDir, name + ".glb");
-            MeshGltf.ReexportPartGlb(composition, name, prepared, recordGlb: composition);
+            MeshGltf.ReexportPartGlb(composition, name, prepared, recordGlb: composition,
+                shiftRecord: preparedShift, hiddenCentred: preparedCentred);
             var target = targetFor?.Invoke(name, prepared)
                 ?? new BlenderSessionTarget(name, "", prepared, Subject: Character, Outfit: Outfit);
             targets.Add(target);
             var partTarget = AuthoredParts.Part(Character, Outfit, name);
-            // The held-session tests pass modRoot specifically so this fixture does not query the live
+            // The held-session tests pass transportRoot specifically so this fixture does not query the live
             // session while its transaction gate is occupied. They model an older contract as before.
-            AuthoredProject? snapshot = typedSession && modRoot is null ? session.Snapshot() : null;
-            parts.Add(new SessionPart(name, Edited: !string.IsNullOrWhiteSpace(target.ProjectAssetId),
+            AuthoredProject? snapshot = typedSession && transportRoot is null ? session.Snapshot() : null;
+            var entry = new SessionPart(name, Edited: !string.IsNullOrWhiteSpace(target.ProjectAssetId),
                 EditId: target.EditDefinitionId,
                 Edits: snapshot is not null
                     ? MainWindowViewModel.BlenderSessionEdits(snapshot, partTarget) : null,
                 DefaultEditName: snapshot is not null
-                    ? AuthoredEditSession.NewEditLabel(snapshot, partTarget, null) : null));
+                    ? AuthoredEditSession.NewEditLabel(snapshot, partTarget, null) : null);
+            parts.Add(sessionEntry is null ? entry : sessionEntry(entry));
             if (missingPrepared.Contains(name)) File.Delete(prepared);
         }
         BlenderBridge.WriteSession(composition, null, parts, "return.glb", targets);
@@ -1350,7 +1583,7 @@ public class BlenderReturnRoundTripTests
                     .Select(name => Rigged(temp, name,
                         stock: untouched.Contains(name) || remolded.Contains(name),
                         submeshes, pixels, everyMap, moved: remolded.Contains(name) ? shift : 0f,
-                        uv1: extraUv.Contains(name))).ToList(),
+                        uv1: extraUv.Contains(name), secondBone: twoBones.Contains(name))).ToList(),
                 hash => BonePaths[hash], returned);
             File.Delete(PreviewMaps.SidecarPath(returned));
         }
@@ -1368,12 +1601,12 @@ public class BlenderReturnRoundTripTests
     /// The target and session documents are deliberately left in place: their acknowledged revision,
     /// comparison baseline and exact rows are the subject of the multi-send tests.</summary>
     private static void Resend(TempGame temp, string returned, bool stock, float moved,
-        IReadOnlyDictionary<string, BlenderPartTarget>? editTargets = null)
+        IReadOnlyDictionary<string, BlenderPartTarget>? editTargets = null, bool everyMap = false)
     {
         if (File.Exists(returned)) File.Delete(returned);
         string mapRecord = PreviewMaps.SidecarPath(returned);
         if (File.Exists(mapRecord)) File.Delete(mapRecord);
-        MeshGltf.ExportCombinedRiggedGlb(new[] { Rigged(temp, Cloth, stock, 2, 4, false, moved) },
+        MeshGltf.ExportCombinedRiggedGlb(new[] { Rigged(temp, Cloth, stock, 2, 4, everyMap, moved) },
             hash => BonePaths[hash], returned);
         if (File.Exists(mapRecord)) File.Delete(mapRecord);
         BlenderBridge.WriteSendSidecar(returned, Array.Empty<string>(), editTargets);
@@ -1396,8 +1629,7 @@ public class BlenderReturnRoundTripTests
     private static string SendBackRigidPart(TempGame temp, AuthoredEditSession session, string part,
         bool nudged)
     {
-        string runDir = Path.Combine(session.Snapshot().RootDir!, ProjectAssetIngress.DirectoryName,
-            "blender", "rigid");
+        string runDir = Path.Combine(ProjectAssetIngress.RootFor(session.Snapshot()), "blender", "rigid");
         Directory.CreateDirectory(runDir);
         var maps = new (string?, string?, string?)[]
             { (WritePng(temp.At($"maps/{part}.rigid.b.png"), 44, 4), null, null) };
@@ -1449,9 +1681,12 @@ public class BlenderReturnRoundTripTests
     /// of them, a map of its own on each — and body is the plain one. <paramref name="stock"/> picks which set
     /// of images it carries: the ones the session handed Blender, or the different ones the modder sends back.
     /// <paramref name="everyMap"/> fills the normal and RMO slots too, which is what a real painted part
-    /// carries and what makes a send's map count three per submesh rather than one.</summary>
+    /// carries and what makes a send's map count three per submesh rather than one.
+    ///
+    /// <para><paramref name="secondBone"/> weights the part's first vertex to <see cref="SecondBone"/>
+    /// instead of the root, so the part weights two bones.</para></summary>
     private static MeshGltf.RiggedPart Rigged(TempGame temp, string name, bool stock, int submeshes,
-        int pixels, bool everyMap, float moved = 0f, bool uv1 = false)
+        int pixels, bool everyMap, float moved = 0f, bool uv1 = false, bool secondBone = false)
     {
         string tag = stock ? "stock" : "sent";
         int count = name == Cloth ? submeshes : 1;
@@ -1462,11 +1697,15 @@ public class BlenderReturnRoundTripTests
                 everyMap ? Map(submesh, "n", (byte)(seed + 1)) : null,
                 everyMap ? Map(submesh, "r", (byte)(seed + 2)) : null);
         }).ToList();
-        return new MeshGltf.RiggedPart(Submeshes(name, count, moved, uv1),
+        var mesh = Submeshes(name, count, moved, uv1);
+        if (secondBone) mesh.Channels["BlendIndices"][0] = 1f;
+        return new MeshGltf.RiggedPart(mesh,
             new MeshSkin
             {
-                BoneHashes = new[] { RootBone },
-                BindPoses = new List<Matrix4x4> { Matrix4x4.Identity },
+                BoneHashes = secondBone ? new[] { RootBone, SecondBone } : new[] { RootBone },
+                BindPoses = secondBone
+                    ? new List<Matrix4x4> { Matrix4x4.Identity, Matrix4x4.Identity }
+                    : new List<Matrix4x4> { Matrix4x4.Identity },
             },
             BaseColorPng: maps[0].Item1,
             PerSubmesh: maps);
@@ -1475,8 +1714,12 @@ public class BlenderReturnRoundTripTests
             WritePng(temp.At($"maps/{name}.{tag}.{submesh}.{input}.png"), seed, pixels);
     }
 
-    private const uint RootBone = 0x1111_1111;
-    private static readonly Dictionary<uint, string> BonePaths = new() { [RootBone] = "root" };
+    private const uint RootBone = 0x1111_1111, SecondBone = 0x2222_2222;
+    private static readonly Dictionary<uint, string> BonePaths = new()
+    {
+        [RootBone] = "root",
+        [SecondBone] = "root/second",
+    };
 
     /// <summary>One triangle per submesh, side by side: the part whose materials a return has to keep
     /// apart, at whatever width the case needs. <paramref name="moved"/> shifts the whole part along X, by
@@ -1565,6 +1808,15 @@ public class BlenderReturnRoundTripTests
     /// in flight first — and while the window's thread is held it cannot leave the queue again.</summary>
     private static Task<bool> Queued(MainWindowViewModel vm) =>
         WaitFor(() => !vm.PendingBlenderReturns.IsCompleted);
+
+    /// <summary>Let the open's own background work finish before a test holds the session. The build plan
+    /// the open asks for applies on the window's thread and reads the session there; landing inside the
+    /// hold, it would keep the window's thread waiting for the whole of it.</summary>
+    private static async Task OpenSettledAsync(MainWindowViewModel vm, PumpedUiThread ui)
+    {
+        Assert.True(await WaitFor(() => !vm.BuildPage.IsPlanning), "the open's build plan never settled");
+        Assert.True(ui.Idle(Settle), "the window's thread never went idle after the open");
+    }
 
     private static async Task<bool> WaitFor(Func<bool> reached)
     {

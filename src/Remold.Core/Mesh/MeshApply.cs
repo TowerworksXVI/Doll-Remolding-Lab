@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
+using Remold.Core.Project;
 
 namespace Remold.Core.Mesh;
 
@@ -131,8 +132,8 @@ public static class MeshApply
     // ---- the compile -------------------------------------------------------
 
     /// <summary>Map the authored glb skin onto the target's bone order by joint-name hash, taking topology and
-    /// weights from the glb. Unresolved-bone vertices fall back to the nearest original vertex's weights so
-    /// nothing yanks to the skeleton root; a missing geometry channel is filled from the original by
+    /// weights from the glb. Weight on a bone the target lacks is refused (<see cref="OffSkeletonWeightException"/>)
+    /// wherever the target stores influences; a missing geometry channel is filled from the original by
     /// proximity.</summary>
     internal static Built BuildSkinned(UnityMesh orig, Payload glb, uint[] targetBoneHashes)
     {
@@ -147,57 +148,24 @@ public static class MeshApply
                                                     + "the affected vertices in Blender, then send the mesh back");
         // Resolve the authored joints onto the target bone order.
         var jr = ResolveAuthoredJoints(targetBoneHashes, glb.SkinJointHashes!, glb.JointIndices!, glb.JointWeights!, glb.VertexCount);
+        // A weight on a bone the target lacks has no bone to move it that keeps the authored deformation. A
+        // target storing no influences never writes the skin, so what it lacks cannot matter there.
+        if (jr.OffSkeletonVertices > 0 && (orig.Has("BlendIndices") || orig.Has("BlendWeight")))
+            throw new OffSkeletonWeightException(jr.OffSkeletonVertices, jr.OffSkeletonBones);
 
         int n = glb.VertexCount;
         var bi = new float[n * 4];
         var bw = new float[n * 4];
         for (int v = 0; v < n; v++)
-        {
-            bool droppedSome = false;
             for (int k = 0; k < 4; k++)
             {
                 int gj = glb.JointIndices![v * 4 + k];
-                float w = glb.JointWeights![v * 4 + k];
                 int ti = gj >= 0 && gj < jr.JointToTarget.Length ? jr.JointToTarget[gj] : -1;
-                if (ti < 0)
-                {
-                    // DROP the unresolved influence (don't pile its weight onto bone 0); keep the rest
-                    bi[v * 4 + k] = 0; bw[v * 4 + k] = 0;
-                    if (w > 0) droppedSome = true;
-                }
-                else { bi[v * 4 + k] = ti; bw[v * 4 + k] = w; }
+                // an unresolved slot is weightless here (or the skin is never written): it stays empty
+                if (ti >= 0) { bi[v * 4 + k] = ti; bw[v * 4 + k] = glb.JointWeights![v * 4 + k]; }
             }
-            // kept some resolved influence but dropped a weighted unresolved one: renormalize the survivors
-            // so it doesn't partially collapse (fully-unresolved verts fall back below)
-            if (droppedSome && !jr.FullyUnsafe[v])
-            {
-                float sum = 0f;
-                for (int k = 0; k < 4; k++) sum += bw[v * 4 + k];
-                if (sum > 0f) for (int k = 0; k < 4; k++) bw[v * 4 + k] /= sum;
-            }
-        }
 
         int[]? nn = null;
-        // ONLY a vertex whose every unit of authored WEIGHT is on missing bones falls back to the nearest
-        // original skin, so it doesn't yank to the root or ship an all-zero skin.
-        if (jr.FullyUnsafeCount > 0 && orig.Has("BlendIndices") && orig.Has("BlendWeight"))
-        {
-            nn = NearestNeighbors(orig.Channels["Vertex"], orig.VertexCount, glb.Channels["Vertex"], n,
-                TieChannels(orig, glb));
-            var oi = orig.Channels["BlendIndices"]; var ow = orig.Channels["BlendWeight"];
-            int od = orig.Dims["BlendWeight"];   // the original's STORED influence width (1–4), == BlendIndices dim
-            for (int v = 0; v < n; v++)
-            {
-                if (!jr.FullyUnsafe[v]) continue;
-                int s = nn[v];
-                // read the original at ITS width (not a hardcoded 4 — a narrow original would over-read), pad to 4
-                for (int k = 0; k < 4; k++)
-                {
-                    bi[v * 4 + k] = k < od ? oi[s * od + k] : 0f;
-                    bw[v * 4 + k] = k < od ? ow[s * od + k] : 0f;
-                }
-            }
-        }
 
         // The authored skin is always 4-wide (glTF JOINTS_0/WEIGHTS_0 are vec4); the game stores 1–4.
         // Reduce to the target's stored width by keeping the STRONGEST influences and renormalizing, or a
@@ -230,8 +198,6 @@ public static class MeshApply
         if (reducedVerts > 0)
             built.Warnings.Add($"{reducedVerts} vertex(es) had more than {targetWidth} bone influence(s). " +
                                $"They were reduced to the strongest {targetWidth} and renormalized.");
-        if (OutOfSkeletonWarning(jr) is { } outOfSkel)
-            built.Warnings.Add(outOfSkel);
         return built;
     }
 
@@ -703,27 +669,20 @@ public static class MeshApply
         return outp;
     }
 
-    // ---- bone resolution diagnosis ----
+    // ---- bone resolution ----
 
     /// <summary>The result of mapping an authored skin's joints onto a target skeleton: the per-joint target
-    /// index the compile uses, plus the counts the warning is worded from.
-    /// <see cref="FullyUnsafe"/>/<see cref="FullyUnsafeCount"/> drive the nearest-original fallback — a vertex
-    /// is unsafe when NO WEIGHTED influence resolved; a zero-weight resolved slot must not mask that, or the
-    /// vertex ships an all-zero skin. The *-Weighted counts are the warning inputs: an absent bone is only
-    /// worth warning about when an authored influence puts weight on it.</summary>
+    /// index the compile uses, and how much authored weight sits on bones the target lacks. Only weight
+    /// counts: a weightless slot on an absent bone deforms nothing.</summary>
     internal sealed class JointResolution
     {
         public required int[] JointToTarget;      // per authored joint → target bone index, -1 if absent
-        public required bool[] FullyUnsafe;       // per vertex: no WEIGHTED influence resolved to a target bone
-        public int FullyUnsafeCount;              // count of FullyUnsafe (drives the fallback)
-        public int FullyWeightedVerts;            // fully-unsafe AND carried weight on a missing bone
-        public int PartialVerts;                  // kept weighted influence, dropped a weighted missing one
-        public int UnresolvedWeightedBones;       // distinct missing joints that carry weight somewhere
+        public int OffSkeletonVertices;           // vertices with weight on a bone the target lacks
+        public int OffSkeletonBones;              // distinct absent joints that carry weight somewhere
     }
 
-    /// <summary>Map each authored joint hash onto the target's bone order and tally the per-vertex weight
-    /// impact of any bone the target lacks. Pure/read-only; <see cref="BuildSkinned"/> runs it to get the
-    /// diagnosis Build reports.</summary>
+    /// <summary>Map each authored joint hash onto the target's bone order and count the weight that lands
+    /// on bones the target lacks. Pure/read-only.</summary>
     internal static JointResolution ResolveAuthoredJoints(
         uint[] targetBoneHashes, uint[] jointHashes, int[] jointIndices, float[] jointWeights, int vertexCount)
     {
@@ -734,53 +693,48 @@ public static class MeshApply
         for (int j = 0; j < jointToTarget.Length; j++)
             jointToTarget[j] = hashToIndex.TryGetValue(jointHashes[j], out var ti) ? ti : -1;
 
-        var fullyUnsafe = new bool[vertexCount];
-        int fullyUnsafeCount = 0, fullyWeighted = 0, partial = 0;
+        int offVertices = 0;
         var weightedMissing = new HashSet<int>();
         for (int v = 0; v < vertexCount; v++)
         {
-            // Weight decides safety, not slot resolution: a vertex whose only WEIGHT sits on missing bones
-            // counts as fully unsafe, else the compile drops every real influence and ships an all-zero
-            // skin. w != 0, not w > 0, so a negative weight (which Build refuses outright) counts.
-            bool anyResolvedWeight = false, anyMissing = false, droppedWeighted = false;
+            // w != 0, not w > 0, so a negative weight (which Build refuses outright) counts
+            bool off = false;
             for (int k = 0; k < 4; k++)
             {
                 int gj = jointIndices[v * 4 + k];
-                float w = jointWeights[v * 4 + k];
                 int ti = gj >= 0 && gj < jointToTarget.Length ? jointToTarget[gj] : -1;
-                if (ti >= 0) { if (w != 0) anyResolvedWeight = true; }
-                else
-                {
-                    anyMissing = true;
-                    if (w != 0) { droppedWeighted = true; weightedMissing.Add(gj); }
-                }
+                if (ti < 0 && jointWeights[v * 4 + k] != 0) { off = true; weightedMissing.Add(gj); }
             }
-            if (!anyResolvedWeight && anyMissing)
-            {
-                fullyUnsafe[v] = true; fullyUnsafeCount++;
-                if (droppedWeighted) fullyWeighted++;
-            }
-            else if (droppedWeighted) partial++;
+            if (off) offVertices++;
         }
 
         return new JointResolution
         {
-            JointToTarget = jointToTarget, FullyUnsafe = fullyUnsafe, FullyUnsafeCount = fullyUnsafeCount,
-            FullyWeightedVerts = fullyWeighted, PartialVerts = partial, UnresolvedWeightedBones = weightedMissing.Count,
+            JointToTarget = jointToTarget, OffSkeletonVertices = offVertices,
+            OffSkeletonBones = weightedMissing.Count,
         };
     }
 
-    /// <summary>The out-of-skeleton warning, or null when nothing broke. Fires ONLY when an authored
-    /// influence lands on a bone the target lacks AND carries weight. Non-blocking: an absent bone is
-    /// warn-and-drop: Build ships the mesh and reports this.</summary>
-    internal static string? OutOfSkeletonWarning(JointResolution jr)
+    /// <summary>The build's refusal for an authored skin with weight on bones the target does not have. The
+    /// compile does not know which edit it is compiling, so the build names it through <see cref="For"/>.</summary>
+    public sealed class OffSkeletonWeightException : AuthoredRefusalException
     {
-        if (jr.UnresolvedWeightedBones == 0) return null;
-        int verts = jr.FullyWeightedVerts + jr.PartialVerts;
-        return $"{verts} vertex(es) are weighted to {jr.UnresolvedWeightedBones} bone(s) this item's " +
-               $"skeleton doesn't have. {jr.FullyWeightedVerts} fell back to the original weights, " +
-               $"{jr.PartialVerts} dropped that influence and kept the rest. Paint them to a bone the "  +
-               "item uses.";
+        public int Vertices { get; }
+        public int Bones { get; }
+
+        public OffSkeletonWeightException(int vertices, int bones) : base(Describe("the new mesh", vertices, bones))
+        {
+            Vertices = vertices;
+            Bones = bones;
+        }
+
+        /// <summary>The refusal worded for the edit on <paramref name="mesh"/>.</summary>
+        public string For(string mesh) => Describe($"the mesh edit on '{mesh}'", Vertices, Bones);
+
+        private static string Describe(string subject, int vertices, int bones) =>
+            $"{subject} has {vertices} {(vertices == 1 ? "vertex" : "vertices")} weighted to {bones} " +
+            $"{(bones == 1 ? "bone" : "bones")} this item doesn't have. Open the edit in Blender, run Check " +
+            "Mesh, and send it again";
     }
 
     // ---- outline bake (vertex Color) ----

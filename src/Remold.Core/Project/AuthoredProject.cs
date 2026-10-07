@@ -12,7 +12,17 @@ namespace Remold.Core.Project;
 /// hashes, shader layouts, carriers and emitted files belong to later derived records.</summary>
 public sealed class AuthoredProject
 {
-    public const int CurrentSchema = 2;
+    // 3: a geometry asset may record the centre a part the game starts hidden was moved by (shift) and
+    // that it was returned from a session in which such parts opened centred (hidden_centred). Both change
+    // what the project builds, so a version that would drop them on save must not open the project.
+    public const int CurrentSchema = 3;
+
+    /// <summary>The first authored schema. Every schema from here to <see cref="CurrentSchema"/> reads
+    /// as the current one with nothing to convert, and is saved as the current one.</summary>
+    public const int FirstAuthoredSchema = 2;
+
+    /// <summary>Whether a manifest of <paramref name="schema"/> is authored intent this version reads.</summary>
+    public static bool IsAuthored(int schema) => schema is >= FirstAuthoredSchema and <= CurrentSchema;
 
     [JsonPropertyName("schema")] public int Schema { get; set; } = CurrentSchema;
     [JsonPropertyName("app_version")] public string? AppVersion { get; set; }
@@ -31,7 +41,21 @@ public sealed class AuthoredProject
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public AuthoredWorkspaceIndex? WorkspaceIndex { get; set; }
 
+    /// <summary>The name of this mod's round-trip folder (see <see cref="RoundTripStore"/>). The app gives
+    /// it to a mod when the mod opens, and it is saved with the mod's next save, or just before the mod
+    /// first hands a file to Blender or an image editor. It names the mod rather than the folder the mod
+    /// sits in, so the mod keeps its round trips wherever its folder goes.</summary>
+    [JsonPropertyName("round_trip_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RoundTripId { get; set; }
+
     [JsonIgnore] public string? RootDir { get; set; }
+
+    /// <summary>The app-owned folder this mod's round trips live in, outside <see cref="RootDir"/>. Every
+    /// file an outside editor is handed sits here, so renaming the mod folder never moves a file Blender or
+    /// an image editor still holds. Not part of the manifest: the app binds it once the mod folder is
+    /// known.</summary>
+    [JsonIgnore] public string? TransportRoot { get; set; }
 
     /// <summary>Resolve a workspace-relative path against <see cref="RootDir"/>.</summary>
     public string Resolve(string relative)
@@ -84,6 +108,20 @@ public sealed class ProjectAsset
     [JsonPropertyName("baked_rest")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<float>? BakedRest { get; set; }
+    /// <summary>Geometry only: the centre a part the game starts hidden was moved by so it opened centred
+    /// in Blender (<see cref="Workbench.HiddenPart"/>, 3 floats, applied after <see cref="BakedRest"/>),
+    /// recorded from the session file the return came back through. Absent on geometry left where it was
+    /// modelled. Kept apart from the rest: a rest record refuses a translation.</summary>
+    [JsonPropertyName("shift")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<float>? Shift { get; set; }
+    /// <summary>Geometry only: true on geometry returned from a Blender session in which parts the game
+    /// starts hidden opened centred, whether or not its own part is one. Its build carries a bone to or from
+    /// a hidden part by where that part showed; geometry without it was authored before, and builds as it
+    /// did then (<see cref="Mesh.BindReference.For"/>). Written only when true.</summary>
+    [JsonPropertyName("hidden_centred")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? HiddenCentred { get; set; }
 }
 
 /// <summary>A narrow semantic authored value. The semantic is the portable identity; a backend-specific
@@ -279,7 +317,26 @@ public sealed class EditDefinition
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ReturnWarning { get; set; }
     [JsonPropertyName("bindings")] public List<Binding> Bindings { get; set; } = new();
+    [JsonPropertyName("disabled_material_effects")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<DisabledMaterialEffect>? DisabledMaterialEffects { get; set; }
+    [JsonPropertyName("copied_material_shading")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<CopiedMaterialShading>? CopiedMaterialShading { get; set; }
 }
+
+/// <summary>An authored off switch. Numeric bindings remain intact while this switch is off.</summary>
+public sealed record DisabledMaterialEffect(
+    [property: JsonPropertyName("material_slot_index")] int MaterialSlotIndex,
+    [property: JsonPropertyName("effect_id")] string EffectId);
+
+/// <summary>Where one material position's shading was copied from. Provenance only: the copied
+/// numbers are the edit's own values, never a live link to the source.</summary>
+public sealed record CopiedMaterialShading(
+    [property: JsonPropertyName("material_slot_index")] int MaterialSlotIndex,
+    [property: JsonPropertyName("source_part")] TargetPart SourcePart,
+    [property: JsonPropertyName("source_material_slot_index")] int SourceMaterialSlotIndex,
+    [property: JsonPropertyName("source_material_name")] string SourceMaterialName);
 
 /// <summary>One runtime key and the ordered states it cycles through. A missing key is valid authored intent
 /// but cannot build until the card is assigned one.</summary>
@@ -309,6 +366,13 @@ public sealed class KeyGroupState
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Label { get; set; }
     [JsonPropertyName("active_edit_ids")] public List<string> ActiveEditIds { get; set; } = new();
+
+    /// <summary>A key that puts the group straight into this state from any other, or null for none. It
+    /// differs from its own group's key and from the group's other shortcuts. It may match another group's
+    /// key or shortcut, or the whole-mod key, and then one press does both.</summary>
+    [JsonPropertyName("shortcut")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Shortcut { get; set; }
 }
 
 /// <summary>Non-authoritative materialization metadata needed by the current Edit surface. Authored
@@ -360,6 +424,11 @@ internal static class AuthoredWorkspaceNormalizer
 {
     internal static void Normalize(AuthoredProject project)
     {
+        foreach (var edit in project.EditDefinitions ?? new List<EditDefinition>())
+        {
+            if (edit?.DisabledMaterialEffects is { Count: 0 }) edit.DisabledMaterialEffects = null;
+            if (edit?.CopiedMaterialShading is { Count: 0 }) edit.CopiedMaterialShading = null;
+        }
         var index = project.WorkspaceIndex;
         if (index?.LegacyTargets is not { } legacy) return;
 
@@ -491,7 +560,7 @@ internal static class AuthoredWorkspaceNormalizer
     };
 }
 
-/// <summary>Structural validation for schema-2 authored intent. It rejects ambiguous identity and
+/// <summary>Structural validation for authored intent. It rejects ambiguous identity and
 /// malformed references before resolution can mistake them for a capability result.</summary>
 public static class AuthoredProjectValidator
 {
@@ -597,6 +666,44 @@ public static class AuthoredProjectValidator
             string at = $"edit definition '{edit.Id}'";
             ValidatePart(edit.Target, at, errors);
             if (string.IsNullOrWhiteSpace(edit.Label)) errors.Add($"{at} has no label");
+            if (edit.DisabledMaterialEffects is { } disabledEffects)
+            {
+                if (edit.Kind != EditDefinitionKind.Content && disabledEffects.Count > 0)
+                    errors.Add($"{at} cannot disable material effects on a hide edit");
+                var effectRoutes = new HashSet<(int, string)>();
+                foreach (var effect in disabledEffects)
+                {
+                    if (effect is null)
+                    {
+                        errors.Add($"{at} has an empty material effect");
+                        continue;
+                    }
+                    if (effect.MaterialSlotIndex < 0)
+                        errors.Add($"{at} has a negative effect material-slot index");
+                    if (MaterialEffectCatalog.Definition(effect.EffectId) is null)
+                        errors.Add($"{at} cannot disable material effect '{effect.EffectId}'");
+                    if (!effectRoutes.Add((effect.MaterialSlotIndex, effect.EffectId)))
+                        errors.Add($"{at} disables material effect '{effect.EffectId}' more than once");
+                }
+            }
+            if (edit.CopiedMaterialShading is { } copies)
+            {
+                var copiedPositions = new HashSet<int>();
+                foreach (var copy in copies)
+                {
+                    if (copy is null)
+                    {
+                        errors.Add($"{at} has an empty shading copy record");
+                        continue;
+                    }
+                    if (copy.MaterialSlotIndex < 0 || copy.SourceMaterialSlotIndex < 0)
+                        errors.Add($"{at} has a negative shading copy material-slot index");
+                    if (copy.SourcePart is null) errors.Add($"{at} has a shading copy with no source part");
+                    else ValidatePart(copy.SourcePart, $"{at} shading copy source", errors);
+                    if (!copiedPositions.Add(copy.MaterialSlotIndex))
+                        errors.Add($"{at} records more than one shading copy for material {copy.MaterialSlotIndex}");
+                }
+            }
             var bound = new HashSet<string>(StringComparer.Ordinal);
             var bindings = (edit.Bindings ?? new List<Binding>()).Where(b => b is not null).ToList();
             foreach (var binding in bindings)
@@ -698,6 +805,7 @@ public static class AuthoredProjectValidator
             if (states.Count < 2)
                 errors.Add($"{at} has fewer than two states; delete the group instead");
             var stateIds = new HashSet<string>(StringComparer.Ordinal);
+            var shortcuts = new Dictionary<string, int>(StringComparer.Ordinal);
             for (int i = 0; i < states.Count; i++)
             {
                 string sat = $"{at} state {i}";
@@ -705,6 +813,14 @@ public static class AuthoredProjectValidator
                 else if (!stateIds.Add(states[i].Id))
                     errors.Add($"{at} has duplicate state id '{states[i].Id}'");
                 ValidatePlacements(states[i].ActiveEditIds, edits, sat, contentLimit: true, errors);
+                if (states[i].Shortcut is not { } shortcut) continue;
+                if (ModKeys.Normalize(shortcut) is not { } normal
+                    || !string.Equals(normal, shortcut, StringComparison.Ordinal))
+                    errors.Add($"{sat} has an invalid shortcut");
+                else if (ModKeys.SameKey(group.Key, normal))
+                    errors.Add($"{sat} has its group's own key '{normal}' as its shortcut");
+                else if (!shortcuts.TryAdd(normal, i))
+                    errors.Add($"{sat} shares shortcut '{normal}' with state {shortcuts[normal]}");
             }
         }
     }
@@ -865,8 +981,9 @@ public static class AuthoredProjectValidator
     }
 }
 
-/// <summary>Schema-aware JSON persistence for authored intent. It only overwrites another schema-2
-/// manifest, so loading a released project can never make a later save silently replace it.</summary>
+/// <summary>Schema-aware JSON persistence for authored intent. It only overwrites another authored
+/// manifest, so loading a released project can never make a later save silently replace it. A manifest of
+/// an earlier authored schema reads as the current one, and its next save writes the current schema.</summary>
 public static class AuthoredProjectSerializer
 {
     private static readonly JsonSerializerOptions Json = new()
@@ -888,29 +1005,61 @@ public static class AuthoredProjectSerializer
     /// none of them has an action in this app.</summary>
     public const string DamagedProject = "This mod's project file is damaged and cannot be read.";
 
-    /// <summary>What an open says about a project file written by a version this one does not read. Said by
-    /// app version rather than by the number in the file, which names nothing the modder can act on.</summary>
-    public const string NewerProject =
-        "This mod was made with a newer version of Doll Remolding Lab. Update the app to open it.";
+    /// <summary>What an open says about a project file written by a version this one does not read, naming
+    /// the mod by its folder where the file is known. Said by app version rather than by the number in the
+    /// file, which names nothing the modder can act on.</summary>
+    public static string NewerProject(string? mod) => mod is null
+        ? "This mod was made with a newer version of Doll Remolding Lab. Update the app to open it."
+        : $"'{mod}' was made with a newer version of Doll Remolding Lab. Update the app to open it.";
+
+    /// <summary>The name a refusal gives the mod whose manifest is <paramref name="file"/>: its folder's.</summary>
+    internal static string ModNameOf(string file) =>
+        Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(file))) is { Length: > 0 } name ? name : file;
 
     /// <summary>What an open says when the folder holds no project file. The path is named because the
     /// modder chose it, and the recent-mods list adds its own line when the whole folder is gone.</summary>
     public static string MissingProject(string file) => $"There is no project file at {file}.";
 
-    public static AuthoredProject Deserialize(string json)
+    /// <param name="mod">the mod's name for a refusal (<see cref="NewerProject"/>); null where the json
+    /// came from no file.</param>
+    public static AuthoredProject Deserialize(string json, string? mod = null)
     {
         int schema = ReadSchema(json);
-        if (schema != AuthoredProject.CurrentSchema)
+        if (!AuthoredProject.IsAuthored(schema))
             throw new InvalidDataException(schema > AuthoredProject.CurrentSchema
-                ? NewerProject : DamagedProject);
+                ? NewerProject(mod) : DamagedProject);
 
         AuthoredProject? project;
         try { project = JsonSerializer.Deserialize<AuthoredProject>(json, Json); }
         catch (JsonException e) { throw new InvalidDataException(DamagedProject, e); }
         if (project is null) throw new InvalidDataException(DamagedProject);
+        // An earlier authored schema lacks only fields that are optional in the current one, so it is the
+        // current schema as it stands.
+        project.Schema = AuthoredProject.CurrentSchema;
+        DropAlternateTierGeometry(project);
         AuthoredWorkspaceNormalizer.Normalize(project);
         ThrowIfInvalid(project);
         return project;
+    }
+
+    /// <summary>Take out the geometry slots on a level of detail other than <c>lod0</c>, and every binding
+    /// to them. Projects saved by 0.4 carry one geometry slot per level, all of them answered by the one
+    /// replacement; a separate replacement per level was never something a modder could make, and no
+    /// surface, plan or build reads those slots now. A tolerance of the READ alone — nothing writes them
+    /// again, so a project saved after it is opened carries only the slots this app mints.</summary>
+    private static void DropAlternateTierGeometry(AuthoredProject project)
+    {
+        var dropped = (project.TargetSlots ?? new List<TargetSlot>())
+            .Where(slot => slot is { Input: TargetInputKind.Geometry } && slot.Tier is { Length: > 0 } tier
+                && !string.Equals(tier, "lod0", StringComparison.OrdinalIgnoreCase))
+            .Select(slot => slot.Id).ToHashSet(StringComparer.Ordinal);
+        if (dropped.Count == 0) return;
+        project.TargetSlots!.RemoveAll(slot => dropped.Contains(slot.Id));
+        foreach (var edit in project.EditDefinitions ?? new List<EditDefinition>())
+            edit?.Bindings?.RemoveAll(binding => dropped.Contains(binding.SlotId));
+        // a cache row addressed one of them by id; the row still describes its part's replacement
+        foreach (var record in project.WorkspaceIndex?.Records ?? new List<AuthoredWorkspaceRecord>())
+            if (record?.SlotId is { } slotId && dropped.Contains(slotId)) record.SlotId = null;
     }
 
     /// <summary>Detach one workspace index from whoever handed it over. The Edit-side session takes the
@@ -928,13 +1077,14 @@ public static class AuthoredProjectSerializer
     {
         string file = Directory.Exists(path) ? ModProject.ManifestPathFor(path) : path;
         if (!File.Exists(file)) throw new FileNotFoundException(MissingProject(file), file);
-        var project = Deserialize(File.ReadAllText(file));
+        var project = Deserialize(File.ReadAllText(file), ModNameOf(file));
         project.RootDir = Path.GetDirectoryName(Path.GetFullPath(file));
         return project;
     }
 
-    /// <summary>Write a new schema-2 manifest or update an existing schema-2 manifest atomically. A
-    /// schema-1 file requires the explicit migration save route that consumes a migration report.</summary>
+    /// <summary>Write a new manifest or update an existing authored manifest atomically, as the current
+    /// schema. A schema-1 file requires the explicit migration save route that consumes a migration
+    /// report.</summary>
     public static void Save(AuthoredProject project, string path)
     {
         string file = Directory.Exists(path) || path.EndsWith(Path.DirectorySeparatorChar)
@@ -942,8 +1092,9 @@ public static class AuthoredProjectSerializer
             ? ModProject.ManifestPathFor(path)
             : path;
         string json = Serialize(project);
-        if (File.Exists(file) && ReadSchema(File.ReadAllText(file)) != AuthoredProject.CurrentSchema)
-            throw new InvalidOperationException("authored project save refuses to overwrite a non-schema-2 manifest");
+        if (File.Exists(file) && !AuthoredProject.IsAuthored(ReadSchema(File.ReadAllText(file))))
+            throw new InvalidOperationException(
+                "authored project save refuses to overwrite a manifest that is not authored intent");
 
         string dir = Path.GetDirectoryName(Path.GetFullPath(file))!;
         Directory.CreateDirectory(dir);
@@ -998,9 +1149,16 @@ public static class AuthoredProjectSerializer
     {
         string tmp = file + ".tmp";
         File.WriteAllText(tmp, json, new UTF8Encoding(false));
-        if (File.Exists(file)) File.Replace(tmp, file, backup ? file + ".bak" : null,
-            ignoreMetadataErrors: true);
-        else File.Move(tmp, file);
+        // The swap is the one step another process can refuse for a moment — a virus scanner or an indexer
+        // holding the live manifest it just saw change. The temp file is complete, so the swap is retried
+        // the way the Mods folder's busy operations are; exhaustion throws with the live manifest untouched
+        // and the temp file beside it.
+        ModInstall.RetryBusy(() =>
+        {
+            if (File.Exists(file)) File.Replace(tmp, file, backup ? file + ".bak" : null,
+                ignoreMetadataErrors: true);
+            else File.Move(tmp, file);
+        });
     }
 
     /// <summary>Read only the manifest version so the application can select released compatibility or

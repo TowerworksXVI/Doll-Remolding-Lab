@@ -36,13 +36,12 @@ internal sealed class EditPreviewService
         IReadOnlyList<MeshPreviewRenderer.PreviewTexture?>? samplers, bool ownMaps,
         bool cacheable = true)
     {
-        if (MeshBundle(recipe) is not { } bundle) return null;
+        if (MeshOf(recipe) is not ({ } bundle, var pathId)) return null;
         byte[]? bytes;
         try { bytes = _deobfuscate(bundle); }
         catch { bytes = null; }
         if (bytes is null) return null;
 
-        long pathId = recipe.IsRecipeBacked ? 0 : recipe.MeshPathId;
         string version = _vfs()?.CatalogVersion ?? "unknown";
         // Not cacheable = a game-map sampler the plan expected came back null. That miss may be transient
         // or permanent; the non-caching route is safe for both because storing this render under the
@@ -66,8 +65,7 @@ internal sealed class EditPreviewService
     /// picture under the key the bare part's preview is served from.</summary>
     internal int? GameMeshVertexCount(RecipePart recipe)
     {
-        if (MeshBundle(recipe) is not { } bundle) return null;
-        long pathId = recipe.IsRecipeBacked ? 0 : recipe.MeshPathId;
+        if (MeshOf(recipe) is not ({ } bundle, var pathId)) return null;
         string version = _vfs()?.CatalogVersion ?? "unknown";
         if (_thumbs.TryGetCachedMesh(bundle, recipe.SlotName, version, pathId) is { } hit)
             return hit.VertexCount;
@@ -189,13 +187,15 @@ internal sealed class EditPreviewService
         return Bitmap.DecodeToWidth(stream, ThumbnailCache.MaxDim);
     }
 
-    private string? MeshBundle(RecipePart recipe)
+    /// <summary>Where the part's game mesh is read and which object of that bundle: its recipe address's
+    /// owner and load key, or its serialized pair. Catalog-only — the bundle is read where it always was.</summary>
+    private (string? Bundle, MeshSelector Which) MeshOf(RecipePart recipe)
     {
         if (recipe.IsRecipeBacked)
         {
-            try { return _catalog()?.ResolveAddress(recipe.MeshAddress); }
-            catch { return null; }
+            try { return _catalog()?.TierMesh(recipe.MeshAddress, null, 0) ?? (null, default); }
+            catch { return (null, default); }
         }
-        return recipe.IsSmrBacked ? recipe.MeshBundle : null;
+        return recipe.IsSmrBacked ? (recipe.MeshBundle, recipe.MeshPathId) : (null, default);
     }
 }

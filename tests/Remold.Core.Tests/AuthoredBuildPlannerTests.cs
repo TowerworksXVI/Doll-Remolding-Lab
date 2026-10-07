@@ -154,12 +154,8 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         var plan = AuthoredBuildPlanner.Plan(project, new Backend());
 
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
-        var dropped = plan.Bindings.Single(binding =>
-            binding.AuthoredSlot.Id == "slot-old-stock-picture");
-        Assert.Equal(BuildPlanVerdict.InheritedAsRequested, dropped.Decision.Verdict);
-        Assert.Equal(BuildRuntimeAction.None, dropped.Decision.Action);
-        Assert.Empty(dropped.Emissions);
-        Assert.Empty(dropped.OutputArtifacts);
+        Assert.DoesNotContain(plan.Bindings, binding => binding.EditDefinitionId == "edit-long"
+            && binding.AuthoredSlot.Id == "slot-old-stock-picture");
         Assert.Contains("Long body replaces the part's mesh, so its changes to the original textures "
             + "will not take effect. A replacement uses this edit's own maps instead.", plan.Warnings);
 
@@ -1575,8 +1571,13 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         Assert.DoesNotContain(":202", operation.Decision.TargetingProof.Detail);
     }
 
-    [Fact]
-    public void Stock_ramp_with_a_shared_ordinary_map_is_a_blocking_capability_verdict()
+    /// <summary>Two sibling materials sharing every map are told apart by their own draw ranges, so a pick
+    /// on one of them resolves with the stock-draw proof. Where the part lists more materials than its mesh
+    /// has sections, the two draw over one range and the pick blocks, saying why.</summary>
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(1, true)]
+    public void Stock_ramp_is_proved_by_its_materials_own_draw_range(int sections, bool blocked)
     {
         var part = Part();
         var shared = Game("textures.bundle", 300, "shared_base");
@@ -1587,7 +1588,8 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
             {
                 Material(0, "body", 100, shared),
                 Material(1, "trim", 101, shared),
-            });
+            },
+            MaterialIndexCounts: Enumerable.Repeat(30, sections).ToArray());
         var backend = new ProductionAuthoredBuildBackend(_ => resolved);
         var authoredSlot = new TargetSlot
         {
@@ -1608,9 +1610,19 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
             new EffectiveBuildValue(EffectiveValueKind.ProjectAsset, asset, null,
                 new[] { authoredSlot.Id }), BuildEmissionGate.Unconditional));
 
-        Assert.Equal(BuildPlanVerdict.Unsupported, operation.Decision.Verdict);
-        Assert.Contains("shares every one of its textures", operation.Decision.Reason);
-        Assert.True(operation.Decision.BlocksBuild);
+        if (blocked)
+        {
+            Assert.Equal(BuildPlanVerdict.Unsupported, operation.Decision.Verdict);
+            Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, operation.Decision.Reason);
+            Assert.True(operation.Decision.BlocksBuild);
+            Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, backend.StockDrawBlock(current));
+        }
+        else
+        {
+            Assert.Equal(BuildPlanVerdict.Resolved, operation.Decision.Verdict);
+            Assert.Equal(BuildTargetingProof.StockDrawRange, operation.Decision.TargetingProof!.Kind);
+            Assert.Null(backend.StockDrawBlock(current));
+        }
     }
 
     private static AuthoredProject ProjectWithAlternative()

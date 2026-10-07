@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Remold.App.ViewModels;
 using Remold.App.ViewModels.EditPage;
+using Remold.Core.Blender;
 using Remold.Core.Model;
 using Remold.Core.Project;
 using Remold.Core.Tests.Support;
@@ -190,8 +191,10 @@ public class EditPageActivationTests
 
         vm.SubjectModels.GetOrBuild(Character, Outfit, WarmModel);
         vm.SubjectModelWarmCompleted();
-        for (int i = 0; i < 200 && Assert.Single(Assert.Single(vm.BuildPage.Subjects).Parts).Label != "body"; i++)
-            await Task.Delay(5);
+        // The Edit redraw ran inline; the Build redraw rides the plan the warm started, which lands on a
+        // worker. A plan asked for here supersedes it and is applied before this returns, so the rows
+        // below are read after the last redraw rather than beside it.
+        await vm.BuildPage.ReplanAsync();
 
         Assert.Equal("body", Assert.Single(Assert.Single(vm.EditPage.Nodes).Children, node => node.IsPart).Title);
         Assert.Equal("body", Assert.Single(Assert.Single(vm.BuildPage.Subjects).Parts).Label);
@@ -489,7 +492,28 @@ public class EditPageActivationTests
                 .FirstOrDefault(card => card.Slot.Input == TargetInputKind.BaseColor
                     && card.Slot.MaterialSlotIndex == 0);
         }
-        catch (InvalidOperationException) { return null; }   // a redraw is refilling the rows
+        // A redraw is refilling the rows. A list read mid-mutation fails either way: the enumerator sees
+        // the version change, or an index it just checked is gone by the time it is read.
+        catch (InvalidOperationException) { return null; }
+        catch (ArgumentOutOfRangeException) { return null; }
+    }
+
+    /// <summary>The card as the page redrew it once this install's read of the subject ended without a
+    /// model. The cache records that answer first and the redraw follows on the read's own thread, so the
+    /// record alone is not the page: a card taken between the two still says the read is coming.</summary>
+    private static async Task<EditMapCardVm> UnreadableCardAsync(MainWindowViewModel vm)
+    {
+        for (int i = 0; i < 400; i++)
+        {
+            if (vm.SubjectModels.IsUnreadable(Character, GoldenOutfit)
+                && BaseColorCardOrNull(vm) is { Sharing: EditTextureSharing.Unreadable } drawn)
+                return drawn;
+            await Task.Delay(5);
+        }
+        Assert.True(vm.SubjectModels.IsUnreadable(Character, GoldenOutfit), "the read never ended");
+        var card = await BaseColorCardAsync(vm);
+        Assert.Equal(EditTextureSharing.Unreadable, card.Sharing);
+        return card;
     }
 
     private static EditSlotRef BareSlot(AuthoredEditSession session, TargetInputKind input)
@@ -712,18 +736,18 @@ public class EditPageActivationTests
             Assert.Empty(session.Snapshot().EditDefinitions);
             int changes = 0;
             session.Changed += (_, _) => changes++;
-            TestImages.WritePng(ingress!.Session.OutboundSnapshot, g: 77);
+            TestImages.WritePng(ingress!.Outbound, g: 77);
             vm.PublishPictureReturn(ingress, new ImmediateProgress());
             Assert.Single(session.Snapshot().EditDefinitions);
             Assert.Equal(1, changes);
-            Assert.True(File.Exists(ingress.Session.OutboundSnapshot));
+            Assert.True(File.Exists(ingress.Outbound));
 
-            TestImages.WritePng(ingress.Session.OutboundSnapshot, g: 88);
+            TestImages.WritePng(ingress.Outbound, g: 88);
             vm.PublishPictureReturn(ingress, new ImmediateProgress());
-            TestImages.WritePng(ingress.Session.OutboundSnapshot, g: 99);
+            TestImages.WritePng(ingress.Outbound, g: 99);
             vm.PublishPictureReturn(ingress, new ImmediateProgress());
 
-            string runDirectory = Path.GetDirectoryName(ingress.Session.ReturnArtifact)!;
+            string runDirectory = ingress.Folder;
             string slotDirectory = Directory.GetParent(runDirectory)!.FullName;
             Assert.Single(Directory.GetDirectories(slotDirectory));
             Assert.Equal(3, changes);
@@ -907,11 +931,7 @@ public class EditPageActivationTests
             // The install is there and answers nothing for this subject, and the app is not scanning: the
             // warm pass runs, fails, and nothing after it will try again.
             var vm = await BoundaryWindowAsync(root, warm: (_, _) => null, scanning: false);
-            for (int i = 0; i < 200 && !vm.SubjectModels.IsUnreadable(Character, GoldenOutfit); i++)
-                await Task.Delay(5);
-            Assert.True(vm.SubjectModels.IsUnreadable(Character, GoldenOutfit));
-            vm.EditPage.Rebuild();
-            var card = await BaseColorCardAsync(vm);
+            var card = await UnreadableCardAsync(vm);
             string png = TestImages.WritePng(Path.Combine(root, "in", "paint.png"));
             var status = new ImmediateProgress();
 
@@ -977,8 +997,8 @@ public class EditPageActivationTests
             Assert.Equal("Base color on material 0.\n\n"
                 + "This outfit draws this original map in 2 places. The edit changes all of them.", body);
             Assert.Equal("Edit", button);
-            // Nothing was opened: a transport would have minted the ingress folder under the mod.
-            Assert.False(Directory.Exists(Path.Combine(root, ProjectAssetIngress.DirectoryName)));
+            // Nothing was opened: a transport would have minted a folder in the mod's round-trip folder.
+            Assert.Empty(Directory.GetDirectories(vm.ProjectDocument.Session!.Snapshot().TransportRoot!));
             Assert.DoesNotContain(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1004,9 +1024,7 @@ public class EditPageActivationTests
         await InTempMod("remold-gate-unreadable-", async root =>
         {
             var vm = await BoundaryWindowAsync(root, warm: (_, _) => null, scanning: false);
-            for (int i = 0; i < 200 && !vm.SubjectModels.IsUnreadable(Character, GoldenOutfit); i++)
-                await Task.Delay(5);
-            Assert.True(vm.SubjectModels.IsUnreadable(Character, GoldenOutfit));
+            await UnreadableCardAsync(vm);
             await AssertAllPictureGesturesRefusedAsync(vm, root, GameFilesGate.SubjectUnreadable);
             return 0;
         });
@@ -1190,7 +1208,7 @@ public class EditPageActivationTests
             Assert.True(result.Launched);
             Assert.NotNull(opened);
             Assert.Equal("Skin", opened!.Label);
-            Assert.Equal(opened.Session.OutboundSnapshot, launched);
+            Assert.Equal(opened!.Outbound, launched);
             Assert.Equal("Opened Skin in the image editor. Save to send it back.", status.Value);
             return 0;
         });
@@ -1344,10 +1362,418 @@ public class EditPageActivationTests
         });
     }
 
-    /// <summary>A save that arrives for a mod that is no longer open lands nothing and SAYS so, naming that
-    /// mod. It used to return in silence: on a page showing another mod, an editor save that produced no
-    /// line at all is indistinguishable from paint thrown away — and the editor still holds the file, which
-    /// is the one thing the modder needs to know.</summary>
+    /// <summary>Renaming the mod moves its folder and nothing the image editor holds: the editor was handed a
+    /// file in the mod's own round-trip folder, which follows the mod, so its next save lands on the same
+    /// map.</summary>
+    [Fact]
+    public async Task An_image_editor_save_lands_after_the_mod_folder_is_renamed()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-rename-", async root =>
+        {
+            var (vm, ingress, status) = await OpenedInImageEditorAsync(root);
+
+            vm.PackageName = "Renamed probe";
+            Assert.Null(vm.TryAutoSaveProject());
+            string moved = vm.ProjectDocument.Session!.Snapshot().RootDir!;
+            Assert.NotEqual(Path.GetFullPath(root), Path.GetFullPath(moved));
+            Assert.False(Directory.Exists(root), "the mod folder was never renamed");
+
+            TestImages.WritePng(ingress.Outbound, g: 77);
+            vm.ScanPictureSaves();
+
+            Assert.StartsWith("Saved ", status.Value);
+            Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+            return 0;
+        });
+    }
+
+    /// <summary>A save made while the mod is closed waits in the editor's file, and the mod takes it when it
+    /// opens again, with its own line after the open's.</summary>
+    [Fact]
+    public async Task An_image_editor_save_made_while_the_mod_was_closed_lands_when_it_opens()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-reopen-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 88);
+            Assert.True(await vm.OpenModAsync(root));
+
+            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+            // …and only once: opening again finds nothing new in the file.
+            int pictures = vm.ProjectDocument.Session!.Snapshot().ProjectAssets
+                .Count(asset => asset.Kind == ProjectAssetKind.Picture);
+            vm.NewMod();
+            Assert.True(await vm.OpenModAsync(root));
+            Assert.Equal(pictures, vm.ProjectDocument.Session!.Snapshot().ProjectAssets
+                .Count(asset => asset.Kind == ProjectAssetKind.Picture));
+            return 0;
+        });
+    }
+
+    /// <summary>The app closing is the same as the mod closing: the next run takes the save when the mod
+    /// opens, checked against the slot the editor was opened for.</summary>
+    [Fact]
+    public async Task An_image_editor_save_made_while_the_app_was_closed_lands_on_the_next_run()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-restart-", async root =>
+        {
+            var (first, ingress, _) = await OpenedInImageEditorAsync(root);
+            first.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 99);
+            // The next run of the app: a new window over the same round-trip folders.
+            var next = new MainWindowViewModel(startLoad: false, pageDispatch: work => work())
+                { IsScanning = true, RoundTrips = first.RoundTrips };
+            next.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            Assert.True(await next.OpenModAsync(root));
+
+            Assert.StartsWith("Saved ", next.EditPage.Status);
+            Assert.Contains(next.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+            return 0;
+        });
+    }
+
+    /// <summary>A bare card's first save makes the edit. After a restart the transport remembers that it
+    /// did, so the next save lands on that edit instead of making a second one.</summary>
+    [Fact]
+    public async Task A_bare_card_save_after_a_restart_lands_on_the_edit_its_first_save_made()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-bare-", async root =>
+        {
+            var vm = await BoundaryWindowAsync(root, createEdit: false);
+            vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            var slot = BareSlot(vm.ProjectDocument.Session!, TargetInputKind.BaseColor);
+            MainWindowViewModel.PictureIngress? ingress = null;
+            vm.PictureIngressOpenedForTests = opened => ingress = opened;
+            vm.LaunchImageEditorForTests = _ => true;
+            vm.ExportGamePictureForTests = destination => TestImages.WritePng(destination);
+            var status = new ImmediateProgress();
+            Assert.True((await ((IEditPageShell)vm).OpenPictureAsync(slot, status)).Launched, status.Value);
+            TestImages.WritePng(ingress!.Outbound, g: 40);
+            vm.ScanPictureSaves();
+            Assert.Single(vm.ProjectDocument.Session!.Snapshot().EditDefinitions);
+            vm.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 41);
+            var next = new MainWindowViewModel(startLoad: false, pageDispatch: work => work())
+                { IsScanning = true, RoundTrips = vm.RoundTrips };
+            next.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            Assert.True(await next.OpenModAsync(root));
+
+            Assert.StartsWith("Saved ", next.EditPage.Status);
+            Assert.Single(next.ProjectDocument.Session!.Snapshot().EditDefinitions);
+            return 0;
+        });
+    }
+
+    /// <summary>The round-trip folder older versions kept inside the mod is cleared when the mod opens. A
+    /// Blender send left in it cannot land, and the notice cell says so.</summary>
+    [Fact]
+    public async Task Opening_a_mod_clears_its_old_round_trip_folder_and_names_a_send_left_there()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-legacy-", async root =>
+        {
+            string legacy = Path.Combine(root, ProjectAssetIngress.LegacyDirectoryName);
+            Directory.CreateDirectory(Path.Combine(legacy, "blender", "run"));
+            File.WriteAllText(Path.Combine(legacy, "blender", "run", "return" + BlenderBridge.SidecarSuffix), "{}");
+
+            var vm = await BoundaryWindowAsync(root);
+
+            Assert.False(Directory.Exists(legacy), "the old round-trip folder was left in the mod");
+            Assert.Contains(MainWindowViewModel.LegacyBlenderSendNotice().Detail, vm.NoticeStatus.Detail);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task An_old_round_trip_folder_with_no_send_in_it_goes_quietly()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-legacy-quiet-", async root =>
+        {
+            string legacy = Path.Combine(root, ProjectAssetIngress.LegacyDirectoryName);
+            TestImages.WritePng(Path.Combine(legacy, "edit", "slot", "id", "outbound.png"));
+
+            var vm = await BoundaryWindowAsync(root);
+
+            Assert.False(Directory.Exists(legacy), "the old round-trip folder was left in the mod");
+            Assert.DoesNotContain(MainWindowViewModel.LegacyBlenderSendNotice().Detail, vm.NoticeStatus.Detail);
+            return 0;
+        });
+    }
+
+    /// <summary>A save made while another mod is open is news on that page: it names the mod it is for and
+    /// says when it lands, and the open mod takes nothing.</summary>
+    [Fact]
+    public async Task An_image_editor_save_for_a_mod_that_is_not_open_says_when_it_lands()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-elsewhere-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 66);
+
+            string expected = MainWindowViewModel.PictureSaveModClosed(BoundaryModName);
+            for (int i = 0; i < 200 && vm.EditPage.Status != expected; i++) await Task.Delay(50);
+            Assert.Equal(expected, vm.EditPage.Status);
+            Assert.Empty(vm.ProjectDocument.Session!.Snapshot().ProjectAssets);
+            return 0;
+        });
+    }
+
+    /// <summary>A save the open finds while its subject is still being read waits for the read, then lands:
+    /// the modder did not just save, so there is nothing for them to retry.</summary>
+    [Fact]
+    public async Task A_save_found_while_its_subject_is_being_read_lands_when_the_read_does()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-reading-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+            TestImages.WritePng(ingress.Outbound, g: 55);
+            vm.SubjectModels.Clear();
+
+            Assert.True(await vm.OpenModAsync(root));
+            Assert.DoesNotContain(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+
+            vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            vm.SubjectModelWarmCompleted(replanBuild: false);
+
+            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+            return 0;
+        });
+    }
+
+    /// <summary>A save for a map removed from the mod says so, in words about the map, once: a later open
+    /// that finds the same save retries it without saying the refusal again.</summary>
+    [Fact]
+    public async Task A_save_for_a_removed_map_says_so_once()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-removed-", async root =>
+        {
+            var (vm, ingress, status) = await OpenedInImageEditorAsync(root);
+            var session = vm.ProjectDocument.Session!;
+            session.DeleteEdit(ingress.Slot.Edit.EditDefinitionId);
+            ingress.Session = null;   // as after a reopen: the transport is rebuilt from its folder
+
+            TestImages.WritePng(ingress.Outbound, g: 44);
+            vm.ScanPictureSaves();
+            Assert.Equal("Couldn't apply the image editor's save: " + MainWindowViewModel.PictureMapRemoved,
+                status.Value);
+
+            status.Report("unchanged");
+            vm.ScanPictureSaves();
+            Assert.Equal("unchanged", status.Value);
+            return 0;
+        });
+    }
+
+    /// <summary>The image editor's save, reported by the watch on the mod's round-trip folder as it happens,
+    /// lands with its line: the route every live save takes.</summary>
+    [Fact]
+    public async Task A_live_image_editor_save_lands_through_the_folder_watch()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-live-", async root =>
+        {
+            var (vm, ingress, status) = await OpenedInImageEditorAsync(root);
+            vm.PictureSaveDispatch = work => work();
+
+            TestImages.WritePng(ingress.Outbound, g: 33);
+
+            for (int i = 0; i < 200 && !status.Value.StartsWith("Saved ", StringComparison.Ordinal); i++)
+                await Task.Delay(50);
+            Assert.True(status.Value.StartsWith("Saved ", StringComparison.Ordinal), status.Value);
+            Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+            return 0;
+        });
+    }
+
+    /// <summary>Rename the mod, close it, reopen it from its new folder: a save made meanwhile lands.</summary>
+    [Fact]
+    public async Task An_image_editor_save_lands_after_a_rename_and_a_reopen()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-rename-reopen-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.PackageName = "Renamed probe";
+            for (int i = 0; i < 20 && vm.TryAutoSaveProject() is not null; i++) await Task.Delay(50);
+            string moved = vm.ProjectDocument.Session!.Snapshot().RootDir!;
+            Assert.NotEqual(Path.GetFullPath(root), Path.GetFullPath(moved));
+            vm.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 22);
+            Assert.True(await vm.OpenModAsync(moved));
+
+            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            return 0;
+        });
+    }
+
+    /// <summary>A save refused when it was found, then taken by a later open, says it landed: only the
+    /// refusal is not repeated.</summary>
+    [Fact]
+    public async Task A_save_refused_once_says_so_when_a_later_open_lands_it()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-refused-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+            TestImages.WritePng(ingress.Outbound, g: 11);
+            vm.SubjectModels.Clear();
+            vm.IsScanning = false;   // no game loaded and none coming: the save is refused, not waited for
+            Assert.True(await vm.OpenModAsync(root));
+            Assert.DoesNotContain(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
+                asset => asset.Kind == ProjectAssetKind.Picture);
+
+            vm.NewMod();
+            vm.IsScanning = true;
+            vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            Assert.True(await vm.OpenModAsync(root));
+
+            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            return 0;
+        });
+    }
+
+    /// <summary>A reopened image editor whose map was given another picture since Open is refused, as a
+    /// save into the open transport would be.</summary>
+    [Fact]
+    public async Task A_reopened_save_into_a_map_that_changed_since_open_is_refused()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-moved-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+            Assert.True(await vm.OpenModAsync(root));
+            var card = await BaseColorCardAsync(vm);
+            string png = TestImages.WritePng(Path.Combine(root, "in", "other.png"), g: 90);
+            Assert.NotNull(await ((IEditPageShell)vm).AcceptDroppedPictureAsync(card.Slot, png,
+                new ImmediateProgress(), confirmed: true));
+            vm.NewMod();
+
+            TestImages.WritePng(ingress.Outbound, g: 91);
+            Assert.True(await vm.OpenModAsync(root));
+
+            Assert.Contains(ProjectAssetIngress.EditMovedWhileOpen.TrimEnd('.'), vm.EditPage.Status);
+            return 0;
+        });
+    }
+
+    /// <summary>A save for a mod whose folder is gone names no mod it cannot find: it says the mod was moved
+    /// or deleted.</summary>
+    [Fact]
+    public async Task A_save_for_a_moved_or_deleted_mod_says_so()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-gone-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+            Directory.Delete(root, recursive: true);
+
+            TestImages.WritePng(ingress.Outbound, g: 12);
+
+            for (int i = 0; i < 200 && vm.EditPage.Status != MainWindowViewModel.PictureSaveForMissingMod; i++)
+                await Task.Delay(50);
+            Assert.Equal(MainWindowViewModel.PictureSaveForMissingMod, vm.EditPage.Status);
+            return 0;
+        });
+    }
+
+    /// <summary>A mod that cannot be saved hands the image editor nothing: its round trips would be lost to
+    /// the next run.</summary>
+    [Fact]
+    public async Task An_image_editor_open_is_refused_when_the_mod_cannot_be_saved()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-unsaved-", async root =>
+        {
+            var vm = await BoundaryWindowAsync(root);
+            vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+            vm.EditPage.Rebuild();
+            var card = await BaseColorCardAsync(vm);
+            vm.LaunchImageEditorForTests = _ => throw new InvalidOperationException("never launched");
+            vm.ExportGamePictureForTests = destination => TestImages.WritePng(destination);
+            string manifest = ModProject.ManifestPathFor(root);
+            File.SetAttributes(manifest, FileAttributes.ReadOnly);
+            try
+            {
+                var status = new ImmediateProgress();
+                Assert.False((await ((IEditPageShell)vm).OpenPictureAsync(card.Slot, status)).Launched);
+                Assert.Equal(MainWindowViewModel.RoundTripIdNotSaved("the image editor"), status.Value);
+            }
+            finally { File.SetAttributes(manifest, FileAttributes.Normal); }
+            return 0;
+        });
+    }
+
+    /// <summary>On the Home screen, where the Edit page's line is not shown, a save for a mod is said in the
+    /// notice cell.</summary>
+    [Fact]
+    public async Task A_save_for_a_mod_made_on_the_home_screen_is_said_in_the_notice_cell()
+    {
+        using var settings = new SettingsSnapshot();
+        await InTempMod("remold-roundtrip-home-", async root =>
+        {
+            var (vm, ingress, _) = await OpenedInImageEditorAsync(root);
+            vm.NewMod();
+            vm.ShowHome = true;
+
+            TestImages.WritePng(ingress.Outbound, g: 13);
+
+            string expected = MainWindowViewModel.PictureSaveModClosed(BoundaryModName);
+            for (int i = 0; i < 200 && !vm.NoticeStatus.Detail.Contains(expected); i++) await Task.Delay(50);
+            Assert.Contains(expected, vm.NoticeStatus.Detail);
+            return 0;
+        });
+    }
+
+    /// <summary>Open a picture on the boundary mod's base-colour card in a stubbed image editor.</summary>
+    private static async Task<(MainWindowViewModel Vm, MainWindowViewModel.PictureIngress Ingress,
+        ImmediateProgress Status)> OpenedInImageEditorAsync(string root)
+    {
+        var vm = await BoundaryWindowAsync(root);
+        vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
+        vm.EditPage.Rebuild();
+        var card = await BaseColorCardAsync(vm);
+        MainWindowViewModel.PictureIngress? ingress = null;
+        vm.PictureIngressOpenedForTests = opened => ingress = opened;
+        vm.LaunchImageEditorForTests = _ => true;
+        vm.ExportGamePictureForTests = destination => TestImages.WritePng(destination);
+        var status = new ImmediateProgress();
+        Assert.True((await ((IEditPageShell)vm).OpenPictureAsync(card.Slot, status)).Launched, status.Value);
+        Assert.NotNull(ingress);
+        Assert.DoesNotContain(Path.GetFullPath(root), Path.GetFullPath(ingress!.Outbound),
+            StringComparison.OrdinalIgnoreCase);
+        return (vm, ingress, status);
+    }
+
+    /// <summary>A save that arrives for a mod that is no longer open lands nothing in the open mod and SAYS
+    /// so, naming the mod it is for: on a page showing another mod, an editor save that produced no line at
+    /// all is indistinguishable from paint thrown away.</summary>
     [Fact]
     public async Task A_save_for_a_mod_that_is_no_longer_open_says_so_and_names_it()
     {
@@ -1678,14 +2104,12 @@ public class EditPageActivationTests
     public void A_publish_failure_says_nothing_was_changed(string reason, string expected) =>
         Assert.Equal(expected, MainWindowViewModel.BlenderPublishFailure(reason));
 
-    /// <summary>A return whose mod was closed while it waited names that mod, and closes on the same
-    /// sentence every other refusal on this route closes on.</summary>
+    /// <summary>A return whose mod was closed while it waited names that mod and says when it lands.</summary>
     [Theory]
     [InlineData("Vesna casual",
-        "Couldn't apply the file sent back from Blender: Vesna casual is no longer open. Nothing was changed.")]
+        "Blender sent back changes for 'Vesna casual'. Open 'Vesna casual' to apply them.")]
     [InlineData(MainWindowViewModel.UntitledMod,
-        "Couldn't apply the file sent back from Blender: untitled mod is no longer open. "
-        + "Nothing was changed.")]
+        "Blender sent back changes for 'untitled mod'. Open 'untitled mod' to apply them.")]
     public void A_return_for_a_closed_mod_names_it(string mod, string expected) =>
         Assert.Equal(expected, MainWindowViewModel.BlenderReturnModClosed(mod));
 

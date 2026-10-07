@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
 using AssetsTools.NET.Texture;
@@ -33,6 +34,11 @@ public sealed class BundleReader
 
     private readonly Dictionary<byte[], (AssetsManager Manager, BundleFileInstance Bundle, AssetsFileInstance File)>
         _parsed = new((IEqualityComparer<byte[]>)ReferenceEqualityComparer.Instance);
+
+    // Each kept parse's m_Container, reduced to the Mesh objects of this file each key files — decoded once
+    // per parse, however many load keys are asked of it, and dropped with the parse.
+    private readonly Dictionary<byte[], Dictionary<string, List<long>>> _containerMeshes =
+        new((IEqualityComparer<byte[]>)ReferenceEqualityComparer.Instance);
 
     // most-recently-used last
     private readonly List<byte[]> _recency = new();
@@ -66,6 +72,7 @@ public sealed class BundleReader
     {
         var oldest = _recency[0];
         _recency.RemoveAt(0);
+        _containerMeshes.Remove(oldest);
         if (!_parsed.Remove(oldest, out var entry)) return;
         try { entry.Manager.UnloadAll(); } catch { /* already unloaded — the parse is gone either way */ }
     }
@@ -132,6 +139,113 @@ public sealed class BundleReader
         foreach (var (pid, go, father) in raw)
             result.Add(new TransformNode(pid, goName.GetValueOrDefault(go, ""), father));
         return result;
+    }
+
+    /// <summary>The rig facts a part's placement is read from, off the skinned renderer at
+    /// <paramref name="rendererPathId"/>: the Transform chain from the top of the file down to the renderer's
+    /// root bone, each link with its saved local pose (row-vector), the Avatar named by the nearest Animator
+    /// on the renderer's GameObject or an ancestor of it, and that Animator's saved world in the file
+    /// (<paramref name="rendererPathId"/>'s <c>AvatarFrame</c>: where the Avatar's root sits among the file's
+    /// other rigs). The Avatar is null, and the frame the identity, when no ancestor carries an Animator or
+    /// the Animator names none. Null overall when the object is no skinned renderer or its root bone is not a
+    /// Transform of this file.</summary>
+    public (IReadOnlyList<(string Name, Matrix4x4 Local)> RootChain, PrefabAvatarRef? Avatar, Matrix4x4 AvatarFrame)?
+        RendererRig(byte[] deobfuscatedBundle, long rendererPathId)
+    {
+        var (am, _, inst) = Parse(deobfuscatedBundle);
+        AssetTypeValueField? Read(long pathId, int classId) =>
+            inst.file.GetAssetInfo(pathId) is { } info && info.TypeId == classId ? am.GetBaseField(inst, info) : null;
+        if (Read(rendererPathId, ClassSkinnedMeshRenderer) is not { } smr) return null;
+        var root = smr["m_RootBone"];
+        if (root["m_FileID"].AsInt != 0 || Read(root["m_PathID"].AsLong, ClassTransform) is null) return null;
+
+        AssetTypeValueField? Father(AssetTypeValueField transform) =>
+            transform["m_Father"]["m_FileID"].AsInt == 0 ? Read(transform["m_Father"]["m_PathID"].AsLong, ClassTransform) : null;
+
+        var chain = new List<(string, Matrix4x4)>();
+        var seen = new HashSet<long>();
+        for (var t = Read(root["m_PathID"].AsLong, ClassTransform); t is not null; t = Father(t))
+        {
+            if (!seen.Add(t["m_GameObject"]["m_PathID"].AsLong)) return null;
+            chain.Add((Read(t["m_GameObject"]["m_PathID"].AsLong, ClassGameObject)?["m_Name"].AsString ?? "",
+                Trs(t["m_LocalPosition"], t["m_LocalRotation"], t["m_LocalScale"])));
+        }
+        chain.Reverse();
+
+        seen.Clear();
+        for (var go = Read(smr["m_GameObject"]["m_PathID"].AsLong, ClassGameObject); go is not null;)
+        {
+            AssetTypeValueField? transform = null, animator = null;
+            foreach (var entry in UnwrapArray(go["m_Component"]))
+            {
+                if (FindPtr(entry) is not { } c || c["m_FileID"].AsInt != 0) continue;
+                animator ??= Read(c["m_PathID"].AsLong, ClassAnimator);
+                transform ??= Read(c["m_PathID"].AsLong, ClassTransform);
+            }
+            if (animator is not null)
+            {
+                var pose = animator["m_Avatar"];
+                int file = pose["m_FileID"].AsInt;
+                if (pose["m_PathID"].AsLong == 0) return (chain, null, Matrix4x4.Identity);
+                // the Animator's own saved world, composed up to the top of the file
+                var frame = Matrix4x4.Identity;
+                var walked = new HashSet<long>();
+                for (var t = transform; t is not null; t = Father(t))
+                {
+                    if (!walked.Add(t["m_GameObject"]["m_PathID"].AsLong)) return null;
+                    frame *= Trs(t["m_LocalPosition"], t["m_LocalRotation"], t["m_LocalScale"]);
+                }
+                return (chain, new PrefabAvatarRef(pose["m_PathID"].AsLong, file == 0 ? null : ExternalCabs(inst)[file - 1]),
+                    frame);
+            }
+            var up = transform is null ? null : Father(transform);
+            go = up is null || !seen.Add(up["m_GameObject"]["m_PathID"].AsLong) ? null
+                : Read(up["m_GameObject"]["m_PathID"].AsLong, ClassGameObject);
+        }
+        return (chain, null, Matrix4x4.Identity);
+    }
+
+    /// <summary>A saved local pose as a row-vector matrix: scale, then rotation, then translation.</summary>
+    private static Matrix4x4 Trs(AssetTypeValueField t, AssetTypeValueField q, AssetTypeValueField s) =>
+        Matrix4x4.CreateScale(s["x"].AsFloat, s["y"].AsFloat, s["z"].AsFloat)
+        * Matrix4x4.CreateFromQuaternion(new Quaternion(q["x"].AsFloat, q["y"].AsFloat, q["z"].AsFloat, q["w"].AsFloat))
+        * Matrix4x4.CreateTranslation(t["x"].AsFloat, t["y"].AsFloat, t["z"].AsFloat);
+
+    public const int ClassAnimator = 95;
+    public const int ClassAvatar = 90;
+
+    /// <summary>The rest world of every bone an Avatar describes, keyed by the bone-name hash a skinned mesh
+    /// stores for it (the Avatar's own node id), relative to the Avatar's root node — the Animator's own
+    /// object, which <see cref="RendererRig"/>'s frame places in the file — row-vector. This is the pose the
+    /// rig was set up in, which a prefab's saved Transforms need not be: an enemy prefab is often saved
+    /// mid-pose. Throws when the object is no Avatar or its pose is malformed.</summary>
+    public IReadOnlyDictionary<uint, Matrix4x4> RigRestPose(byte[] deobfuscatedBundle, long avatarPathId)
+    {
+        var (am, _, inst) = Parse(deobfuscatedBundle);
+        if (inst.file.GetAssetInfo(avatarPathId) is not { TypeId: ClassAvatar } info)
+            throw new InvalidDataException("the rig's saved pose is missing from its bundle");
+        var data = am.GetBaseField(inst, info)["m_Avatar"];
+        var nodes = UnwrapArray(data["m_AvatarSkeleton"]["data"]["m_Node"]);
+        var ids = UnwrapArray(data["m_AvatarSkeleton"]["data"]["m_ID"]);
+        var poses = UnwrapArray(data["m_AvatarSkeletonPose"]["data"]["m_X"]);
+        if (nodes.Count == 0 || ids.Count != nodes.Count || poses.Count != nodes.Count)
+            throw new InvalidDataException("the rig's saved pose has mismatched bone counts");
+        var worlds = new Matrix4x4[nodes.Count];
+        var rest = new Dictionary<uint, Matrix4x4>(nodes.Count);
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            // Unity serializes the skeleton parents-first, so a node's parent is always already placed
+            int parent = nodes[i]["m_ParentId"].AsInt;
+            if (parent >= i) throw new InvalidDataException("the rig's saved pose lists a bone before its parent");
+            var local = Trs(poses[i]["t"], poses[i]["q"], poses[i]["s"]);
+            worlds[i] = parent < 0 ? local : local * worlds[parent];
+        }
+        if (!Matrix4x4.Invert(worlds[0], out var fromRoot))
+            throw new InvalidDataException("the rig's saved pose has a root that won't invert");
+        for (int i = 0; i < nodes.Count; i++)
+            if (!rest.TryAdd(ids[i].AsUInt, worlds[i] * fromRoot))
+                throw new InvalidDataException("the rig's saved pose names one bone twice");
+        return rest;
     }
 
     /// <summary>Deobfuscate a live bundle file from disk into plain UnityFS bytes.</summary>
@@ -232,104 +346,80 @@ public sealed class BundleReader
     private static string ReadAssetName(AssetsManager am, AssetsFileInstance inst, AssetFileInfo info) =>
         am.GetBaseField(inst, info)["m_Name"].AsString;
 
-    /// <summary>The deserialized type-tree field for a Mesh by name — or, when <paramref name="pathId"/> is
-    /// non-zero, by that EXACT path id (the smr-body selector: enemy/NPC bundles ship same-named mesh
-    /// copies). The field carries its own data, so it stays usable after this returns.</summary>
-    public AssetTypeValueField? GetMeshField(byte[] deobfuscatedBundle, string meshName, long pathId = 0)
+    /// <summary>THE selection every read of one Mesh makes (<see cref="MeshSelector"/>): the object an exact
+    /// path id names; else the one the load key files — among several a key files (a model's sub-assets),
+    /// the one of this name; else the first Mesh of this name. A load key that files no single Mesh of this
+    /// file selects nothing: the key is what the game loads, so a name read in its place would read an
+    /// object the game may never draw.</summary>
+    private AssetFileInfo? FindMesh(byte[] deobfuscatedBundle, AssetsManager am, AssetsFileInstance inst,
+        string meshName, MeshSelector which) =>
+        SelectMesh(am, inst, meshName, which, () => ContainerMeshes(deobfuscatedBundle, am, inst));
+
+    /// <summary><see cref="FindMesh"/> over a file some other reader loaded, for a caller that parses a bundle
+    /// itself. <paramref name="containerMeshes"/> is asked only for a load key.</summary>
+    internal static AssetFileInfo? SelectMesh(AssetsManager am, AssetsFileInstance inst, string meshName,
+        MeshSelector which, Func<Dictionary<string, List<long>>> containerMeshes)
     {
-        var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
+        if (which.IsExact)
+            return inst.file.GetAssetInfo(which.PathId) is { TypeId: ClassMesh } exact ? exact : null;
+        if (which.LoadKey is { } key)
         {
-            if (info.TypeId != ClassMesh) continue;
-            if (pathId != 0) { if (info.PathId != pathId) continue; }
-            else if (am.GetBaseField(inst, info)["m_Name"].AsString != meshName) continue;
-            var bf = am.GetBaseField(inst, info);
-            ResolveStreamedVertexData(bf, bun);   // pull a streamed vertex buffer inline so Decode works
-            return bf;
+            if (!containerMeshes().TryGetValue(key, out var filed)) return null;
+            var named = filed.Count == 1 ? filed
+                : filed.Where(id => am.GetBaseField(inst, inst.file.GetAssetInfo(id))["m_Name"].AsString == meshName)
+                    .ToList();
+            return named.Count == 1 ? inst.file.GetAssetInfo(named[0]) : null;
         }
+        foreach (var info in inst.file.AssetInfos)
+            if (info.TypeId == ClassMesh && am.GetBaseField(inst, info)["m_Name"].AsString == meshName) return info;
         return null;
     }
 
-    /// <summary>The decoded field for a Mesh AND its <c>source_hash</c>, from the SAME parse. The hash is of
-    /// the PRISTINE on-disk object, taken BEFORE any streamed vertex buffer is inlined, so it matches what
-    /// apply time reads live even for a streamed mesh. The returned field is then resolved so the caller can
-    /// decode it. The single home for "read a mesh + its source_hash", so a streamed mesh's recorded hash
-    /// can never drift from its on-disk bytes.</summary>
-    public (AssetTypeValueField Field, string SourceHash, bool Streamed)? GetMeshFieldAndHash(byte[] deobfuscatedBundle, string meshName)
+    /// <summary>This parse's container keys to the Mesh objects of this file each files, keys compared
+    /// case-insensitively as a bundle's own load compares them. Decoded once per kept parse.</summary>
+    private Dictionary<string, List<long>> ContainerMeshes(byte[] deobfuscatedBundle, AssetsManager am,
+        AssetsFileInstance inst)
     {
-        var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
-        {
-            if (info.TypeId != ClassMesh) continue;
-            var bf = am.GetBaseField(inst, info);
-            if (bf["m_Name"].AsString != meshName) continue;
-            var hash = AssetHash.Sha256(bf.WriteToByteArray());   // pristine, pre-mutation
-            bool streamed = MeshStreamed(bf);     // read before resolve (resolve inlines the buffer)
-            ResolveStreamedVertexData(bf, bun);   // pull a streamed vertex buffer inline so Decode works
-            return (bf, hash, streamed);
-        }
-        return null;
+        if (_containerMeshes.TryGetValue(deobfuscatedBundle, out var have)) return have;
+        return _containerMeshes[deobfuscatedBundle] = ReadContainerMeshes(am, inst);
     }
 
-    /// <summary>The <see cref="GetMeshFieldAndHash"/> twin selected by PATH ID instead of name — the smr-body
-    /// route's read. Same contract: pristine hash first, then the streamed vertex buffer is
-    /// inlined.</summary>
-    public (AssetTypeValueField Field, string SourceHash, bool Streamed)? GetMeshFieldAndHashByPathId(byte[] deobfuscatedBundle, long pathId)
+    /// <summary>A loaded file's container keys to the Mesh objects of this file each files.</summary>
+    internal static Dictionary<string, List<long>> ReadContainerMeshes(AssetsManager am, AssetsFileInstance inst)
     {
-        var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
-        {
-            if (info.TypeId != ClassMesh || info.PathId != pathId) continue;
-            var bf = am.GetBaseField(inst, info);
-            var hash = AssetHash.Sha256(bf.WriteToByteArray());
-            bool streamed = MeshStreamed(bf);
-            ResolveStreamedVertexData(bf, bun);
-            return (bf, hash, streamed);
-        }
-        return null;
+        var map = new Dictionary<string, List<long>>(StringComparer.OrdinalIgnoreCase);
+        var abInfo = inst.file.AssetInfos.FirstOrDefault(i => i.TypeId == ClassAssetBundle);
+        if (abInfo is not null)
+            foreach (var entry in UnwrapArray(am.GetBaseField(inst, abInfo)["m_Container"]))
+            {
+                var asset = FindPtr(entry["second"]["asset"].IsDummy ? entry["second"] : entry["second"]["asset"]);
+                if (asset is null || asset["m_FileID"].AsInt != 0) continue;
+                if (inst.file.GetAssetInfo(asset["m_PathID"].AsLong) is not { TypeId: ClassMesh } info) continue;
+                string key = entry["first"].AsString;
+                if (!map.TryGetValue(key, out var ids)) map[key] = ids = new List<long>();
+                if (!ids.Contains(info.PathId)) ids.Add(info.PathId);
+            }
+        return map;
     }
 
-    /// <summary>Whether a Mesh field stores its vertex buffer in a streamed <c>.resS</c>
-    /// (<c>m_StreamData.size &gt; 0</c>). Must be read on the PRISTINE field, before any streamed buffer is
-    /// inlined.</summary>
-    private static bool MeshStreamed(AssetTypeValueField mesh)
+    /// <summary>The path id of the Mesh <paramref name="which"/> selects, or null when it selects none —
+    /// for a caller that records the exact object rather than reading it.</summary>
+    public long? MeshPathId(byte[] deobfuscatedBundle, string meshName, MeshSelector which)
     {
-        var sd = mesh["m_StreamData"];
-        if (sd.IsDummy) return false;
-        var sizeField = sd["size"];
-        return !sizeField.IsDummy && sizeField.AsLong > 0;
+        var (am, _, inst) = Parse(deobfuscatedBundle);
+        return FindMesh(deobfuscatedBundle, am, inst, meshName, which)?.PathId;
     }
 
-    /// <summary>The PRISTINE serialized bytes of a Mesh object — the whole-object copy an unchanged target
-    /// ships as its mesh blob, injected verbatim. Taken from a fresh parse with NO streamed-vertex
-    /// resolution, so a streamed mesh's blob still references the same <c>.resS</c>. Byte-identical to what
-    /// <see cref="GetMeshFieldAndHash"/> hashes.</summary>
-    public byte[]? GetPristineMeshBytes(byte[] deobfuscatedBundle, string meshName, long pathId = 0)
+    /// <summary>The deserialized type-tree field for the Mesh <paramref name="which"/> selects (see
+    /// <see cref="MeshSelector"/>). The field carries its own data, so it stays usable after this
+    /// returns.</summary>
+    public AssetTypeValueField? GetMeshField(byte[] deobfuscatedBundle, string meshName, MeshSelector which = default)
     {
         var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
-        {
-            if (info.TypeId != ClassMesh) continue;
-            if (pathId != 0) { if (info.PathId != pathId) continue; }
-            var bf = am.GetBaseField(inst, info);
-            if (pathId != 0 || bf["m_Name"].AsString == meshName) return bf.WriteToByteArray();
-        }
-        return null;
-    }
-
-    /// <summary>True when the named Mesh stores its vertex buffer in a streamed <c>.resS</c>, read without
-    /// decoding. An unchanged streamed mesh ships as a whole-object identity blob (<c>.resS</c> intact); an
-    /// edited one goes inline-on-edit (resolve the slice, apply, clear <c>m_StreamData</c>).</summary>
-    public bool? IsMeshStreamed(byte[] deobfuscatedBundle, string meshName)
-    {
-        var (am, bun, inst) = Parse(deobfuscatedBundle);
-        foreach (var info in inst.file.AssetInfos)
-        {
-            if (info.TypeId != ClassMesh) continue;
-            var bf = am.GetBaseField(inst, info);
-            if (bf["m_Name"].AsString == meshName) return MeshStreamed(bf);
-        }
-        return null;
+        if (FindMesh(deobfuscatedBundle, am, inst, meshName, which) is not { } info) return null;
+        var bf = am.GetBaseField(inst, info);
+        ResolveStreamedVertexData(bf, bun);   // pull a streamed vertex buffer inline so Decode works
+        return bf;
     }
 
     /// <summary>A non-readable mesh stores its vertex buffer in a <c>.resS</c> resource (the mesh-level
@@ -613,6 +703,11 @@ public sealed class BundleReader
         long ShaderPathId,
         IReadOnlyList<string> ExternalCabs,
         IReadOnlyDictionary<string, float> Floats,
+        IReadOnlyDictionary<string, float[]> Colors,
+        IReadOnlyDictionary<string, float[]>? TextureTransforms = null,
+        bool NumericPropertiesComplete = true);
+
+    public sealed record ShaderNumericDefaults(IReadOnlyDictionary<string, float> Floats,
         IReadOnlyDictionary<string, float[]> Colors);
 
     /// <summary>Read the Material at <paramref name="pathId"/>'s shading state — keywords, shader PPtr,
@@ -638,6 +733,7 @@ public sealed class BundleReader
         }
         var floats = new Dictionary<string, float>(StringComparer.Ordinal);
         var colors = new Dictionary<string, float[]>(StringComparer.Ordinal);
+        bool complete = true;
         try
         {
             foreach (var pair in bf["m_SavedProperties"]["m_Floats"].Children[0].Children)
@@ -651,10 +747,59 @@ public sealed class BundleReader
                 };
             }
         }
-        catch { /* malformed property block — return whatever parsed */ }
+        catch { complete = false; }
+        var transforms = new Dictionary<string, float[]>(StringComparer.Ordinal);
+        var environments = bf["m_SavedProperties"]["m_TexEnvs"];
+        try
+        {
+            if (!environments.IsDummy)
+            foreach (var pair in environments["Array"].Children)
+            {
+                var scale = pair["second"]["m_Scale"];
+                var offset = pair["second"]["m_Offset"];
+                if (scale.IsDummy || offset.IsDummy) continue;
+                if (scale["x"].IsDummy || scale["y"].IsDummy
+                    || offset["x"].IsDummy || offset["y"].IsDummy)
+                    throw new InvalidDataException("The material texture transform is incomplete.");
+                transforms[pair["first"].AsString + "_ST"] = new[]
+                {
+                    scale["x"].AsFloat, scale["y"].AsFloat,
+                    offset["x"].AsFloat, offset["y"].AsFloat,
+                };
+            }
+        }
+        catch { complete = false; }
         return new MaterialShading(bf["m_Name"].AsString, keywords,
             bf["m_Shader"]["m_FileID"].AsInt, bf["m_Shader"]["m_PathID"].AsLong,
-            ExternalCabs(inst), floats, colors);
+            ExternalCabs(inst), floats, colors, transforms, complete);
+    }
+
+    /// <summary>Numeric defaults declared by the exact Shader object's property table. Texture
+    /// properties are excluded; texture transforms come from the material's texture environments.</summary>
+    public ShaderNumericDefaults? GetShaderNumericDefaults(byte[] deobfuscatedBundle, long pathId)
+    {
+        var (am, bun, inst) = Parse(deobfuscatedBundle);
+        var info = inst.file.GetAssetInfo(pathId);
+        if (info is null || info.TypeId != ClassShader) return null;
+        var properties = am.GetBaseField(inst, info)["m_ParsedForm"]["m_PropInfo"]["m_Props"];
+        if (properties.IsDummy) return null;
+        var floats = new Dictionary<string, float>(StringComparer.Ordinal);
+        var colors = new Dictionary<string, float[]>(StringComparer.Ordinal);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in properties["Array"].Children)
+        {
+            int kind = property["m_Type"].AsInt;
+            if (kind is not (0 or 1 or 2 or 3)) continue;
+            string name = property["m_Name"].AsString;
+            if (string.IsNullOrWhiteSpace(name) || !names.Add(name))
+                throw new InvalidDataException("The shader property table has an empty or duplicate numeric name.");
+            if (kind is 0 or 1)
+                colors.Add(name, Enumerable.Range(0, 4)
+                    .Select(component => property[$"m_DefValue[{component}]"].AsFloat).ToArray());
+            else
+                floats.Add(name, property["m_DefValue[0]"].AsFloat);
+        }
+        return new ShaderNumericDefaults(floats, colors);
     }
 
     /// <summary>The fragment shader variants of the Shader asset at <paramref name="pathId"/>, read

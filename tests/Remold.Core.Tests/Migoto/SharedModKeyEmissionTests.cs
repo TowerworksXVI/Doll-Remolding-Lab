@@ -167,9 +167,9 @@ public sealed class SharedModKeyEmissionTests : IDisposable
         string outDir = Path.Combine(_root, $"hide-{modKey}-{hideKey}");
         new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
             hideHashes: new[] { "dddd4444" }, modKey: modKey,
-            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>>
+            hideClaims: new Dictionary<string, IReadOnlyList<HideClaim>>
             {
-                ["dddd4444"] = new KeyRef[] { hideKey },
+                ["dddd4444"] = new[] { new HideClaim(new KeyRef[] { hideKey }) },
             });
         return File.ReadAllText(Path.Combine(outDir, "mod.ini"));
     }

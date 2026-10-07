@@ -68,7 +68,10 @@ public static class AssetExporter
     // the glb says so.
     // v5: no exported rest world carries a reflection, and duplicate faces ship on split vertex copies so
     // Blender keeps them.
-    public const string RiggedBuildSpec = "rigged-build-spec-v5";
+    // v6: joints stand where the build poses them (BindReference), and no bone is left off the armature.
+    // v7: a part the game starts hidden opens centred at full size, its record says by how much, and every
+    // part's record says which of its subject's bones only hidden parts weight.
+    public const string RiggedBuildSpec = "rigged-build-spec-v7";
 
     /// <summary>Filename of the optional whole-outfit combined glb (all skinned parts, one union-skeleton
     /// armature) written alongside the per-part glbs in <c>meshes/</c>. Deterministic so the Edit pane can
@@ -88,8 +91,12 @@ public static class AssetExporter
     /// admitted here. Deliberate: the export over-offers by exactly that part's bones and the build-time
     /// posed gate refuses paint on them, which is the safe direction — under-offering would hide bones a
     /// build would have accepted.</para></summary>
-    public sealed record RosterPart(string Mesh, string Token, string SourceBundle, long PathId,
-        bool CastsShadows, VisibilityOverride Visibility);
+    /// <param name="RendererBundle">The part's renderer and the saved rest pose its rig names, with
+    /// <paramref name="RendererPathId"/> and <paramref name="Pose"/> (<see cref="Workbench.SubjectPart"/>):
+    /// what places its mesh space in the rig. A row without a renderer has no placement to read.</param>
+    public sealed record RosterPart(string Mesh, string Token, string SourceBundle, MeshSelector Which,
+        bool CastsShadows, VisibilityOverride Visibility, string? RendererBundle = null, long RendererPathId = 0,
+        Workbench.RigPose? Pose = null);
 
     /// <summary>The candidacy roster a rigged export filters its appended bone tail against: every part of
     /// the subject, in the subject model's own order, plus the wardrobe <paramref name="Scheme"/> presence
@@ -141,7 +148,7 @@ public static class AssetExporter
 
         internal void ObserveInputs(
             IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-                IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+                IReadOnlyList<float>? BakedRest, MeshSelector Which, string? EditedGlb)> parts,
             string? combinedOut,
             IReadOnlyDictionary<string, IReadOnlyList<(string? Base, string? Normal, string? Rmo)>>? authoredMaps,
             IReadOnlyDictionary<string, IReadOnlyList<TextureTransportOverride>>? authoredTextureMaps,
@@ -189,7 +196,7 @@ public static class AssetExporter
     /// shape.</summary>
     public static string RiggedBuildFingerprint(Outfit outfit, string character, SubjectRoster? roster,
         IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-            IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+            IReadOnlyList<float>? BakedRest, MeshSelector Which, string? EditedGlb)> parts,
         bool wardrobeUnreadable)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -222,7 +229,8 @@ public static class AssetExporter
             Text(part.SourceBundle);
             Text(part.MeshName);
             Flag(part.GlbOut is not null);
-            Number(part.PathId);
+            Number(part.Which.PathId);
+            Text(part.Which.LoadKey);
             Flag(part.EditedGlb is not null);
             if (part.BakedRest is null) Number(-1);
             else
@@ -242,9 +250,16 @@ public static class AssetExporter
                 Text(part.Mesh);
                 Text(part.Token);
                 Text(part.SourceBundle);
-                Number(part.PathId);
+                Number(part.Which.PathId);
+                Text(part.Which.LoadKey);
                 Flag(part.CastsShadows);
                 Number((int)part.Visibility);
+                // what places the part in its rig, which decides where a joint it lends stands
+                Text(part.RendererBundle);
+                Number(part.RendererPathId);
+                Flag(part.Pose is not null);
+                Text(part.Pose?.Bundle);
+                Number(part.Pose?.PathId ?? 0);
             }
             if (roster.Scheme is null) Number(-1);
             else
@@ -375,7 +390,7 @@ public static class AssetExporter
     /// than log lines: the two are one object in the app, and a line per texture is the flashing the
     /// aggregate replaces.</param>
     public static IReadOnlyList<string> BuildRiggedGlbs(string anyGamePath, GameVfs vfs,
-        Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+        Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, MeshSelector Which, string? EditedGlb)> parts,
         string texDir, IProgress<string>? log = null, string? combinedOut = null,
         ICollection<string>? vanillaFallbacks = null, SubjectRoster? roster = null,
         ICollection<string>? rosterDegraded = null, string? candidacyCacheFile = null,
@@ -408,9 +423,11 @@ public static class AssetExporter
 
     /// <summary>The body of <see cref="BuildRiggedGlbs"/> on a <see cref="CandidacyCache"/> the caller
     /// owns — the seam the candidacy pass's cost is measured through, since what a run had to read and
-    /// scan is otherwise invisible from outside.</summary>
+    /// scan is otherwise invisible from outside. <paramref name="placementOf"/> states where a part's mesh
+    /// space sits in its rig, by slot name and skin, for a synthetic install whose parts carry no skeleton;
+    /// null reads it from the part's renderer (<see cref="Workbench.RigPlacement.Read"/>).</summary>
     internal static IReadOnlyList<string> BuildRiggedGlbsCore(string anyGamePath, GameVfs vfs,
-        Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)> parts,
+        Outfit outfit, string character, IReadOnlyList<(string Part, string SourceBundle, string MeshName, string? GlbOut, IReadOnlyList<float>? BakedRest, MeshSelector Which, string? EditedGlb)> parts,
         string texDir, IProgress<string>? log, string? combinedOut,
         ICollection<string>? vanillaFallbacks, SubjectRoster? roster,
         ICollection<string>? rosterDegraded, CandidacyCache cache, CancellationToken ct,
@@ -421,7 +438,8 @@ public static class AssetExporter
         bool reportBlenderTexCoordWarnings = false,
         RiggedBuildDiagnostics? diagnostics = null,
         IReadOnlyCollection<string>? observedGameSidePreparedGlbs = null,
-        PreviewBlobMemo? previewMemo = null)
+        PreviewBlobMemo? previewMemo = null,
+        Func<string, MeshSkin, Workbench.RigPlacement.Placed>? placementOf = null)
     {
         diagnostics?.ObserveInputs(parts, combinedOut, authoredMaps, authoredTextureMaps,
             observedGameSidePreparedGlbs);
@@ -502,16 +520,16 @@ public static class AssetExporter
             catch { id = null; }
             return contentIds[logical] = id;
         }
-        string? CandidacyKey(string logical, string meshName, long pathId)
+        string? CandidacyKey(string logical, string meshName, MeshSelector which)
         {
             diagnostics?.ObserveBundle(logical, required: false);
             if (!cache.Enabled) return null;
             var id = ContentIdOf(logical);
-            return id is null ? null : CandidacyCache.Key(id, meshName, pathId);
+            return id is null ? null : CandidacyCache.Key(id, meshName, which);
         }
         // The roster rows the export loop's OWN field reads can answer, joined on the slot name the way
-        // ValidFor joins them, and only where the row addresses the very same mesh (same bundle, same path
-        // id) the loop is about to read. Two rows on one slot name would make that join ambiguous, so a
+        // ValidFor joins them, and only where the row addresses the very same mesh (same bundle, same
+        // selector) the loop is about to read. Two rows on one slot name would make that join ambiguous, so a
         // roster carrying them opts out of the reuse entirely and every row goes through the gap pass, as
         // before this optimization existed.
         var rosterByMesh = new Dictionary<string, RosterPart>(StringComparer.OrdinalIgnoreCase);
@@ -673,18 +691,55 @@ public static class AssetExporter
         // The combined session's included parts by SLOT NAME, filled in lockstep with `rigged` — the key the
         // candidacy roster is joined on, which a RiggedPart itself doesn't carry.
         var riggedSlots = new List<string>();
+        var riggedTokens = new List<string>();
+        // …and the uprighting each carries, which a combined session's extra bones take from the part they
+        // stand beside
+        var riggedRests = new List<Matrix4x4?>();
         bool anyHashNamedRig = false;   // a skinned part with NO scene rig falls back to the bone table
         // Every part's game skin against what its scene rig names and the bake it carries, in the order they
         // are read — the subject's whole answer for "which path does this bone hash take, and where does it
         // rest", which only the finished loop holds.
         var unionParts = new List<(MeshSkin Skin, IReadOnlyList<string>? BonePaths, Matrix4x4? Uprighting)>();
+        // the same skins by slot name, first read wins, for the bind reference a part's joints stand under
+        var skinsByMesh = new Dictionary<string, MeshSkin>(StringComparer.OrdinalIgnoreCase);
         // Edited parts, by their slot in `rigged`: their paths need that whole answer, so they are named
         // after the loop.
         var editedParts = new List<(int Slot, MeshSkin Skin)>();
         // Per-part rigged glbs, written after the loop: the armature each one carries spans the SUBJECT, and
         // the subject's skeleton isn't known until every part has been read.
         var pendingLone = new List<PendingLoneGlb>();
-        foreach (var (part, srcBundle, meshName, glbOut, bakedRest, pathId, editedGlb) in parts)
+        // Where each part's mesh space sits in its rig (RigPlacement), read once per part for two answers:
+        // whether the game starts the part shrunk, which decides where this export shows it, and the bind
+        // reference a part's joints stand under. A part the roster doesn't carry has no renderer to read
+        // it from, so it can't be said, and such a part is shown where it was modelled.
+        var rosterRows = new Dictionary<string, RosterPart>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in roster?.Parts ?? Array.Empty<RosterPart>()) rosterRows.TryAdd(r.Mesh, r);
+        var placementPoses = new Dictionary<(string, long), IReadOnlyDictionary<uint, Matrix4x4>>();
+        var placements = new Dictionary<string, Workbench.RigPlacement.Placed>(StringComparer.OrdinalIgnoreCase);
+        Workbench.RigPlacement.Placed PlacedOf(string mesh, MeshSkin skin)
+        {
+            if (placements.TryGetValue(mesh, out var known)) return known;
+            if (placementOf is not null) return placements[mesh] = placementOf(mesh, skin);
+            var row = rosterRows.GetValueOrDefault(mesh);
+            return placements[mesh] = Workbench.RigPlacement.Read(reader, logical => Dec(logical, required: false),
+                vfs.Catalog.DepsForBundle, row?.RendererBundle, row?.RendererPathId ?? 0, row?.Pose, skin,
+                placementPoses);
+        }
+        // Each skinned part's stock mesh (decoded only when asked) and the uprighting its workspace takes:
+        // what fixes a hidden part's centre (Workbench.HiddenPart), for its own export and for any other
+        // part's joints carried by where it shows.
+        var stockMeshes = new Dictionary<string, (Lazy<UnityMesh> Mesh, Matrix4x4? Uprighting)>(
+            StringComparer.OrdinalIgnoreCase);
+        var shownAt = new Dictionary<string, (Matrix4x4 Display, Vector3 Centre)?>(StringComparer.OrdinalIgnoreCase);
+        // Where this export shows a part the game starts hidden, or null for any other part.
+        (Matrix4x4 Display, Vector3 Centre)? HiddenDisplay(string mesh, MeshSkin skin)
+        {
+            if (shownAt.TryGetValue(mesh, out var known)) return known;
+            var stock = stockMeshes[mesh];
+            return shownAt[mesh] = Workbench.HiddenPart.For(PlacedOf(mesh, skin).Placement, () => stock.Mesh.Value,
+                stock.Uprighting);
+        }
+        foreach (var (part, srcBundle, meshName, glbOut, bakedRest, which, editedGlb) in parts)
         {
             // OUTSIDE the per-part catch, which would swallow it and carry on building.
             ct.ThrowIfCancellationRequested();
@@ -693,7 +748,7 @@ public static class AssetExporter
             {
                 var dec = DecPart(srcBundle, part, glbOut);
                 if (dec is null) continue;
-                var field = reader.GetMeshField(dec, meshName, pathId);
+                var field = reader.GetMeshField(dec, meshName, which);
                 if (field is null) continue;
                 // The candidacy pass's measurement for THIS slot, taken off the field already in hand — the
                 // gap pass below then reads only the roster rows this loop never touched. Isolated from the
@@ -702,15 +757,15 @@ public static class AssetExporter
                 // reports it degraded exactly as it does today, and must never turn into a skipped part.
                 //
                 // The join is by slot name the way ValidFor joins it (case-insensitively) but the mesh
-                // LOOKUP that produced `field` selects m_Name case-SENSITIVELY at path id 0 — so a roster
+                // LOOKUP that produced `field` selects m_Name case-SENSITIVELY on a read by name — so a roster
                 // row differing from the export row only in case addresses a mesh this loop did not read,
                 // and claiming it here would answer a row the gap pass would have dropped. The last clause
-                // closes that: at path id 0 the names must match exactly, and elsewhere the path id is the
-                // selector and settles it on its own.
+                // closes that: for a read by name the names must match exactly, and elsewhere the selector
+                // settles it on its own.
                 if (rosterByMesh.TryGetValue(meshName, out var rosterRow)
                     && string.Equals(rosterRow.SourceBundle, srcBundle, StringComparison.Ordinal)
-                    && rosterRow.PathId == pathId
-                    && (pathId != 0 || string.Equals(rosterRow.Mesh, meshName, StringComparison.Ordinal))
+                    && rosterRow.Which == which
+                    && (which != default || string.Equals(rosterRow.Mesh, meshName, StringComparison.Ordinal))
                     && !measuredInLoop.ContainsKey(meshName))
                 {
                     try
@@ -718,7 +773,7 @@ public static class AssetExporter
                         // Keyed off the ROSTER ROW's own triple, which is what the gap pass would key on:
                         // one key per asset whichever route mints it, so the two can't memo the same mesh
                         // twice under two names.
-                        var key = CandidacyKey(rosterRow.SourceBundle, rosterRow.Mesh, rosterRow.PathId);
+                        var key = CandidacyKey(rosterRow.SourceBundle, rosterRow.Mesh, rosterRow.Which);
                         measuredInLoop[meshName] = CandidacyRow(rosterRow, roster!.Scheme,
                             cache.TryGet(key) ?? cache.Measure(key, field));
                     }
@@ -732,9 +787,9 @@ public static class AssetExporter
                 // Read ONCE per part: an edited part needs it too, for the map and for its connectors.
                 SceneRig? sceneRig = null;
                 if (skin is { IsSkinned: true })
-                    sceneRig = SceneRig.TryRead(dec, meshName, skin, pathId)
-                        ?? (pathId != 0 && scope.Candidates.Count > 0
-                            ? SceneRig.TryReadForMeshRef(scope.Candidates[0].Dec, pathId, skin)
+                    sceneRig = SceneRig.TryRead(dec, meshName, skin, which)
+                        ?? (which.IsExact && scope.Candidates.Count > 0
+                            ? SceneRig.TryReadForMeshRef(scope.Candidates[0].Dec, which.PathId, skin)
                             : null);
                 // The space this part's workspace sits in: the rest its project record states where one
                 // exists (a converted 0.3.x project), else the scene rig's own uprighting — so a body
@@ -744,7 +799,18 @@ public static class AssetExporter
                 // lands in bind space rather than a skewed one.
                 var partRest = RestBake.Effective(bakedRest, sceneRig?.Uprighting, out bool restRefused);
                 // the rig's paths are in GAME bone order, so they pair with this part's game skin
-                if (skin is { IsSkinned: true }) unionParts.Add((skin, sceneRig?.BonePaths, partRest));
+                int unionSlot = unionParts.Count;
+                // first read wins for the stock mesh as for the skin, so a slot two rows name is centred by
+                // the mesh its skin came from
+                bool ownsStock = false;
+                if (skin is { IsSkinned: true })
+                {
+                    unionParts.Add((skin, sceneRig?.BonePaths, partRest));
+                    skinsByMesh.TryAdd(meshName, skin);
+                    var stockField = field;
+                    ownsStock = stockMeshes.TryAdd(meshName,
+                        (new Lazy<UnityMesh>(() => UnityMesh.Decode(stockField, meshName)), partRest));
+                }
                 // A part this run writes no glb for has already given what it was read for — its share of
                 // the subject's skeleton. Decoding its geometry and resolving its textures would buy
                 // nothing, so a rig-only part costs one bundle read rather than a whole part export.
@@ -755,6 +821,8 @@ public static class AssetExporter
                 // mesh asset's own m_Name differs, and the send-back joins its parts to the ledger by the
                 // name the glb carries.
                 var mesh = UnityMesh.Decode(field, meshName);
+                if (ownsStock && !stockMeshes[meshName].Mesh.IsValueCreated)
+                    stockMeshes[meshName] = (new Lazy<UnityMesh>(mesh), partRest);
                 if (warnedTexCoordParts?.Add(part) == true)
                     foreach (string warning in MeshGltf.TexCoordTransportWarnings(mesh, part))
                         log?.Report(warning);
@@ -804,11 +872,18 @@ public static class AssetExporter
                 if (skin is { IsSkinned: true })
                 {
                     var uprighting = partRest;
+                    // A part the game starts shrunk opens centred at full size, its own joints moved with it,
+                    // in every session (Workbench.HiddenPart): its geometry takes the uprighting and then the
+                    // centring, and everything placed beside it takes the display placement both make.
+                    var hidden = HiddenDisplay(meshName, skin);
+                    var shown = hidden?.Display ?? uprighting;
+                    if (hidden is not null) unionParts[unionSlot] = (skin, sceneRig?.BonePaths, shown);
                     // The modder's own geometry wins for an edited part: its workspace glb holds the authored
                     // mesh AND skin, so the session opens on what they last sent rather than the game copy
-                    // their next send would overwrite. It already sits in the space the Add put it in, so it
-                    // combines with no further uprighting. Maps come from the workspace PNGs and the part's
-                    // own authored files — a workspace glb carries neither.
+                    // their next send would overwrite. It already sits in the space the Add put it in —
+                    // centred, for a part the game starts hidden — so it combines with no further uprighting.
+                    // Maps come from the workspace PNGs and the part's own authored files — a workspace glb
+                    // carries neither.
                     if (editedGlb is not null && glbOut is null)
                     {
                         // A workspace glb that won't parse degrades to the game copy rather than dropping the
@@ -827,13 +902,15 @@ public static class AssetExporter
                         if (edited is { } e)
                         {
                             editedParts.Add((rigged.Count, e.Skin));
+                            riggedRests.Add(shown);
                             rigged.Add(new MeshGltf.RiggedPart(e.Mesh, e.Skin, baseColorPng, normalPng,
-                                ConnectorRests: Composed(sceneRig?.ConnectorRests, uprighting),
+                                ConnectorRests: Composed(sceneRig?.ConnectorRests, shown),
                                 PerSubmesh: perSubmesh,
                                 TextureTransport: e.Mesh.Submeshes.Count == mesh.Submeshes.Count
                                     ? textureTransport
                                     : Transport(e.Mesh.Submeshes.Count, reportMissed: false)));
                             riggedSlots.Add(meshName);
+                            riggedTokens.Add(part);
                             done.Add(part);
                             continue;
                         }
@@ -849,16 +926,20 @@ public static class AssetExporter
                     if (glbOut is not null)
                         pendingLone.Add(new PendingLoneGlb(part, meshName, glbOut, mesh, skin, baseColorPng,
                             normalPng, perSubmesh, sceneRig?.BonePaths, uprighting, sceneRig?.ConnectorRests,
-                            textureTransport));
+                            textureTransport, hidden?.Centre));
                     var (contextPose, connectors) = CombinedPose(sceneRig, uprighting,
                         // the gated read is the expensive half, so it runs only where the answer can matter
-                        () => Workbench.PartSkinGate.Blocked(RequiredDec, srcBundle, meshName, pathId, reader) is null);
+                        () => Workbench.PartSkinGate.Blocked(RequiredDec, srcBundle, meshName, which, reader) is null,
+                        hidden: hidden is not null);
+                    riggedRests.Add(shown);
                     rigged.Add(new MeshGltf.RiggedPart(mesh, skin, baseColorPng, normalPng,
                         sceneRig?.BonePaths, uprighting, connectors,
                         PerSubmesh: perSubmesh,
                         ContextPose: contextPose,
-                        TextureTransport: textureTransport));   // for the union combined
+                        TextureTransport: textureTransport,   // for the union combined
+                        Shift: hidden?.Centre));
                     riggedSlots.Add(meshName);
+                    riggedTokens.Add(part);
                     done.Add(part);
                 }
                 else if (glbOut is not null)   // rigid prop: no rig, but still upgrade its bare Add glb to textured
@@ -892,8 +973,7 @@ public static class AssetExporter
         if (rigged.Count > 0 && anyHashNamedRig)
             log?.Report("Some bones open under generated names.");
 
-        var skeleton = SubjectSkeleton(unionParts, bones.Path, out var disagreeing);
-        foreach (var line in DisagreementLines(disagreeing)) log?.Report(line);
+        var skeleton = SubjectSkeleton(unionParts, bones.Path);
 
         // The subject's candidacy roster, measured the way the BUILD measures it (ModBuilder's RosterProbe):
         // bone table + narrow layout + presence + posed bones + the prefab's shadow and visibility flags. It
@@ -934,15 +1014,89 @@ public static class AssetExporter
                 roster?.PartsPoolAlone ?? false);
         }
 
+        // The bind each bone a part's armature carries stands under: the rule the build poses a replacement by
+        // (BindReference), over the candidates and coverage group the tail is filtered by, so a joint stands
+        // where the built mod pivots it. Null where candidacy is unknown, and the armature keeps the placement
+        // it has always had.
+        var referenceParts = new Dictionary<string, BindReference.Part?>(StringComparer.OrdinalIgnoreCase);
+        BindReference.Part? ReferencePart(string mesh)
+        {
+            if (referenceParts.TryGetValue(mesh, out var known)) return known;
+            var posed = candidacy?.FirstOrDefault(c => string.Equals(c.Mesh, mesh, StringComparison.OrdinalIgnoreCase))?.Posed;
+            if (posed is null || !skinsByMesh.TryGetValue(mesh, out var skin)) return referenceParts[mesh] = null;
+            var placed = new Lazy<Workbench.RigPlacement.Placed>(() => PlacedOf(mesh, skin));
+            return referenceParts[mesh] = new BindReference.Part(mesh, skin.BoneHashes, skin.BindPoses, posed,
+                new Lazy<(Matrix4x4?, string?)>(() => (placed.Value.Placement, placed.Value.Problem)),
+                new Lazy<string?>(() => placed.Value.Skeleton),
+                new Lazy<(Matrix4x4?, string?)>(() =>
+                {
+                    // read only for a part the placement hides; a stock mesh that won't decode is the reason
+                    try
+                    {
+                        return HiddenDisplay(mesh, skin) is { } shown
+                            ? (shown.Display, null) : (null, "its geometry can't be read to centre it");
+                    }
+                    catch (Exception e) when (e is not IOException)
+                    {
+                        return (null, $"its geometry can't be read to centre it ({e.Message})");
+                    }
+                }));
+        }
+        IReadOnlyDictionary<uint, Matrix4x4>? ReferenceFor(string slot)
+        {
+            if (candidacy is null || ReferencePart(slot) is not { } target) return null;
+            bool alone = roster?.PartsPoolAlone ?? false;
+            var (candidates, _) = Migoto.PoolDerive.PoolCandidates(candidacy, slot, alone);
+            var groups = Migoto.PoolDerive.VariantGroups(candidacy, roster?.Scheme, unmeasured, candidates, slot, alone);
+            var order = BindReference.SourceOrder(candidates.Select(c => c.Mesh),
+                groups.SelectMany(g => g.Members).Select(m => m.Mesh));
+            // Every glb this export writes is geometry authored under the relation it shows.
+            return BindReference.For(target, order.Select(ReferencePart).OfType<BindReference.Part>().ToList(),
+                    carryHidden: true)
+                .Reference;
+        }
+
+        // The subject's hidden bones: the ones parts the game starts shrunk weight and no other part does.
+        // Read over the whole roster, since the part being sent may weight a bone only a part outside this
+        // session poses. A part whose placement can't be read counts as shown, which leaves its bones out
+        // of the set; unknown candidacy says nothing at all. Recorded beside each part's glb for the Blender
+        // session, with whether the game's own part already weights one of them and another bone.
+        HashSet<uint>? hiddenBones = null;
+        if (candidacy is not null)
+        {
+            var hiddenPosed = new HashSet<uint>();
+            var shownPosed = new HashSet<uint>();
+            foreach (var row in candidacy)
+            {
+                bool shrunk = skinsByMesh.TryGetValue(row.Mesh, out var rowSkin)
+                    && PlacedOf(row.Mesh, rowSkin).Placement is { } g && BindReference.Hidden(g);
+                (shrunk ? hiddenPosed : shownPosed).UnionWith(row.Posed);
+            }
+            hiddenPosed.ExceptWith(shownPosed);
+            hiddenBones = hiddenPosed;
+        }
+        PreviewMaps.HiddenFacts? HiddenFactsFor(string slot)
+        {
+            if (hiddenBones is not { Count: > 0 }) return null;
+            var posed = candidacy!.FirstOrDefault(c => string.Equals(c.Mesh, slot, StringComparison.OrdinalIgnoreCase))?.Posed;
+            bool mixes = posed is not null && posed.Any(hiddenBones.Contains) && posed.Any(b => !hiddenBones.Contains(b));
+            return new PreviewMaps.HiddenFacts(hiddenBones.OrderBy(b => b).Select(b => b.ToString("x8")).ToList(),
+                mixes);
+        }
+
         foreach (var w in pendingLone)
         {
             ct.ThrowIfCancellationRequested();
             try
             {
-                MeshGltf.ExportRiggedGlb(w.Mesh, w.Skin, bones.Path, w.GlbOut, w.BaseColorPng, w.NormalPng,
-                    w.PerSubmesh, w.ScenePaths, w.Uprighting, w.ConnectorRests,
-                    ExtraBones(skeleton, w.Skin.BoneHashes, w.Uprighting, ValidFor(w.MeshName)),
-                    m => log?.Report($"{w.Part} · {m}"), MapWouldNotDecode, w.TextureTransport, previewMemo);
+                var reference = ReferenceFor(w.MeshName);
+                // the subject's other bones stand in the space this part's joints are shown in
+                var shown = w.Shift is { } centre ? Workbench.HiddenPart.Display(w.Uprighting, centre) : w.Uprighting;
+                MeshGltf.ExportRiggedGlb(w.Mesh, StandUnder(w.Skin, reference), bones.Path, w.GlbOut,
+                    w.BaseColorPng, w.NormalPng, w.PerSubmesh, w.ScenePaths, w.Uprighting, w.ConnectorRests,
+                    ExtraBones(skeleton, w.Skin.BoneHashes, shown, ValidFor(w.MeshName), reference),
+                    m => log?.Report($"{w.Part} · {m}"), MapWouldNotDecode, w.TextureTransport, previewMemo,
+                    w.Shift, HiddenFactsFor(w.MeshName));
             }
             catch (IOException) { throw; }
             catch (Exception e)
@@ -974,9 +1128,15 @@ public static class AssetExporter
                 }
                 combinedValid = union;
             }
+            // One armature serves every part, so a bone two of them place differently stands where the body
+            // places it, or the session's first part when it carries no body; the game result never depends on
+            // where a joint stood in Blender.
+            int lead = Math.Max(0, riggedTokens.FindIndex(IsBodyToken));
+            var leadReference = ReferenceFor(riggedSlots[lead]);
             MeshGltf.ExportCombinedRiggedGlb(rigged, bones.Path, combinedOut,
-                CombinedExtraBones(skeleton, rigged, combinedValid), m => log?.Report(m),
-                MapWouldNotDecode, previewMemo);
+                CombinedExtraBones(skeleton, rigged, combinedValid, leadReference, riggedRests[lead]),
+                m => log?.Report(m), MapWouldNotDecode, previewMemo, lead,
+                LeadRests(leadReference, riggedRests[lead]));
         }
         foreach (var name in missedTextures) unreadableTextures?.Add(name);
         if (parts.Any(part => part.GlbOut is not null
@@ -1063,7 +1223,7 @@ public static class AssetExporter
     private static List<Migoto.PoolDerive.PartBones>? CandidacyRoster(SubjectRoster? roster,
         Bundles.BundleReader reader, Func<string, byte[]?> dec,
         IReadOnlyDictionary<string, Migoto.PoolDerive.PartBones> measured, CandidacyCache cache,
-        Func<string, string, long, string?> keyOf, ICollection<string>? degraded = null,
+        Func<string, string, MeshSelector, string?> keyOf, ICollection<string>? degraded = null,
         ICollection<string>? unreadable = null)
     {
         if (roster is not { Parts.Count: > 0 }) return null;
@@ -1083,14 +1243,14 @@ public static class AssetExporter
             string? key;
             try
             {
-                key = keyOf(r.SourceBundle, r.Mesh, r.PathId);
+                key = keyOf(r.SourceBundle, r.Mesh, r.Which);
                 if (cache.TryGet(key) is { } hit) { bones.Add(CandidacyRow(r, roster.Scheme, hit)); continue; }
                 cache.BundleReads++;
                 var d = dec(r.SourceBundle);
                 // bytes unavailable RIGHT NOW — a lock or a missing file, which a rerun may not repeat
                 if (d is null) { degraded?.Add(r.Mesh); unreadable?.Add(r.Mesh); continue; }
                 cache.MeshReads++;
-                field = reader.GetMeshField(d, r.Mesh, r.PathId);
+                field = reader.GetMeshField(d, r.Mesh, r.Which);
             }
             // conservatively the same class: whatever threw between the manifest and the mesh bytes, this
             // run cannot say the content itself refused
@@ -1130,92 +1290,60 @@ public static class AssetExporter
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? PerSubmesh,
         IReadOnlyList<string>? ScenePaths, Matrix4x4? Uprighting,
         IReadOnlyDictionary<string, Matrix4x4>? ConnectorRests,
-        IReadOnlyList<TextureTransportSource>? TextureTransport);
+        IReadOnlyList<TextureTransportSource>? TextureTransport, Vector3? Shift);
 
     /// <summary>One bone of the subject's skeleton: where it hangs, its rest world in BIND space
     /// (<c>inverse(bindPose)</c>, before any bake), and the uprighting the part it was read from
     /// carries.</summary>
     internal readonly record struct SubjectBone(uint Hash, string Path, Matrix4x4 BindRest, Matrix4x4? Uprighting);
 
-    /// <summary>How far apart two parts may bind one bone, in TRANSLATION, and still be read as agreeing
-    /// about where it stands (see <see cref="SubjectSkeleton"/>). Deliberately not
-    /// <see cref="RestBake.TranslationTol"/>: that one answers "is this translation small enough to drop
-    /// from a bake", so a whole centimetre passes it — as a placement gate the same number would call two
-    /// rests a centimetre apart the same bone and stand an armature stick between them. This answers "do
-    /// these two parts place this bone in the same spot", where a centimetre is plainly visible. 1e-4 sits
-    /// well above the ~1e-6 noise of inverting a bind pose and well below any real placement difference.
-    /// Rotation stays on <see cref="RestBake.RotationTol"/>, already the tight half of that split.</summary>
-    private const float PlacementAgreementTol = 1e-4f;
-
-    /// <summary>How many disagreeing bones <see cref="DisagreementLines"/> names before it counts the
-    /// rest.</summary>
-    private const int NamedDisagreements = 3;
-
-    /// <summary>What a build says about the bones <see cref="SubjectSkeleton"/> dropped. Each line goes to
-    /// the status bar, and a rig whose parts are systematically offset disagrees about EVERY bone it has —
-    /// so three are named and the remainder is a count. Naming none would hide a two-bone problem; naming
-    /// all of them buries every other line of the build.</summary>
-    internal static IEnumerable<string> DisagreementLines(IReadOnlyList<string> disagreeing)
-    {
-        for (int i = 0; i < disagreeing.Count && i < NamedDisagreements; i++)
-            yield return $"Bone {disagreeing[i]} is off the armature: this item's parts bind it in "
-                         + "different places.";
-        if (disagreeing.Count > NamedDisagreements)
-            yield return $"…and {disagreeing.Count - NamedDisagreements} more bones bind in different "
-                         + "places, all off the armature.";
-    }
-
     /// <summary>
     /// The whole subject's skeleton in the order its parts were read: every bone any part skins, named the
     /// way that part's export names it (its scene rig first, then the bone table, then a flat
-    /// <c>bone_&lt;hash8&gt;</c>) so one bone reaches one armature node however many parts pose it.
-    ///
-    /// <para>Bind poses are the placement source, and the first part to name a bone fixes both its path and
-    /// its rest — but only while the subject AGREES about it. Agreement is judged in SCENE space, each part's
-    /// bind rest composed with its own uprighting: a subject whose body ships lying down while its hair
-    /// ships upright binds the head in two bind spaces and one scene place, and that is one bone. A bone
-    /// two parts place differently in the scene has no one rest to stand at, so it is dropped from the
-    /// skeleton entirely and named in <paramref name="disagreeing"/>: it still poses the parts that own
-    /// it, it just never joins another part's armature. An armature stick in the wrong place is worse
-    /// than an absent one.</para>
+    /// <c>bone_&lt;hash8&gt;</c>) so one bone reaches one armature node however many parts pose it. The first
+    /// part to name a bone fixes its path, and its rest where no bind reference places the bone.
     /// </summary>
     internal static IReadOnlyList<SubjectBone> SubjectSkeleton(
         IReadOnlyList<(MeshSkin Skin, IReadOnlyList<string>? BonePaths, Matrix4x4? Uprighting)> parts,
-        Func<uint, string?> resolveBone, out IReadOnlyList<string> disagreeing)
+        Func<uint, string?> resolveBone)
     {
-        var byHash = new Dictionary<uint, int>();       // hash → its slot in `bones`
+        var seen = new HashSet<uint>();
         var bones = new List<SubjectBone>();
-        var dropped = new HashSet<uint>();
-        var names = new List<string>();
         foreach (var (skin, bonePaths, uprighting) in parts)
             // a skin whose bind poses don't reach its bone list places nothing past that point, and this runs
             // outside the per-part isolation the reads have
             for (int i = 0; i < skin.BoneCount && i < skin.BindPoses.Count; i++)
             {
                 uint hash = skin.BoneHashes[i];
-                if (dropped.Contains(hash)) continue;
-                if (!Matrix4x4.Invert(skin.BindPoses[i], out var rest)) continue;   // no placement, no bone
-                if (byHash.TryGetValue(hash, out var at))
-                {
-                    var placed = uprighting is { } g ? rest * g : rest;
-                    var held = bones[at].Uprighting is { } hg ? bones[at].BindRest * hg : bones[at].BindRest;
-                    if (RestBake.RotationDiff(placed, held) <= RestBake.RotationTol
-                        && RestBake.TranslationDiff(placed, held) <= PlacementAgreementTol)
-                        continue;
-                    names.Add(bones[at].Path);
-                    bones.RemoveAt(at);
-                    byHash.Remove(hash);
-                    foreach (var h in byHash.Keys.ToList()) if (byHash[h] > at) byHash[h]--;
-                    dropped.Add(hash);
-                    continue;
-                }
+                if (seen.Contains(hash) || !Matrix4x4.Invert(skin.BindPoses[i], out var rest)) continue;
+                seen.Add(hash);
                 string path = (bonePaths is not null && i < bonePaths.Count ? bonePaths[i] : null)
                               ?? resolveBone(hash) ?? $"bone_{hash:x8}";
-                byHash[hash] = bones.Count;
                 bones.Add(new SubjectBone(hash, path, rest, uprighting));
             }
-        disagreeing = names;
         return bones;
+    }
+
+    /// <summary>A skin whose binds are restated to <paramref name="reference"/> wherever it names a bone:
+    /// the armature a part's glb carries then stands where the build poses the part's replacement. A bone the
+    /// part weights keeps its own bind, which is what the reference states for it; only a joint the part
+    /// tables and does not weight can move. The geometry and its weights are untouched.</summary>
+    internal static MeshSkin StandUnder(MeshSkin skin, IReadOnlyDictionary<uint, Matrix4x4>? reference) =>
+        reference is null ? skin : new MeshSkin
+        {
+            BoneHashes = skin.BoneHashes,
+            BindPoses = skin.BindPoses.Select((bind, i) =>
+                i < skin.BoneCount && reference.TryGetValue(skin.BoneHashes[i], out var stated) ? stated : bind).ToList(),
+        };
+
+    /// <summary>Whether a part token names the item's body — <c>body</c>, <c>body1</c>, <c>P2_body_trans</c> —
+    /// the part a combined session's shared armature takes a disputed bone's place from.</summary>
+    internal static bool IsBodyToken(string token)
+    {
+        var name = System.Text.RegularExpressions.Regex.Replace(token, "^P\\d+_", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        int letters = 0;
+        while (letters < name.Length && char.IsLetter(name[letters])) letters++;
+        return string.Equals(name[..letters], "body", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The subject's bones a LONE part's armature carries on top of its own: everything the part
@@ -1229,16 +1357,26 @@ public static class AssetExporter
     /// tail, so a send that painted nothing still re-splits onto the same joint indices. An ANCESTOR of an
     /// offered bone comes back whatever the filter says (see <see cref="OfferedTail"/>).</para></summary>
     internal static IReadOnlyList<MeshGltf.ExtraBone> ExtraBones(IReadOnlyList<SubjectBone> skeleton,
-        IReadOnlyList<uint> own, Matrix4x4? uprighting, IReadOnlySet<uint>? valid = null)
+        IReadOnlyList<uint> own, Matrix4x4? uprighting, IReadOnlySet<uint>? valid = null,
+        IReadOnlyDictionary<uint, Matrix4x4>? reference = null)
     {
         var offered = OfferedTail(skeleton, new HashSet<uint>(own), valid);
         var extras = new List<MeshGltf.ExtraBone>();
         foreach (var b in skeleton)
             if (offered.Contains(b.Hash))
-                extras.Add(new MeshGltf.ExtraBone(b.Hash, b.Path,
-                    uprighting is { } g ? b.BindRest * g : b.BindRest));
+            {
+                var rest = RestOf(b, reference);
+                extras.Add(new MeshGltf.ExtraBone(b.Hash, b.Path, uprighting is { } g ? rest * g : rest));
+            }
         return extras;
     }
+
+    /// <summary>Where a bone rests in the part's bind space: inverse of the bind the reference states for it
+    /// (the build's rule, <see cref="BindReference"/>), else the bind rest of the part that named it
+    /// first.</summary>
+    private static Matrix4x4 RestOf(SubjectBone bone, IReadOnlyDictionary<uint, Matrix4x4>? reference) =>
+        reference is not null && reference.TryGetValue(bone.Hash, out var stated) && Matrix4x4.Invert(stated, out var rest)
+            ? rest : bone.BindRest;
 
     /// <summary>
     /// Which of <paramref name="skeleton"/>'s bones an appended tail offers: everything the geometry doesn't
@@ -1250,9 +1388,9 @@ public static class AssetExporter
     /// <c>MeshGltf</c>'s armature build registers every '/'-split prefix of an offered bone's path as a node,
     /// so dropping an ancestor doesn't remove it from the file — it leaves it there stripped of its hash
     /// suffix and parked at an identity world. Blender imports a joint's node ancestors as bones, so the
-    /// modder still gets something paintable, and paint on a hash-less joint is DISCARDED on the way back in
-    /// (its influences are dropped and the vertex renormalised) instead of meeting the build's posed gate and
-    /// being refused out loud. Restoring the ancestor as a proper hash-named joint puts that refusal back:
+    /// modder still gets something paintable, and paint on a hash-less joint is refused at Send as weight
+    /// outside the item's skeleton instead of meeting the build's posed gate, which names the bone it
+    /// refuses. Restoring the ancestor as a proper hash-named joint puts that refusal back:
     /// pre-filter behaviour for a bone the filter has no way to hide anyway.</para>
     /// </summary>
     private static HashSet<uint> OfferedTail(IReadOnlyList<SubjectBone> skeleton, HashSet<uint> posed,
@@ -1280,15 +1418,29 @@ public static class AssetExporter
         return offered;
     }
 
+    /// <summary>Where the lead part's build rule (<paramref name="reference"/>, in its bind space) stands each
+    /// bone it covers in a combined session: the rest each bind states, under the lead's
+    /// <paramref name="uprighting"/>. Null without a reference.</summary>
+    internal static IReadOnlyDictionary<uint, Matrix4x4>? LeadRests(IReadOnlyDictionary<uint, Matrix4x4>? reference,
+        Matrix4x4? uprighting)
+    {
+        if (reference is null) return null;
+        var rests = new Dictionary<uint, Matrix4x4>(reference.Count);
+        foreach (var (hash, bind) in reference)
+            if (Matrix4x4.Invert(bind, out var rest))
+                rests[hash] = uprighting is { } g ? rest * g : rest;
+        return rests;
+    }
+
     /// <summary>The combined session's twin of <see cref="ExtraBones"/>: a bone no part in the session poses
-    /// stands where the part it was READ from would have put it, since this glb bakes no one uprighting of
-    /// its own — each part carries its own.
+    /// stands where the lead part's reference places it (<paramref name="leadReference"/>, under the lead's
+    /// uprighting), else where the part it was READ from would have put it, since this glb bakes no one
+    /// uprighting of its own — each part carries its own.
     ///
     /// <para>"Poses" is read off each part's skin, so every part handed here must already list only the
     /// bones its geometry rides (<see cref="MeshSkin.WeightedOnly"/> reduces an edited part's re-read skin
-    /// to that). A part whose skin still spans the subject leaves this with nothing to add, and the bones
-    /// <see cref="SubjectSkeleton"/> deliberately dropped come back through that part's own stale
-    /// worlds.</para>
+    /// to that). A part whose skin still spans the subject leaves this with nothing to add: its stale
+    /// worlds place those bones instead.</para>
     ///
     /// <para><paramref name="valid"/> is the UNION of the included parts' valid tail sets
     /// (<see cref="ValidTailBones"/>), not any one part's: this glb ships ONE shared armature every part
@@ -1297,7 +1449,8 @@ public static class AssetExporter
     /// candidacy unknown, and the whole skeleton is offered as before. An ANCESTOR of an offered bone comes
     /// back whatever the filter says (see <see cref="OfferedTail"/>).</para></summary>
     internal static IReadOnlyList<MeshGltf.ExtraBone> CombinedExtraBones(IReadOnlyList<SubjectBone> skeleton,
-        IReadOnlyList<MeshGltf.RiggedPart> parts, IReadOnlySet<uint>? valid = null)
+        IReadOnlyList<MeshGltf.RiggedPart> parts, IReadOnlySet<uint>? valid = null,
+        IReadOnlyDictionary<uint, Matrix4x4>? leadReference = null, Matrix4x4? leadUprighting = null)
     {
         var posed = new HashSet<uint>();
         foreach (var p in parts)
@@ -1306,8 +1459,13 @@ public static class AssetExporter
         var extras = new List<MeshGltf.ExtraBone>();
         foreach (var b in skeleton)
             if (offered.Contains(b.Hash))
-                extras.Add(new MeshGltf.ExtraBone(b.Hash, b.Path,
-                    b.Uprighting is { } g ? b.BindRest * g : b.BindRest));
+            {
+                // a bone the lead part's reference places stands beside the lead part, in its space
+                bool led = leadReference is not null && leadReference.ContainsKey(b.Hash);
+                var rest = RestOf(b, leadReference);
+                var g = led ? leadUprighting : b.Uprighting;
+                extras.Add(new MeshGltf.ExtraBone(b.Hash, b.Path, g is { } m ? rest * m : rest));
+            }
         return extras;
     }
 
@@ -1358,10 +1516,14 @@ public static class AssetExporter
     ///
     /// <para><paramref name="replaceable"/> is a delegate: answering it costs a bundle read, and only a part
     /// with a scene rig and no bake can reach a different answer.</para>
+    ///
+    /// <para>A part the game starts <paramref name="hidden"/> takes no pose either: the prefab's rest pose
+    /// shrinks it out of sight, so it opens centred at full size in every session, gated or not
+    /// (<see cref="Workbench.HiddenPart"/>).</para>
     /// </summary>
     internal static (IReadOnlyList<Matrix4x4>? ContextPose, IReadOnlyDictionary<string, Matrix4x4>? Connectors)
-        CombinedPose(SceneRig? sceneRig, Matrix4x4? uprighting, Func<bool> replaceable) =>
-        uprighting is null && sceneRig?.BoneRestWorlds is { } restWorlds && !replaceable()
+        CombinedPose(SceneRig? sceneRig, Matrix4x4? uprighting, Func<bool> replaceable, bool hidden = false) =>
+        !hidden && uprighting is null && sceneRig?.BoneRestWorlds is { } restWorlds && !replaceable()
             // recover the connectors' true SCENE worlds for a posed part: their recorded rests are
             // bind-normalized by inverse(measured G), so composing G back undoes it
             ? (restWorlds, Composed(sceneRig.ConnectorRests, sceneRig.MeasuredRest))
@@ -1488,15 +1650,15 @@ public static class AssetExporter
             { gw = meta.Width; gh = meta.Height; }
         }
 
-        // the vanilla fallback: catalog-resolve the address to its bundle and decode the game mesh
+        // the vanilla fallback: the game mesh the address loads, decoded out of its bundle
         UnityMesh? ResolveVanilla(string meshName, string address)
         {
             if (string.IsNullOrEmpty(address)) return null;
-            var bundle = vfs.Catalog.ResolveAddress(address);
+            var (bundle, which) = vfs.Catalog.TierMesh(address, null, 0);
             if (bundle is null) return null;
             var dec = Dec(bundle);
             if (dec is null) return null;
-            var field = reader.GetMeshField(dec, meshName);
+            var field = reader.GetMeshField(dec, meshName, which);
             return field is null ? null : UnityMesh.Decode(field);
         }
 

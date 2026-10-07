@@ -54,7 +54,7 @@ public class SceneRestUprightingTests
         return (vfs, rig, UnityMesh.Decode(field, Mesh));
     }
 
-    private static List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)> Spec(
+    private static List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)> Spec(
         string glbOut, IReadOnlyList<float>? bakedRest) => new()
     {
         ("prop", Logical, Mesh, glbOut, bakedRest, 0L, null),
@@ -126,6 +126,20 @@ public class SceneRestUprightingTests
         PreviewMaps.CopyPortableWorkspace(glb, copy);
         Assert.Equal(rest, PreviewMaps.ReadBakedRest(copy));
 
+        // a hidden part's centre and its subject's hidden bones are records too, and travel the same way
+        var centred = g.At("c.glb");
+        File.WriteAllBytes(centred, new byte[] { 4 });
+        PreviewMaps.WriteSidecar(centred, Array.Empty<PreviewMaps.Entry>(),
+            Array.Empty<PreviewMaps.SubmeshSource>(), shift: new[] { 1f, 2f, 3f },
+            hidden: new PreviewMaps.HiddenFacts(new[] { "0000abcd" }, StockMixes: true));
+        var centredCopy = g.At(Path.Combine("copy", "c.glb"));
+        PreviewMaps.CopyPortableWorkspace(centred, centredCopy);
+        Assert.Equal(new[] { 1f, 2f, 3f }, PreviewMaps.ReadShift(centredCopy));
+        Assert.Equal(new[] { "0000abcd" }, PreviewMaps.ReadHiddenFacts(centredCopy)!.Bones);
+        Assert.True(PreviewMaps.ReadHiddenFacts(centredCopy)!.StockMixes);
+        Assert.Null(PreviewMaps.ReadShift(copy));
+        Assert.Null(PreviewMaps.ReadHiddenFacts(copy));
+
         // nothing to record clears the sidecar, and a file with none reads as bind space
         var bare = g.At("b.glb");
         File.WriteAllBytes(bare, new byte[] { 1 });
@@ -149,20 +163,114 @@ public class SceneRestUprightingTests
         float[] up = RestBake.Apply(mesh, G).Channels["Vertex"];
         float[] down = RestBake.Unapply(mesh, G).Channels["Vertex"];
 
-        // a scene-space union: a baked file is already there, a bind-space one takes the target's rest
-        Assert.Equal(up, Of(ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: null, targetRest: G)));
-        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: G, targetRest: G));
-        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: null, targetRest: null));
-        // an anchor-space union: a baked file takes its rest back off, a bind-space one is left alone
-        Assert.Equal(down, Of(ModBuilder.PayloadInUnionSpace(payload, sceneUnion: false, fileRest: G, targetRest: G)));
-        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: false, fileRest: null, targetRest: G));
+        // a scene-space union: a baked file is already there, a bind-space one takes the target's rest, and
+        // either way the donor keeps that rotation against the replaced part's own space
+        Assert.Equal(up, Of(ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: null, targetRest: G,
+            out var carried)));
+        Assert.Equal(G, carried);
+        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: G, targetRest: G,
+            out carried));
+        Assert.Equal(G, carried);
+        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: true, fileRest: null, targetRest: null,
+            out carried));
+        Assert.Null(carried);
+        // an anchor-space union: a baked file takes its rest back off, a bind-space one is left alone, and the
+        // donor keeps no rotation against the replaced part's own space
+        Assert.Equal(down, Of(ModBuilder.PayloadInUnionSpace(payload, sceneUnion: false, fileRest: G, targetRest: G,
+            out carried)));
+        Assert.Null(carried);
+        Assert.Same(payload, ModBuilder.PayloadInUnionSpace(payload, sceneUnion: false, fileRest: null, targetRest: G,
+            out carried));
+        Assert.Null(carried);
+    }
+
+    // ---- the bind reference, carried into the space the donor's vertices sit in ----------------------
+
+    /// <summary>A quarter turn about X, as <see cref="RestBake.Snap"/> gives it for a part modelled lying down:
+    /// the anchor's scene rotation in a scene-rest union, which is never the identity.</summary>
+    private static readonly Matrix4x4 AnchorScene = new(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
+
+    /// <summary>A quarter turn about Z: a rotation the donor can carry that is not the anchor's.</summary>
+    private static readonly Matrix4x4 QuarterTurnZ = new(0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+
+    private static IReadOnlyDictionary<uint, Matrix4x4> AReference() => new Dictionary<uint, Matrix4x4>
+    {
+        [0x101] = Matrix4x4.CreateTranslation(0.1f, 0.2f, 0.3f),
+        [0x102] = Matrix4x4.CreateRotationY(0.5f) * Matrix4x4.CreateTranslation(-0.4f, 1.1f, 0.05f),
+    };
+
+    [Fact]
+    public void The_anchor_scene_rotation_used_here_is_one_a_scene_rest_union_has()
+    {
+        Assert.Equal(AnchorScene, RestBake.Snap(Matrix4x4.CreateRotationX(MathF.PI / 2)));
+        Assert.True(SwapCompile.TrySceneDelta(AnchorScene, out var delta));
+        Assert.Equal(AnchorScene, delta);
     }
 
     [Fact]
-    public void TheSubjectSkeleton_JudgesAgreement_InSceneSpace()
+    public void A_replacement_its_own_part_anchors_keeps_the_reference_as_stated()
+    {
+        // The replaced part anchors: the build is the one it has always been, even where the rest the donor
+        // carries is not the anchor's.
+        var reference = AReference();
+        Assert.Same(reference, ModBuilder.ReferenceInUnionSpace(reference, anchorIsReplaced: true,
+            anchorScene: AnchorScene, carried: QuarterTurnZ));
+    }
+
+    [Fact]
+    public void A_neighbour_anchor_in_an_anchor_space_union_keeps_the_reference_as_stated()
+    {
+        // The union is in the anchor's own space: the donor is back in the replaced part's space and nothing
+        // restates the reference, so the replaced part's statement is already where the donor is.
+        var reference = AReference();
+        Assert.Same(reference, ModBuilder.ReferenceInUnionSpace(reference, anchorIsReplaced: false,
+            anchorScene: null, carried: QuarterTurnZ));
+    }
+
+    [Fact]
+    public void A_neighbour_anchor_whose_scene_rotation_the_donor_carries_keeps_the_reference_as_stated()
+    {
+        // The donor already carries the anchor's own scene rotation, so the restatement the build applies to
+        // the reference is the one the donor's vertices took.
+        var reference = AReference();
+        Assert.Same(reference, ModBuilder.ReferenceInUnionSpace(reference, anchorIsReplaced: false,
+            anchorScene: AnchorScene, carried: AnchorScene));
+    }
+
+    [Fact]
+    public void A_neighbour_anchor_whose_scene_rotation_differs_from_the_donors_carries_the_reference_to_the_donor()
+    {
+        // The anchor stands up by a quarter turn about X and the donor carries a quarter turn about Z. Each
+        // entry becomes anchorScene · transpose(carried) · bind (row-vector), so after the build restates it
+        // by the anchor's rotation it stands where the donor's vertices are.
+        var reference = AReference();
+        var carried = ModBuilder.ReferenceInUnionSpace(reference, anchorIsReplaced: false,
+            anchorScene: AnchorScene, carried: QuarterTurnZ);
+
+        Assert.NotSame(reference, carried);
+        Assert.Equal(reference.Keys.OrderBy(k => k), carried.Keys.OrderBy(k => k));
+
+        // By hand, for the bind that only moves the bone to (0.1, 0.2, 0.3):
+        //   anchorScene rows          (1, 0, 0) (0, 0, 1) (0, -1, 0)
+        //   transpose(carried) rows   (0, -1, 0) (1, 0, 0) (0, 0, 1)
+        //   their product's rows      (0, -1, 0) (0, 0, 1) (-1, 0, 0)
+        // and the bind only adds its translation row, which the product's own (0, 0, 0, 1) row passes
+        // through unchanged. Taking the bind first would move that row to (-0.3, -0.1, 0.2); swapping the two
+        // turns, or dropping the transpose, changes the rotation rows.
+        var expected = new Matrix4x4(
+            0, -1, 0, 0,
+            0, 0, 1, 0,
+            -1, 0, 0, 0,
+            0.1f, 0.2f, 0.3f, 1);
+        Assert.Equal(expected, carried[0x101]);
+    }
+
+    [Fact]
+    public void TheSubjectSkeleton_KeepsTheFirstOwnersRest_WithItsOwnUprighting()
     {
         // A body that ships lying down and a hair that ships upright bind the head in two bind spaces and
-        // one scene place: composed with each part's own uprighting they agree, and the head is one bone.
+        // one scene place. The head is one bone, and it carries the first owner's rest together with the
+        // uprighting that stands THAT rest up — whatever the second part says about it.
         var G = new Matrix4x4(1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
         var scene = Matrix4x4.CreateTranslation(0.1f, 1.2f, -0.02f);
         Assert.True(Matrix4x4.Invert(G, out var gInv));
@@ -178,17 +286,15 @@ public class SceneRestUprightingTests
             (Skin(lyingRest), new[] { "root/head" }, G),
             (Skin(scene), new[] { "root/head" }, null),
         };
-        var bones = AssetExporter.SubjectSkeleton(parts, _ => null, out var disagreeing);
-        Assert.Empty(disagreeing);
+        var bones = AssetExporter.SubjectSkeleton(parts, _ => null);
         var bone = Assert.Single(bones);
         Assert.Equal(lyingRest, bone.BindRest);   // the first owner's rest, in its own bind space
         Assert.Equal(G, bone.Uprighting);
 
-        // …and a part that really places the bone elsewhere in the scene still loses it
+        // …and a part that places the bone elsewhere in the scene does not take it off the armature
         parts[1] = (Skin(scene * Matrix4x4.CreateTranslation(0, 0.05f, 0)), new[] { "root/head" }, null);
-        bones = AssetExporter.SubjectSkeleton(parts, _ => null, out disagreeing);
-        Assert.Equal(new[] { "root/head" }, disagreeing);
-        Assert.Empty(bones);
+        bone = Assert.Single(AssetExporter.SubjectSkeleton(parts, _ => null));
+        Assert.Equal(lyingRest, bone.BindRest);
     }
 
     [Fact]

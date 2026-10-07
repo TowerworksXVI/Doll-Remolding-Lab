@@ -102,6 +102,38 @@ public class GroupEmissionTests : IDisposable
 
     private static MigotoEmitter.Result Build(PoolBuildRequest req) => new MigotoEmitter().Build(req);
 
+    [Fact]
+    public void A_member_bone_no_slim_selection_holds_keeps_every_vertex_rather_than_a_tie()
+    {
+        // A member's rows are not ridden by the donor's geometry, so a rigid tie would write a wrong row
+        // outright. A group bone no small selection of the member holds therefore keeps the dense width,
+        // where a pool part's would ride a co-riding bone.
+        const int mixed = 1100, skew = 200, n = mixed + skew;
+        var req = Fixture(out string outDir, out _, withTier: false);
+        SyntheticPool.WriteProportionalPairDump(Path.Combine(_root, "mv1"), seed: 7, mixed: mixed, skew: skew, C, G);
+        var result = Build(req);
+
+        Assert.Contains(result.Diagnostics, d => d.Contains($"mv1: bone 0x{G:x8} ships at dense width")
+            && d.Contains($"{n} rows"));
+        Assert.DoesNotContain(result.Diagnostics, d => d.StartsWith("mv1:") && d.Contains("tied rigidly"));
+
+        // The widened bone takes the DENSE operator's rows — the ones the residual gate is calibrated
+        // against. They reach the buffer through a per-row read of the factors rather than the whole
+        // materialized matrix, and a disagreement between those two routes would ship a bone whose
+        // coefficients no gate ever measured. The member's rows are its bones in order: C, then G.
+        var off = File.ReadAllBytes(Path.Combine(outDir, "mv1_off.buf"));
+        int bas = (int)BitConverter.ToUInt32(off, 8), width = (int)BitConverter.ToUInt32(off, 12);
+        Assert.Equal(n, width);
+        string md = Path.Combine(_root, "mv1");
+        var p = PoolMath.ParsePositions(File.ReadAllBytes(Path.Combine(md, "stream0.buf")), 40, 0);
+        var (w, bi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(md, "stream2.buf")));
+        var dense = PoolMath.PInv(PoolMath.BuildC(p, w, bi, nbones: 2));
+        var bytes = File.ReadAllBytes(Path.Combine(outDir, "mv1_cpinv.buf"));
+        for (int r = 0; r < 4; r++)
+            for (int t = 0; t < n; t++)
+                Assert.Equal(dense[(4 * 1 + r) * n + t], BitConverter.ToSingle(bytes, (4 * bas + r * width + t) * 4));
+    }
+
     // ---- zero diff ------------------------------------------------------------------------------------
 
     /// <summary>The hard invariant of this feature: a request carrying no group emits what it emitted
@@ -333,6 +365,8 @@ public class GroupEmissionTests : IDisposable
         string sec = Section(ini, "[CustomShaderGroup_mv1_swap]");
         Assert.Contains("cs-cb5 = Resource_mv1_CB\n", sec);
         Assert.Contains("cs-cb13 = Resource_beta_CB\n", sec);
+        // the anchor's constants, which that rebase reads, are still captured at the anchor's draw
+        Assert.Contains("Resource_beta_CB = copy vs-cb1\n", Section(ini, "[TextureOverride_Cap_beta]"));
         Assert.Contains(result.Diagnostics, d => d.Contains("mv1") && d.Contains("draw order"));
         // …while mv2, which shares C with the anchor, runs from the chain like any witnessed member
         Assert.Contains("if $zz_gate_src_mv2 == 1\nrun = CustomShaderGroup_mv2_swap\nendif\n", ini);
@@ -836,6 +870,7 @@ public class GroupEmissionTests : IDisposable
     public void The_group_build_emits_the_pinned_text_contract()
     {
         Build(Fixture(out string outDir, out _));
+        HlslCheck.EveryShaderCompilesClean(File.ReadAllText(Path.Combine(outDir, "mod.ini")), outDir);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         foreach (var (emittedFile, goldenFile) in new[]
                  {

@@ -150,12 +150,13 @@ public static class InstallGate
 }
 
 /// <summary>Warnings for keys that 3DMigoto will treat as one input. A collision is legal: it says that the
-/// named controls switch together.</summary>
+/// named controls switch together. State shortcuts shared between groups are the feature working, so two
+/// shortcuts never warn about each other; a shortcut on a group key or the whole-mod key does.</summary>
 public static class KeyCollisions
 {
     public const string WholeModLabel = "the whole mod";
 
-    public sealed record Entry(string Identity, string Label, string? Key);
+    public sealed record Entry(string Identity, string Label, string? Key, bool Shortcut = false);
 
     public static IReadOnlyDictionary<string, string> Tips(IEnumerable<Entry> entries)
     {
@@ -167,9 +168,14 @@ public static class KeyCollisions
             var rows = collision.ToList();
             foreach (var row in rows)
             {
-                var others = rows.Where(other => !ReferenceEquals(other, row)).Select(other => other.Label)
-                    .Distinct(StringComparer.Ordinal).ToList();
-                tips[row.Identity] = $"Same key as {NameList(others)}. They switch together.";
+                var clashes = rows.Where(other => !ReferenceEquals(other, row)
+                    && !(row.Shortcut && other.Shortcut)).ToList();
+                if (clashes.Count == 0) continue;
+                var others = clashes.Select(other => other.Label).Distinct(StringComparer.Ordinal).ToList();
+                bool jumps = row.Shortcut || clashes.Any(other => other.Shortcut);
+                tips[row.Identity] = $"Same key as {NameList(others)}. "
+                    + (!jumps ? "They switch together."
+                        : others.Count == 1 ? "One press does both." : "One press does all of them.");
             }
         }
         return tips;

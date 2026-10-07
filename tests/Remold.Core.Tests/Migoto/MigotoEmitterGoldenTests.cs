@@ -101,7 +101,11 @@ public class MigotoEmitterGoldenTests : IDisposable
         // chunks[0] is submesh 0's binds; every later chunk opens with the previous draw's arguments
         string Binds(int submesh) => submesh == 0 ? chunks[0] : chunks[submesh][(chunks[submesh].IndexOf('\n') + 1)..];
 
-        Assert.DoesNotContain("ps-t", Binds(0));                       // untouched: the anchor's real maps
+        // untouched: the anchor's real maps. The slots later submeshes bind are saved here, ahead of the
+        // first draw, which takes a reference and binds nothing
+        Assert.False(Binds(0).StartsWith("ps-t", StringComparison.Ordinal));
+        Assert.DoesNotContain("\nps-t", Binds(0));
+        Assert.Contains("if $zz_slot_a == 0\nResource_SaveT0 = ref ps-t0\nendif\n", Binds(0));
         Assert.Contains("ps-t0 = Resource_Tex0\n", Binds(1));          // authored albedo
         Assert.Contains("ps-t0 = Resource_Tex1\n", Binds(1));          // authored normal
         Assert.Contains("ps-t0 = Resource_Tex2\n", Binds(1));          // authored RMO
@@ -135,7 +139,7 @@ public class MigotoEmitterGoldenTests : IDisposable
             OutDir = outDir,
             ToggleKey = "F6",
             HideHashes = new[] { "cccc3333", "dddd4444" },
-            HideKeys = new Dictionary<string, IReadOnlyList<KeyRef>> { ["dddd4444"] = new KeyRef[] { "F9" } },
+            HideClaims = new Dictionary<string, IReadOnlyList<HideClaim>> { ["dddd4444"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } },
             Pipelines = new[]
             {
                 new ReplacePipeline
@@ -156,6 +160,7 @@ public class MigotoEmitterGoldenTests : IDisposable
     public void Keyed_build_emits_the_pinned_text_contract()
     {
         string outDir = RunKeyedBuild();
+        HlslCheck.EveryShaderCompilesClean(File.ReadAllText(Path.Combine(outDir, "mod.ini")), outDir);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         string emitted = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         string goldenPath = Path.Combine(GoldenDir(), "mod_keyed.ini");
@@ -237,6 +242,7 @@ public class MigotoEmitterGoldenTests : IDisposable
     public void Scoped_overlay_build_emits_the_pinned_text_contract()
     {
         string outDir = RunScopedOverlayBuild();
+        HlslCheck.EveryShaderCompilesClean(File.ReadAllText(Path.Combine(outDir, "mod.ini")), outDir);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         string emitted = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         string goldenPath = Path.Combine(GoldenDir(), "mod_scoped.ini");
@@ -257,6 +263,7 @@ public class MigotoEmitterGoldenTests : IDisposable
     public void Full_build_emits_the_pinned_text_contract()
     {
         string outDir = RunFullBuild();
+        HlslCheck.EveryShaderCompilesClean(File.ReadAllText(Path.Combine(outDir, "mod.ini")), outDir);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
 
         foreach (var name in new[] { "mod.ini", "union_swap.json" })
@@ -585,6 +592,7 @@ public class MigotoEmitterGoldenTests : IDisposable
     public void Routed_build_emits_the_pinned_text_contract()
     {
         string outDir = RunRoutedBuild();
+        HlslCheck.EveryShaderCompilesClean(File.ReadAllText(Path.Combine(outDir, "mod.ini")), outDir);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         string emitted = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         string goldenPath = Path.Combine(GoldenDir(), "mod_routed.ini");

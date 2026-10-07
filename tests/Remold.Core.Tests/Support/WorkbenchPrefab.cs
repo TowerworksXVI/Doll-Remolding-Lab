@@ -79,9 +79,14 @@ internal static class WorkbenchPrefab
     /// -1 = parented to the container root, where a shipped prefab hangs its rig). Each becomes a
     /// GameObject + Transform, so <c>BundleReader.ListTransforms</c> reads the hierarchy (the workbench
     /// Skeleton node). Null/empty ⇒ the prefab ships no rig (skeleton unavailable).</param>
+    /// <param name="siblingRoot">An optional SECOND container root in the same file, with skinned slots of
+    /// its own hanging under its own Transform — the shape of a bundle shipping a support team's members
+    /// side by side, or a weapon beside its ammunition. Its slots carry serialized meshes and no
+    /// recipe.</param>
     public static void Build(string path, string bundleName, string rootName,
         SlotSpec[] slots, (string SlotPath, string MeshAddress)[]? recipe, string[] externalCabs,
-        (string Name, int Parent)[]? bones = null, VisibilityLists? visibility = null)
+        (string Name, int Parent)[]? bones = null, VisibilityLists? visibility = null,
+        (string RootName, SlotSpec[] Slots)? siblingRoot = null, bool rootTransform = true)
     {
         // one type tree per class, so the field is present for every renderer as soon as any slot asks
         bool withCast = Array.Exists(slots, s => s.CastShadows is not null);
@@ -145,12 +150,15 @@ internal static class WorkbenchPrefab
             }
             arr.Children = els;
         });
-        // the root's own Transform — a non-bone the workbench must exclude
-        AddObject(file, rootTrPid, ClassTransform, bf =>
-        {
-            bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = rootPid;
-            bf["m_Father"]["m_FileID"].AsInt = 0; bf["m_Father"]["m_PathID"].AsLong = 0;
-        });
+        // the root's own Transform — a non-bone the workbench must exclude. Omitted on request
+        // (rootTransform: false) to ship the malformed shape a multi-root reader must refuse loudly:
+        // the slot Transforms below still name it as their father, so the chain dangles.
+        if (rootTransform)
+            AddObject(file, rootTrPid, ClassTransform, bf =>
+            {
+                bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = rootPid;
+                bf["m_Father"]["m_FileID"].AsInt = 0; bf["m_Father"]["m_PathID"].AsLong = 0;
+            });
         // each slot: a GameObject + its SkinnedMeshRenderer + a Transform (parented to the root)
         var slotTransformByName = new Dictionary<string, long>(StringComparer.Ordinal);
         foreach (var slot in slots)
@@ -198,6 +206,53 @@ internal static class WorkbenchPrefab
                 bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = slotGoPid;
                 bf["m_Father"]["m_FileID"].AsInt = 0; bf["m_Father"]["m_PathID"].AsLong = rootTrPid;
             });
+        }
+        // the sibling container root, when asked for: its own GameObject + Transform (no father), and its
+        // skinned slots parented under IT — in the same file, so a reader that takes every renderer in the
+        // file sees them beside the first root's
+        long siblingRootPid = 0;
+        if (siblingRoot is { } sibling)
+        {
+            siblingRootPid = pid++;
+            long siblingTrPid = pid++;
+            AddObject(file, siblingRootPid, ClassGameObject, bf =>
+            {
+                bf["m_Name"].AsString = sibling.RootName;
+                bf["m_Component"]["Array"].Children = new List<AssetTypeValueField>();
+            });
+            AddObject(file, siblingTrPid, ClassTransform, bf =>
+            {
+                bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = siblingRootPid;
+                bf["m_Father"]["m_FileID"].AsInt = 0; bf["m_Father"]["m_PathID"].AsLong = 0;
+            });
+            foreach (var slot in sibling.Slots)
+            {
+                long slotGoPid = pid++;
+                long smrPid = pid++;
+                long slotTrPid = pid++;
+                AddObject(file, slotGoPid, ClassGameObject, bf => bf["m_Name"].AsString = slot.Name);
+                AddObject(file, smrPid, ClassSkinnedMeshRenderer, bf =>
+                {
+                    bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = slotGoPid;
+                    if (withCast) bf["m_CastShadows"].AsInt = slot.CastShadows ?? 1;
+                    var arr = bf["m_Materials"]["Array"];
+                    var els = new List<AssetTypeValueField>();
+                    foreach (var (fid, mpid) in slot.Materials)
+                    {
+                        var el = ValueBuilder.DefaultValueFieldFromArrayTemplate(arr);
+                        el["m_FileID"].AsInt = fid; el["m_PathID"].AsLong = mpid;
+                        els.Add(el);
+                    }
+                    arr.Children = els;
+                    bf["m_Mesh"]["m_FileID"].AsInt = slot.Mesh?.FileId ?? 0;
+                    bf["m_Mesh"]["m_PathID"].AsLong = slot.Mesh?.PathId ?? 0;
+                });
+                AddObject(file, slotTrPid, ClassTransform, bf =>
+                {
+                    bf["m_GameObject"]["m_FileID"].AsInt = 0; bf["m_GameObject"]["m_PathID"].AsLong = slotGoPid;
+                    bf["m_Father"]["m_FileID"].AsInt = 0; bf["m_Father"]["m_PathID"].AsLong = siblingTrPid;
+                });
+            }
         }
         // optional rig: a GameObject + Transform per bone, parented per the bones[] parent indices, with
         // the rig's own roots hanging off the container root as a shipped prefab's do
@@ -254,7 +309,9 @@ internal static class WorkbenchPrefab
                 NodeList(bf, "LobbyShowNodes", vis.LobbyShowNodes);
             });
 
-        AddAssetBundleObject(file, pid, bundleName, rootPid, rootName);
+        var containerRoots = new List<(long Pid, string Key)> { (rootPid, rootName) };
+        if (siblingRoot is { } sib) containerRoots.Add((siblingRootPid, sib.RootName));
+        AddAssetBundleObject(file, pid, bundleName, containerRoots);
 
         using var ms = new MemoryStream();
         using (var w = new AssetsFileWriter(ms)) file.Write(w);
@@ -365,7 +422,8 @@ internal static class WorkbenchPrefab
         b.VectorOfStruct(name, "PPtr<Transform>", 1, e => e
             .Value("int", "m_FileID", 4, 4).Value("SInt64", "m_PathID", 4, 8));
 
-    private static void AddAssetBundleObject(AssetsFile file, long pathId, string bundleName, long rootPid, string key)
+    private static void AddAssetBundleObject(AssetsFile file, long pathId, string bundleName,
+        IReadOnlyList<(long Pid, string Key)> roots)
     {
         file.Metadata.TypeTreeTypes.Add(AssetBundleType());
         var info = AssetFileInfo.Create(file, pathId, ClassAssetBundle, classDatabase: null, preferEditor: false)
@@ -375,11 +433,16 @@ internal static class WorkbenchPrefab
         var bf = ValueBuilder.DefaultValueFieldFromTemplate(tpl);
         bf["m_Name"].AsString = bundleName;
         var arr = bf["m_Container"]["Array"];
-        var el = ValueBuilder.DefaultValueFieldFromArrayTemplate(arr);
-        el["first"].AsString = key;
-        el["second"]["asset"]["m_FileID"].AsInt = 0;
-        el["second"]["asset"]["m_PathID"].AsLong = rootPid;
-        arr.Children = new List<AssetTypeValueField> { el };
+        var els = new List<AssetTypeValueField>();
+        foreach (var (rootPid, key) in roots)
+        {
+            var el = ValueBuilder.DefaultValueFieldFromArrayTemplate(arr);
+            el["first"].AsString = key;
+            el["second"]["asset"]["m_FileID"].AsInt = 0;
+            el["second"]["asset"]["m_PathID"].AsLong = rootPid;
+            els.Add(el);
+        }
+        arr.Children = els;
         info.SetNewData(bf);
         file.Metadata.AssetInfos.Add(info);
     }

@@ -179,12 +179,13 @@ public sealed partial class AuthoredEditSession
         public ExactAssetPublishResult PublishAssetForBinding(ProjectAssetIngressSession ingress,
             ProjectAssetKind kind, string label, ProjectAssetNormalization normalization,
             ProjectAssetSource? source = null, int? replacementSubmeshCount = null,
-            IReadOnlyList<float>? bakedRest = null)
+            IReadOnlyList<float>? bakedRest = null, IReadOnlyList<float>? shift = null,
+            bool hiddenCentred = false)
         {
             ArgumentNullException.ThrowIfNull(ingress);
             ArgumentNullException.ThrowIfNull(normalization);
             var staged = StagePublish(_project, ingress, kind, label, normalization, source,
-                replacementSubmeshCount, bakedRest);
+                replacementSubmeshCount, new GeometrySpace(bakedRest, shift, hiddenCentred));
             if (staged is null)
                 return new ExactAssetPublishResult(ProjectAssetPublishResult.Unchanged, null, null);
             _files.Staging(staged.Staged);

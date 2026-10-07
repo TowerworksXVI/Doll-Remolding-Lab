@@ -42,6 +42,44 @@
       <Setter Property="Background" Value="{DynamicResource HudAccentDimBrush}" />
       <Setter Property="Foreground" Value="{DynamicResource HudSubtextBrush}" />
     </Style>
+
+    <!-- keyField = a key binding (KeyCaptureButton): an input field with a keyboard glyph, so it never
+         reads as one of the ＋ add buttons beside it. The border lights on hover and turns copper while
+         the field waits for a key. -->
+    <Style Selector="Button.keyField">
+      <Setter Property="Padding" Value="7,3" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Button.keyField /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudBgBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource HudBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{DynamicResource HudTextBrush}" />
+    </Style>
+    <Style Selector="Button.keyField:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudBgBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource HudSubtextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudTextBrush}" />
+    </Style>
+    <Style Selector="Button.keyField:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudBgBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource HudSubtextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudTextBrush}" />
+    </Style>
+    <Style Selector="Button.keyField.capturing /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="BorderBrush" Value="{DynamicResource HudAccentBrush}" />
+    </Style>
+    <Style Selector="Button.keyField:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource HudBgBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource HudBorderBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource HudSubtextBrush}" />
+    </Style>
+    <Style Selector="Button.keyField TextBlock.keyGlyph">
+      <Setter Property="Foreground" Value="{DynamicResource HudSubtextBrush}" />
+    </Style>
+    <Style Selector="Button.keyField TextBlock.keyEmpty">
+      <Setter Property="Foreground" Value="{DynamicResource HudSubtextBrush}" />
+    </Style>
   </Application.Styles>
 
   <Application.Resources>

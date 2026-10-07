@@ -11,12 +11,7 @@ using Remold.Core.Project;
 
 namespace Remold.App.Views;
 
-/// <summary>
-/// The shading-values dialog: every value the material's shader reads, one row each — plain-language
-/// label, the field's own name, a box holding the value the edit sets, and the material's original
-/// beside it. An empty box means the original; typing a number sets it. Applying returns only the rows
-/// that changed, validated against each field's shape before the dialog closes.
-/// </summary>
+/// <summary>Edits material values and enabled effects together. Disabled effects keep their values.</summary>
 public sealed class ShadingValuesWindow : Window
 {
     internal const string CopiedValueUnreadable = "Couldn't read the copied value.";
@@ -31,6 +26,42 @@ public sealed class ShadingValuesWindow : Window
         public bool Refused => Problems.Count > 0;
     }
 
+    internal sealed class EffectSelection
+    {
+        private readonly Dictionary<string, EditShadingEffect> _effects;
+        private readonly Dictionary<string, bool> _enabled;
+
+        internal EffectSelection(IReadOnlyList<EditShadingEffect> effects)
+        {
+            _effects = effects.ToDictionary(effect => effect.Id, StringComparer.Ordinal);
+            _enabled = effects.ToDictionary(effect => effect.Id, effect => effect.IsEnabled,
+                StringComparer.Ordinal);
+            foreach (var effect in effects)
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal) { effect.Id };
+                for (string? parent = effect.ParentId; parent is not null; parent = _effects[parent].ParentId)
+                    if (!_effects.ContainsKey(parent) || !seen.Add(parent))
+                        throw new ArgumentException("The effect hierarchy is incomplete or contains a cycle.",
+                            nameof(effects));
+            }
+        }
+
+        internal bool Contains(string? id) => id is not null && _effects.ContainsKey(id);
+        internal bool IsEnabled(string id) => _enabled[id];
+        internal bool IsAvailable(string id)
+        {
+            for (string? parent = _effects[id].ParentId; parent is not null; parent = _effects[parent].ParentId)
+                if (!_enabled[parent]) return false;
+            return true;
+        }
+        internal bool IsActive(string? id) => !Contains(id) || IsEnabled(id!) && IsAvailable(id!);
+        internal void SetEnabled(string id, bool enabled) => _enabled[id] = enabled;
+        internal bool MatchesOriginal => _enabled.Values.All(enabled => enabled);
+        internal IReadOnlyList<EditShadingEffectEdit> Edits => _effects.Values
+            .Where(effect => effect.IsEnabled != _enabled[effect.Id])
+            .Select(effect => new EditShadingEffectEdit(effect.Id, _enabled[effect.Id])).ToArray();
+    }
+
     private sealed class Row
     {
         public required EditShadingField Field { get; init; }
@@ -38,16 +69,22 @@ public sealed class ShadingValuesWindow : Window
         public required TextBlock Problem { get; init; }
         public required string Initial { get; init; }
         public required bool Copied { get; init; }
+        public required Control Container { get; init; }
     }
 
     private readonly List<Row> _rows = new();
+    private readonly EffectSelection _effectSelection;
+    private readonly Dictionary<string, (CheckBox Box, TextBlock Edited)> _effectControls =
+        new(StringComparer.Ordinal);
 
     private ShadingValuesWindow(string materialLabel, IReadOnlyList<EditShadingField> fields,
         IReadOnlyDictionary<string, string> authored, IReadOnlySet<string> copied,
-        IReadOnlySet<string> unreadableCopies, bool addsFirstEdit)
+        IReadOnlySet<string> unreadableCopies, bool addsFirstEdit,
+        IReadOnlyList<EditShadingEffect> effects)
     {
-        Title = "Shading values";
-        Width = 560;
+        _effectSelection = new EffectSelection(effects);
+        Title = "Advanced shading";
+        Width = 620;
         MaxHeight = 640;
         SizeToContent = SizeToContent.Height;
         CanResize = false;
@@ -59,8 +96,10 @@ public sealed class ShadingValuesWindow : Window
         IBrush? dim = Brush("HudSubtextBrush");
         IBrush? amber = Brush("HudAmberBrush");
 
-        var list = new StackPanel { Spacing = 8 };
-        foreach (var state in DialogRows(fields, authored, copied, unreadableCopies))
+        var list = new StackPanel { Spacing = 12 };
+        var states = DialogRows(fields, authored, copied, unreadableCopies);
+
+        void AddField(StackPanel panel, DialogRow state)
         {
             var field = state.Field;
             var box = new TextBox
@@ -72,8 +111,10 @@ public sealed class ShadingValuesWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
             };
             ToolTip.SetTip(box, field.Kind == MaterialValueKind.Color
-                ? "Four numbers: red, green, blue, alpha."
-                : $"One number. The game's own materials use {Trim(field.ObservedMin)} to {Trim(field.ObservedMax)}.");
+                ? field.Semantic.EndsWith("_ST", StringComparison.Ordinal)
+                    ? "Four numbers: horizontal scale, vertical scale, horizontal offset, vertical offset."
+                    : "Four numbers: red, green, blue, alpha."
+                : $"One number. Original materials use {Trim(field.ObservedMin)} to {Trim(field.ObservedMax)}.");
             var problem = new TextBlock
             {
                 FontSize = 11, Foreground = amber, IsVisible = state.Problem is not null,
@@ -104,13 +145,58 @@ public sealed class ShadingValuesWindow : Window
             Grid.SetColumn(box, 1);
             Grid.SetColumn(original, 2);
             original.Margin = new Thickness(10, 0, 0, 0);
-            list.Children.Add(new StackPanel { Children = { grid, problem } });
+            var container = new StackPanel
+            {
+                Margin = new Thickness(_effectSelection.Contains(field.EffectId) ? 20 : 0, 0, 0, 0),
+                Children = { grid, problem },
+            };
+            panel.Children.Add(container);
             _rows.Add(new Row
             {
                 Field = field, Box = box, Problem = problem,
-                Initial = state.Initial, Copied = state.Copied,
+                Initial = state.Initial, Copied = state.Copied, Container = container,
             });
+            box.TextChanged += (_, _) => RefreshEffectControls();
         }
+
+        void AddEffect(StackPanel panel, EditShadingEffect effect)
+        {
+            var body = new StackPanel { Spacing = 8 };
+            var enabled = new CheckBox { Content = effect.Label, FontSize = 12,
+                IsChecked = effect.IsEnabled, MinHeight = 28 };
+            var edited = new TextBlock { Text = "✎", Foreground = Brush("HudAccentBrush"),
+                VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
+            ToolTip.SetTip(edited, "Edited values");
+            _effectControls.Add(effect.Id, (enabled, edited));
+            enabled.IsCheckedChanged += (_, _) =>
+            {
+                _effectSelection.SetEnabled(effect.Id, enabled.IsChecked == true);
+                RefreshEffectControls();
+            };
+            body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6,
+                Children = { enabled, edited } });
+            foreach (var state in states.Where(state => state.Field.EffectId == effect.Id))
+                AddField(body, state);
+            foreach (var child in effects.Where(child => child.ParentId == effect.Id))
+            {
+                var nested = new StackPanel { Margin = new Thickness(20, 0, 0, 0) };
+                AddEffect(nested, child);
+                body.Children.Add(nested);
+            }
+            panel.Children.Add(body);
+        }
+
+        foreach (var effect in effects.Where(effect => effect.ParentId is null)) AddEffect(list, effect);
+        var ordinary = states.Where(state => !_effectSelection.Contains(state.Field.EffectId)).ToList();
+        if (ordinary.Count > 0)
+        {
+            var values = new StackPanel { Spacing = 8 };
+            if (effects.Count > 0)
+                values.Children.Add(new TextBlock { Text = "Other values", FontSize = 12, Foreground = text });
+            foreach (var state in ordinary) AddField(values, state);
+            list.Children.Add(values);
+        }
+        RefreshEffectControls();
 
         var apply = new Button { Content = "Apply", IsDefault = true, Padding = new Thickness(16, 6) };
         apply.Click += (_, _) => Apply();
@@ -127,7 +213,7 @@ public sealed class ShadingValuesWindow : Window
                     TextWrapping = TextWrapping.Wrap },
                 new TextBlock
                 {
-                    Text = "An empty box keeps the original value.",
+                    Text = "An empty box keeps the original value. Disabled effects keep their saved values.",
                     FontSize = 11, Foreground = dim,
                 },
                 new TextBlock
@@ -160,7 +246,22 @@ public sealed class ShadingValuesWindow : Window
             }
         }
         if (result.Refused) return;
-        Close(new EditShadingValuesResult(result.Edits, result.MatchesOriginal));
+        Close(new EditShadingValuesResult(result.Edits,
+            result.MatchesOriginal && _effectSelection.MatchesOriginal, _effectSelection.Edits));
+    }
+
+    private void RefreshEffectControls()
+    {
+        foreach (var (id, controls) in _effectControls)
+        {
+            controls.Box.IsEnabled = _effectSelection.IsAvailable(id);
+            controls.Edited.IsVisible = _effectSelection.IsActive(id) && _rows
+                .Where(row => row.Field.EffectId == id)
+                .Any(row => row.Copied || row.Box.Text?.Trim() is { Length: > 0 } typed &&
+                    !string.Equals(typed, row.Field.OriginalValue, StringComparison.Ordinal));
+        }
+        foreach (var row in _rows)
+            row.Container.IsEnabled = _effectSelection.IsActive(row.Field.EffectId);
     }
 
     internal static IReadOnlyList<DialogRow> DialogRows(IReadOnlyList<EditShadingField> fields,
@@ -218,7 +319,9 @@ public sealed class ShadingValuesWindow : Window
     /// <summary>Show the dialog modally; resolves to the changed rows, or null on a cancel.</summary>
     public static Task<EditShadingValuesResult?> Show(Window owner, string materialLabel,
         IReadOnlyList<EditShadingField> fields, IReadOnlyDictionary<string, string> authored,
-        IReadOnlySet<string> copied, IReadOnlySet<string> unreadableCopies, bool addsFirstEdit) =>
-        new ShadingValuesWindow(materialLabel, fields, authored, copied, unreadableCopies, addsFirstEdit)
+        IReadOnlySet<string> copied, IReadOnlySet<string> unreadableCopies, bool addsFirstEdit,
+        IReadOnlyList<EditShadingEffect>? effects = null) =>
+        new ShadingValuesWindow(materialLabel, fields, authored, copied, unreadableCopies, addsFirstEdit,
+            effects ?? Array.Empty<EditShadingEffect>())
             .ShowDialog<EditShadingValuesResult?>(owner);
 }

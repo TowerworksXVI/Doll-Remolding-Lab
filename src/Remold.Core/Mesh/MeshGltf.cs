@@ -23,7 +23,8 @@ namespace Remold.Core.Mesh;
 public static class MeshGltf
 {
     /// <summary>Content-key version of the shared-armature combined GLB writer.</summary>
-    public const string CombinedWriterSpec = "combined-rigged-writer-v1";
+    // v2: a part the game starts hidden opens centred at full size, joints and all.
+    public const string CombinedWriterSpec = "combined-rigged-writer-v2";
 
     internal const int MaxTexCoordSets = 8;
 
@@ -295,6 +296,11 @@ public static class MeshGltf
     /// rig the corpus table can't resolve), and <paramref name="uprighting"/> bakes the scene-rest rotation
     /// into the geometry while posing each bone at <c>inverse(bindPose)·G</c>, so model and rig stand
     /// upright together (see <see cref="RestBake"/>; undone at package build).</para>
+    ///
+    /// <para>For a part the game starts hidden, <paramref name="shift"/> is the centre
+    /// (<see cref="Workbench.HiddenPart"/>) the uprighted geometry and every joint move by, so the part opens
+    /// at the origin at full size. It is recorded beside the file and undone at package build, before the
+    /// rest.</para>
     /// </summary>
     /// <param name="extraBones">Bones of the SUBJECT this geometry does not pose, so the armature a modder
     /// sees covers the whole outfit rather than the one part they opened (see <see cref="ExtraBone"/>).</param>
@@ -302,6 +308,8 @@ public static class MeshGltf
     /// <see cref="AddExtraBones"/>); null drops those lines.</param>
     /// <param name="onUnreadableMap">handed the path of every map that would not decode (see
     /// <see cref="PreviewImageSet"/>).</param>
+    /// <param name="hidden">what the export read about the subject's hidden parts, recorded beside the
+    /// file for the Blender session (<see cref="PreviewMaps.HiddenFacts"/>).</param>
     public static void ExportRiggedGlb(UnityMesh mesh, MeshSkin skin, Func<uint, string?> resolveBone,
         string outPath, string? baseColorPng = null, string? normalPng = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? perSubmesh = null,
@@ -309,19 +317,21 @@ public static class MeshGltf
         IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null,
         IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null,
         Action<string>? onUnreadableMap = null, IReadOnlyList<TextureTransportSource>? textureTransport = null,
-        PreviewBlobMemo? previewMemo = null)
+        PreviewBlobMemo? previewMemo = null, Vector3? shift = null, PreviewMaps.HiddenFacts? hidden = null)
     {
         previewMemo ??= new PreviewBlobMemo();
-        // Uprighting is the ONLY placement this export applies, and it moves geometry and joints together.
-        // A part whose prefab mounts it by an unbakeable offset gets no placement at all: its bytes have to
-        // stay raw bind space for the compile to round-trip, so mesh and armature sit together at the part's
-        // own origin rather than the joints alone standing at the mount.
+        // Uprighting, and for a part the game starts hidden the centring after it, are the ONLY placement
+        // this export applies, and they move geometry and joints together. A part whose prefab mounts it by
+        // an unbakeable offset gets no placement at all: its bytes have to stay raw bind space for the compile
+        // to round-trip, so mesh and armature sit together at the part's own origin rather than the joints
+        // alone standing at the mount.
         if (uprighting is { } g) mesh = RestBake.Apply(mesh, g);
+        if (shift is { } centre) mesh = RestBake.Shift(mesh, centre);
         mesh = SplitDuplicateFaces(mesh);
         var model = ModelRoot.CreateModel();
         var scene = model.UseScene("scene");
         var (jointNodes, armature) = BuildArmature(scene, skin, resolveBone, scenePaths,
-            uprighting, connectorRests, extraBones, log);
+            Shown(uprighting, shift), connectorRests, extraBones, log);
         var glSkin = BindSkin(model, mesh.Name + "_skin", jointNodes, armature);
 
         var (joints, weights) = SkinAttributes(mesh);
@@ -337,10 +347,17 @@ public static class MeshGltf
         model.SaveGLB(outPath);
         var transport = GltfTextureTransport.Write(outPath, textureTransport, onUnreadableMap, previewMemo);
         // The record says which space the file is in, so a prepared copy, a cache restore and the return
-        // that comes back through it all read the bake this export applied.
+        // that comes back through it all read the bake and the shift this export applied.
         PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport,
-            uprighting is { } baked ? RestBake.ToList(baked) : null);
+            uprighting is { } baked ? RestBake.ToList(baked) : null,
+            shift is { } moved ? Workbench.HiddenPart.ToList(moved) : null, hidden);
     }
+
+    /// <summary>What a joint's rest world composes with where geometry takes <paramref name="uprighting"/>
+    /// and then, for a part the game starts hidden, the centring <paramref name="shift"/>: the uprighting
+    /// alone, or the display placement both make (<see cref="Workbench.HiddenPart.Display"/>).</summary>
+    private static Matrix4x4? Shown(Matrix4x4? uprighting, Vector3? shift) =>
+        shift is { } centre ? Workbench.HiddenPart.Display(uprighting, centre) : uprighting;
 
     /// <summary>One part to combine into a multi-mesh rigged glb: its mesh, skin, optional preview maps,
     /// and its scene-rig overrides (see <see cref="ExportRiggedGlb"/>). Paths and uprighting are per-part —
@@ -355,13 +372,18 @@ public static class MeshGltf
     /// mount instead of at its own origin. Display-only, for parts no session can send back — the posed
     /// bytes are not the raw bind-space round trip a writable part's compile needs. Excludes
     /// <see cref="Uprighting"/> (a baked part's geometry already carries its rest). A part with neither
-    /// exports at its own bind rest, mesh and joints together.</para></summary>
+    /// exports at its own bind rest, mesh and joints together.</para>
+    ///
+    /// <para><see cref="Shift"/> — for a part the game starts hidden, the centre its uprighted geometry and
+    /// joints move by, so it opens at the origin at full size (<see cref="Workbench.HiddenPart"/>). Such a
+    /// part takes no <see cref="ContextPose"/>.</para></summary>
     public readonly record struct RiggedPart(UnityMesh Mesh, MeshSkin Skin, string? BaseColorPng = null, string? NormalPng = null,
         IReadOnlyList<string?>? ScenePaths = null, Matrix4x4? Uprighting = null,
         IReadOnlyDictionary<string, Matrix4x4>? ConnectorRests = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? PerSubmesh = null,
         IReadOnlyList<Matrix4x4>? ContextPose = null,
-        IReadOnlyList<TextureTransportSource>? TextureTransport = null);
+        IReadOnlyList<TextureTransportSource>? TextureTransport = null,
+        Vector3? Shift = null);
 
     /// <summary>One bone of the SUBJECT that the exported geometry does not pose: its bone-name hash, the
     /// '/'-joined path it hangs on, and its rest world in Unity space — already composed with whatever
@@ -406,20 +428,30 @@ public static class MeshGltf
     /// <see cref="AddExtraBones"/>); null drops those lines.</param>
     /// <param name="onUnreadableMap">handed the path of every map that would not decode (see
     /// <see cref="PreviewImageSet"/>).</param>
+    /// <param name="lead">The part whose placement a bone two parts place differently takes: its bones are
+    /// collected first.</param>
+    /// <param name="leadRests">Where the lead part's build rule stands each bone it covers (rest worlds, under
+    /// the lead's uprighting): a joint the session's parts list stands there, whichever part lists it first,
+    /// unless that part's bones come posed from a context. Null stands every joint at the first lister's own
+    /// bind.</param>
     public static void ExportCombinedRiggedGlb(IReadOnlyList<RiggedPart> parts, Func<uint, string?> resolveBone,
         string outPath, IReadOnlyList<ExtraBone>? extraBones = null, Action<string>? log = null,
-        Action<string>? onUnreadableMap = null, PreviewBlobMemo? previewMemo = null)
+        Action<string>? onUnreadableMap = null, PreviewBlobMemo? previewMemo = null, int lead = 0,
+        IReadOnlyDictionary<uint, Matrix4x4>? leadRests = null)
     {
         previewMemo ??= new PreviewBlobMemo();
         var model = ModelRoot.CreateModel();
         var scene = model.UseScene("scene");
 
-        // 1. union of bones across every part (first part to use a bone fixes its pose), then the subject's
-        // remaining bones — added LAST so no part's joint index moves
+        // 1. union of bones across every part (the lead part first, then the rest in order; the first to use a
+        // bone fixes its pose), then the subject's remaining bones — added LAST so no part's joint index moves
         var (worldOf, hashOf, order) = NewBoneAccumulators();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        var partPaths = parts.Select(p => CollectBones(p.Skin, resolveBone, worldOf, hashOf, order, seen,
-            p.ScenePaths, p.Uprighting, p.ConnectorRests, p.ContextPose)).ToList();
+        var partPaths = new string[parts.Count][];
+        foreach (int i in Enumerable.Range(0, parts.Count).OrderBy(i => i == lead ? 0 : 1))
+            partPaths[i] = CollectBones(parts[i].Skin, resolveBone, worldOf, hashOf, order, seen,
+                parts[i].ScenePaths, Shown(parts[i].Uprighting, parts[i].Shift), parts[i].ConnectorRests,
+                parts[i].ContextPose, leadRests);
         var extraPaths = AddExtraBones(extraBones, worldOf, hashOf, order, seen, log);
         var (nodeOf, armature) = BuildNodeTree(scene, worldOf, hashOf, order);
 
@@ -456,6 +488,7 @@ public static class MeshGltf
             var partMesh = part.Uprighting is { } g ? RestBake.Apply(srcMesh, g)
                 : part.ContextPose is { } pose ? PoseAtRest(srcMesh, part.Skin, pose)
                 : srcMesh;
+            if (part.Shift is { } centre) partMesh = RestBake.Shift(partMesh, centre);
             AddSkinnedMeshNode(model, scene, partMesh, joints, weights, glSkin, material, submeshMats);
         }
 
@@ -516,10 +549,13 @@ public static class MeshGltf
         ParsedGlb? refitTo = null, Action? afterSourceRead = null,
         IReadOnlyList<TextureTransportOverride>? authoredTextures = null,
         ParsedGlb? geometryBaseline = null, PreviewBlobMemo? previewMemo = null,
-        Matrix4x4? uprighting = null, IReadOnlyList<float>? bakedRest = null) =>
+        Matrix4x4? uprighting = null, IReadOnlyList<float>? bakedRest = null,
+        IReadOnlyList<IncomingMaps>? returnedMaps = null, Vector3? shift = null,
+        IReadOnlyList<float>? shiftRecord = null, bool hiddenCentred = false) =>
         // Lenient: the source is a Blender send-back (see LoadModel).
         ReexportPartGlb(ParsedGlb.Open(sourcePath), meshName, outPath, beforeWrite, recordGlb, authoredMaps,
-            refitTo, afterSourceRead, authoredTextures, geometryBaseline, previewMemo, uprighting, bakedRest);
+            refitTo, afterSourceRead, authoredTextures, geometryBaseline, previewMemo, uprighting, bakedRest,
+            returnedMaps, shift, shiftRecord, hiddenCentred);
 
     /// <inheritdoc cref="ReexportPartGlb(string, string?, string, Action{string}?, string?, IReadOnlyList{ValueTuple{string?, string?, string?}}?, ParsedGlb?, Action?)"/>
     /// <param name="uprighting">stands a BIND-SPACE source up into scene-rest space, geometry and armature
@@ -527,13 +563,26 @@ public static class MeshGltf
     /// the session in the space the session is in.</param>
     /// <param name="bakedRest">the rest the WRITTEN file is baked by, recorded beside it so a send-back
     /// through it marks its asset with the space it came from.</param>
+    /// <param name="returnedMaps">the source's maps as the caller already read them against
+    /// <paramref name="recordGlb"/> (<see cref="ReadSubmeshMaps(ParsedGlb, string?, string?, Action{string}?, bool)"/>),
+    /// so a return prepared and then re-split is classified once; null reads them here.</param>
+    /// <param name="shift">centres an UNCENTRED source of a part the game starts hidden, geometry and
+    /// armature together, after any <paramref name="uprighting"/> (see <see cref="Workbench.HiddenPart"/>) —
+    /// an edit sent back before hidden parts opened centred joins the session centred.</param>
+    /// <param name="shiftRecord">the centre the WRITTEN file is moved by, recorded beside it so a send-back
+    /// through it marks its asset with it.</param>
+    /// <param name="hiddenCentred">records beside the written file that it was prepared for a session in
+    /// which parts the game starts hidden open centred, so a send-back through it is stamped with that
+    /// relation.</param>
     public static MeshApply.Payload ReexportPartGlb(ParsedGlb source, string? meshName, string outPath,
         Action<string>? beforeWrite = null, string? recordGlb = null,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authoredMaps = null,
         ParsedGlb? refitTo = null, Action? afterSourceRead = null,
         IReadOnlyList<TextureTransportOverride>? authoredTextures = null,
         ParsedGlb? geometryBaseline = null, PreviewBlobMemo? previewMemo = null,
-        Matrix4x4? uprighting = null, IReadOnlyList<float>? bakedRest = null)
+        Matrix4x4? uprighting = null, IReadOnlyList<float>? bakedRest = null,
+        IReadOnlyList<IncomingMaps>? returnedMaps = null, Vector3? shift = null,
+        IReadOnlyList<float>? shiftRecord = null, bool hiddenCentred = false)
     {
         previewMemo ??= new PreviewBlobMemo();
         var model = source.Model;
@@ -547,7 +596,6 @@ public static class MeshGltf
         var baselineMesh = contract is null ? null : ImportCorePayload(contract.Model, meshName).Mesh;
         var payload = ImportCorePayload(model, meshName);
         if (baselineMesh is not null) MeshApply.ConformTransportUvs(baselineMesh, payload.Mesh);
-        var authoredSources = AuthoredSources(authoredMaps);
         if (!payload.HasSkin)
         {
             // A part the offer poses, standing on geometry that came back with no armature at all. The
@@ -563,10 +611,11 @@ public static class MeshGltf
             // The source's own carrier rides into the read: a send-back whose untouched maps came back as
             // hash-only markers re-embeds those slots from the record's pictures rather than losing them
             // with the image-less standard channels.
-            var maps = WorkspaceSubmeshMaps(ReadSubmeshMaps(model, record, meshName, source.Stock,
-                source.Transport), authoredMaps);
+            var unriggedIncoming = returnedMaps
+                ?? ReadSubmeshMaps(model, record, meshName, source.Stock, source.Transport);
             beforeWrite?.Invoke(outPath);
-            ExportGlb(payload.Mesh, outPath, perSubmesh: maps, authoredSources: authoredSources,
+            ExportGlb(payload.Mesh, outPath, perSubmesh: WorkspaceSubmeshMaps(unriggedIncoming, authoredMaps),
+                authoredSources: AuthoredSources(authoredMaps, unriggedIncoming),
                 textureTransport: unriggedTextureTransport);
             return payload;
         }
@@ -578,6 +627,14 @@ public static class MeshGltf
             payload = new MeshApply.Payload
             {
                 Mesh = RestBake.Apply(payload.Mesh, stand),
+                JointIndices = payload.JointIndices,
+                JointWeights = payload.JointWeights,
+                SkinJointHashes = payload.SkinJointHashes,
+            };
+        if (shift is { } centre)
+            payload = new MeshApply.Payload
+            {
+                Mesh = RestBake.Shift(payload.Mesh, centre),
                 JointIndices = payload.JointIndices,
                 JointWeights = payload.JointWeights,
                 SkinJointHashes = payload.SkinJointHashes,
@@ -661,6 +718,25 @@ public static class MeshGltf
             var reflected = AxisConvention.Reflect(lift);
             foreach (var key in worldOf.Keys.ToList()) worldOf[key] = worldOf[key] * reflected;
         }
+        // …and a hidden part's uncentred source moves by its centre the same way, after the stand: its
+        // geometry and its own joints. A bone of another part the geometry rides is not the part's to move:
+        // it stands where this run's build stands it, beside the part it belongs to.
+        if (shift is { } moveBy)
+        {
+            var reflected = AxisConvention.Reflect(Matrix4x4.CreateTranslation(-moveBy));
+            foreach (var key in worldOf.Keys.ToList()) worldOf[key] = worldOf[key] * reflected;
+            if (offered is not null)
+            {
+                var own = PosedHashes(ImportCorePayload(refitTo!.Model, meshName));
+                var offeredWorld = new Dictionary<uint, Matrix4x4>();
+                foreach (var (path, hash) in offered.Joints)
+                    if (offered.Worlds.TryGetValue(path, out var w)) offeredWorld.TryAdd(hash, w);
+                for (int ki = 0; ki < keep.Count; ki++)
+                    if (!own.Contains(srcHashes[keep[ki]])
+                        && offeredWorld.TryGetValue(srcHashes[keep[ki]], out var standing))
+                        worldOf[paths[ki]] = standing;
+            }
+        }
         // The offer, appended AFTER every joint the geometry rides, so those joints keep their indices and
         // this is a tail in the same sense AddExtraBones writes one. Matched BY HASH, never by path: the
         // source's node names came back through Blender and need not spell the path this run's build spells
@@ -708,11 +784,11 @@ public static class MeshGltf
         // The part's own preview materials + map sidecar, rebuilt over the maps it came back on, so a re-open
         // ALONE opens textured and its next send-back classifies those maps against the same record the
         // session's own read used.
-        var imgCache = new PreviewImageSet(authoredSources, previewMemo: previewMemo)
+        var incoming = returnedMaps ?? ReadSubmeshMaps(model, record, meshName, source.Stock, source.Transport);
+        var imgCache = new PreviewImageSet(AuthoredSources(authoredMaps, incoming), previewMemo: previewMemo)
             { Labels = ImageLabels(textureTransport) };
         var submeshMats = BuildSubmeshMaterials(outModel, payload.Mesh.Name, payload.Mesh.Submeshes.Count,
-            WorkspaceSubmeshMaps(ReadSubmeshMaps(model, record, meshName, source.Stock, source.Transport),
-                authoredMaps), imgCache);
+            WorkspaceSubmeshMaps(incoming, authoredMaps), imgCache);
         AddSkinnedMeshNode(outModel, scene, payload.Mesh, joints, weights, glSkin, material: null, submeshMats);
 
         beforeWrite?.Invoke(outPath);
@@ -720,7 +796,7 @@ public static class MeshGltf
         outModel.SaveGLB(outPath);
         var transport = GltfTextureTransport.Write(outPath, textureTransport, previewMemo: previewMemo);
         PreviewMaps.WriteSidecar(outPath, imgCache.Entries, imgCache.Submeshes, imgCache.Slots, transport,
-            bakedRest);
+            bakedRest, shiftRecord, hiddenCentred: hiddenCentred);
         return payload;
     }
 
@@ -809,6 +885,18 @@ public static class MeshGltf
         for (int i = 0; i < jointNodes.Count && i < hashes.Length; i++)
             if (hashes[i] != 0) joints.Add((ChainPath(jointNodes[i], wrapper, worlds), hashes[i]));
         return joints.Count == 0 ? null : new ArmatureOffer(joints, worlds);
+    }
+
+    /// <summary>The bones a payload's geometry gives a nonzero weight to, by hash: in an offer, the part's own
+    /// posed bones, as against the other parts' bones its tail offers.</summary>
+    private static HashSet<uint> PosedHashes(MeshApply.Payload payload)
+    {
+        var posed = new HashSet<uint>();
+        if (payload.JointIndices is not { } indices || payload.JointWeights is not { } weights
+            || payload.SkinJointHashes is not { } hashes) return posed;
+        for (int k = 0; k < indices.Length && k < weights.Length; k++)
+            if (weights[k] != 0 && indices[k] < hashes.Length) posed.Add(hashes[indices[k]]);
+        return posed;
     }
 
     /// <summary>What <see cref="OfferedJoints"/> hands the refit: the offered joints in the offer file's own
@@ -1014,7 +1102,7 @@ public static class MeshGltf
         Dictionary<string, Matrix4x4> worldOf, Dictionary<string, uint> hashOf, List<string> order, HashSet<string> seen,
         IReadOnlyList<string?>? scenePaths = null, Matrix4x4? uprighting = null,
         IReadOnlyDictionary<string, Matrix4x4>? connectorRests = null,
-        IReadOnlyList<Matrix4x4>? boneWorlds = null)
+        IReadOnlyList<Matrix4x4>? boneWorlds = null, IReadOnlyDictionary<uint, Matrix4x4>? restOf = null)
     {
         var paths = new string[skin.BoneCount];
         for (int i = 0; i < skin.BoneCount; i++)
@@ -1027,6 +1115,8 @@ public static class MeshGltf
             {
                 if (boneWorlds is not null && i < boneWorlds.Count)
                     worldOf[path] = AxisConvention.Reflect(boneWorlds[i]);
+                else if (restOf is not null && restOf.TryGetValue(h, out var stood))
+                    worldOf[path] = AxisConvention.Reflect(stood);
                 else
                 {
                     Matrix4x4.Invert(skin.BindPoses[i], out var restUnity);
@@ -1450,8 +1540,9 @@ public static class MeshGltf
             _slots.Add(new PreviewMaps.SlotSource(meshName, submesh, kind, hit.Hash));
         }
 
-        /// <summary>Note which stock RMO a submesh's material was built over, so the intake reads the alpha
-        /// off the map this export actually embedded there. A map that would not decode records nothing: the
+        /// <summary>Note which RMO a submesh's material was built over — the game's, or the modder's own on a
+        /// re-split — so the intake reads the alpha off the map this export actually embedded there. A map
+        /// that would not decode records nothing: the
         /// export did not embed it, and a recorded source no material carries would hand an authored RMO an
         /// alpha channel out of a file that cannot be read.</summary>
         public void UsedRmo(string meshName, int submesh, string rmoPng)
@@ -1515,14 +1606,24 @@ public static class MeshGltf
         return (image, alpha);
     }
 
-    /// <summary>Force each normal to unit length (glTF requirement); a near-zero normal falls back to
-    /// +Z.</summary>
+    /// <summary>How far from unit length a normal's SQUARED length may sit and still ship as it arrived.
+    /// Far inside what the glTF writer accepts, so nothing a validator would reject passes untouched.</summary>
+    private const float NormalUnitTolerance = 1e-6f;
+
+    /// <summary>Force each normal to unit length (glTF requirement); a near-zero normal falls back to +Z.
+    ///
+    /// <para>A normal that is already unit length ships as it arrived. Dividing one by its own length moves
+    /// its last bit, and a game mesh's normals pass through here on the way back to a rebuild: a mesh nobody
+    /// edited would otherwise rebuild into different bytes than it shipped as, taking the outline baked from
+    /// those normals with it.</para></summary>
     private static IReadOnlyList<Vector3> Normalize(IReadOnlyList<Vector3> v)
     {
         var r = new Vector3[v.Count];
         for (int i = 0; i < v.Count; i++)
         {
-            float len = v[i].Length();
+            float squared = v[i].LengthSquared();
+            if (Math.Abs(squared - 1f) <= NormalUnitTolerance) { r[i] = v[i]; continue; }
+            float len = MathF.Sqrt(squared);
             r[i] = len > 1e-6f ? v[i] / len : new Vector3(0, 0, 1);
         }
         return r;
@@ -1616,7 +1717,7 @@ public static class MeshGltf
     /// <summary>Resolve each submesh's preview map slots (base colour, normal, RMO) out of a returned glb, in
     /// primitive order. Origins
     /// come from the sidecar written beside the glb at export (<see cref="PreviewMaps"/>); a submesh whose
-    /// material is missing or slot-less reads <see cref="MapOrigin.None"/> and inherits at build. Validation
+    /// material is missing or slot-less reads <see cref="MapAnswer.None"/> and inherits at build. Validation
     /// is skipped: a schema complaint about geometry accessors must not cost the modder their texture
     /// work.
     ///
@@ -1733,6 +1834,12 @@ public static class MeshGltf
         // work for that slot unless it reproduces what the session sent there (see ReadStandardChannels).
         // Legacy glbs have no outbound bindings and continue through the fixed-channel path below.
         bool keyed = sessionOutbound.Count > 0;
+        // Whether the send-back carries carrier rows for THIS part at all. The add-on writes one per tagged
+        // node it finds, bytes or marker, so a sent slot with no row under a part that has rows is a
+        // picture the modder took off; a part with no rows cannot say (an older add-on, a hand-written
+        // file, or a material rebuilt from nothing) and its silence keeps the no-picture answer.
+        bool partHasRows = transport?.Bindings.Any(binding =>
+            string.Equals(binding.Mesh, owner, StringComparison.Ordinal)) == true;
         var resolvedByPrimitive = new Dictionary<int, List<IncomingTexture>>();
         if (keyed)
         {
@@ -1741,7 +1848,9 @@ public static class MeshGltf
                 var key = Key(binding);
                 returned.TryGetValue(key, out var image);
                 ResolvedMap resolved;
-                if (image.Png is null && image.OutboundHash is { Length: > 0 } returnedHash)
+                if (image.Png is null && string.IsNullOrEmpty(image.OutboundHash))
+                    resolved = new ResolvedMap(partHasRows ? MapAnswer.Removed : MapAnswer.None);
+                else if (image.Png is null && image.OutboundHash is { Length: > 0 } returnedHash)
                 {
                     // The marker is honored only against the exact identity this session stamped; on any
                     // mismatch the send refuses whole rather than guess which picture "unchanged" meant.
@@ -1751,12 +1860,12 @@ public static class MeshGltf
                             $"The {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} on {owner} came "
                             + "back marked unchanged, but it isn't the picture this session sent. Open the part "
                             + "again from the Lab and send it once more");
-                    resolved = new ResolvedMap(MapOrigin.Vanilla, StockPng: binding.Source);
+                    resolved = ResolvedMap.Untouched(binding.Source, binding.Origin);
                 }
                 else resolved = PreviewMaps.ResolveTransport(image.Png, binding, neutrals);
                 if (binding.PrimitiveIndex is not { } primitive)
                 {
-                    if (resolved.Origin == MapOrigin.Authored)
+                    if (resolved.Answer == MapAnswer.Authored)
                         report?.Invoke(
                             $"Ignored {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} from "
                             + $"Blender: material {binding.MaterialIndex + 1} is not on any submesh.");
@@ -1769,6 +1878,20 @@ public static class MeshGltf
             }
             for (int p = 0; p < glMesh.Primitives.Count; p++)
                 ReadStandardChannels(p, glMesh.Primitives[p].Material);
+            // A picture of the modder's own that came back with nothing in its place — the node unlinked, or
+            // the material rebuilt without it — is the one loss on this route nothing else reports: the slot
+            // goes flat or back to the original map, so the modder is told which picture stopped being used.
+            foreach (var binding in outbound)
+            {
+                if (binding.Origin != MapOrigin.Authored || binding.PrimitiveIndex is not { } primitive
+                    || !resolvedByPrimitive.TryGetValue(primitive, out var answered)) continue;
+                int index = answered.FindIndex(item => item.MaterialIndex == binding.MaterialIndex
+                    && string.Equals(item.ShaderProperty, binding.ShaderProperty, StringComparison.Ordinal));
+                if (index >= 0 && answered[index].Map.Answer is MapAnswer.None or MapAnswer.Removed)
+                    report?.Invoke($"The {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} on {owner} "
+                        + "came back from Blender without a picture. The picture set up for that texture slot "
+                        + "is no longer used.");
+            }
         }
 
         var maps = new List<IncomingMaps>(glMesh.Primitives.Count);
@@ -1780,7 +1903,7 @@ public static class MeshGltf
                 ? new IncomingMaps(Exact(MapKind.BaseColor), Exact(MapKind.Normal), Exact(MapKind.Rmo),
                     prim.Material?.Name ?? "", exact, ExactName(MapKind.BaseColor), ExactName(MapKind.Normal),
                     ExactName(MapKind.Rmo),
-                    RmoStockSource: outbound.FirstOrDefault(binding => binding.PrimitiveIndex == p
+                    RmoSentSource: outbound.FirstOrDefault(binding => binding.PrimitiveIndex == p
                         && binding.Kind == MapKind.Rmo).Source)
                 : new IncomingMaps(
                     PreviewMaps.Resolve(ChannelImage(prim.Material, "BaseColor"), MapKind.BaseColor, sidecar, owner,
@@ -1811,9 +1934,10 @@ public static class MeshGltf
         // The tagged node keeps its answer when it came back edited: a different picture on the standard
         // channel beside it is then reported, not silently dropped. Otherwise the channel's picture is
         // classified against the slot's own outbound bytes and its answer stands in for the tagged node's
-        // untouched-or-absent one: a painted map, a link to another slot's picture or the neutral normal
-        // is the ask it is, and the slot's own stock picture reads as untouched rather than as no image at
-        // all (a missing normal beside an edited base builds flat; an untouched one keeps the game's).
+        // untouched, removed or absent one: a painted map, a link to another slot's picture or the neutral
+        // normal is the ask it is, and the slot's own stock picture reads as untouched rather than as no
+        // image at all. A tagged node the modder deleted (Removed) is replaced by whatever the channel
+        // shows; only an explicit neutral on the tagged node outranks the channel's untouched picture.
         // Nothing is said about a channel still showing what the session sent.
         void ReadStandardChannels(int primitive, Material? material)
         {
@@ -1855,7 +1979,7 @@ public static class MeshGltf
                 // channel never matches what the session sent even when nothing was touched. With the
                 // tagged node present, its answer is the RMO's whole answer.
                 if (kind == MapKind.Rmo && returned.ContainsKey(Key(binding))) continue;
-                if (tagged.Map.Origin == MapOrigin.Authored)
+                if (tagged.Map.Answer == MapAnswer.Authored)
                 {
                     if (!returned.TryGetValue(Key(binding), out var carried)
                         || carried.Png is not { } carriedPng || !carriedPng.AsSpan().SequenceEqual(image))
@@ -1864,8 +1988,8 @@ public static class MeshGltf
                     continue;
                 }
                 var resolved = PreviewMaps.ResolveTransport(image, binding, neutrals);
-                if (resolved.Origin == MapOrigin.None) continue;
-                if (tagged.Map.Origin == MapOrigin.Neutral && resolved.Origin == MapOrigin.Vanilla) continue;
+                if (resolved.Answer == MapAnswer.None) continue;
+                if (tagged.Map.Answer == MapAnswer.Neutral && resolved.Answer == MapAnswer.Untouched) continue;
                 list[index] = tagged with { Map = resolved, ImageName = name };
             }
         }
@@ -1874,8 +1998,9 @@ public static class MeshGltf
     /// <summary>The map paths a re-split re-embeds per submesh, in primitive order — what makes the part open
     /// textured on its own. The AUTHORED file wins its slot where the send-back wrote one, so the part re-opens
     /// showing the modder's work rather than the game texture it covers. Otherwise only a slot that returned
-    /// byte-identical to what the session embedded contributes its stock map: re-embedding the stock map an
-    /// authored image replaced would make the next send read that work as untouched.</summary>
+    /// untouched contributes the picture the session sent it — the game's map or the modder's own, whichever
+    /// sat there: re-embedding the stock map an authored image replaced would make the next send read that
+    /// work as untouched.</summary>
     private static List<(string?, string?, string?)> WorkspaceSubmeshMaps(IReadOnlyList<IncomingMaps> maps,
         IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authored)
     {
@@ -1883,26 +2008,33 @@ public static class MeshGltf
         for (int i = 0; i < maps.Count; i++)
         {
             var own = authored is not null && i < authored.Count ? authored[i] : default;
-            perSubmesh.Add((own.Base ?? Stock(maps[i].BaseColor),
-                            own.Normal ?? Stock(maps[i].Normal),
-                            own.Rmo ?? Stock(maps[i].Rmo)));
+            perSubmesh.Add((own.Base ?? Sent(maps[i].BaseColor),
+                            own.Normal ?? Sent(maps[i].Normal),
+                            own.Rmo ?? Sent(maps[i].Rmo)));
         }
         return perSubmesh;
 
-        static string? Stock(ResolvedMap m) => m.Origin == MapOrigin.Vanilla ? m.StockPng : null;
+        static string? Sent(ResolvedMap m) => m.Answer == MapAnswer.Untouched ? m.Sent?.Png : null;
     }
 
-    /// <summary>Every path in <paramref name="authored"/>, as the set the record write asks whether a source it
-    /// embedded is the modder's own. Null where nothing is authored, which is what the plain stock export
-    /// passes.</summary>
+    /// <summary>Every embedded picture that is the modder's own, as the set the record write asks whether a
+    /// source it embedded is: the files in <paramref name="authored"/> a send-back wrote, plus every picture
+    /// of the modder's that <paramref name="returned"/> brought back untouched — those re-embed from the file
+    /// the session sent (see <see cref="WorkspaceSubmeshMaps"/>), and the record has to say whose file that
+    /// is, or the next send reads the modder's normal as the game's. Null where nothing is authored, which is
+    /// what the plain stock export passes.</summary>
     internal static IReadOnlySet<string>? AuthoredSources(
-        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authored)
+        IReadOnlyList<(string? Base, string? Normal, string? Rmo)>? authored,
+        IReadOnlyList<IncomingMaps>? returned = null)
     {
-        if (authored is null) return null;
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (b, n, r) in authored)
+        foreach (var (b, n, r) in authored ?? Array.Empty<(string?, string?, string?)>())
             foreach (var p in new[] { b, n, r })
                 if (p is not null) set.Add(p);
+        foreach (var maps in returned ?? Array.Empty<IncomingMaps>())
+            foreach (var map in new[] { maps.BaseColor, maps.Normal, maps.Rmo })
+                if (map is { Answer: MapAnswer.Untouched, Sent: { Origin: MapOrigin.Authored } sent })
+                    set.Add(sent.Png);
         return set.Count > 0 ? set : null;
     }
 

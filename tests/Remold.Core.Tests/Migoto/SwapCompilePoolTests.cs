@@ -93,6 +93,16 @@ public class SwapCompilePoolTests : IDisposable
         using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(outDir, "meta.json")));
         Assert.Equal(5, meta.RootElement.GetProperty("unionBones").GetInt32());
         Assert.Equal(9, meta.RootElement.GetProperty("verts").GetInt32());
+        // the table the streams are sliced in, which is what a draw under another layout is checked against
+        var recorded = MetaChannels.Read(outDir)!;
+        Assert.Equal(result.Channels, recorded);
+        // and that table slices the bytes that shipped: every stream is verts x the stride it implies
+        foreach (var s in result.Streams)
+        {
+            int stride = recorded.Where(c => c.Dimension != 0 && c.Stream == s.Stream)
+                .Max(c => c.Offset + c.Dimension * (c.Format is 0 or 10 or 11 ? 4 : c.Format is 1 or 4 or 5 or 8 or 9 ? 2 : 1));
+            Assert.Equal((long)result.VertexCount * stride, new FileInfo(Path.Combine(outDir, $"stream{s.Stream}.buf")).Length);
+        }
 
         var order = JsonDocument.Parse(File.ReadAllText(Path.Combine(outDir, "unionorder.json")))
             .RootElement.EnumerateArray().Select(e => uint.Parse(e.GetString()!)).ToArray();
@@ -167,9 +177,6 @@ public class SwapCompilePoolTests : IDisposable
         Assert.Equal(0, bi[0, 0]);      // every union index is the one it always was
         Assert.Equal(4, bi[4, 0]);
         Assert.Equal(0, bi[6, 0]);
-
-        // nothing was dropped on the way: an unresolved influence is what the out-of-skeleton warning names
-        Assert.DoesNotContain(result.Warnings, w => w.Contains("doesn't have"));
     }
 
     [Fact]

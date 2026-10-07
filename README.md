@@ -63,7 +63,7 @@ Extract over the existing folder.
 
 There is no separate addon to install. It will appear within the Blender windows opened by the app.
 
-Opening a part launches Blender with the part already imported, on its own or with the rest of the outfit around it. The scene comes organized (`Mod` for what ships, `Reference` for scenery that never does), with all supported bones on an armature that starts hidden. A **Doll Remolding Lab** panel will appear in the sidebar with a dropdown for where your changes go, and two buttons, **Check mesh** and **Send to Lab**. Check mesh blocks a Send on problems that would break the mod and warns on likely mistakes. Send to Lab always exports with the right glTF settings, so the export dialog is never your problem.
+Opening a part launches Blender with the part already imported, on its own or with the rest of the outfit around it. The scene comes organized (`Mod` for what ships, `Reference` for scenery that never does), with all supported bones on an armature that starts hidden. Parts the game keeps shrunk until an animation shows them open centred at the origin at full size; when you open all parts they sit in a `Shrunk Parts` collection that starts hidden. A **Doll Remolding Lab** panel will appear in the sidebar with a dropdown for where your changes go, and two buttons, **Check mesh** and **Send to Lab**. Check mesh blocks a Send on problems that would break the mod and warns on likely mistakes. Send to Lab always exports with the right glTF settings, so the export dialog is never your problem.
 
 ## Toggle keys
 
@@ -71,6 +71,7 @@ A toggle key is set in the Build pane and written into the mod's `mod.ini` as a 
 
 - Any number can be set up as **key groups** in the application's Build pane. Any number of different states can be created, each with their own edits.
 - Pressing the key toggles through each configured state in turn.
+- A state can also have its own shortcut key, which jumps straight to that state from any other. States in different groups can share a shortcut, so one press sets them all.
 - **F10** is 3DMigoto's own reload key: it reloads all installed mods without restarting the game. **F6** toggles all mods on/off on many loaders.
 
 ## Known limits

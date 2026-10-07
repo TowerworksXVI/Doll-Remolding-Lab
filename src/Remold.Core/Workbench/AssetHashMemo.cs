@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using Remold.Core.Bundles;
 
 namespace Remold.Core.Workbench;
 
@@ -100,11 +101,11 @@ public sealed class AssetHashMemo
         _maxEntries = Math.Max(1, maxEntries);
     }
 
-    /// <summary>One mesh's key: the bundle's content identity, the mesh's node name and its path-id
+    /// <summary>One mesh's key: the bundle's content identity, the mesh's node name and its
     /// selector — the same selector the measurement reads by. Null when the bundle's content identity is
     /// unknown, which is not an identity and must never be memoized under.</summary>
-    public static string? MeshKey(string? bundleContentId, string meshName, long pathId) =>
-        bundleContentId is null ? null : NameKey.Of($"m\n{bundleContentId}\n{meshName}\n{pathId}");
+    public static string? MeshKey(string? bundleContentId, string meshName, MeshSelector which) =>
+        bundleContentId is null ? null : NameKey.Of($"m\n{bundleContentId}\n{meshName}\n{which.Token}");
 
     /// <summary>One texture's key, on the same rule as <see cref="MeshKey"/>. The domain letter keeps the
     /// two keyspaces apart, so a mesh and a texture can never collide on one entry.</summary>

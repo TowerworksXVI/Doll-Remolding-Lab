@@ -10,11 +10,12 @@ namespace Remold.Core.Migoto;
 /// <summary>
 /// Turns an author-supplied texture into the DDS form a generated mod binds. A <c>.dds</c> source is
 /// trusted verbatim (the author already chose a format); anything ImageSharp decodes (PNG etc.) becomes
-/// BC7 carrying a full mip chain down to 1×1, tagged <c>_SRGB</c> or UNORM per the slot it replaces.
+/// a full mip chain down to 1×1, tagged <c>_SRGB</c> or UNORM per the slot it replaces. Dimensions divisible
+/// by four use BC7; other sizes use RGBA8 so Direct3D can load them without resizing the image.
 ///
 /// <para>Compression and mips are done here because 3DMigoto binds the file verbatim: it compresses nothing
 /// and generates no mips at runtime, so an uncompressed chainless map ships at four times the bytes and
-/// aliases at distance. BC7 is emitted whatever BCn format the stock map uses — every channel matters here
+/// aliases at distance. Every channel is retained regardless of the stock map's format
 /// (a patched albedo's alpha, and the packed-normal layout carrying X in alpha and Y in green, which
 /// downsamples correctly because the chain is filtered per channel with no premultiply).</para>
 ///
@@ -39,7 +40,7 @@ public static class AuthoredDds
         sourcePath.EndsWith(".dds", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Encode (or pass through) <paramref name="sourcePath"/> to <paramref name="destPath"/>. A
-    /// decoded source lands in Unity-native bottom-up row order as BC7 with a full mip chain; a <c>.dds</c>
+    /// decoded source lands in Unity-native bottom-up row order with a full mip chain; a <c>.dds</c>
     /// source passes through verbatim. Throws on an unreadable/undecodable source — a build must never
     /// silently ship a missing map.
     ///
@@ -89,9 +90,16 @@ public static class AuthoredDds
         var pixels = new byte[w * h * 4];
         image.CopyPixelDataTo(pixels);
 
-        byte[][] levels = Bc7Encoder.EncodeMipChain(pixels, w, h, taskCount);
+        // Direct3D requires the top level of a BC texture to be aligned to 4x4 blocks. Padding or
+        // resizing would change the image's UV mapping; RGBA8 preserves its dimensions and pixels.
+        bool block = (w & 3) == 0 && (h & 3) == 0;
+        byte[][] levels = block ? Bc7Encoder.EncodeMipChain(pixels, w, h, taskCount)
+            : TextureCodec.EncodeMipChain(pixels, w, h, AssetsTools.NET.Texture.TextureFormat.RGBA32,
+                taskCount: taskCount);
+        uint format = block ? (srgb ? DdsWriter.BC7_UNORM_SRGB : DdsWriter.BC7_UNORM)
+            : (srgb ? DdsWriter.R8G8B8A8_UNORM_SRGB : DdsWriter.R8G8B8A8_UNORM);
         using (var f = File.Create(destPath))
-            DdsWriter.Write(f, srgb ? DdsWriter.BC7_UNORM_SRGB : DdsWriter.BC7_UNORM, w, h, levels);
+            DdsWriter.Write(f, format, w, h, levels);
         if (cached is not null) Publish(destPath, cached);
     }
 
@@ -113,7 +121,7 @@ public static class AuthoredDds
 
     /// <summary>Bumped when the encoded bytes change for reasons the key cannot see — the container header,
     /// the row order, the mip rule, the target format, or an encoder upgrade.</summary>
-    private const string CodecVersion = "bc7-mips-bottomup-2";
+    private const string CodecVersion = "dds-mips-bottomup-3";
 
     /// <summary>Where an encode of this source under this tag lives. The source is keyed by CONTENT, so an
     /// edited image misses and a renamed or copied one hits.</summary>

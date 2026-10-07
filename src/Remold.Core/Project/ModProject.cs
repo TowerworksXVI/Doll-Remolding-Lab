@@ -316,10 +316,15 @@ public sealed class ModProject
         var enc = new UTF8Encoding(false);
         var tmp = file + ".tmp";
         File.WriteAllText(tmp, json, enc);
-        if (File.Exists(file))
-            File.Replace(tmp, file, file + ".bak", ignoreMetadataErrors: true);
-        else
-            File.Move(tmp, file);   // first save — no live manifest to replace
+        // The swap is retried while another process holds the live file for a moment (a scanner, an
+        // indexer), as the authored manifest's is; the temp file is complete, so a retry repeats nothing.
+        ModInstall.RetryBusy(() =>
+        {
+            if (File.Exists(file))
+                File.Replace(tmp, file, file + ".bak", ignoreMetadataErrors: true);
+            else
+                File.Move(tmp, file);   // first save — no live manifest to replace
+        });
     }
 
     /// <summary>Move the whole project folder to <paramref name="destFolder"/> and retarget
@@ -355,7 +360,7 @@ public sealed class ModProject
         var rel = Path.GetRelativePath(root, path);
         var first = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
         return first.Equals(".editor", StringComparison.OrdinalIgnoreCase)
-            || first.Equals(ProjectAssetIngress.DirectoryName, StringComparison.OrdinalIgnoreCase);
+            || first.Equals(ProjectAssetIngress.LegacyDirectoryName, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void CopyInputs(string src, string dest)
@@ -407,6 +412,14 @@ public sealed class ProjectInfo
     /// without it, which is the author's call to make: nothing else about the mod changes, and the folder
     /// is then exactly as readable as one built before the record existed.</summary>
     [JsonPropertyName("include_repair_data")] public bool IncludeRepairData { get; set; } = true;
+
+    /// <summary>Whether this project was read back out of a BUILT mod rather than made here. False is what
+    /// a manifest that names it not takes, which is every project made in this app. The one thing it
+    /// changes: a blank <see cref="Author"/> on an imported project means the mod listed no author, so an
+    /// open must not quietly put the person's own name there.</summary>
+    [JsonPropertyName("imported")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Imported { get; set; }
 }
 
 /// <summary>The game build the exports were read from — for post-update staleness.</summary>

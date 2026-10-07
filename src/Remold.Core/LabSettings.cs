@@ -63,6 +63,11 @@ public sealed class LabSettings
     /// <para>ADDITIVE, and the default is TRUE: a settings.json written before the key existed has to
     /// deserialize to shipping the record, which is what every build did when it was written.</para></summary>
     public bool IncludeRepairData { get; set; } = true;
+    /// <summary>The width the Edit page's tree pane was last dragged to. No Settings row: dragging the divider is
+    /// the only way it changes.
+    /// <para>ADDITIVE: a settings.json without the key deserializes to null, and the pane opens at its own
+    /// default width, as it did before the divider could move.</para></summary>
+    public double? EditTreeWidth { get; set; }
     /// <summary>Recent mod projects, most-recent-first.</summary>
     public List<RecentMod> RecentMods { get; set; } = new();
 
@@ -95,10 +100,51 @@ public sealed class LabSettings
     /// front, capped at <see cref="MaxRecent"/>.</summary>
     public void AddRecent(string path, string name)
     {
-        RecentMods.RemoveAll(m => string.Equals(m.Path, path, StringComparison.OrdinalIgnoreCase));
+        RecentMods.RemoveAll(m => SamePath(m.Path, path));
         RecentMods.Insert(0, new RecentMod { Path = path, Name = name });
         if (RecentMods.Count > MaxRecent) RecentMods.RemoveRange(MaxRecent, RecentMods.Count - MaxRecent);
     }
+
+    /// <summary>Point the entry for a project folder that has moved at its new path and name, in the same
+    /// place in the list. Any other entry already on the new path goes: the move could only take a path no
+    /// folder held, so that entry stood for a folder already gone. The entry is REPLACED, never edited in
+    /// place — see <see cref="RemoveRecents"/>. Returns false when the old path isn't listed.</summary>
+    public bool RetargetRecent(string oldPath, string newPath, string name)
+    {
+        int at = RecentMods.FindIndex(m => SamePath(m.Path, oldPath));
+        if (at < 0) return false;
+        var moved = new RecentMod { Path = newPath, Name = name };
+        RecentMods[at] = moved;
+        RecentMods.RemoveAll(m => !ReferenceEquals(m, moved) && SamePath(m.Path, newPath));
+        return true;
+    }
+
+    /// <summary>Whether a recent entry's project is gone for good: nothing at its path, while the folder
+    /// that held it is still there. When that folder is missing too — an unplugged drive, a share that is
+    /// offline — the project is out of reach, not deleted, and its entry stays. Touches the disk, and a
+    /// path on an unreachable share can take seconds to answer, so the UI asks off its own thread.</summary>
+    public static bool IsMissingProject(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path) || File.Exists(path)) return false;
+            string? holder = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)));
+            return holder is not null && Directory.Exists(holder);
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException
+            or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;   // a path that can't even be examined is not proof the project is gone
+        }
+    }
+
+    /// <summary>Remove exactly these entries, by identity. Entries are only ever replaced, never edited,
+    /// so an entry judged against a snapshot is removed only if it is still the one that was judged: a
+    /// project re-listed or moved since then is a new entry and stays. Returns how many were removed.</summary>
+    public int RemoveRecents(IReadOnlyCollection<RecentMod> entries) =>
+        RecentMods.RemoveAll(m => entries.Any(e => ReferenceEquals(e, m)));
+
+    private static bool SamePath(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
     public static LabSettings Load(string? path = null)
     {

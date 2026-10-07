@@ -9,9 +9,22 @@ namespace Remold.Core.Migoto;
 /// re-tagged on the way through.</summary>
 public sealed record DdsImage(uint DxgiFormat, int Width, int Height, IReadOnlyList<byte[]> Levels);
 
+/// <summary>Which DXGI tags one read accepts. The ramp tag alone is the default because the oldest caller
+/// is the toon-ramp pick, whose whole job is to refuse a file that is not a ramp: a reader that took a BC7
+/// file of the right extent would let one through to the build.</summary>
+public enum DdsAccepts
+{
+    /// <summary>The fp16 <c>R16G16B16A16_FLOAT</c> tag a toon ramp is stored in, and nothing else.</summary>
+    RampOnly,
+    /// <summary>Every tag <see cref="DdsWriter"/> emits: the ramp tag plus the RGBA8 and BC7 map tags. What
+    /// a caller reading back a map this app shipped in a mod folder passes.</summary>
+    AnythingTheBuildWrites,
+}
+
 /// <summary>
 /// Reads back the DX10-header DDS files <see cref="DdsWriter"/> writes, for the formats whose bytes travel
-/// verbatim: the fp16 <c>R16G16B16A16_FLOAT</c> a toon ramp is stored in.
+/// verbatim: the fp16 <c>R16G16B16A16_FLOAT</c> a toon ramp is stored in, and — for a caller that asks for
+/// them with <see cref="DdsAccepts.AnythingTheBuildWrites"/> — the RGBA8 and BC7 maps a build ships.
 ///
 /// <para>STRICT on purpose. A DDS whose declared layout and byte count disagree still parses as a DDS and
 /// then fails texture creation at bind time, which surfaces as an override that silently never draws — so
@@ -35,10 +48,12 @@ public static class DdsReader
 
     /// <summary>Parse <paramref name="path"/>. Throws <see cref="InvalidDataException"/> naming what did not
     /// hold.</summary>
-    public static DdsImage Read(string path) => Parse(File.ReadAllBytes(path), path);
+    public static DdsImage Read(string path, DdsAccepts accepts = DdsAccepts.RampOnly) =>
+        Parse(File.ReadAllBytes(path), path, accepts);
 
     /// <summary>Parse a whole DDS file's bytes. <paramref name="what"/> names the source in refusals.</summary>
-    public static DdsImage Parse(ReadOnlySpan<byte> bytes, string what = "DDS")
+    public static DdsImage Parse(ReadOnlySpan<byte> bytes, string what = "DDS",
+        DdsAccepts accepts = DdsAccepts.RampOnly)
     {
         if (bytes.Length < DdsWriter.HeaderBytes)
             throw new InvalidDataException(
@@ -66,10 +81,13 @@ public static class DdsReader
         int mips = (int)wantMips;
 
         uint dxgi = U(bytes, 4 + 124);
-        if (dxgi != DdsWriter.R16G16B16A16_FLOAT)
+        if (accepts == DdsAccepts.RampOnly && dxgi != DdsWriter.R16G16B16A16_FLOAT)
             throw new InvalidDataException(
                 $"{what} is DXGI format {dxgi}; this reader accepts only {DdsWriter.R16G16B16A16_FLOAT} "
                 + "(R16G16B16A16_FLOAT)");
+        if (!DdsWriter.IsBlockCompressed(dxgi) && DdsWriter.BytesPerPixel(dxgi) == 0)
+            throw new InvalidDataException(
+                $"{what} is DXGI format {dxgi}; this reader accepts only the formats this app writes");
         uint dimension = U(bytes, 4 + 124 + 4), arraySize = U(bytes, 4 + 124 + 12);
         if (dimension != DIMENSION_TEXTURE2D)
             throw new InvalidDataException($"{what} is resource dimension {dimension}, not a 2D texture");

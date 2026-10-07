@@ -189,13 +189,14 @@ public class ModInstallTests : IDisposable
     // ---- the swap ----
 
     [Fact]
-    public void Busy_retry_succeeds_after_transient_access_denied_and_sharing_violations()
+    public void Busy_retry_succeeds_after_transient_access_denied_sharing_violations_and_held_swaps()
     {
         foreach (var denied in new Exception[]
         {
             new UnauthorizedAccessException("access denied"),
             new IOException("access denied", unchecked((int)0x80070005)),
             new IOException("sharing violation", unchecked((int)0x80070020)),
+            new IOException("Unable to remove the file to be replaced.", unchecked((int)0x80070497)),
         })
         {
             int calls = 0;
@@ -420,18 +421,18 @@ public class ModInstallTests : IDisposable
         Directory.CreateDirectory(staging);
         string heldPath = Path.Combine(staging, "held.buf");
         File.WriteAllText(heldPath, "brief hold");
-        var held = File.Open(heldPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        var release = new Thread(() =>
-        {
-            Thread.Sleep(200);
-            held.Dispose();
-        }) { IsBackground = true };
-        release.Start();
+        using var held = File.Open(heldPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         var log = new List<string>();
+        int waits = 0;
 
-        ModInstall.Install(built, mods, log.Add);
-        Assert.True(release.Join(5_000), "the staging holder did not release");
+        // The hold lets go during the second wait, so the third attempt is the one that succeeds — by
+        // construction, not by a sleep racing the retry schedule.
+        ModInstall.Install(built, mods, log.Add, busyDelay: _ =>
+        {
+            if (++waits == 2) held.Dispose();
+        });
 
+        Assert.Equal(2, waits);
         Assert.Equal(new[]
         {
             "the Mods folder was busy deleting the staging folder; succeeded on attempt 3",
@@ -476,7 +477,6 @@ public class ModInstallTests : IDisposable
         using var stop = new ManualResetEventSlim();
         using var acquired = new ManualResetEventSlim();
         Exception? holderFailure = null;
-        long acquiredAt = 0;
         var holder = new Thread(() =>
         {
             try
@@ -484,7 +484,6 @@ public class ModInstallTests : IDisposable
                 while (!stop.IsSet && !File.Exists(sidelinedHeld)) Thread.Yield();
                 if (stop.IsSet) return;
                 using var stream = File.Open(sidelinedHeld, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-                acquiredAt = Stopwatch.GetTimestamp();
                 acquired.Set();
                 stop.Wait();
             }
@@ -495,17 +494,17 @@ public class ModInstallTests : IDisposable
         }) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
         holder.Start();
         var log = new List<string>();
+        var waits = new List<TimeSpan>();
 
-        var outcome = ModInstall.Install(built, mods, log.Add);
-        TimeSpan afterHold = acquiredAt == 0 ? TimeSpan.MaxValue : Stopwatch.GetElapsedTime(acquiredAt);
+        var outcome = ModInstall.Install(built, mods, log.Add, busyDelay: waits.Add);
         stop.Set();
         Assert.True(holder.Join(5_000), "the sideline holder did not stop");
 
         Assert.Null(holderFailure);
         Assert.True(acquired.IsSet, "the sideline was deleted before the test could hold it");
         Assert.Equal(".remold-replaced-mine_v1_0", outcome.LeftBehind);
-        Assert.True(afterHold < TimeSpan.FromMilliseconds(1_500),
-            $"the LeftBehind path waited {afterHold.TotalMilliseconds:F0} ms after the hold");
+        // No retry wait was ever asked for: the held sideline was tried once and reported, not waited on.
+        Assert.Empty(waits);
         Assert.Empty(log);
         Directory.Delete(sideline, recursive: true);
     }

@@ -112,7 +112,7 @@ public partial class MainWindowViewModel : IBuildPageShell
                     return slot.Mesh is { } mesh
                         && meshGate.Blocked(mesh.LogicalBundle, mesh.Name ?? "", mesh.PathId) is { } why
                             ? PartSkinGate.PlanRefusal(why) : null;
-                }), cancellationToken);
+                }, effectEvidence: evidence.ResolveEffects), cancellationToken);
     }
 
     public BuildLoaderState LoaderState()
@@ -473,20 +473,23 @@ public partial class MainWindowViewModel : IBuildPageShell
             TimelineShoesFor: TimelineShoesFor,
             BundleContentHash: BundleReads.BundleContentHashLookup(vfs.Catalog, vfs.Manifest),
             CatalogIdentity: vfs.CatalogIdentity,
-            ReadDegraded: () => readDegraded);
+            ReadDegraded: () => readDegraded,
+            DependenciesOf: vfs.Catalog.DepsForBundle,
+            LoadKeyOf: vfs.Catalog.LoadKeyForAddress);
     }
 
     private SubjectModel? ResolveSubjectForBuild(string character, string stem)
     {
         if (_subjectModels.TryGet(character, stem) is { } hit) return hit;
-        var catalog = _vfs?.Catalog;
-        if (catalog is null) return null;
+        var vfs = _vfs;
+        if (vfs is null) return null;
         var outfit = RosterLookup.FindOutfit(_roster, character, stem);
         if (outfit is null) return null;
         try
         {
             var model = _subjectModels.GetOrBuild(character, outfit.Stem,
-                () => SubjectModelBuilder.Build(catalog, TryDeobfuscateBundle, outfit, character));
+                () => PrepareCurrentSubject(vfs, SubjectModelBuilder.Build(vfs.Catalog,
+                    logical => ReadSubjectBundle(vfs, logical), outfit, character)));
             SubjectModelWarmCompleted();
             return model;
         }

@@ -69,7 +69,7 @@ public partial class MainWindowViewModel
             string? rel;
             string root;
             int schema = Remold.Core.Project.AuthoredProjectSerializer.SchemaOf(projectPath);
-            if (schema == Remold.Core.Project.AuthoredProject.CurrentSchema)
+            if (Remold.Core.Project.AuthoredProject.IsAuthored(schema))
             {
                 var project = Remold.Core.Project.AuthoredProjectSerializer.Load(projectPath);
                 rel = project.Info.Preview;

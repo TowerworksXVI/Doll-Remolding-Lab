@@ -133,9 +133,9 @@ public sealed class StockTextureCache
     /// its limit). False when neither landed.
     ///
     /// <para>A hard link is a second NAME for one file, not a snapshot: whatever writes through the
-    /// destination writes the cache entry too. <paramref name="destination"/> is inside the modder's own mod
-    /// folder (<c>&lt;project&gt;\.ingress\blender\&lt;run&gt;\textures</c>), so the app is not the only thing
-    /// that can reach it — an image tool, an antivirus restore or a sync client that edits a file in place
+    /// destination writes the cache entry too. <paramref name="destination"/> is inside the mod's round-trip
+    /// folder beside the app (<c>round-trips\&lt;mod&gt;\blender\&lt;run&gt;\textures</c>), so the app is not
+    /// the only thing that can reach it — an image tool, an antivirus restore or a sync client that edits a file in place
     /// would write the durable entry through the link. The trade is taken deliberately: nothing in the app
     /// writes there (the glb writer only reads it), the tools that realistically touch such a file REPLACE it,
     /// which breaks the link rather than following it, and an entry that does end up unreadable is deleted and

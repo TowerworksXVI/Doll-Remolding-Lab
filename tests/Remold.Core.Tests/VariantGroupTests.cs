@@ -596,7 +596,7 @@ public class VariantGroupTests
                 candidates, "body"));
 
         var classified = PoolDerive.CoverTierBones(derived, candidates, TiersOf,
-            MigotoEmitter.MaxPoolParts, replacedPart: "body", readableRoster: roster);
+            replacedPart: "body", readableRoster: roster);
         var verdict = Assert.Single(classified.TierBoneVerdicts);
         Assert.Equal(PoolDerive.TierBoneClass.Merged, verdict.Classification);
         Assert.Equal(new[] { "P1_dress", "P2_dress" }, verdict.OwningParts);
@@ -604,7 +604,7 @@ public class VariantGroupTests
         // the control: over the whole roster the dress covers it, so the classification above is the
         // candidacy filter's doing and nothing else
         Assert.Equal(new[] { "body", "P1_dress" },
-            PoolDerive.CoverTierBones(derived, roster, TiersOf, MigotoEmitter.MaxPoolParts,
+            PoolDerive.CoverTierBones(derived, roster, TiersOf,
                 replacedPart: "body", readableRoster: roster).Pool);
     }
 
@@ -871,22 +871,24 @@ public class VariantGroupTests
                 (SkinAt((HShared, 1.60f)), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (SkinAt((HShared, p2Y)), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            _ => null, out _);
+            _ => null);
 
-    /// <summary>A group bone is only as good as the place its members agree it stands. The subject skeleton
-    /// drops a bone two parts bind apart, and BOTH export routes walk that skeleton, so a bone it dropped
-    /// reaches no tail whatever the offer says.</summary>
+    /// <summary>Wardrobe variants are free to bind a group bone apart — a variant family can sit centimetres
+    /// off its base body — because a build converts each member's rows onto one statement for the bone. The
+    /// subject skeleton stands it where the first variant puts it, and BOTH export routes walk that skeleton,
+    /// so the bone reaches the tail either way.</summary>
     [Fact]
-    public void A_bone_the_variants_bind_apart_is_not_offered_by_either_route()
+    public void A_bone_the_variants_bind_apart_is_offered_where_the_first_variant_puts_it()
     {
         var offer = new HashSet<uint> { HShared };
         var own = new[] { HRoot };
         var parts = new[] { new MeshGltf.RiggedPart(new UnityMesh { Name = "body_lod0" }, SkinAt((HRoot, 0f))) };
 
-        // 4 cm apart in Y — plainly visible, and far above the placement tolerance
+        // 4 cm apart in Y: the measured shape of a variant family offset from its siblings
         var apart = TwoVariantSubject(1.64f);
-        Assert.Empty(AssetExporter.ExtraBones(apart, own, uprighting: null, valid: offer));
-        Assert.Empty(AssetExporter.CombinedExtraBones(apart, parts, offer));
+        var lone = Assert.Single(AssetExporter.ExtraBones(apart, own, uprighting: null, valid: offer));
+        Assert.Equal(1.60f, lone.RestWorld.Translation.Y);
+        Assert.Equal(new[] { HShared }, AssetExporter.CombinedExtraBones(apart, parts, offer).Select(e => e.Hash));
 
         // siblings binding it identically place it once, and it is offered
         var agreed = TwoVariantSubject(1.60f);

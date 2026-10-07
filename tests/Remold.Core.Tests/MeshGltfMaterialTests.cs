@@ -127,9 +127,9 @@ public class MeshGltfMaterialTests
         var maps = MeshGltf.ReadSubmeshMaps(path);
         Assert.NotEmpty(maps);
         // base colour and normal still resolve; the emissive image reaches nothing, and no RMO was embedded
-        Assert.All(maps, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
-        Assert.All(maps, m => Assert.Equal(MapOrigin.Vanilla, m.Normal.Origin));
-        Assert.All(maps, m => Assert.Equal(MapOrigin.None, m.Rmo.Origin));
+        Assert.All(maps, m => Assert.Equal(MapAnswer.Untouched, m.BaseColor.Answer));
+        Assert.All(maps, m => Assert.Equal(MapAnswer.Untouched, m.Normal.Answer));
+        Assert.All(maps, m => Assert.Equal(MapAnswer.None, m.Rmo.Answer));
     }
 
     // ---- the ORM pair -------------------------------------------------------------------------------
@@ -194,7 +194,7 @@ public class MeshGltfMaterialTests
         model.SaveGLB(path);
 
         var slot = MeshGltf.ReadSubmeshMaps(path)[0].Rmo;
-        Assert.Equal(MapOrigin.Authored, slot.Origin);
+        Assert.Equal(MapAnswer.Authored, slot.Answer);
         // the painted image, permuted back out of glTF order
         Assert.Equal(new Rgba32(2, 3, 1, 4), FirstPixel(slot.AuthoredPng!));
     }
@@ -221,8 +221,8 @@ public class MeshGltfMaterialTests
         model.SaveGLB(path);
 
         var slot = MeshGltf.ReadSubmeshMaps(path)[0].Rmo;
-        Assert.Equal(MapOrigin.Vanilla, slot.Origin);
-        Assert.Equal(System.IO.Path.GetFullPath(rmo), slot.StockPng);
+        Assert.Equal(MapAnswer.Untouched, slot.Answer);
+        Assert.Equal(System.IO.Path.GetFullPath(rmo), slot.Sent?.Png);
     }
 
     [Fact]
@@ -379,8 +379,8 @@ public class MeshGltfMaterialTests
 
         ModelRoot.Load(record).SaveGLB(returned);
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "patch", record);
-        Assert.Equal(MapOrigin.Vanilla,
-            incoming.Single(m => m.MaterialName == "gf2_submesh0").BaseColor.Origin);
+        Assert.Equal(MapAnswer.Untouched,
+            incoming.Single(m => m.MaterialName == "gf2_submesh0").BaseColor.Answer);
     }
 
     /// <summary>The bridge's alpha remap recognizes the graph Blender's glTF importer builds only when

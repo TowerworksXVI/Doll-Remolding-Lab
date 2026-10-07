@@ -29,6 +29,7 @@ public class KeyCycleEmissionTests : IDisposable
     {
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         string emitted = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        HlslCheck.EveryShaderCompilesClean(emitted, outDir);
         string path = Path.Combine(GoldenDir(), name);
         if (regold)
         {
@@ -91,7 +92,7 @@ public class KeyCycleEmissionTests : IDisposable
     /// <para>Both pool parts carry a lod1 tier, because LOD choice is not distance-only: what the hiding
     /// position owes the part's OTHER draws is the same thing it owes the lod0 one, and a build without
     /// tiers cannot state that.</para></summary>
-    private string RunStackedHideBuild()
+    private string RunStackedHideBuild(IReadOnlyList<KeyCycle>? cycles = null)
     {
         string dumps = Path.Combine(_root, "hdumps");
         SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64,
@@ -138,7 +139,7 @@ public class KeyCycleEmissionTests : IDisposable
                         { ["beta"] = new[] { new KeyRef("F8", 1) } },
                 },
             },
-            KeyCycles = new[] { new KeyCycle("F7", 2, 0), new KeyCycle("F8", 2, 0) },
+            KeyCycles = cycles ?? new[] { new KeyCycle("F7", 2, 0), new KeyCycle("F8", 2, 0) },
             HiddenFlags = new[]
             {
                 new HiddenFlag("vesna_ssr01_body", new[] { new KeyRef("F8", 1) }),
@@ -387,9 +388,57 @@ public class KeyCycleEmissionTests : IDisposable
         // the payload is emitted once, and its section gates on the flag rather than on a position
         string section = Section(ini, "[TextureOverride_Cap_alpha]");
         Assert.Contains("if $zz_shw_vesna_ssr01_body == 1\nhandling = skip\nendif\n", section);
-        Assert.Contains("if $zz_shw_vesna_ssr01_body == 1\nif $zz_done_swap == 0\n", section);
+        Assert.Contains("if $zz_shw_vesna_ssr01_body == 1\nrun = CustomShaderPoseBlock_alpha_swap\nrun = CommandListDraw_swap\n", section);
+        Assert.Contains("run = CustomShaderGather_alpha\nrun = CustomShaderPosePalette_alpha_swap\nrun = CustomShaderPoseSkin_swap_p0\n",
+            Section(ini, "[CustomShaderPoseBlock_alpha_swap]"));
         Assert.DoesNotContain("if $zz_key_f7 ==", section);
         Assert.Single(Regex.Matches(ini, Regex.Escape("run = CommandListDraw_swap")));
+    }
+
+    /// <summary>State shortcuts on the stacked-hide build. F9 jumps both groups to their second state; F7,
+    /// the content group's own key, also jumps the hiding group to its first; F6, the whole-mod key, also
+    /// jumps the content group to its first. A shortcut sets its group's position and never steps it, a
+    /// key that already steps something makes its jumps after the step, and every press ends in one
+    /// recompute, so a jump that hides or reveals a part is reflected at once.</summary>
+    [Fact]
+    public void A_shortcut_sets_each_group_it_names_then_recomputes_the_hidden_parts_once()
+    {
+        string ini = File.ReadAllText(Path.Combine(RunStackedHideBuild(new[]
+        {
+            new KeyCycle("F7", 2, 0, Shortcuts: new[] { new KeyShortcut("F6", 0), new KeyShortcut("F9", 1) }),
+            new KeyCycle("F8", 2, 0, Shortcuts: new[] { new KeyShortcut("F7", 0), new KeyShortcut("F9", 1) }),
+        }), "mod.ini"));
+
+        Assert.Contains("[Key_zz_key_f9]\nkey = no_modifiers F9\nrun = CommandListKey_zz_key_f9\n", ini);
+        Assert.Equal("[CommandListKey_zz_key_f9]\n$zz_key_f7 = 1\n$zz_key_f8 = 1\n"
+            + "run = CommandListRecomputeHidden\n", Section(ini, "[CommandListKey_zz_key_f9]"));
+        Assert.Equal("[CommandListKey_zz_key_f7]\n$zz_key_f7 = $zz_key_f7 + 1\nif $zz_key_f7 == 2\n"
+            + "$zz_key_f7 = 0\nendif\n$zz_key_f8 = 0\nrun = CommandListRecomputeHidden\n",
+            Section(ini, "[CommandListKey_zz_key_f7]"));
+        Assert.Equal("[CommandListKey_zz_key_f6]\n$zz_key_f6 = $zz_key_f6 + 1\nif $zz_key_f6 == 2\n"
+            + "$zz_key_f6 = 0\nendif\n$zz_key_f7 = 0\nrun = CommandListRecomputeHidden\n",
+            Section(ini, "[CommandListKey_zz_key_f6]"));
+        // a shortcut is a press, not a position anything gates on: it declares no variable of its own
+        Assert.DoesNotContain("$zz_key_f9 =", ini);
+        Assert.Single(Regex.Matches(ini, Regex.Escape("[Key_zz_key_f9]")));
+        // one per key section, the shortcut's included, plus the one in [Constants]
+        Assert.Equal(5, Regex.Matches(ini, Regex.Escape("run = CommandListRecomputeHidden")).Count);
+    }
+
+    /// <summary>A group this build declares no variable for switches nothing here, so its shortcut has
+    /// nothing to set and emits nothing: assigning an undeclared variable is a load error in 3DMigoto.</summary>
+    [Fact]
+    public void A_shortcut_of_a_group_the_build_does_not_declare_emits_nothing()
+    {
+        string ini = File.ReadAllText(Path.Combine(RunStackedHideBuild(new[]
+        {
+            new KeyCycle("F7", 2, 0),
+            new KeyCycle("F8", 2, 0),
+            new KeyCycle("F10", 2, 0, Shortcuts: new[] { new KeyShortcut("F11", 1) }),
+        }), "mod.ini"));
+
+        Assert.DoesNotContain("F11", ini);
+        Assert.DoesNotContain("zz_key_f10", ini);
     }
 
     /// <summary>A section body, up to the blank line that ends it.</summary>

@@ -81,23 +81,21 @@ public class TierOrphanTieTests : IDisposable
         // vertex), so no co-weight exists and the proximity fallback picks A.
         var result = new MigotoEmitter().Build(Request(out string outDir, new[] { A, B }, new[] { A }));
 
-        string shader = File.ReadAllText(Path.Combine(outDir, "tiertie_lod1_swap.hlsl"));
+        // the pool is the part alone, so the tie rides inside the tier's own palette pass: the pair
+        // is stamped there, and the lod0 kernel, where every row has its own recover, carries none
+        string shader = File.ReadAllText(Path.Combine(outDir, "pose_palette_alpha_lod1_swap.hlsl"));
+        Assert.Contains("PAIRS=1;", shader);
         Assert.Contains("static const uint2 PAIR[1] = { uint2(1,0) };", shader);
-        Assert.Contains("StructuredBuffer<float4> palIn  : register(t0);", shader);
+        Assert.DoesNotContain("PAIR", File.ReadAllText(Path.Combine(outDir, "pose_palette_alpha_swap.hlsl")));
+        Assert.False(File.Exists(Path.Combine(outDir, "tiertie_lod1_swap.hlsl")));
 
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         ModBuilderTests.AssertNoDuplicateSections(ini);
-        Assert.Contains("[CustomShaderTierTie_lod1_swap]\ncs = tiertie_lod1_swap.hlsl\n"
-                      + "cs-t0 = copy Resource_PaletteConv_swap\n"
-                      + "cs-u1 = copy Resource_PaletteConv_swap\nDispatch = 1, 1, 1\n"
-                      + "Resource_PaletteConv_swap = copy cs-u1\npost cs-u1 = null\n", ini);
-        // the fill runs in the tier's chain after the witness convert and before the skin
+        HlslCheck.EveryShaderCompilesClean(ini, outDir);
+        Assert.DoesNotContain("CustomShaderTierTie", ini);
         string tier = Section(ini, "[TextureOverride_Cap_alpha_lod1]");
-        Assert.Contains("run = CustomShaderConvertW_swap\nrun = CustomShaderTierTie_lod1_swap\n"
-                      + "run = CustomShaderSkin_swap\n", tier);
-        // and never in the lod0 chain, where every row has its own recover
-        string lod0 = Section(ini, "[TextureOverride_Cap_alpha]");
-        Assert.DoesNotContain("CustomShaderTierTie", lod0);
+        Assert.Contains("run = CustomShaderPoseBlock_alpha_lod1_swap\n", tier);
+        Assert.Contains("run = CustomShaderPosePalette_alpha_lod1_swap\n", Section(ini, "[CustomShaderPoseBlock_alpha_lod1_swap]"));
 
         Assert.Contains(result.Diagnostics, d => d.Contains("alpha_lod1: bone 0x00000066 has no row at this tier")
             && d.Contains("nearest bone 0x00000065"));
@@ -133,7 +131,7 @@ public class TierOrphanTieTests : IDisposable
 
         var result = new MigotoEmitter().Build(req);
 
-        string shader = File.ReadAllText(Path.Combine(outDir, "tiertie_lod1_swap.hlsl"));
+        string shader = File.ReadAllText(Path.Combine(outDir, "pose_palette_alpha_lod1_swap.hlsl"));
         Assert.Contains("static const uint2 PAIR[1] = { uint2(2,1) };", shader);
         Assert.Contains(result.Diagnostics, d => d.Contains("bone 0x00000067 has no row at this tier")
             && d.Contains("co-riding bone 0x00000066"));

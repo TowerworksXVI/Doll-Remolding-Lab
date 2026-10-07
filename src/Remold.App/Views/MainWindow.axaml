@@ -68,8 +68,13 @@
               </Style>
             </Menu.Styles>
             <MenuItem Header="File">
-              <MenuItem Header="New mod…" Click="OnNewMod" />
-              <MenuItem Header="Open mod…" Click="OnOpenMod" />
+              <!-- off while an import runs, for the same reason as the Home page's own buttons -->
+              <MenuItem Header="New mod…" Click="OnNewMod" IsEnabled="{Binding !IsImporting}" />
+              <MenuItem Header="Open mod…" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}" />
+              <MenuItem Header="Import mod from zip…" Click="OnImportModZip"
+                        IsEnabled="{Binding !IsImporting}" />
+              <MenuItem Header="Import mod folder…" Click="OnImportModFolder"
+                        IsEnabled="{Binding !IsImporting}" />
               <MenuItem Header="Open recent" Name="RecentMenu" ItemsSource="{Binding RecentMods}"
                         IsEnabled="{Binding HasRecentMods}">
                 <MenuItem.ItemTemplate>
@@ -339,6 +344,28 @@
               </Grid>
             </TabItem>
 
+            <!-- ===== Support Teams — one row per support team; its three members (A, B, C) and its
+                 weapon are the subjects. A team lists only when at least one member has a model on this
+                 install; picks feed the same queue/ledger as Characters. ===== -->
+            <TabItem Header="{Binding SupportTeamsTabHeader}">
+              <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
+                <TextBox Grid.Row="0" Watermark="Filter support teams" Text="{Binding SupportSearchText}"
+                         Margin="0,0,0,10" />
+                <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
+                        BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
+                  <Panel>
+                    <TextBlock Text="Reading game files…" Margin="14"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding IsLoading}" />
+                    <TextBlock Text="{Binding SupportTeamsNoMatch}" Margin="14" TextWrapping="Wrap"
+                               Foreground="{StaticResource HudSubtextBrush}"
+                               IsVisible="{Binding HasSupportTeamsNoMatch}" />
+                    <TreeView ItemsSource="{Binding SupportTeams}" Background="Transparent" Padding="6" />
+                  </Panel>
+                </Border>
+              </Grid>
+            </TabItem>
+
           </TabControl>
 
           <!-- footer (S9 inc4): no Add/queue — Pick just selects subjects. A subject is authored in Edit
@@ -356,6 +383,7 @@
         <!-- EDIT — the authoring page: one row per part, per edit and per slot, written straight onto the
              project's own intent. -->
         <views:EditPageView DataContext="{Binding EditPage}"
+              TreeWidth="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditTreeWidth, Mode=TwoWay}"
               IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='② Edit'}" />
         <views:BuildPageView DataContext="{Binding BuildPage}"
               IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='③ Build'}" />
@@ -363,66 +391,93 @@
     </Grid>
 
     <!-- ===== Home / start screen (the hub between mods; background scan runs behind it) ===== -->
-    <Border Grid.Row="1" IsVisible="{Binding ShowHome}" Background="{StaticResource HudBgBrush}">
-      <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Width="520" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+    <!-- AllowDrop sits on the whole home pane, and so do the drag handlers (MainWindow.axaml.cs): the drop
+         lands anywhere on it, and the Edit and Build pages keep their own drags because this pane is their
+         sibling rather than their ancestor. No hover highlight: the line below names what the pane takes,
+         and the cursor changes to the copy cursor while a droppable thing is over it. -->
+    <Border Grid.Row="1" Name="HomePane" IsVisible="{Binding ShowHome}"
+            Background="{StaticResource HudBgBrush}" DragDrop.AllowDrop="True">
+      <!-- The page is bounded by the pane it sits in, so nothing on it can run under or past the status
+           bar however short the window is. The block keeps its own height while it fits and is centred
+           there; past that the recent-mods box takes whatever is left over and its list scrolls inside
+           the box, because the box is the one part of the page that has no fixed size. -->
+      <DockPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="520"
+                 MaxHeight="{Binding #HomePane.Bounds.Height}">
 
-        <TextBlock Grid.Row="0" Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="26"
-                   Foreground="{StaticResource HudAccentBrush}" HorizontalAlignment="Center" />
-        <TextBlock Grid.Row="1" Margin="0,6,0,28" HorizontalAlignment="Center" TextAlignment="Center"
-                   Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
-                   Text="Start a new mod, or reopen a recent one." />
+        <StackPanel DockPanel.Dock="Top">
+          <TextBlock Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="26"
+                     Foreground="{StaticResource HudAccentBrush}" HorizontalAlignment="Center" />
+          <TextBlock Margin="0,6,0,28" HorizontalAlignment="Center" TextAlignment="Center"
+                     Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
+                     Text="Start a new mod, reopen a recent one, or import a built mod." />
 
-        <!-- primary actions -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-          <Button Content="＋  New mod" Click="OnNewMod" Classes="primary"
-                  FontSize="15" Padding="22,12" />
-          <Button Content="Open mod…" Click="OnOpenMod" FontSize="15" Padding="22,12" />
+          <!-- primary actions. Every one of them is off while an import runs: each starts a project, and a
+               second start would mint a folder the import in flight is still writing into. -->
+          <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+            <Button Content="＋  New mod" Click="OnNewMod" Classes="primary"
+                    IsEnabled="{Binding !IsImporting}" FontSize="15" Padding="22,12" />
+            <Button Content="Open mod…" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}"
+                    FontSize="15" Padding="22,12" />
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,12,0,0"
+                      HorizontalAlignment="Center">
+            <Button Content="Import mod from zip…" Click="OnImportModZip"
+                    IsEnabled="{Binding !IsImporting}" FontSize="13" Padding="14,8" />
+            <Button Content="Import mod folder…" Click="OnImportModFolder"
+                    IsEnabled="{Binding !IsImporting}" FontSize="13" Padding="14,8" />
+          </StackPanel>
+          <TextBlock Margin="0,10,0,0" HorizontalAlignment="Center" TextAlignment="Center"
+                     Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
+                     Text="Drop a built mod folder or zip here to import it." />
         </StackPanel>
 
-        <!-- recent mods -->
-        <Border Grid.Row="3" Margin="0,28,0,0" Background="{StaticResource HudPanelBrush}"
-                BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="4"
-                Padding="16,12" IsVisible="{Binding HasRecentMods}">
-          <StackPanel Spacing="8">
-            <TextBlock Text="Recent mods" Foreground="{StaticResource HudSubtextBrush}" FontWeight="SemiBold" FontSize="12" />
-            <ItemsControl ItemsSource="{Binding RecentMods}">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="vm:RecentModVm">
-                  <Button Classes="recent" Margin="0,1" Padding="10,7" HorizontalAlignment="Stretch"
-                          HorizontalContentAlignment="Left"
-                          Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}"
-                          CommandParameter="{Binding}">
-                    <!-- the thumbnail slot is a FIXED box on every row, held whether or not the mod has a
-                         preview, so the names line up down the list. Empty it draws nothing at all — no
-                         border, no stand-in. Its height is under the row's own two lines, so a preview
-                         never makes a row taller than its neighbours. -->
-                    <Grid ColumnDefinitions="Auto,*">
-                      <Border Grid.Column="0" Width="56" Height="32" Margin="0,0,10,0"
-                              VerticalAlignment="Center" ClipToBounds="True">
-                        <Image Source="{Binding Thumb}" Stretch="Uniform" />
-                      </Border>
-                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
-                        <!-- trimmed, so the full path is on hover: every trimmed label in the app pairs the
-                             two -->
-                        <TextBlock Text="{Binding Path}" Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
-                                   TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Path}" />
-                      </StackPanel>
-                    </Grid>
-                  </Button>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
-          </StackPanel>
-        </Border>
-
         <!-- background scan progress -->
-        <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8" Margin="0,22,0,0"
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="0,22,0,0"
                     HorizontalAlignment="Center" IsVisible="{Binding IsScanning}">
           <TextBlock Classes="pulse" Text="◌" />
           <TextBlock Text="{Binding StatusChars}" Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
         </StackPanel>
-      </Grid>
+
+        <!-- recent mods -->
+        <Border Margin="0,28,0,0" Background="{StaticResource HudPanelBrush}"
+                BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="4"
+                Padding="16,12" IsVisible="{Binding HasRecentMods}">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Margin="0,0,0,8" Text="Recent mods"
+                       Foreground="{StaticResource HudSubtextBrush}" FontWeight="SemiBold" FontSize="12" />
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <ItemsControl ItemsSource="{Binding RecentMods}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RecentModVm">
+                    <Button Classes="recent" Margin="0,1" Padding="10,7" HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left"
+                            Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).OpenRecentCommand}"
+                            CommandParameter="{Binding}">
+                      <!-- the thumbnail slot is a FIXED box on every row, held whether or not the mod has a
+                           preview, so the names line up down the list. Empty it draws nothing at all — no
+                           border, no stand-in. Its height is under the row's own two lines, so a preview
+                           never makes a row taller than its neighbours. -->
+                      <Grid ColumnDefinitions="Auto,*">
+                        <Border Grid.Column="0" Width="56" Height="32" Margin="0,0,10,0"
+                                VerticalAlignment="Center" ClipToBounds="True">
+                          <Image Source="{Binding Thumb}" Stretch="Uniform" />
+                        </Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding Name}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
+                          <!-- trimmed, so the full path is on hover: every trimmed label in the app pairs the
+                               two -->
+                          <TextBlock Text="{Binding Path}" Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
+                                     TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Path}" />
+                        </StackPanel>
+                      </Grid>
+                    </Button>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+      </DockPanel>
     </Border>
 
     <!-- ===== Status bar =====

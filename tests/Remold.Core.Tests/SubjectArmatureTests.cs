@@ -110,7 +110,7 @@ public class SubjectArmatureTests
                 (Skin(HRoot, HHip), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (Skin(HRoot, HHead), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            h => Paths.GetValueOrDefault(h), out _);
+            h => Paths.GetValueOrDefault(h));
 
     private static ModelRoot ExportAndReload(string path, MeshSkin skin,
         IReadOnlyList<MeshGltf.ExtraBone>? extras)
@@ -209,7 +209,7 @@ public class SubjectArmatureTests
                 (RotatedSkin(HRoot, HHip), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (skin, (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            h => Paths.GetValueOrDefault(h), out _);
+            h => Paths.GetValueOrDefault(h));
         var extras = AssetExporter.ExtraBones(skeleton, new[] { HRoot, HHead }, uprighting: null);
         Assert.Equal(new[] { Paths[HHip] }, extras.Select(e => e.Path).ToArray());   // the connector's own path
         var union = ExportAndReload(g.At("union.glb"), skin, extras);
@@ -315,7 +315,7 @@ public class SubjectArmatureTests
         var jr = MeshApply.ResolveAuthoredJoints(new[] { HRoot, HHip, HHead }, payload.SkinJointHashes!,
             payload.JointIndices!, payload.JointWeights!, payload.VertexCount);
         Assert.Equal(2, jr.JointToTarget[joint]);
-        Assert.Equal(0, jr.FullyUnsafeCount);
+        Assert.Equal(0, jr.OffSkeletonVertices);
     }
 
     /// <summary>Route: PrepareChangedPart → SendBackGeometry.Unchanged. Answering "unchanged" is what spares
@@ -529,7 +529,7 @@ public class SubjectArmatureTests
     {
         var combined = g.At(Path.Combine("meshes", outName));
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth1", ClothLogical, "cloth1_lod0", null, null, 0L, editedGlb),
                 ("weapon", WeaponLogical, "weapon_lod0", null, null, 0L, null),
@@ -603,10 +603,11 @@ public class SubjectArmatureTests
         Assert.Equal(new[] { HHead }, healed.Select(e => e.Hash).ToArray());
     }
 
-    /// <summary>A bone the subject's parts bind in different places joins no armature — and a stale
-    /// workspace glb that still carries it in its tail must not be the loophole that puts it back.</summary>
+    /// <summary>A bone the subject's parts bind in different places still joins the combined armature, stood
+    /// where the first part to name it puts it: a build converts every mesh's rows onto one statement per
+    /// bone, so nothing about the disagreement makes weight on it unbuildable.</summary>
     [Fact]
-    public void ACombinedSession_ATailBoneTheSubjectDisagreesAbout_ReachesNoUnionJoint()
+    public void ACombinedSession_ATailBoneTheSubjectsPartsBindDifferently_StillReachesAUnionJoint()
     {
         using var g = new TempGame();
         // the tail the workspace file was written with, back when the subject still agreed about the hip
@@ -619,7 +620,7 @@ public class SubjectArmatureTests
         var read = MeshGltf.ReadRiggedGlb(ws)!.Value;
         Assert.Contains(HHip, read.Skin.BoneHashes);         // the file really does still carry it
 
-        // …and the subject has since fallen out over where the hip stands, so it is off the skeleton
+        // …and a second part binds the hip half a metre from where the first does
         var elsewhere = new MeshSkin
         {
             BoneHashes = new[] { HHip },
@@ -631,8 +632,8 @@ public class SubjectArmatureTests
                 (Skin(HRoot, HHip), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (elsewhere, (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            h => Paths.GetValueOrDefault(h), out var disagreeing);
-        Assert.Equal(new[] { Paths[HHip] }, disagreeing.ToArray());
+            h => Paths.GetValueOrDefault(h));
+        Assert.Equal(RestUnity[HHip], skeleton.Single(b => b.Hash == HHip).BindRest.Translation);
 
         var reduced = MeshSkin.WeightedOnly(read.Mesh, read.Skin)!.Value;
         var parts = new[]
@@ -645,7 +646,7 @@ public class SubjectArmatureTests
             AssetExporter.CombinedExtraBones(skeleton, parts));
 
         var skin = ModelRoot.Load(combined).LogicalSkins.Single();
-        Assert.DoesNotContain(NodeName(HHip),
+        Assert.Contains(NodeName(HHip),
             Enumerable.Range(0, skin.JointsCount).Select(i => skin.Joints[i].Name).ToArray());
     }
 
@@ -715,13 +716,13 @@ public class SubjectArmatureTests
         var skeleton = AssetExporter.SubjectSkeleton(
             new[] { (Skin(HRoot, HHip), (IReadOnlyList<string>?)new[] { "Bip001", "Bip001/Bip001 Pelvis" },
                      (Matrix4x4?)null) },
-            h => Paths.GetValueOrDefault(h), out _);
+            h => Paths.GetValueOrDefault(h));
 
         Assert.Equal(new[] { "Bip001", "Bip001/Bip001 Pelvis" }, skeleton.Select(b => b.Path).ToArray());
     }
 
     [Fact]
-    public void SubjectSkeleton_ABoneTheSubjectsPartsBindDifferently_JoinsNoArmature()
+    public void SubjectSkeleton_ABoneTheSubjectsPartsBindDifferently_StandsWhereTheFirstPartPutsIt()
     {
         var elsewhere = new MeshSkin
         {
@@ -739,70 +740,76 @@ public class SubjectArmatureTests
                 (elsewhere, (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (Skin(HRoot, HHead), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            h => Paths.GetValueOrDefault(h), out var disagreeing);
+            h => Paths.GetValueOrDefault(h));
 
-        Assert.Equal(new[] { Paths[HHip] }, disagreeing.ToArray());        // said out loud, not dropped quietly
-        Assert.Equal(new[] { HRoot, HHead }, skeleton.Select(b => b.Hash).ToArray());
-        // so a part that doesn't pose the hip is never handed one
-        Assert.DoesNotContain(HHip,
+        // every bone is named once, in the order the parts were read, and the hip keeps the FIRST part's rest
+        Assert.Equal(new[] { HRoot, HHip, HHead }, skeleton.Select(b => b.Hash).ToArray());
+        Assert.Equal(RestUnity[HHip], skeleton.Single(b => b.Hash == HHip).BindRest.Translation);
+        // so a part that doesn't pose the hip is offered it like any other bone
+        Assert.Contains(HHip,
             AssetExporter.ExtraBones(skeleton, new[] { HRoot }, uprighting: null).Select(e => e.Hash));
     }
 
-    /// <summary>Placement agreement is its own tolerance, not the bake's refusal threshold. A bake may shrug
-    /// off a whole centimetre of translation because it DROPS it; an armature stick a centimetre out of place
-    /// is just wrong. A millimetre is already a disagreement here; inverse noise still is not.</summary>
+    /// <summary>A tail bone stands where the build poses it: the bind the reference states for it in the
+    /// EXPORTED part's own mesh space (<see cref="Remold.Core.Mesh.BindReference"/>), which can sit away from
+    /// the rest of the part that named it first.</summary>
     [Fact]
-    public void SubjectSkeleton_AMillimetreApart_IsADisagreement_InverseNoiseIsNot()
+    public void ExtraBones_StandATailBoneWhereTheReferencePlacesIt()
     {
-        IReadOnlyList<string> Skeleton(float yOff, out uint[] hashes)
-        {
-            var moved = new MeshSkin
-            {
-                BoneHashes = new[] { HRoot, HHip },
-                BindPoses = new List<Matrix4x4>
-                {
-                    Matrix4x4.CreateTranslation(-RestUnity[HRoot]),
-                    Matrix4x4.CreateTranslation(-RestUnity[HHip] - new Vector3(0, yOff, 0)),
-                },
-            };
-            var bones = AssetExporter.SubjectSkeleton(
-                new[]
-                {
-                    (Skin(HRoot, HHip), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
-                    (moved, (IReadOnlyList<string>?)null, (Matrix4x4?)null),
-                },
-                h => Paths.GetValueOrDefault(h), out var said);
-            hashes = bones.Select(b => b.Hash).ToArray();
-            return said;
-        }
+        // the body names the head; the exported cloth's mesh space is offset 4 cm from the body's, so the
+        // reference carries the head's bind 4 cm up
+        var body = Skin(HRoot, HHip, HHead);
+        var skeleton = AssetExporter.SubjectSkeleton(
+            new[] { (body, (IReadOnlyList<string>?)null, (Matrix4x4?)null) }, h => Paths.GetValueOrDefault(h));
 
-        var mm = Skeleton(0.001f, out var afterMm);                    // 1 mm: a visible offset
-        Assert.Equal(new[] { Paths[HHip] }, mm.ToArray());              // named, so the build reports it
-        Assert.Equal(new[] { HRoot }, afterMm);                         // and the hip joins no armature
+        var tail = AssetExporter.ExtraBones(skeleton, new[] { HRoot, HHip }, uprighting: null,
+            reference: HeadFourCentimetresUp).Single();
 
-        var noise = Skeleton(1e-6f, out var afterNoise);                // inverse noise: still one bone
-        Assert.Empty(noise);
-        Assert.Equal(new[] { HRoot, HHip }, afterNoise);
+        Assert.Equal(HHead, tail.Hash);
+        Assert.Equal(RestUnity[HHead].Y + 0.04f, tail.RestWorld.Translation.Y, 5);
+        // and with no reference for it, it stays where the body put it
+        Assert.Equal(RestUnity[HHead], AssetExporter.ExtraBones(skeleton, new[] { HRoot, HHip },
+            uprighting: null).Single().RestWorld.Translation);
     }
 
-    /// <summary>The drop list drives the status bar, and a systematically-offset rig disagrees about every
-    /// bone it has. Three get named; the rest get counted.</summary>
+    /// <summary>A lone export restates its skin to the reference wherever the reference names a bone: a
+    /// bone the part weights keeps its own bind (which is what the reference states for it), and a bone it
+    /// only tables stands where the build poses it. With no reference, nothing moves.</summary>
     [Fact]
-    public void DisagreementLines_NameThreeBones_ThenCountTheRest()
+    public void StandUnder_RestatesOnlyTheBonesTheReferenceNames()
     {
-        Assert.Empty(AssetExporter.DisagreementLines(Array.Empty<string>()));
+        var skin = Skin(HRoot, HHip, HHead);
+        var moved = Matrix4x4.CreateTranslation(0, -1.7f, 0);
 
-        var few = AssetExporter.DisagreementLines(new[] { "root/a", "root/b", "root/c" }).ToArray();
-        Assert.Equal(3, few.Length);
-        Assert.All(few, l => Assert.DoesNotContain("more bones", l));
-        Assert.Contains("root/c", few[2]);
+        var stood = AssetExporter.StandUnder(skin, new Dictionary<uint, Matrix4x4>
+        {
+            [HHip] = skin.BindPoses[1],
+            [HHead] = moved,
+        });
 
-        var many = AssetExporter.DisagreementLines(
-            Enumerable.Range(0, 40).Select(i => $"root/b{i}").ToArray()).ToArray();
-        Assert.Equal(4, many.Length);
-        Assert.Contains("root/b2", many[2]);
-        Assert.Contains("…and 37 more bones", many[3]);
-        Assert.DoesNotContain(many, l => l.Contains('—'));   // no em-dashes in status text
+        Assert.Equal(skin.BoneHashes, stood.BoneHashes);
+        Assert.Equal(new[] { skin.BindPoses[0], skin.BindPoses[1], moved }, stood.BindPoses);
+        Assert.Same(skin, AssetExporter.StandUnder(skin, null));
+    }
+
+    private static Dictionary<uint, Matrix4x4> HeadFourCentimetresUp => new()
+    {
+        [HHead] = Matrix4x4.CreateTranslation(-RestUnity[HHead] - new Vector3(0, 0.04f, 0)),
+    };
+
+    /// <summary>The reference is stated in the exported part's BIND space, and the uprighting the glb bakes
+    /// stands that space up, so the reference comes first.</summary>
+    [Fact]
+    public void ExtraBones_ApplyTheReferenceBeforeTheUprighting()
+    {
+        var skeleton = AssetExporter.SubjectSkeleton(
+            new[] { (Skin(HRoot, HHip, HHead), (IReadOnlyList<string>?)null, (Matrix4x4?)null) },
+            h => Paths.GetValueOrDefault(h));
+        var g = Matrix4x4.CreateRotationX(MathF.PI / 2);
+
+        var tail = AssetExporter.ExtraBones(skeleton, new[] { HRoot, HHip }, g, reference: HeadFourCentimetresUp).Single();
+
+        Assert.Equal(RestUnity[HHead].Y + 0.04f, tail.RestWorld.Translation.Z, 4);   // +Y, then swung onto +Z
     }
 
     [Fact]
@@ -879,7 +886,7 @@ public class SubjectArmatureTests
         Directory.CreateDirectory(g.At("meshes"));
         var glb = g.At(Path.Combine("meshes", ClothSlot + ".glb"));
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth1", FilterClothLogical, ClothSlot, glb, null, 0L, null),
                 ("hair1", FilterHairLogical, HairSlot, null, null, 0L, null),
@@ -1009,7 +1016,7 @@ public class SubjectArmatureTests
     {
         Directory.CreateDirectory(g.At("meshes"));
         var glb = g.At(Path.Combine("meshes", ClothSlot + ".glb"));
-        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
         {
             ("cloth1", FilterClothLogical, ClothSlot, glb, null, 0L, null),
         };
@@ -1420,7 +1427,7 @@ public class SubjectArmatureTests
             MeshGltf.ExportRiggedGlb(Part(ClothSlot, 1), Skin(HRoot), h => Paths.GetValueOrDefault(h), ws);
         var combined = g.At(Path.Combine("meshes", name + ".glb"));
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth1", FilterClothLogical, ClothSlot, null, null, 0L, ws),
                 ("hair1", FilterHairLogical, HairSlot, null, null, 0L, null),
@@ -1586,7 +1593,7 @@ public class SubjectArmatureTests
                 (Skin(HHip, HHead), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
                 (Skin(HArm), (IReadOnlyList<string>?)null, (Matrix4x4?)null),
             },
-            h => Paths.GetValueOrDefault(h), out _);
+            h => Paths.GetValueOrDefault(h));
 
     [Fact]
     public void ALoneTail_ABoneTheFilterDropsThatAnOfferedBoneHangsOff_StaysAHashNamedJoint()
@@ -1665,7 +1672,7 @@ public class SubjectArmatureTests
             MeshGltf.ExportRiggedGlb(Part(HairSlot, 1), Skin(HRoot), h => Paths.GetValueOrDefault(h), hairWs);
         var combined = g.At(Path.Combine("meshes", name + ".glb"));
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, new Outfit(0, "VesnaSSR01", OutfitKind.Base), "Vesna",
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth1", FilterClothLogical, ClothSlot, null, null, 0L, clothWs),
                 ("hair1", FilterHairLogical, HairSlot, null, null, 0L, hairWs),
@@ -1757,23 +1764,24 @@ public class SubjectArmatureTests
         var cloth = roster.Parts[0];
         Assert.Equal("cloth1", cloth.Token);      // the token presence classifies from — NOT the slot name
         Assert.Equal("cloth.bundle", cloth.SourceBundle);
-        Assert.Equal(0L, cloth.PathId);           // recipe-backed: the name selects the mesh, not an id
+        // recipe-backed: the load key its address names selects the mesh, read where the bundle is opened
+        Assert.Equal(MeshSelector.ByLoadKey("addr_cloth"), cloth.Which);
         Assert.False(cloth.CastsShadows);
         Assert.Equal(VisibilityOverride.None, cloth.Visibility);
 
         var hair = roster.Parts[1];
         Assert.Equal("hair1", hair.Token);
         Assert.Equal("hair.bundle", hair.SourceBundle);
-        Assert.Equal(77L, hair.PathId);
+        Assert.Equal((MeshSelector)77L, hair.Which);
         Assert.True(hair.CastsShadows);
         Assert.Equal(VisibilityOverride.CoatList, hair.Visibility);
 
-        // the half-smr part took the ADDRESS's bundle, not the one its MeshBundle names, and no id selects
-        // it — taking the smr route on a bundle alone would read a mesh by name out of a bundle that ships
+        // the half-smr part took the ADDRESS's bundle and load key, not the bundle its MeshBundle names —
+        // taking the smr route on a bundle alone would read a mesh by name out of a bundle that ships
         // same-named copies precisely because it cannot be read that way
         var belt = roster.Parts[2];
         Assert.Equal("belt.bundle", belt.SourceBundle);
-        Assert.Equal(0L, belt.PathId);
+        Assert.Equal(MeshSelector.ByLoadKey("addr_belt"), belt.Which);
     }
 
     /// <summary>What a failed wardrobe-table read costs, and how long it is believed for.
@@ -1808,11 +1816,12 @@ public class SubjectArmatureTests
     /// mesh is read by.</summary>
     private static AssetExporter.SubjectRoster AppAssembledRoster(string hairToken)
     {
+        // each fixture bundle files its mesh under the mesh's own name, which is the load key its address names
         var catalog = CatalogIndex.ForTest(new[]
         {
             ("addr_cloth", FilterClothLogical),
             ("addr_hair", FilterHairLogical),
-        });
+        }, loadKeyRows: new[] { ("addr_cloth", ClothSlot), ("addr_hair", HairSlot) });
         var model = new SubjectModel("Vesna", "VesnaSSR01", SubjectSource.Prefab, new[]
         {
             new SubjectPart("cloth1", ClothSlot, "addr_cloth", Array.Empty<SubjectMaterial>()),

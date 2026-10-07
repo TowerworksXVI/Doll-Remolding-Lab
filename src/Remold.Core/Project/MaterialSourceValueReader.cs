@@ -99,3 +99,29 @@ public static class MaterialShadingValues
             : null;
     }
 }
+
+/// <summary>A material's original numeric values, including the defaults declared by its exact
+/// shader — what a snapshot copy carries and the numeric editor shows as original. A missing value
+/// remains unknown. Read through <see cref="DerivedMaterialEvidence.ResolveOriginals"/>, which shares
+/// the install's bundle parses and one defaults read per shader.</summary>
+public sealed record MaterialOriginalValues(BundleReader.MaterialShading Shading,
+    BundleReader.ShaderNumericDefaults? Defaults)
+{
+    public string? Value(MaterialValueField field)
+    {
+        string? saved = MaterialShadingValues.OriginalValue(Shading, field);
+        if (saved is not null || field.Source == MaterialValueSource.FamilyRule) return saved;
+        if (field.Kind == MaterialValueKind.Color)
+        {
+            float[]? components = null;
+            if (Shading.TextureTransforms?.TryGetValue(field.Semantic, out var transform) == true)
+                components = transform;
+            else if (Defaults?.Colors.TryGetValue(field.Semantic, out var color) == true)
+                components = color;
+            return components is null ? null : string.Join(" ", components.Select(component =>
+                component.ToString("R", CultureInfo.InvariantCulture)));
+        }
+        return Defaults?.Floats.TryGetValue(field.Semantic, out float value) == true
+            ? value.ToString("R", CultureInfo.InvariantCulture) : null;
+    }
+}

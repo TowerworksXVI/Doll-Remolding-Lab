@@ -26,7 +26,7 @@ public class RampRecordShapeTests
             Submesh = 2,
             Albedo = "textures/body_s2_base.png",
             AlbedoOrigin = SlotOrigin.Authored,
-            NormalOrigin = SlotOrigin.VanillaOwn,
+            NormalOrigin = SlotOrigin.Untouched,
         };
 
         var json = JsonSerializer.Serialize(row, Json);
@@ -237,7 +237,7 @@ public class RampRecordShapeTests
 
         row.KeepOwnRamp();
         Assert.Null(row.Ramp);
-        Assert.Equal(SlotOrigin.VanillaOwn, row.RampOrigin);
+        Assert.Equal(SlotOrigin.Untouched, row.RampOrigin);
         Assert.False(row.RampIsCarried);
     }
 

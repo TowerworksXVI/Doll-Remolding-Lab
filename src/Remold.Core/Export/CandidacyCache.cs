@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AssetsTools.NET;
+using Remold.Core.Bundles;
 
 namespace Remold.Core.Export;
 
@@ -110,9 +111,9 @@ internal sealed class CandidacyCache
     /// it is the same identity <c>Workbench.BundleReads.ContentHashLookup</c> keys sharing reuse on — one
     /// identity home, so the two cannot drift. The cost is that content swapped underneath an unchanged
     /// manifest reads as unchanged here.</para></summary>
-    public static string Key(string bundleContentId, string meshName, long pathId) =>
+    public static string Key(string bundleContentId, string meshName, MeshSelector which) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            bundleContentId + "\n" + meshName + "\n" + pathId.ToString(CultureInfo.InvariantCulture))))
+            bundleContentId + "\n" + meshName + "\n" + which.Token)))
             .ToLowerInvariant();
 
     /// <summary>The memoized measurement for <paramref name="key"/>, or null when there is none — a

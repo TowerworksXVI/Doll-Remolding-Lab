@@ -37,13 +37,6 @@ public sealed partial class BuildPageVm : ObservableObject
     private long? _builtRevision;
     private string? _builtPreviewStamp;
     private bool _runSurfaceCleared;
-    private int _presentationGeneration;
-    private IReadOnlyList<TargetPart> _compositionTargets = Array.Empty<TargetPart>();
-    private IReadOnlyDictionary<string, AuthoredEditOutlineEntry> _compositionEdits =
-        new Dictionary<string, AuthoredEditOutlineEntry>(StringComparer.Ordinal);
-    private IReadOnlyDictionary<string, PlannedPart> _compositionParts =
-        new Dictionary<string, PlannedPart>(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<CompositionTarget, CompositionCacheEntry> _compositionCache = new();
 
     public BuildPageVm(IBuildPageShell shell, Action<Action>? dispatch = null)
     {
@@ -189,11 +182,6 @@ public sealed partial class BuildPageVm : ObservableObject
         public void Report(string value) => _report(value);
     }
 
-    private readonly record struct CompositionTarget(string GroupId, string StateId);
-    private sealed record CompositionCacheEntry(int Generation, IReadOnlyList<BuildResolvedPartVm> Rows);
-    private readonly record struct CompositionOutcome(TargetPart Target, string Answer,
-        BuildResolvedPartState State);
-
     /// <summary>Switch the one session this page reads. A project switch drops every result and bitmap; a
     /// step hop calls <see cref="Enter"/> instead and keeps them.</summary>
     public void Load(AuthoredEditSession? session)
@@ -281,7 +269,6 @@ public sealed partial class BuildPageVm : ObservableObject
         string? keep = SelectedEdit?.EditDefinitionId;
         _outline = _session?.Outline();
         _loader = _shell.LoaderState();
-        ApplyCompositionPresentation(_outline, _plan);
         BuildLibrary(_outline);
         BuildBoard(_outline);
         SelectedEdit = AllEdits().FirstOrDefault(edit => string.Equals(edit.EditDefinitionId, keep,
@@ -469,7 +456,7 @@ public sealed partial class BuildPageVm : ObservableObject
         Always.AvailableEdits.Clear();
         Groups.Clear();
         if (outline is null) return;
-        var edits = _compositionEdits;
+        var edits = outline.Edits.ToDictionary(edit => edit.Id, StringComparer.Ordinal);
         foreach (string editId in outline.Always)
             if (edits.TryGetValue(editId, out var edit)) Always.Tokens.Add(Token(edit, null, null));
         foreach (var edit in outline.Edits.Where(edit => !outline.Always.Contains(edit.Id, StringComparer.Ordinal)))
@@ -570,111 +557,6 @@ public sealed partial class BuildPageVm : ObservableObject
         ranges.Add(start == end ? start.ToString() : $"{start}–{end}");
         return string.Join(", ", ranges);
     }
-
-    /// <summary>Install the exact outline/plan pair this redraw presents. This generation advances only
-    /// when inputs reach the presentation; starting a plan that has not returned does not invalidate an
-    /// open disclosure backed by the still-applied pair.</summary>
-    private void ApplyCompositionPresentation(AuthoredEditOutline? outline, AuthoredBuildPlan? plan)
-    {
-        _presentationGeneration++;
-        _compositionCache.Clear();
-        _compositionTargets = outline?.KnownParts.DistinctBy(CompositionPartKey,
-                StringComparer.OrdinalIgnoreCase).ToArray()
-            ?? Array.Empty<TargetPart>();
-        _compositionEdits = outline?.Edits.ToDictionary(edit => edit.Id, StringComparer.Ordinal)
-            ?? new Dictionary<string, AuthoredEditOutlineEntry>(StringComparer.Ordinal);
-        _compositionParts = plan?.Parts.ToDictionary(part => CompositionPartKey(part.Target),
-                StringComparer.OrdinalIgnoreCase)
-            ?? new Dictionary<string, PlannedPart>(StringComparer.OrdinalIgnoreCase);
-    }
-
-    internal (int Active, int Hidden) CompositionCounts(string groupId, int stateIndex)
-    {
-        int active = 0, hidden = 0;
-        foreach (var outcome in ResolveComposition(groupId, stateIndex))
-        {
-            if (outcome.State == BuildResolvedPartState.Active) active++;
-            else if (outcome.State == BuildResolvedPartState.Hidden) hidden++;
-        }
-        return (active, hidden);
-    }
-
-    internal void OpenComposition(BuildStateVm state)
-    {
-        lock (_changeGate)
-        {
-            var target = new CompositionTarget(state.GroupId, state.Id);
-            if (!_compositionCache.TryGetValue(target, out var cached)
-                || cached.Generation != _presentationGeneration)
-            {
-                var rows = ResolveComposition(state.GroupId, state.Index)
-                    .Select(outcome => new BuildResolvedPartVm(PartName(outcome.Target), outcome.Answer,
-                        outcome.State)).ToArray();
-                cached = new CompositionCacheEntry(_presentationGeneration, rows);
-                _compositionCache[target] = cached;
-            }
-            state.Composition.Clear();
-            foreach (var row in cached.Rows) state.Composition.Add(row);
-        }
-    }
-
-    /// <summary>The state-local answer for every relevant known part. A part with no plan remains original;
-    /// a planned part belongs here only when Always or this key group controls it. Other groups' operations
-    /// cannot be summarized truthfully by this state and are omitted.</summary>
-    private IEnumerable<CompositionOutcome> ResolveComposition(string groupId, int stateIndex)
-    {
-        foreach (var target in _compositionTargets)
-        {
-            if (!_compositionParts.TryGetValue(CompositionPartKey(target), out var part))
-            {
-                yield return new CompositionOutcome(target, "original", BuildResolvedPartState.Original);
-                continue;
-            }
-
-            bool relevant = false;
-            PlannedPartOperation? activeEdit = null;
-            bool hidden = false;
-            foreach (var operation in part.Operations)
-            {
-                bool operationRelevant = false;
-                bool operationActive = false;
-                foreach (var condition in operation.ActiveWhen)
-                {
-                    if (condition.IsAlways)
-                    {
-                        operationRelevant = true;
-                        operationActive = true;
-                        break;
-                    }
-                    if (!string.Equals(condition.GroupId, groupId, StringComparison.Ordinal)) continue;
-                    operationRelevant = true;
-                    if (condition.StateIndex == stateIndex) operationActive = true;
-                }
-                relevant |= operationRelevant;
-                if (!operationActive) continue;
-                if (operation.Disposition == PlannedPartDisposition.Hidden) hidden = true;
-                else if (operation.Disposition == PlannedPartDisposition.Edit && activeEdit is null)
-                    activeEdit = operation;
-            }
-
-            if (!relevant) continue;
-            if (hidden)
-            {
-                yield return new CompositionOutcome(target, "hidden", BuildResolvedPartState.Hidden);
-                continue;
-            }
-            if (activeEdit?.EditDefinitionId is { } editId)
-            {
-                string answer = _compositionEdits.TryGetValue(editId, out var edit) ? edit.Label : "edited";
-                yield return new CompositionOutcome(target, answer, BuildResolvedPartState.Active);
-                continue;
-            }
-            yield return new CompositionOutcome(target, "original", BuildResolvedPartState.Original);
-        }
-    }
-
-    private static string CompositionPartKey(TargetPart target) =>
-        $"{target.Subject}\u001f{target.Outfit}\u001f{target.RendererSlot}";
 
     private void RefreshPlanPresentation()
     {
@@ -882,10 +764,22 @@ public sealed partial class BuildPageVm : ObservableObject
             new(KeyCollisions.WholeModLabel, KeyCollisions.WholeModLabel, _shell.WholeModKey),
         };
         rows.AddRange(Groups.Select(group => new KeyCollisions.Entry(group.Id, group.DisplayName, group.Key)));
+        rows.AddRange(Groups.SelectMany(group => group.States.Select(state => new KeyCollisions.Entry(
+            ShortcutIdentity(state), $"{group.DisplayName} · {state.DisplayName}", state.Shortcut,
+            Shortcut: true))));
         var tips = KeyCollisions.Tips(rows);
         WholeModKeyCollisionTip = tips.GetValueOrDefault(KeyCollisions.WholeModLabel, "");
-        foreach (var group in Groups) group.CollisionTip = tips.GetValueOrDefault(group.Id, "");
+        foreach (var group in Groups)
+        {
+            group.CollisionTip = tips.GetValueOrDefault(group.Id, "");
+            foreach (var state in group.States)
+                state.CollisionTip = tips.GetValueOrDefault(ShortcutIdentity(state), "");
+        }
     }
+
+    /// <summary>A state shortcut's identity among the collision rows. State ids repeat across groups, and
+    /// the unit separator keeps it apart from every group id.</summary>
+    private static string ShortcutIdentity(BuildStateVm state) => $"{state.GroupId}\u001f{state.Id}";
 
     public void IdentityChanged()
     {
@@ -1126,6 +1020,10 @@ public sealed partial class BuildPageVm : ObservableObject
     internal void SetGroupPersistence(string groupId, bool persist) =>
         Mutate(() => _session?.SetGroupPersistence(groupId, persist), "");
 
+    internal void SetStateShortcut(string groupId, string stateId, string? key) =>
+        Mutate(() => _session?.SetStateShortcut(groupId, stateId, key),
+            key is null ? "Shortcut cleared." : $"Shortcut set to {ModKeys.Display(key)}.");
+
     internal void RenameState(string groupId, string stateId, string? label) =>
         Mutate(() => _session?.RenameState(groupId, stateId, label), "State renamed.");
 
@@ -1212,29 +1110,45 @@ public sealed partial class BuildPageVm : ObservableObject
     /// its command runs.</summary>
     public void ClearMarkedTarget() => MarkedTarget = null;
 
+    // The drop gestures read the outline and the rows, then act on what they read. They hold the change gate
+    // for the whole of that, as the redraws that replace those rows do: under an inline dispatcher a plan
+    // continuation can otherwise land between the read and the act, and the gesture reorders a row set
+    // that no longer exists.
+
     public void DropEdit(string editId, string? groupId, string? stateId)
     {
-        if (_outline?.Edits.FirstOrDefault(edit => edit.Id == editId) is not { } edit) return;
-        if (IsUsedAt(editId, groupId, stateId))
-        { Status = $"{edit.Label} is already there."; return; }
-        AddTo(edit.Id, edit.Target, edit.Kind, groupId, stateId);
+        lock (_changeGate)
+        {
+            if (_outline?.Edits.FirstOrDefault(edit => edit.Id == editId) is not { } edit) return;
+            if (IsUsedAt(editId, groupId, stateId))
+            { Status = $"{edit.Label} is already there."; return; }
+            AddTo(edit.Id, edit.Target, edit.Kind, groupId, stateId);
+        }
     }
 
     /// <summary>Whether this edit is already used in this place. The cursor asks it while a drag is still
     /// in the air, so a drop that would only refuse shows as refused instead of accepted and swallowed;
     /// the release asks it again, which is what actually refuses.</summary>
-    public bool IsUsedAt(string editId, string? groupId, string? stateId) =>
-        _outline?.Edits.FirstOrDefault(edit =>
-                string.Equals(edit.Id, editId, StringComparison.Ordinal))?.Placements
-            .Any(placement => string.Equals(placement.KeyGroupId, groupId, StringComparison.Ordinal)
-                && string.Equals(placement.StateId, stateId, StringComparison.Ordinal)) == true;
+    public bool IsUsedAt(string editId, string? groupId, string? stateId)
+    {
+        lock (_changeGate)
+        {
+            return _outline?.Edits.FirstOrDefault(edit =>
+                    string.Equals(edit.Id, editId, StringComparison.Ordinal))?.Placements
+                .Any(placement => string.Equals(placement.KeyGroupId, groupId, StringComparison.Ordinal)
+                    && string.Equals(placement.StateId, stateId, StringComparison.Ordinal)) == true;
+        }
+    }
 
     public void DropState(string groupId, string stateId, string targetStateId)
     {
-        var group = Groups.FirstOrDefault(row => row.Id == groupId);
-        int from = group?.States.ToList().FindIndex(state => state.Id == stateId) ?? -1;
-        int to = group?.States.ToList().FindIndex(state => state.Id == targetStateId) ?? -1;
-        if (from >= 0 && to >= 0 && from != to) ReorderState(group!.States[from], to);
+        lock (_changeGate)
+        {
+            var group = Groups.FirstOrDefault(row => row.Id == groupId);
+            int from = group?.States.ToList().FindIndex(state => state.Id == stateId) ?? -1;
+            int to = group?.States.ToList().FindIndex(state => state.Id == targetStateId) ?? -1;
+            if (from >= 0 && to >= 0 && from != to) ReorderState(group!.States[from], to);
+        }
     }
 
     [RelayCommand]
@@ -1665,7 +1579,7 @@ public sealed partial class BuildStateVm : ObservableObject
     {
         _page = page; GroupId = group.Id; Id = state.Id; Index = index; StateCount = stateCount;
         _label = state.Label ?? "";
-        (ActiveCount, HiddenCount) = page.CompositionCounts(GroupId, Index);
+        _shortcut = state.Shortcut;
         _ready = true;
     }
     public string GroupId { get; }
@@ -1684,24 +1598,24 @@ public sealed partial class BuildStateVm : ObservableObject
     public bool IsLaunch => Index == 0;
     public ObservableCollection<BuildTokenVm> Tokens { get; } = new();
     public ObservableCollection<BuildEditChoiceVm> AvailableEdits { get; } = new();
-    public ObservableCollection<BuildResolvedPartVm> Composition { get; } = new();
-    public int ActiveCount { get; }
-    public int HiddenCount { get; }
-    public string CountLine => string.Join(" · ", new[]
-    {
-        ActiveCount > 0 ? $"{ActiveCount} active" : "",
-        HiddenCount > 0 ? $"{HiddenCount} hidden" : "",
-    }.Where(value => value.Length > 0));
     [ObservableProperty] private string _label;
+    /// <summary>The key that jumps the group straight to this state, or null for none.</summary>
+    [ObservableProperty] private string? _shortcut;
+    [ObservableProperty] private string _collisionTip = "";
+    public bool HasCollision => CollisionTip.Length > 0;
     partial void OnLabelChanged(string value)
     {
         OnPropertyChanged(nameof(DisplayName));
         if (_ready) _page.RenameState(GroupId, Id, value);
     }
+    partial void OnShortcutChanged(string? value)
+    {
+        if (_ready) _page.SetStateShortcut(GroupId, Id, value);
+    }
+    partial void OnCollisionTipChanged(string value) => OnPropertyChanged(nameof(HasCollision));
     [RelayCommand] private Task Remove() => _page.RemoveStateAsync(this);
     [RelayCommand] private void MoveUp() { if (Index > 0) _page.ReorderState(this, Index - 1); }
     [RelayCommand] private void MoveDown() => _page.ReorderState(this, Index + 1);
-    [RelayCommand] private void OpenComposition() => _page.OpenComposition(this);
     internal void NotifyMarkChanged() => OnPropertyChanged(nameof(IsMarked));
 }
 
@@ -1752,15 +1666,6 @@ public sealed partial class BuildTokenVm : ObservableObject
     [RelayCommand] private void Remove() => _page.RemoveFrom(EditDefinitionId, Target, Kind, GroupId, StateId);
     [RelayCommand] private void Open() => _page.OpenTokenCommand.Execute(this);
 }
-
-public enum BuildResolvedPartState
-{
-    Original,
-    Active,
-    Hidden,
-}
-
-public sealed record BuildResolvedPartVm(string Part, string Answer, BuildResolvedPartState State);
 
 public sealed class BuildIssueVm
 {

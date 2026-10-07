@@ -23,6 +23,96 @@ public partial class MainWindow : Window
         // a press bubbles the CheckBox has already eaten it — the open has to see the press on the way DOWN,
         // and it recognises Pick rows by their view-model type rather than by naming three trees.
         AddHandler(PointerPressedEvent, OnPickRowPointerPressed, RoutingStrategies.Tunnel);
+        // THE RULE, and the reason these three sit on the HOME PANE rather than on the window: the Edit and
+        // Build pages run their own drag handlers, and a window-level handler bubbles AFTER theirs and would
+        // overwrite every page drag's effects with None. The home pane is their sibling, so a drag over a
+        // page never reaches here at all — and the guards below still refuse to touch DragEffects unless
+        // Home is showing, so nothing about a page's drop depends on where this is attached.
+        //
+        // DragEnter as well as DragOver: crossing an element boundary mid-drag raises ENTER, not Over, and an
+        // unhandled DragEnter leaves the platform's permissive effects standing — the cursor flickers, and a
+        // release on that frame delivers a drop the home screen meant to refuse.
+        var home = this.FindControl<Border>("HomePane")
+            ?? throw new InvalidOperationException("the window has no home pane to accept a dropped mod on");
+        home.AddHandler(DragDrop.DragEnterEvent, OnHomeDragOver);
+        home.AddHandler(DragDrop.DragOverEvent, OnHomeDragOver);
+        home.AddHandler(DragDrop.DropEvent, OnHomeDrop);
+    }
+
+    /// <summary>The copy cursor only over the home screen, and only for one dropped folder or file: a drop
+    /// while a mod is open changes nothing, and two things dropped together name no one mod to import.</summary>
+    private void OnHomeDragOver(object? sender, DragEventArgs e)
+    {
+        if (!HomeShowing) return;   // never speak for a drag the pages own
+        e.DragEffects = CanImportDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+    }
+
+    private void OnHomeDrop(object? sender, DragEventArgs e)
+    {
+        if (!HomeShowing) return;
+        if (!CanImportDrop(e)) { e.DragEffects = DragDropEffects.None; return; }
+        if (DroppedPath(e) is not { } path) { e.DragEffects = DragDropEffects.None; return; }
+        // Normalize what goes back to the drag source — unset, it returns the platform's Copy|Move|Link.
+        e.DragEffects = DragDropEffects.Copy;
+        // Fire-and-forget the top of the async chain — the import's own busy gate serializes the rest.
+        _ = ImportDroppedAsync(path);
+    }
+
+    private bool HomeShowing => DataContext is MainWindowViewModel { ShowHome: true };
+
+    private bool CanImportDrop(DragEventArgs e) =>
+        HomeShowing && e.DataTransfer.Contains(DataFormat.File) && DroppedPath(e) is not null;
+
+    /// <summary>The one local path a drop carries, or null when it carries none or more than one.</summary>
+    private static string? DroppedPath(DragEventArgs e)
+    {
+        var files = e.DataTransfer.TryGetFiles();
+        if (files is null) return null;
+        var paths = files.Select(f => f.TryGetLocalPath()).Where(p => !string.IsNullOrEmpty(p)).ToList();
+        return paths.Count == 1 ? paths[0] : null;
+    }
+
+    private async Task ImportDroppedAsync(string path)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (!vm.ShowHome) return;
+        if (!await vm.ConfirmLeaveProjectAsync()) return;
+        await vm.ImportModAsync(path);
+    }
+
+    /// <summary>Import mod from zip… — read a built mod's distribution zip back into a new project.</summary>
+    private async void OnImportModZip(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (!await vm.ConfirmLeaveProjectAsync()) return;
+        var picked = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import mod from zip",
+            AllowMultiple = false,
+            SuggestedStartLocation = await LibraryStartAsync(),
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Zip files") { Patterns = new[] { "*.zip" } },
+                new FilePickerFileType("All files") { Patterns = new[] { "*" } },
+            },
+        });
+        var path = picked.FirstOrDefault()?.TryGetLocalPath();
+        if (!string.IsNullOrEmpty(path)) await vm.ImportModAsync(path!);
+    }
+
+    /// <summary>Import mod folder… — read a built mod folder back into a new project.</summary>
+    private async void OnImportModFolder(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (!await vm.ConfirmLeaveProjectAsync()) return;
+        var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Import mod folder",
+            AllowMultiple = false,
+            SuggestedStartLocation = await LibraryStartAsync(),
+        });
+        var path = picked.FirstOrDefault()?.TryGetLocalPath();
+        if (!string.IsNullOrEmpty(path)) await vm.ImportModAsync(path!);
     }
 
     /// <summary>Double-click a Pick row → open it in Edit, checking it first. Handling the second press

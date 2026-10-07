@@ -93,13 +93,46 @@ public sealed partial class EditNodeVm : ObservableObject
     public bool HasProblem => !string.IsNullOrEmpty(Problem);
 
     /// <summary>What the part-level refusal row says: the install's own refusal where there is one, else the
-    /// mesh-edit gate's reason on a part with no edits.
+    /// mesh-edit gate's reason on a part with no edits, and then, on every row of a part the game starts
+    /// hidden, <see cref="HiddenPartNote"/> on a line of its own. Where the gate greys a hidden part's opens,
+    /// every row of it says the gate's reason first and then only <see cref="HiddenPartShrunk"/>: the
+    /// sentence about the part's position in Blender would contradict the greyed opens above it.
     ///
     /// <para>The gate's reason is on the two Blender opens' hover everywhere else, and that is enough where
     /// an edit row's own panels stand beside them. A bare part has no such panels: the opens are its whole
     /// action row, and a mesh the gate refuses is invisible until the pointer happens to rest on a disabled
-    /// button. It says the same sentence in the same amber row the install's refusal uses.</para></summary>
-    public string? PartRefusal => Problem ?? (IsBarePart ? MeshEditBlock : null);
+    /// button. It says the same sentence in the same amber row the install's refusal uses.</para>
+    ///
+    /// <para>The hidden-part note is no refusal: it blocks nothing, and says that the part's position in
+    /// Blender will not match the game, which the modder meets whether the part is bare or edited.</para></summary>
+    public string? PartRefusal
+    {
+        get
+        {
+            if (!StartsHidden) return Problem ?? (IsBarePart ? MeshEditBlock : null);
+            bool greyed = MeshEditBlock is not null;
+            string? refusal = Problem ?? MeshEditBlock;
+            string note = greyed ? HiddenPartShrunk : HiddenPartNote;
+            return refusal is null ? note : refusal + "\n" + note;
+        }
+    }
+
+    /// <summary>The first sentence of <see cref="HiddenPartNote"/>, all a hidden part whose opens the gate
+    /// greys says.</summary>
+    public const string HiddenPartShrunk = "This part starts shrunk or off screen.";
+
+    /// <summary>What every row of a part the game starts hidden says under its action row.</summary>
+    public const string HiddenPartNote = HiddenPartShrunk
+        + " Its position in Blender will not match the game.";
+
+    /// <summary>The game starts this row's part shrunk out of sight, so it opens in Blender centred at full
+    /// size. Set on part and content-edit rows by the page, which reads it lazily per part and keeps the
+    /// answer across rebuilds. Never set on a hide edit's row: a hide edit has no Blender opens, so the note
+    /// about how the part opens there has nothing to explain.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PartRefusal))]
+    [NotifyPropertyChangedFor(nameof(HasPartRefusal))]
+    private bool _startsHidden;
 
     public bool HasPartRefusal => !string.IsNullOrEmpty(PartRefusal);
 

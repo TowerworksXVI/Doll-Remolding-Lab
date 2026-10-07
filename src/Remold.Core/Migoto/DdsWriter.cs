@@ -39,9 +39,12 @@ internal static class DdsWriter
         _ => 0,
     };
 
-    /// <summary>Tightly-packed byte count of one uncompressed level.</summary>
+    /// <summary>Tightly-packed byte count of one level: the block count for a compressed tag, the texel
+    /// count times the texel size for an uncompressed one.</summary>
     public static long LevelBytes(uint dxgiFormat, int width, int height) =>
-        (long)width * BytesPerPixel(dxgiFormat) * height;
+        IsBlockCompressed(dxgiFormat)
+            ? TextureCodec.BlobSize(ATTextureFormat.BC7, width, height, 1)
+            : (long)width * BytesPerPixel(dxgiFormat) * height;
 
     /// <summary>Write the header for <paramref name="levels"/> (largest first, one per mip) then the
     /// level bytes. <paramref name="width"/>/<paramref name="height"/> are the base level; the rest of
@@ -51,6 +54,8 @@ internal static class DdsWriter
         if (width <= 0 || height <= 0) throw new ArgumentException($"invalid DDS dimensions {width}x{height}");
         if (levels.Count == 0) throw new ArgumentException("a DDS needs at least the base level", nameof(levels));
         bool block = IsBlockCompressed(dxgiFormat);
+        if (block && ((width & 3) != 0 || (height & 3) != 0))
+            throw new ArgumentException($"Block-compressed DDS dimensions must be multiples of four, got {width}x{height}");
         if (!block && BytesPerPixel(dxgiFormat) == 0)
             throw new ArgumentException($"DXGI format {dxgiFormat} is not one this writer can tag", nameof(dxgiFormat));
 
@@ -61,8 +66,7 @@ internal static class DdsWriter
         int lw = width, lh = height;
         for (int i = 0; i < levels.Count; i++)
         {
-            long want = block ? TextureCodec.BlobSize(ATTextureFormat.BC7, lw, lh, 1)
-                              : LevelBytes(dxgiFormat, lw, lh);
+            long want = LevelBytes(dxgiFormat, lw, lh);
             if (levels[i].Length != want)
                 throw new ArgumentException(
                     $"mip level {i} is {levels[i].Length} bytes; DXGI {dxgiFormat} at {lw}x{lh} is {want}",

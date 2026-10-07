@@ -52,13 +52,10 @@ public class PickRowLabelTests
     [Fact]
     public void EveryShippedCuratedSkin_LeadsWithItsCuratedLabel_NotItsStem()
     {
-        // the real table, because these strings ARE the feature: a row leading with "Mayling_dorm" instead
-        // of "Barracks" is the regression this pins
+        // the real table, because these strings ARE the feature: a row leading with its model stem instead
+        // of its curated name is the regression this pins. Every curated entry renders BARE
+        // (OutfitKind.Other), so the curated string is the WHOLE leading segment, not merely its prefix.
         foreach (var skin in CuratedSkins.All)
-            Assert.StartsWith(skin.OutfitDisplay, Label(skin.ToOutfit()), StringComparison.Ordinal);
-
-        var mayling = CuratedSkins.All.Where(e => e.Character == "Mayling").ToList();
-        Assert.Equal(new[] { "Barracks", "Crew Deck" },
-            mayling.Select(e => Label(e.ToOutfit()).Split("  ·  ")[0]).ToArray());
+            Assert.Equal(skin.OutfitDisplay, Label(skin.ToOutfit()).Split("  ·  ")[0]);
     }
 }

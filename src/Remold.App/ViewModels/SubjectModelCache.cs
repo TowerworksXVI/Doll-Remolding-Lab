@@ -13,6 +13,7 @@ public sealed class SubjectModelCache
 {
     private readonly object _changeGate = new();
     private long _version;
+    private long _generation;
     private TaskCompletionSource _changed = NewChangeSource();
     private readonly ConcurrentDictionary<SubjectKey, SubjectModel> _models =
         new(SubjectKeyComparer.Instance);
@@ -39,11 +40,22 @@ public sealed class SubjectModelCache
     public SubjectModel GetOrBuild(string character, string stem, Func<SubjectModel> build)
     {
         var key = new SubjectKey(character, stem);
-        if (_models.TryGetValue(key, out var hit)) return hit;
+        long generation;
+        lock (_changeGate)
+        {
+            if (_models.TryGetValue(key, out var hit)) return hit;
+            generation = _generation;
+        }
         var made = build();
-        var result = _models.GetOrAdd(key, made);
-        if (ReferenceEquals(result, made)) SignalChanged();
-        return result;
+        lock (_changeGate)
+        {
+            // A rescan may have cleared the install while this model's materials were being read.
+            // The old caller can finish, but its answer must not repopulate the new install's cache.
+            if (generation != _generation) return made;
+            var result = _models.GetOrAdd(key, made);
+            if (ReferenceEquals(result, made)) SignalChanged();
+            return result;
+        }
     }
 
     /// <summary>The model for a subject IF one is already memoized, else null — a peek that never builds.
@@ -76,9 +88,13 @@ public sealed class SubjectModelCache
     /// <summary>Drop every memoized model and every recorded failure, for a re-read of the game.</summary>
     public void Clear()
     {
-        _models.Clear();
-        _unreadable.Clear();
-        SignalChanged();
+        lock (_changeGate)
+        {
+            _generation++;
+            _models.Clear();
+            _unreadable.Clear();
+            SignalChanged();
+        }
     }
 
     public long Version { get { lock (_changeGate) return _version; } }

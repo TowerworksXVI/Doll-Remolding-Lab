@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Remold.Core.Textures;
 
 namespace Remold.Core.Project;
@@ -53,6 +54,29 @@ public sealed partial class AuthoredEditSession
         lock (_gate)
             if (string.Equals(_project.RootDir, root, StringComparison.OrdinalIgnoreCase)) return;
         Change(project => project.RootDir = root);
+    }
+
+    /// <summary>Point the model at the app-owned folder its round trips live in. Like the root, it says
+    /// where the model's files are kept rather than what the modder authored, and it is not saved, so
+    /// setting it is not a change to the mod.</summary>
+    public void SetTransportRoot(string? root)
+    {
+        lock (_gate) _project.TransportRoot = root;
+    }
+
+    /// <summary>The name of this mod's round-trip folder, or null while it has none.</summary>
+    public string? RoundTripId
+    {
+        get { lock (_gate) return _project.RoundTripId; }
+    }
+
+    /// <summary>Give the mod the name of its round-trip folder. It is saved with the mod like the rest of
+    /// the model, but it records where the app keeps files rather than anything the modder made, so it is
+    /// not a change the page redraws for.</summary>
+    public void SetRoundTripId(string id)
+    {
+        if (!RoundTripStore.IsId(id)) throw new ArgumentException("not a round-trip id", nameof(id));
+        lock (_gate) _project.RoundTripId = id;
     }
 
     /// <summary>The compatibility reading of one part's Always placements.</summary>
@@ -337,9 +361,13 @@ public sealed partial class AuthoredEditSession
         && string.Equals(slot.Semantic, semantic, StringComparison.Ordinal));
 
     /// <summary>One part's game-domain slots as the install answers for them, in the shape and order the
-    /// schema-1 adapter and emission projection use: lod0 geometry, then each LOD tier, then each material's supported
+    /// schema-1 adapter and emission projection use: the part's geometry, then each material's supported
     /// texture bindings. The exact shader property, not the coarse semantic, separates bindings at one
-    /// material position; two properties may intentionally point at the same Texture2D resource.</summary>
+    /// material position; two properties may intentionally point at the same Texture2D resource.
+    ///
+    /// <para>ONE geometry slot, on <c>lod0</c>. A part's lower-detail versions take the same replacement
+    /// the closest one does, and a separate replacement per level was never something a modder could make,
+    /// so a slot per level would be a route nothing could ever answer differently.</para></summary>
     private static List<TargetSlot> GameSlots(TargetPart target, LegacyResolvedPart resolved)
     {
         var slots = new List<TargetSlot>();
@@ -354,21 +382,6 @@ public sealed partial class AuthoredEditSession
             Mesh = Clone(resolved.Mesh),
             MaterialIndexCounts = resolved.MaterialIndexCounts?.ToArray(),
         });
-        foreach (var tier in resolved.Tiers ?? Array.Empty<LegacyResolvedTier>())
-        {
-            // The tier's own name is the engine's word for it and is on no screen; what the modder can act
-            // on is that the part's lower-detail versions could not be pinned down.
-            RequireExact(tier.Renderer, LowerDetailVersions);
-            RequireExact(tier.Mesh, LowerDetailVersions);
-            slots.Add(new TargetSlot
-            {
-                Part = Clone(target),
-                Tier = tier.Tier,
-                Input = TargetInputKind.Geometry,
-                Renderer = Clone(tier.Renderer),
-                Mesh = Clone(tier.Mesh),
-            });
-        }
         foreach (var material in resolved.Materials ?? Array.Empty<LegacyResolvedMaterial>())
         {
             var inputs = new HashSet<string>(StringComparer.Ordinal);
@@ -431,10 +444,6 @@ public sealed partial class AuthoredEditSession
     /// <summary>Refuse a route the install cannot name one object for. The adapter reports the same gap as
     /// blocking migration; here there is no report to carry it, so it is said out loud instead of minting a
     /// slot nothing can be bound at.</summary>
-    /// <summary>What the part's LOD tiers are called on screen. One phrase for the whole set: which tier is
-    /// missing is a distinction nobody can act on, and the tier's own name is the engine's.</summary>
-    private const string LowerDetailVersions = "lower-detail versions";
-
     /// <param name="what">Which of the part's things is missing, in the modder's own words. Empty where the
     /// part itself is what the game files cannot pin down.</param>
     private static void RequireExact(GameAssetRef value, string what)
@@ -538,6 +547,9 @@ public sealed partial class AuthoredEditSession
                 Target = Clone(source.Target),
                 Label = NewEditLabel(project, source.Target, label),
                 Bindings = bindings,
+                DisabledMaterialEffects = source.DisabledMaterialEffects?.ToList(),
+                CopiedMaterialShading = source.CopiedMaterialShading?.Select(copy =>
+                    copy with { SourcePart = Clone(copy.SourcePart) }).ToList(),
             });
         });
         return id;
@@ -755,100 +767,42 @@ public sealed partial class AuthoredEditSession
             slotId, field, semantic, canonical, writes));
     }
 
-    /// <summary>Apply one shading dialog's changed rows as one authored transaction. Any slots the rows
-    /// need are minted in the same candidate as their bindings and files, so a stale edit or refused value
-    /// leaves no partial answer behind.</summary>
-    public void ApplyMaterialValues(string editDefinitionId, TargetPart target, int materialSlotIndex,
-        IReadOnlyList<AuthoredMaterialValueEdit> edits,
-        Func<TargetPart, LegacyResolvedPart?> resolvePart)
-    {
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(edits);
-        ArgumentNullException.ThrowIfNull(resolvePart);
-        var prepared = edits.Select(edit =>
-        {
-            var field = MaterialValueCatalog.Field(edit.Semantic)
-                ?? throw new ArgumentException($"'{edit.Semantic}' is not an authorable shading value",
-                    nameof(edits));
-            if (string.IsNullOrWhiteSpace(edit.Value)) return (field, Value: (string?)null);
-            if (!MaterialValueBuildSupport.TryValues(edit.Semantic, edit.Value, out _,
-                    out string canonical))
-                throw MaterialValueArgument(field, edit.Value);
-            return (field, Value: canonical);
-        }).ToList();
-        if (prepared.Select(item => item.field.Semantic).Distinct(StringComparer.Ordinal).Count()
-            != prepared.Count)
-            throw new ArgumentException("a shading field was supplied more than once", nameof(edits));
-        bool needsSlot = prepared.Any(item => item.Value is not null);
-        LegacyResolvedPart? resolved = needsSlot ? resolvePart(Clone(target)) : null;
-        if (needsSlot && resolved is null)
-            throw new AuthoredRefusalException(PartNotInstalled);
-
-        ChangeWithValueFiles((project, writes) =>
-        {
-            RequiredEdit(project, editDefinitionId);
-            foreach (var (field, canonical) in prepared)
-            {
-                var slot = MaterialValueSlot(project, target, materialSlotIndex, field.Semantic);
-                if (canonical is null)
-                {
-                    if (slot is not null)
-                        SetBinding(project, editDefinitionId,
-                            new Binding { SlotId = slot.Id, Kind = BindingKind.TargetGameValue });
-                    continue;
-                }
-                string slotId = slot?.Id ?? EnsureMaterialValueSlot(project, target,
-                    materialSlotIndex, field.Semantic, resolved!);
-                SetMaterialValue(project, editDefinitionId, slotId, field, field.Semantic,
-                    canonical, writes);
-            }
-            RemoveUnauthoredMaterialValueSlots(project);
-        });
-    }
-
-    /// <summary>Bind all selected source-material values in one transaction. Both sides' lazy slots and
-    /// every target binding commit together or not at all.</summary>
-    public void CopyMaterialValues(string editDefinitionId, TargetPart target, int materialSlotIndex,
-        TargetPart source, int sourceMaterialSlotIndex, IReadOnlyList<string> semantics,
-        Func<TargetPart, LegacyResolvedPart?> resolvePart)
-    {
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(semantics);
-        ArgumentNullException.ThrowIfNull(resolvePart);
-        var fields = semantics.Distinct(StringComparer.Ordinal).Select(semantic =>
-            MaterialValueCatalog.Field(semantic)
-            ?? throw new ArgumentException($"'{semantic}' is not an authorable shading value",
-                nameof(semantics))).ToList();
-        var targetResolved = resolvePart(Clone(target))
-            ?? throw new AuthoredRefusalException(PartNotInstalled);
-        var sourceResolved = resolvePart(Clone(source))
-            ?? throw new AuthoredRefusalException(SourcePartNotInstalled);
-        Change(project =>
-        {
-            RequiredEdit(project, editDefinitionId);
-            foreach (var field in fields)
-            {
-                string from = EnsureMaterialValueSlot(project, source, sourceMaterialSlotIndex,
-                    field.Semantic, sourceResolved);
-                string onto = EnsureMaterialValueSlot(project, target, materialSlotIndex,
-                    field.Semantic, targetResolved);
-                SetBinding(project, editDefinitionId, new Binding
-                {
-                    SlotId = onto,
-                    Kind = BindingKind.SourceSlot,
-                    SourceSlot = new BindingSourceSlot { SlotId = from },
-                });
-            }
-        });
-    }
-
     public void ChooseTargetGameValue(string editDefinitionId, string slotId) => Change(project =>
     {
         SetBinding(project, editDefinitionId,
             new Binding { SlotId = slotId, Kind = BindingKind.TargetGameValue });
         RemoveUnauthoredMaterialValueSlots(project);
     });
+
+    /// <summary>Returns a made shading value to the original wherever <paramref name="offered"/> answers for
+    /// the slot's material and does not list the value's field. No pass the game draws for that material
+    /// reads such a field, so the value never changed anything and a build cannot place it. A null answer
+    /// (the material could not be read) keeps the value. Reports each value it removed.</summary>
+    public IReadOnlyList<RemovedMaterialValue> RemoveMaterialValuesNoPassReads(
+        Func<TargetSlot, IReadOnlySet<string>?> offered)
+    {
+        ArgumentNullException.ThrowIfNull(offered);
+        var before = Snapshot();
+        var removed = new List<RemovedMaterialValue>();
+        foreach (var slot in before.TargetSlots.Where(slot =>
+                     slot.Input == TargetInputKind.MaterialValue && slot.Semantic is not null))
+        {
+            if (offered(slot) is not { } fields || fields.Contains(slot.Semantic!)) continue;
+            foreach (var edit in before.EditDefinitions)
+                if (edit.Bindings.Any(binding => string.Equals(binding.SlotId, slot.Id, StringComparison.Ordinal)
+                        && binding.Kind != BindingKind.TargetGameValue))
+                    removed.Add(new RemovedMaterialValue(edit.Id, edit.Label, slot.Id, slot.Semantic!));
+        }
+        if (removed.Count == 0) return removed;
+        Change(project =>
+        {
+            foreach (var value in removed)
+                SetBinding(project, value.EditDefinitionId,
+                    new Binding { SlotId = value.SlotId, Kind = BindingKind.TargetGameValue });
+            RemoveUnauthoredMaterialValueSlots(project);
+        });
+        return removed;
+    }
 
     public void ChooseInheritedCarrier(string editDefinitionId, string slotId) =>
         Choose(editDefinitionId, slotId, BindingKind.InheritedLiveCarrier);
@@ -878,17 +832,22 @@ public sealed partial class AuthoredEditSession
     /// <param name="bakedRest">geometry only: the scene-rest uprighting the session file the return
     /// came back through was baked by, so the asset states its own space (see
     /// <see cref="ProjectAsset.BakedRest"/>).</param>
+    /// <param name="shift">geometry only: the centre that session file was moved by, for a part the game
+    /// starts hidden (see <see cref="ProjectAsset.Shift"/>).</param>
+    /// <param name="hiddenCentred">geometry only: the return came from a session in which hidden parts
+    /// opened centred (see <see cref="ProjectAsset.HiddenCentred"/>), as the record of the session file it
+    /// came back through states it.</param>
     public ExactAssetPublishResult PublishAssetForBinding(ProjectAssetIngressSession ingress,
         ProjectAssetKind kind, string label, ProjectAssetNormalization normalization,
         ProjectAssetSource? source = null, int? replacementSubmeshCount = null,
-        IReadOnlyList<float>? bakedRest = null)
+        IReadOnlyList<float>? bakedRest = null, IReadOnlyList<float>? shift = null, bool hiddenCentred = false)
     {
         ArgumentNullException.ThrowIfNull(ingress);
         ArgumentNullException.ThrowIfNull(normalization);
         // Normalization is the expensive half and it holds no lock: only the record below is the
         // transaction, which is what lets a caller publish from a worker without stalling the window.
         var staged = StagePublish(Snapshot(), ingress, kind, label, normalization, source,
-            replacementSubmeshCount, bakedRest);
+            replacementSubmeshCount, new GeometrySpace(bakedRest, shift, hiddenCentred));
         try
         {
             if (staged is null) return new ExactAssetPublishResult(ProjectAssetPublishResult.Unchanged, null, null);
@@ -910,7 +869,7 @@ public sealed partial class AuthoredEditSession
     private static StagedPublish? StagePublish(AuthoredProject project,
         ProjectAssetIngressSession ingress, ProjectAssetKind kind, string label,
         ProjectAssetNormalization normalization, ProjectAssetSource? source, int? replacementSubmeshCount,
-        IReadOnlyList<float>? bakedRest)
+        GeometrySpace space)
     {
         if (project.RootDir is null) throw new InvalidOperationException("project has no root directory");
         var edit = RequiredEdit(project, ingress.EditDefinitionId);
@@ -926,8 +885,12 @@ public sealed partial class AuthoredEditSession
                 "a replacement cannot have a negative number of submeshes");
         if (replacementSubmeshCount is not null && slot.Input != TargetInputKind.Geometry)
             throw new InvalidOperationException("replacement output layout can only accompany geometry");
-        if (bakedRest is not null && slot.Input != TargetInputKind.Geometry)
+        if (space.BakedRest is not null && slot.Input != TargetInputKind.Geometry)
             throw new InvalidOperationException("a baked rest can only accompany geometry");
+        if ((space.Shift is not null || space.HiddenCentred) && slot.Input != TargetInputKind.Geometry)
+            throw new InvalidOperationException("a hidden part's centring can only accompany geometry");
+        if (space.Shift is not null && Workbench.HiddenPart.FromList(space.Shift) is null)
+            throw new ArgumentException("a shift record is three floats", nameof(space));
         ProjectAssetIngress.RequireUnchangedBinding(project, ingress);
         ProjectAssetIngress.RequireUnchangedSource(project, ingress);
 
@@ -973,8 +936,13 @@ public sealed partial class AuthoredEditSession
                 ? new ProjectAssetSource { ProjectAssetId = sourceId } : null;
         return new StagedPublish(ingress, kind,
             string.IsNullOrWhiteSpace(label) ? Path.GetFileName(relative) : label.Trim(),
-            assetId, relative, canonical, staged, lineage, replacementSubmeshCount, minted, bakedRest);
+            assetId, relative, canonical, staged, lineage, replacementSubmeshCount, minted, space);
     }
+
+    /// <summary>The space a published geometry file sits in: its rest bake, the centre a hidden part was
+    /// moved by, and whether it came from a session in which hidden parts opened centred.</summary>
+    private readonly record struct GeometrySpace(IReadOnlyList<float>? BakedRest, IReadOnlyList<float>? Shift,
+        bool HiddenCentred);
 
     /// <summary>One publish's MUTATION half: the staged bytes take their canonical place and the addressed
     /// binding names the new asset. Both belong to whichever transaction runs this — the file move is
@@ -1004,7 +972,9 @@ public sealed partial class AuthoredEditSession
             Label = staged.Label,
             File = staged.Relative,
             Source = staged.Lineage,
-            BakedRest = staged.BakedRest?.ToList(),
+            BakedRest = staged.Space.BakedRest?.ToList(),
+            Shift = staged.Space.Shift?.ToList(),
+            HiddenCentred = staged.Space.HiddenCentred ? true : null,
         });
         SetBinding(project, edit.Id, new Binding
         {
@@ -1035,7 +1005,7 @@ public sealed partial class AuthoredEditSession
     private sealed record StagedPublish(ProjectAssetIngressSession Ingress, ProjectAssetKind Kind,
         string Label, string AssetId, string Relative, string Canonical, string Staged,
         ProjectAssetSource? Lineage, int? ReplacementSubmeshCount,
-        IReadOnlyList<string> MintedDirectories, IReadOnlyList<float>? BakedRest);
+        IReadOnlyList<string> MintedDirectories, GeometrySpace Space);
 
     /// <summary>Apply only the accepted binding rows from a reviewable material-source proposal. Dynamic
     /// and unsupported differences remain visible on the proposal and can never become guessed bindings.</summary>
@@ -1700,8 +1670,10 @@ public sealed partial class AuthoredEditSession
     private static AuthoredProject Clone(AuthoredProject source)
     {
         string? root = source.RootDir;
+        string? transports = source.TransportRoot;
         var clone = AuthoredProjectSerializer.Deserialize(AuthoredProjectSerializer.Serialize(source));
         clone.RootDir = root;
+        clone.TransportRoot = transports;
         // The serializer is deliberately the deep-copy law for authored state. Rejoin the two pieces of
         // live install evidence it intentionally omits so a later transaction can use the measurement that
         // opened this session without leaking it into schema-2 JSON.
@@ -1771,6 +1743,8 @@ public sealed partial class AuthoredEditSession
         File = source.File,
         Source = source.Source is null ? null : Clone(source.Source),
         BakedRest = source.BakedRest?.ToList(),
+        Shift = source.Shift?.ToList(),
+        HiddenCentred = source.HiddenCentred,
         Value = source.Value is null ? null : new ProjectAssetValue
         {
             Semantic = source.Value.Semantic,
@@ -1866,6 +1840,10 @@ public sealed class AuthoredProjectChangedEventArgs : EventArgs
 public sealed record PartEditState(TargetPart Target, CompositionState State, string? EditDefinitionId);
 public sealed record EditSlotState(TargetSlot Slot, Binding Binding, ProjectAsset? ProjectAsset);
 public sealed record AuthoredMaterialValueEdit(string Semantic, string? Value);
+
+/// <summary>One made shading value returned to the original: the edit it was made in, and its field.</summary>
+public sealed record RemovedMaterialValue(string EditDefinitionId, string EditLabel, string SlotId,
+    string Semantic);
 
 public enum MaterialDifferenceDisposition
 {
@@ -1967,7 +1945,13 @@ public sealed record ProjectAssetNormalization(Action<string, string> Normalize,
 /// distinct from canonical project files; normalization completes in same-directory staging before publish.</summary>
 public static class ProjectAssetIngress
 {
-    public const string DirectoryName = ".ingress";
+    /// <summary>The folder inside a mod that older versions kept its round trips in. The app deletes it
+    /// from a mod it opens.</summary>
+    public const string LegacyDirectoryName = ".ingress";
+
+    /// <summary>The app-owned folder <paramref name="project"/>'s round trips live in.</summary>
+    public static string RootFor(AuthoredProject project) => project.TransportRoot
+        ?? throw new InvalidOperationException("project has no round-trip folder");
 
     /// <param name="handOver">This transport is opened and consumed inside ONE transaction, and it is not a
     /// round trip: the caller made <paramref name="unregisteredSource"/> for exactly this publish, no
@@ -2009,7 +1993,7 @@ public static class ProjectAssetIngress
         if (!File.Exists(source)) throw new FileNotFoundException("transport source is missing", source);
 
         string id = Guid.NewGuid().ToString("N");
-        string dir = Path.Combine(project.RootDir, DirectoryName, Segment(editDefinitionId),
+        string dir = Path.Combine(RootFor(project), Segment(editDefinitionId),
             Segment(slotId), id);
         var minted = MintDirectory(dir);
         string extension = Path.GetExtension(source);
@@ -2038,12 +2022,18 @@ public static class ProjectAssetIngress
     /// project-asset id and binding kind recorded when the session was launched.</summary>
     public static ProjectAssetIngressSession Resume(AuthoredProject project, string editDefinitionId,
         string slotId, string returnArtifact, string? sourceProjectAssetId,
-        BindingKind? sourceBindingKind = null)
+        BindingKind? sourceBindingKind = null) =>
+        Resume(project, editDefinitionId, slotId, returnArtifact, sourceProjectAssetId, sourceBindingKind,
+            recordedBindingIdentity: null);
+
+    private static ProjectAssetIngressSession Resume(AuthoredProject project, string editDefinitionId,
+        string slotId, string returnArtifact, string? sourceProjectAssetId, BindingKind? sourceBindingKind,
+        string? recordedBindingIdentity)
     {
         ArgumentNullException.ThrowIfNull(project);
         if (project.RootDir is null) throw new InvalidOperationException("project has no root directory");
         string returned = Path.GetFullPath(returnArtifact);
-        string expectedRoot = Path.GetFullPath(Path.Combine(project.RootDir, DirectoryName,
+        string expectedRoot = Path.GetFullPath(Path.Combine(RootFor(project),
             Segment(editDefinitionId), Segment(slotId))) + Path.DirectorySeparatorChar;
         if (!returned.StartsWith(expectedRoot, StringComparison.OrdinalIgnoreCase)
             || !Path.GetFileName(returned).StartsWith("return.", StringComparison.OrdinalIgnoreCase))
@@ -2065,9 +2055,11 @@ public static class ProjectAssetIngress
         string? expectedAsset = string.IsNullOrWhiteSpace(sourceProjectAssetId) ? null : sourceProjectAssetId;
         var expectedKind = sourceBindingKind
             ?? (expectedAsset is null ? BindingKind.TargetGameValue : BindingKind.ProjectAsset);
-        string expectedBinding = BindingIdentity(expectedKind, expectedAsset);
+        string expectedBinding = recordedBindingIdentity ?? BindingIdentity(expectedKind, expectedAsset);
         if (!string.Equals(BindingIdentity(binding), expectedBinding, StringComparison.Ordinal))
-            throw new InvalidOperationException("the exact slot changed after this Blender transport opened");
+            throw recordedBindingIdentity is null
+                ? new InvalidOperationException("the exact slot changed after this Blender transport opened")
+                : new AuthoredRefusalException(EditMovedWhileOpen);
 
         string identity = "";
         if (expectedAsset is not null)
@@ -2082,6 +2074,48 @@ public static class ProjectAssetIngress
         return new ProjectAssetIngressSession(Path.GetFileName(directory), editDefinitionId, slotId,
             expectedAsset, source, outbound, returned, identity, hasSemanticBaseline: expectedAsset is not null,
             startingBindingIdentity: expectedBinding);
+    }
+
+    private const string LentStateFile = "transport.json";
+
+    private sealed record LentState(
+        [property: JsonPropertyName("edit")] string EditDefinitionId,
+        [property: JsonPropertyName("slot")] string SlotId,
+        [property: JsonPropertyName("source_asset")] string? SourceProjectAssetId,
+        [property: JsonPropertyName("binding")] string BindingIdentity);
+
+    /// <summary>Write down what reopening <paramref name="session"/> needs, beside its files: the slot it
+    /// addresses and the answer that slot gave when the outside program last took a copy. Called when the
+    /// transport is lent and again after every save that lands, so a reopen checks the slot against the
+    /// answer the program's copy was made from.</summary>
+    public static void RecordLent(ProjectAssetIngressSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (session.HandedOver)
+            throw new InvalidOperationException("a handed-over transport is never reopened");
+        RoundTripStore.WriteAtomically(
+            Path.Combine(Path.GetDirectoryName(session.OutboundSnapshot)!, LentStateFile),
+            JsonSerializer.Serialize(new LentState(session.EditDefinitionId, session.SlotId,
+                session.SourceProjectAssetId, session.StartingBindingIdentity)));
+    }
+
+    /// <summary>Whether <paramref name="directory"/> holds a transport <see cref="RecordLent"/> wrote down.</summary>
+    public static bool IsRecordedLent(string directory) => File.Exists(Path.Combine(directory, LentStateFile));
+
+    /// <summary>Reopen the lent transport in <paramref name="directory"/> from what
+    /// <see cref="RecordLent"/> wrote down. It refuses, as a save into the live transport would, when the
+    /// slot no longer gives the answer the outside program's copy was made from.</summary>
+    public static ProjectAssetIngressSession ResumeLent(AuthoredProject project, string directory)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var state = JsonSerializer.Deserialize<LentState>(
+                File.ReadAllText(Path.Combine(directory, LentStateFile)))
+            ?? throw new InvalidDataException("the transport record is empty");
+        string outbound = Directory.EnumerateFiles(directory, "outbound.*").SingleOrDefault()
+            ?? throw new FileNotFoundException("transport outbound snapshot is missing", directory);
+        return Resume(project, state.EditDefinitionId, state.SlotId,
+            Path.Combine(directory, "return" + Path.GetExtension(outbound)), state.SourceProjectAssetId,
+            sourceBindingKind: null, recordedBindingIdentity: state.BindingIdentity);
     }
 
     internal static string BindingIdentity(Binding binding) => BindingIdentity(binding.Kind,

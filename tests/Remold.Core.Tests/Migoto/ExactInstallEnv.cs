@@ -27,6 +27,9 @@ internal static class ExactInstallEnv
         var reader = new BundleReader();
         var models = new Dictionary<(string, string), SubjectModel?>();
         var textureIds = new Dictionary<(string, string), long>();
+        // Each recipe address the resolved subjects spell, to the slot it draws: a synthetic mesh is filed in
+        // its bundle's container under its own name, so that name is the address's load key.
+        var slotByAddress = new Dictionary<string, string>(StringComparer.Ordinal);
         var inner = env.ResolveSubject;
 
         long TextureId(string bundleId, string name)
@@ -57,6 +60,7 @@ internal static class ExactInstallEnv
         {
             if (!string.IsNullOrWhiteSpace(bundle) && pathId != 0) return (bundle, pathId);
             if (string.IsNullOrWhiteSpace(address)) return (bundle, pathId);
+            slotByAddress.TryAdd(address, slotName);
             string? owner;
             try
             {
@@ -130,6 +134,12 @@ internal static class ExactInstallEnv
         {
             ResolveSubject = Resolve,
             CatalogVersion = env.CatalogVersion ?? "test-catalog",
+            // A fixture's parts carry no skeleton to read, and are authored in one mesh space.
+            PlacementOf = env.PlacementOf ?? ((_, _, _) => (System.Numerics.Matrix4x4.Identity, null)),
+            // nor a renderer whose root chain could be read, so no pool of it places a part by one
+            RootChainFor = env.RootChainFor ?? (_ => null),
+            // this env's own subjects first; an env it wraps answers for the addresses only it resolved
+            LoadKeyOf = address => slotByAddress.GetValueOrDefault(address) ?? env.LoadKeyOf?.Invoke(address),
         };
     }
 

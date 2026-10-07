@@ -18,7 +18,7 @@ namespace Remold.Core.Migoto;
 ///   stream0.buf / stream1.buf / stream2.buf   raw stream slices (pos·nrm·tan / color·uv / weights·indices)
 ///   ib.buf                                     raw m_IndexBuffer bytes
 ///   bindpose.json                              per-bone bindpose(16) + rest pivot(3)
-///   meta.json                                  stream manifest + counts + index format + submeshes
+///   meta.json                                  stream manifest + counts + index format + channel table + submeshes
 /// Operates on already-deobfuscated bundle bytes.
 /// </summary>
 public static class StreamDump
@@ -151,10 +151,10 @@ public static class StreamDump
 
     /// <summary><paramref name="reader"/> lets a caller dumping several meshes out of one bundle share the
     /// parse; null opens the bundle for this call alone.</summary>
-    public static Result Dump(byte[] deobfuscatedBundle, string meshName, string outDir, long pathId = 0,
+    public static Result Dump(byte[] deobfuscatedBundle, string meshName, string outDir, MeshSelector which = default,
         BundleReader? reader = null)
     {
-        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
+        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, which)
             ?? throw new InvalidDataException(
                 $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
         if (UnrecoverableSkinReason(field) is { } why)
@@ -190,7 +190,7 @@ public static class StreamDump
         sb.Append("  ]\n}\n");
         File.WriteAllText(Path.Combine(outDir, "bindpose.json"), sb.ToString());
 
-        // meta.json — stream manifest + counts + index format + submeshes
+        // meta.json — stream manifest + counts + index format + channel table + submeshes
         var meta = new StringBuilder();
         meta.Append("{\n");
         meta.Append($"  \"mesh\": \"{meshName}\", \"verts\": {mesh.VertexCount}, \"boneCount\": {skin.BoneCount},\n");
@@ -201,7 +201,10 @@ public static class StreamDump
         meta.Append("  \"streams\": [");
         for (int s = 0; s < mesh.StreamIds.Count; s++)
             meta.Append(s > 0 ? ", " : "").Append($"{{ \"stream\": {mesh.StreamIds[s]}, \"stride\": {Emitted(s)} }}");
-        meta.Append("],\n  \"submeshes\": [");
+        meta.Append("],\n");
+        // the mesh's own table: it describes the verbatim streams, not the widened skin stream
+        MetaChannels.Append(meta, UnityMesh.ChannelsOf(field));
+        meta.Append(",\n  \"submeshes\": [");
         for (int s = 0; s < mesh.Submeshes.Count; s++)
             meta.Append(s > 0 ? ", " : "").Append($"{{ \"firstByte\": {mesh.Submeshes[s].FirstByte}, \"indexCount\": {mesh.Submeshes[s].IndexCount}, \"baseVertex\": {mesh.Submeshes[s].BaseVertex} }}");
         meta.Append("]\n}\n");

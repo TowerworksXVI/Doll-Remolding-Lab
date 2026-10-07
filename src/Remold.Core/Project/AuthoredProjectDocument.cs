@@ -38,7 +38,7 @@ public sealed class AuthoredProjectDocument
     public bool OpenedLegacy { get; private set; }
 
     /// <summary>What the conversion at open inferred, for the first save to report. Null on a project that
-    /// was already schema 2 — a conversion that could not complete threw instead.</summary>
+    /// was already authored intent — a conversion that could not complete threw instead.</summary>
     public MigrationReport? LastMigrationReport { get; private set; }
 
     /// <summary>What an open says when a schema-1 mod cannot be converted because the game files it has to
@@ -49,7 +49,7 @@ public sealed class AuthoredProjectDocument
         + GameFilesGate.Unavailable;
 
     /// <summary>A fresh untitled project, authored from its first keystroke. A new mod has no released past
-    /// to convert, so there is nothing to adapt and its first save writes schema 2.</summary>
+    /// to convert, so there is nothing to adapt and its first save writes the current schema.</summary>
     public static AuthoredProjectDocument New() =>
         new(new AuthoredEditSession(new AuthoredProject()), openedLegacy: false);
 
@@ -64,12 +64,15 @@ public sealed class AuthoredProjectDocument
         Func<string, string, IReadOnlyList<string>>? rosterSlots = null)
     {
         int schema = AuthoredProjectSerializer.SchemaOf(path);
-        if (schema == AuthoredProject.CurrentSchema)
+        // an earlier authored schema reads as the current one, and the next save writes the current one
+        if (AuthoredProject.IsAuthored(schema))
             return new AuthoredProjectDocument(
                 new AuthoredEditSession(AuthoredProjectSerializer.Load(path)), openedLegacy: false);
         if (schema != ModProject.CurrentSchema)
             throw new InvalidDataException(schema > AuthoredProject.CurrentSchema
-                ? AuthoredProjectSerializer.NewerProject : AuthoredProjectSerializer.DamagedProject);
+                ? AuthoredProjectSerializer.NewerProject(AuthoredProjectSerializer.ModNameOf(
+                    Directory.Exists(path) ? ModProject.ManifestPathFor(path) : path))
+                : AuthoredProjectSerializer.DamagedProject);
         if (resolvePart is null) throw new InvalidDataException(NoInstall);
 
         var adaptation = LegacyProjectAdapter.Adapt(ModProject.Load(path), resolvePart, rosterSlots);
@@ -137,8 +140,9 @@ public sealed class AuthoredProjectDocument
     private static string Sentence(string detail) =>
         char.ToUpperInvariant(Trimmed(detail)[0]) + Trimmed(detail)[1..] + ".";
 
-    /// <summary>Persist what the session holds, as schema 2. A released schema-1 file on disk is replaced
-    /// atomically and retained as <c>mod.drlproj.bak</c>; a schema-2 file is simply rewritten.</summary>
+    /// <summary>Persist what the session holds, as the current schema. A released schema-1 file on disk is
+    /// replaced atomically and retained as <c>mod.drlproj.bak</c>; an authored file of this or an earlier
+    /// authored schema is simply rewritten.</summary>
     public void Save(string? path = null) => Write(Session, SaveTarget(path));
 
     private void Write(AuthoredEditSession session, string target)
@@ -213,6 +217,34 @@ public sealed class AuthoredProjectDocument
         return Load(destination);
     }
 
+    /// <summary>Save a copy of the project under <paramref name="name"/> in a new folder, all or nothing: a
+    /// copy that fails partway removes the folder it made, and where even that fails the
+    /// <see cref="PartialCopyException"/> names the folder left behind.</summary>
+    public AuthoredProjectDocument SaveCopyAs(string destination, string name)
+    {
+        string source = Session.Snapshot().RootDir
+            ?? throw new InvalidOperationException("project has no root directory to copy");
+        if (Directory.Exists(destination) || File.Exists(destination))
+            throw new IOException($"destination already exists: {destination}");
+        try
+        {
+            CopyInputs(source, destination);
+            var copy = Load(destination);
+            copy.Session.SetName(name);
+            copy.Save(destination);
+            return copy;
+        }
+        catch (Exception failure)
+        {
+            try { ModInstall.RetryBusy(() => ModInstall.DeleteTree(destination)); }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                throw new PartialCopyException(destination, failure);
+            }
+            throw;
+        }
+    }
+
     private static void CopyInputs(string source, string destination)
     {
         Directory.CreateDirectory(destination);
@@ -240,7 +272,7 @@ public sealed class AuthoredProjectDocument
     {
         string first = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
         return first.Equals(".editor", StringComparison.OrdinalIgnoreCase)
-            || first.Equals(ProjectAssetIngress.DirectoryName, StringComparison.OrdinalIgnoreCase);
+            || first.Equals(ProjectAssetIngress.LegacyDirectoryName, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Re-anchor parts against what THIS project already recorded, rather than against a mounted
@@ -315,4 +347,12 @@ public sealed class AuthoredProjectDocument
         GameBuild = source.GameBuild, LogicalBundle = source.LogicalBundle,
         PathId = source.PathId, Name = source.Name,
     };
+}
+
+/// <summary>A copy of a project failed partway and its folder could not be removed: <see cref="Folder"/>
+/// holds an unfinished project.</summary>
+public sealed class PartialCopyException(string folder, Exception cause)
+    : IOException($"the unfinished copy at {folder} could not be removed", cause)
+{
+    public string Folder { get; } = folder;
 }

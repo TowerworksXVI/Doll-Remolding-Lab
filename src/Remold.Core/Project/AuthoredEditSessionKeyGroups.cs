@@ -49,8 +49,29 @@ public sealed partial class AuthoredEditSession
     {
         var group = RequiredGroup(project, keyGroupId);
         string? normalized = NormalizeOptionalKey(key);
-        if (normalized is not null) RefuseSharedKey(project, normalized, group.Id);
+        if (normalized is not null)
+        {
+            RefuseSharedKey(project, normalized, group.Id);
+            RefuseOwnShortcut(group, normalized, null);
+        }
         group.Key = normalized;
+    });
+
+    /// <summary>Give one state a shortcut key, or clear it with null or whitespace. The key may match
+    /// another group's key or shortcut, or the whole-mod key; inside its own group it must be unique.</summary>
+    public void SetStateShortcut(string keyGroupId, string stateId, string? key) => Change(project =>
+    {
+        var group = RequiredGroup(project, keyGroupId);
+        var state = RequiredState(group, stateId);
+        string? normalized = NormalizeOptionalKey(key);
+        if (normalized is not null)
+        {
+            if (ModKeys.SameKey(group.Key, normalized))
+                throw new AuthoredRefusalException($"Key {ModKeys.Display(normalized)} already switches "
+                    + "this key group. Pick another key for the shortcut.");
+            RefuseOwnShortcut(group, normalized, state);
+        }
+        state.Shortcut = normalized;
     });
 
     public void RenameGroup(string keyGroupId, string? label) =>
@@ -164,7 +185,8 @@ public sealed partial class AuthoredEditSession
         }
     }
 
-    /// <summary>Duplicate one state, including all placements, and return the new stable id.</summary>
+    /// <summary>Duplicate one state, including all placements, and return the new stable id. The shortcut
+    /// stays with the source: two states of one group cannot share one.</summary>
     public string DuplicateState(string keyGroupId, string stateId, string? label = null)
     {
         string id = "";
@@ -286,7 +308,7 @@ public sealed partial class AuthoredEditSession
                 edit.ReturnWarning)).ToArray();
             var groups = _project.KeyGroups.Select(group => new KeyGroupOutline(group.Id, group.Key,
                 group.Label, group.States.Select(state => new KeyGroupStateOutline(state.Id, state.Label,
-                    state.ActiveEditIds.ToArray())).ToArray(), group.Persist)).ToArray();
+                    state.ActiveEditIds.ToArray(), state.Shortcut)).ToArray(), group.Persist)).ToArray();
             var knownParts = _project.TargetSlots.Select(slot => slot.Part)
                 .Concat(_project.EditDefinitions.Select(edit => edit.Target))
                 .Concat(_project.WorkspaceIndex?.Records.Select(record => record.Part)
@@ -374,6 +396,17 @@ public sealed partial class AuthoredEditSession
                 + ".");
     }
 
+    /// <summary>Refuse a key one of the group's states already jumps to, other than
+    /// <paramref name="except"/>: inside one group a press has one meaning.</summary>
+    private static void RefuseOwnShortcut(KeyGroup group, string key, KeyGroupState? except)
+    {
+        var holder = group.States.FirstOrDefault(state => !ReferenceEquals(state, except)
+            && ModKeys.SameKey(state.Shortcut, key));
+        if (holder is not null)
+            throw new AuthoredRefusalException($"Key {ModKeys.Display(key)} is already the shortcut for "
+                + $"{PlacementNames.State(group, holder)}. Pick another key.");
+    }
+
     private static string? Trimmed(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
@@ -394,4 +427,5 @@ public sealed record EditPlacementOutline(string? KeyGroupId, string? StateId, i
 public sealed record KeyGroupOutline(string Id, string? Key, string? Label,
     IReadOnlyList<KeyGroupStateOutline> States, bool Persist = false);
 
-public sealed record KeyGroupStateOutline(string Id, string? Label, IReadOnlyList<string> ActiveEditIds);
+public sealed record KeyGroupStateOutline(string Id, string? Label, IReadOnlyList<string> ActiveEditIds,
+    string? Shortcut = null);

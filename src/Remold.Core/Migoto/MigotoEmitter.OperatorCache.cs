@@ -33,7 +33,7 @@ public sealed partial class MigotoEmitter
     /// Everything else the solve is parameterised by is a constant, and <see cref="AlgoVersion"/> stamps
     /// those directly — they are not this revision's job. An entry written by another revision is not this
     /// revision's answer, so it is never read.</summary>
-    const int OperatorAlgoRevision = 3;
+    const int OperatorAlgoRevision = 5;
 
     /// <summary>The identity a cached operator is valid under: the hand-bumped revision plus the VALUE of
     /// every constant the solve is parameterised by, so editing one of them retires the entries it would
@@ -48,12 +48,13 @@ public sealed partial class MigotoEmitter
     /// (no cache root wired) or the caller could not name the mesh (no key). The operator NAME joins it: the
     /// name is embedded in the diagnostics the payload carries. So does the pool's bind-space CONVERSION:
     /// the solve runs on the part's geometry AFTER it, so a solve from an unconverted pool is not a
-    /// converted pool's answer.</summary>
+    /// converted pool's answer. So does whether the solve ties a bone no slim selection holds: a pool
+    /// part's operator does, a wardrobe member's does not.</summary>
     string? OperatorCacheKey(string? opKey, string name, Matrix4x4? conversion,
-        IReadOnlyList<int> retainedRows) =>
+        IReadOnlyList<int> retainedRows, bool tieSlimFailures) =>
         OperatorCacheDir is null || opKey is null
             ? null : $"{AlgoVersion()}|{name}|{opKey}{ConversionTag(conversion)}"
-                + $"|rows{string.Join('.', retainedRows)}";
+                + $"|rows{string.Join('.', retainedRows)}{(tieSlimFailures ? "|tieslim" : "")}";
 
     /// <summary>The conversion's nine rotation entries, or nothing at all when there is none — a part in
     /// its pool's reference space keys exactly as it does in a pool that converts nothing. A snapped

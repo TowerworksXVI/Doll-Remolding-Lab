@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -30,6 +30,23 @@ namespace Remold.Core.Tests;
 /// </summary>
 public class EditPageVmTests
 {
+    /// <summary>Exact disable operations a fixture material offers, one program each.</summary>
+    private static IReadOnlyList<MaterialEffectOperation> FixtureOperations(params string[] effectIds) =>
+        effectIds.Select(id => new MaterialEffectOperation(id, new[] { "0123456789abcdef" },
+            new[] { new MaterialEffectBufferPatch(2, 544, new[] { new MaterialPatchWrite("_UseGlitter", 116, 0) }) },
+            Array.Empty<MaterialEffectTexture>())).ToArray();
+
+    private sealed class ShadingTestFolder : IDisposable
+    {
+        private readonly string _path = Path.Combine(Path.GetTempPath(), "remold-shading-" + Guid.NewGuid().ToString("N"));
+        public ShadingTestFolder(AuthoredEditSession session)
+        {
+            Directory.CreateDirectory(_path);
+            session.SetRootDir(_path);
+        }
+        public void Dispose() => Directory.Delete(_path, recursive: true);
+    }
+
     // ---- the shell recorder ----
 
     private sealed class FakeShell : IEditPageShell
@@ -204,6 +221,11 @@ public class EditPageVmTests
             return MeshEditBlock(part);
         }
 
+        /// <summary>Whether the game starts a part hidden.</summary>
+        public Func<TargetPart, bool> Hidden = _ => false;
+
+        public Task<bool> HiddenPartAsync(TargetPart part) => Task.FromResult(Hidden(part));
+
         public async Task OpenPartInBlenderAsync(TargetPart part, bool withReferences,
             IProgress<string> status)
         {
@@ -263,6 +285,23 @@ public class EditPageVmTests
         public Exception? ShadingEditFailure;
         public IReadOnlyDictionary<string, string>? LastShadingAuthored;
         public bool? LastShadingAddsFirstEdit;
+        public IReadOnlyList<EditShadingEffectEdit>? ShadingEffectEdits;
+        public EditShadingInfo? ShadingInfo;
+        public Exception? ShadingReadFailure;
+        public bool ShadingPending;
+        public int ShadingReadCalls;
+        public EditShadingRead? PeekShading(TargetPart part, int materialSlotIndex,
+            GameAssetRef? material = null) => ShadingPending ? null
+                : ShadingReadFailure is not null ? new(null, "Couldn't read this material's effects.")
+                : new(ShadingInfo);
+
+        public Task<EditShadingInfo?> ReadShadingAsync(TargetPart part, int materialSlotIndex,
+            GameAssetRef? material = null)
+        {
+            ShadingReadCalls++;
+            return ShadingReadFailure is { } failure ? Task.FromException<EditShadingInfo?>(failure)
+                : Task.FromResult(ShadingInfo);
+        }
         public Task<EditShadingValuesResult?> EditShadingValuesAsync(EditRef edit,
             int materialSlotIndex, string materialLabel, IReadOnlyDictionary<string, string> authored,
             bool addsFirstEdit)
@@ -271,18 +310,24 @@ public class EditPageVmTests
             LastShadingAddsFirstEdit = addsFirstEdit;
             if (ShadingEditFailure is not null)
                 return Task.FromException<EditShadingValuesResult?>(ShadingEditFailure);
-            return Task.FromResult(ShadingEdits is null ? null
-                : new EditShadingValuesResult(ShadingEdits, ShadingMatchesOriginal));
+            return Task.FromResult(ShadingEdits is null && ShadingEffectEdits is null ? null
+                : new EditShadingValuesResult(ShadingEdits ?? Array.Empty<EditShadingValueEdit>(),
+                    ShadingMatchesOriginal, ShadingEffectEdits));
         }
 
         /// <summary>What the shading-source picker answers.</summary>
         public EditShadingSource? ShadingSource;
         public Exception? ShadingCopyFailure;
+        public IReadOnlyDictionary<string, string>? LastShadingCopyAuthored;
         public Task<EditShadingSource?> PickShadingSourceAsync(TargetPart part, int materialSlotIndex,
             string materialLabel, GameAssetRef? targetMaterial,
-            IReadOnlyList<(string Subject, string Outfit)> subjects, IProgress<string> status) =>
-            ShadingCopyFailure is null ? Task.FromResult(ShadingSource)
+            IReadOnlyDictionary<string, string> authored,
+            IReadOnlyList<(string Subject, string Outfit)> subjects, IProgress<string> status)
+        {
+            LastShadingCopyAuthored = authored;
+            return ShadingCopyFailure is null ? Task.FromResult(ShadingSource)
                 : Task.FromException<EditShadingSource?>(ShadingCopyFailure);
+        }
 
         /// <summary>Whether the last drop arrived with the page's own question already answered.</summary>
         public bool? LastDropConfirmed;
@@ -542,7 +587,7 @@ public class EditPageVmTests
     }
 
     [Fact]
-    public async Task Copied_shading_binds_the_exact_source_material_slot()
+    public async Task Copied_shading_saves_numeric_values_without_a_live_source_link()
     {
         var (vm, session, shell) = Page(TextureOnly(), s =>
         {
@@ -553,6 +598,7 @@ public class EditPageVmTests
                     new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0"),
                 });
         });
+        using var folder = new ShadingTestFolder(session);
         var row = ShadingRow(vm, "edit-long");
 
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(row);
@@ -562,17 +608,17 @@ public class EditPageVmTests
         var edit = project.EditDefinitions.Single(candidate => candidate.Id == "edit-long");
         var carrier = project.TargetSlots.Single(slot =>
             slot.Input == TargetInputKind.MaterialValue && slot.Part.SameAs(Body));
-        var source = project.TargetSlots.Single(slot =>
+        Assert.DoesNotContain(project.TargetSlots, slot =>
             slot.Input == TargetInputKind.MaterialValue && slot.Part.SameAs(AuthoredEditFixtures.Hair));
         var binding = edit.Bindings.Single(candidate => candidate.SlotId == carrier.Id);
-        Assert.Equal(BindingKind.SourceSlot, binding.Kind);
-        Assert.Equal(source.Id, binding.SourceSlot!.SlotId);
+        Assert.Equal(BindingKind.ProjectAsset, binding.Kind);
+        Assert.Null(binding.SourceSlot);
+        Assert.Equal("0", project.ProjectAssets.Single(asset => asset.Id == binding.ProjectAssetId).Value!.Value);
         Assert.Empty(AuthoredProjectValidator.Errors(project));
 
-        // the cheap row carries the copy marker; the shell resolves its number when the dialog opens
         var again = ShadingRow(vm, "edit-long");
         Assert.True(again.IsEdited);
-        Assert.Equal("", again.AuthoredValues["_UseGIFlatten"]);
+        Assert.Equal("0", again.AuthoredValues["_UseGIFlatten"]);
 
         // reverting returns the value to the original
         vm.RevertShadingCommand.Execute(again);
@@ -596,6 +642,7 @@ public class EditPageVmTests
                 });
         });
 
+        using var folder = new ShadingTestFolder(session);
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
         var copied = ShadingRow(vm, "edit-long");
         Assert.Equal(2, copied.AuthoredValues.Count);
@@ -608,13 +655,13 @@ public class EditPageVmTests
 
         var remaining = ShadingRow(vm, "edit-long");
         Assert.DoesNotContain(MaterialValueSemantics.UseGiFlatten, remaining.AuthoredValues.Keys);
-        Assert.Equal("", remaining.AuthoredValues["_StockingCenterColor"]);
+        Assert.Equal("1 1 1 1", remaining.AuthoredValues["_StockingCenterColor"]);
         var project = session.Snapshot();
         Assert.DoesNotContain(project.TargetSlots, slot => slot.Part.SameAs(Body)
             && slot.Input == TargetInputKind.MaterialValue
             && slot.Semantic == MaterialValueSemantics.UseGiFlatten);
         Assert.Contains(project.EditDefinitions.Single(edit => edit.Id == "edit-long").Bindings,
-            binding => binding.Kind == BindingKind.SourceSlot
+            binding => binding.Kind == BindingKind.ProjectAsset
                 && project.TargetSlots.Single(slot => slot.Id == binding.SlotId).Semantic
                     == "_StockingCenterColor");
     }
@@ -635,6 +682,205 @@ public class EditPageVmTests
         Assert.Equal(0, shell.ConfirmCalls);
         Assert.Equal(before, session.Revision);
         Assert.Equal(EditPageVm.ShadingAlreadyMatches, vm.Status);
+    }
+
+    [Fact]
+    public async Task Copy_refusal_keeps_numeric_values_and_effects_unchanged()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
+                new[] { new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0") },
+                EffectsToDisable: new[] { "detail" },
+                EffectOperations: Array.Empty<MaterialEffectOperation>());
+        });
+        using var folder = new ShadingTestFolder(session);
+        long revision = session.Revision;
+        await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        Assert.Equal(revision, session.Revision);
+        Assert.False(ShadingRow(vm, "edit-long").IsEdited);
+        Assert.Contains("cannot be disabled", vm.Status);
+    }
+
+    [Fact]
+    public async Task Copied_shading_records_its_source_and_names_what_it_leaves_alone()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
+                new[]
+                {
+                    new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0"),
+                    new EditShadingCopyRow("_StockingCenterColor", "Stocking centre colour", "1 1 1 1", null),
+                },
+                SourceMaterialName: "hair_faceuber", SkippedUnreadable: new[] { "Glitter density" },
+                EffectsCompared: false);
+        });
+        using var folder = new ShadingTestFolder(session);
+        await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        Assert.Contains("Copies 1 shading value. Returns 1 value to the original.", shell.LastConfirmBody);
+        Assert.Contains("Leaves Glitter density unchanged", shell.LastConfirmBody);
+        Assert.Contains(EditPageVm.EffectsNotCompared, shell.LastConfirmBody);
+        Assert.DoesNotContain("_StockingCenterColor", ShadingRow(vm, "edit-long").AuthoredValues.Keys);
+        Assert.NotNull(shell.LastShadingCopyAuthored);
+        var row = ShadingRow(vm, "edit-long");
+        Assert.Equal("0", row.AuthoredValues["_UseGIFlatten"]);
+        Assert.Equal("hair_faceuber", row.CopiedFrom);
+        Assert.Contains("copied from 'hair_faceuber'", row.Summary);
+        var definition = session.Snapshot().EditDefinitions.Single(edit => edit.Id == "edit-long");
+        var copy = Assert.Single(definition.CopiedMaterialShading!);
+        Assert.Equal(0, copy.MaterialSlotIndex);
+        Assert.True(copy.SourcePart.SameAs(AuthoredEditFixtures.Hair));
+        vm.RevertShadingCommand.Execute(row);
+        Assert.Null(session.Snapshot().EditDefinitions.Single(edit => edit.Id == "edit-long").CopiedMaterialShading);
+        Assert.Null(ShadingRow(vm, "edit-long").CopiedFrom);
+    }
+
+    [Fact]
+    public async Task Copy_warns_for_source_only_effects_and_saves_numeric_snapshot()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
+                new[] { new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "0", "0") },
+                SourceOnlyEffects: new[] { "Internal volume" });
+        });
+        using var folder = new ShadingTestFolder(session);
+        await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        Assert.Contains("Internal volume", shell.LastConfirmBody);
+        Assert.Equal("0", ShadingRow(vm, "edit-long").AuthoredValues["_UseGIFlatten"]);
+    }
+
+    [Fact]
+    public async Task A_prepared_shading_failure_stays_visible_without_retrying_on_selection()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingReadFailure = new IOException("unreadable fixture");
+        });
+        var node = PartRow(vm).Children.Single(candidate => candidate.EditDefinitionId == "edit-long");
+        await vm.LoadPreviewsAsync(node);
+        Assert.Contains("Couldn't read", node.MapGroups[0].Shading!.EffectsNote);
+        await vm.LoadPreviewsAsync(node);
+        vm.Enter();
+        Assert.Equal(0, shell.ShadingReadCalls);
+        Assert.Contains("Couldn't read", ShadingRow(vm, "edit-long").EffectsNote);
+        shell.ShadingReadFailure = null;
+        shell.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
+            new[] { new EditShadingEffect("stocking", "Stocking tint") },
+            FixtureOperations("stocking"));
+        vm.Rebuild(); // the outfit read has published its replacement answer
+        Assert.Equal(0, shell.ShadingReadCalls);
+        Assert.Single(ShadingRow(vm, "edit-long").Effects);
+        Assert.Equal("", ShadingRow(vm, "edit-long").EffectsNote);
+    }
+
+    [Fact]
+    public async Task Prepared_effects_are_present_when_cards_are_created_and_survive_redraws_without_reads()
+    {
+        var (vm, _, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
+                new[] { new EditShadingEffect("stocking", "Stocking tint") },
+                FixtureOperations("stocking"));
+        });
+
+        for (int redraw = 0; redraw < 3; redraw++)
+        {
+            var row = ShadingRow(vm, "edit-long");
+            Assert.Equal("stocking", Assert.Single(row.Effects).Id);
+            Assert.Equal("", row.EffectsNote);
+            var node = PartRow(vm).Children.Single(candidate => candidate.EditDefinitionId == "edit-long");
+            vm.SelectedNode = node;
+            await vm.LoadPreviewsAsync(node);
+            vm.Enter();
+            Assert.NotSame(row, ShadingRow(vm, "edit-long"));
+            Assert.Single(ShadingRow(vm, "edit-long").Effects);
+        }
+        Assert.Equal(0, shell.ShadingReadCalls);
+    }
+
+    [Fact]
+    public async Task Outfit_loading_publishes_effects_together_without_card_preview_work()
+    {
+        var (vm, _, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingPending = true;
+        });
+        Assert.Equal("Reading material effects…", ShadingRow(vm, "edit-long").EffectsNote);
+        var node = PartRow(vm).Children.Single(candidate => candidate.EditDefinitionId == "edit-long");
+        await vm.LoadPreviewsAsync(node);
+        Assert.Equal(0, shell.ShadingReadCalls);
+
+        shell.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
+            new[] { new EditShadingEffect("stocking", "Stocking tint") });
+        shell.ShadingPending = false;
+        vm.Rebuild();
+
+        Assert.Single(ShadingRow(vm, "edit-long").Effects);
+        Assert.Equal("", ShadingRow(vm, "edit-long").EffectsNote);
+        Assert.Equal(0, shell.ShadingReadCalls);
+    }
+
+    [Fact]
+    public async Task Effect_only_dialog_disable_and_revert_preserve_then_clear_saved_values()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
+                new[] { new EditShadingEffect("stocking", "Stocking tint") },
+                FixtureOperations("stocking"));
+        });
+        using var folder = new ShadingTestFolder(session);
+        shell.ShadingEdits = new[] { new EditShadingValueEdit("_StockingFalloffPower", "2") };
+        await vm.EditShadingValuesCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        shell.ShadingEdits = null;
+        shell.ShadingEffectEdits = new[] { new EditShadingEffectEdit("stocking", false) };
+        await vm.EditShadingValuesCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        var row = ShadingRow(vm, "edit-long");
+        Assert.Equal("2", row.AuthoredValues["_StockingFalloffPower"]);
+        Assert.Contains("stocking", row.DisabledEffectIds);
+        Assert.False(Assert.Single(row.Effects).IsEnabled);
+        vm.RevertShadingCommand.Execute(row);
+        Assert.False(ShadingRow(vm, "edit-long").IsEdited);
+        Assert.True(Assert.Single(ShadingRow(vm, "edit-long").Effects).IsEnabled);
+    }
+
+    [Fact]
+    public async Task Disable_all_retains_child_choice_and_ordinary_lighting_values()
+    {
+        var (vm, session, shell) = Page(TextureOnly(), candidate =>
+        {
+            candidate.Resolve = part => Installed(part);
+            candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(), new[]
+            {
+                new EditShadingEffect("internal-volume", "Internal volume"),
+                new EditShadingEffect("matcap", "Matcap", ParentId: "internal-volume"),
+            }, FixtureOperations("internal-volume", "matcap"));
+            candidate.ShadingEdits = new[] { new EditShadingValueEdit("_UseGIFlatten", "1") };
+        });
+        using var folder = new ShadingTestFolder(session);
+        await vm.EditShadingValuesCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        await vm.DisableAllShadingEffectsCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
+        var row = ShadingRow(vm, "edit-long");
+        Assert.Equal(new[] { "internal-volume" }, row.DisabledEffectIds);
+        Assert.Equal("1", row.AuthoredValues["_UseGIFlatten"]);
+        var effect = row.Effects.Single(candidate => candidate.Id == "internal-volume");
+        var child = row.Effects.Single(candidate => candidate.Id == "matcap");
+        Assert.False(effect.IsEnabled);
+        Assert.True(child.IsEnabled);
+        Assert.False(child.IsAvailable);
+        effect.IsEnabled = true;
+        await vm.ToggleShadingEffectCommand.ExecuteAsync(effect);
+        Assert.Empty(ShadingRow(vm, "edit-long").DisabledEffectIds);
+        Assert.Equal("1", ShadingRow(vm, "edit-long").AuthoredValues["_UseGIFlatten"]);
     }
 
     [Fact]
@@ -758,12 +1004,13 @@ public class EditPageVmTests
                 });
         });
 
+        using var folder = new ShadingTestFolder(session);
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(await BareShadingRow(vm));
 
         var edit = Assert.Single(EditsFor(session));
         Assert.True(Assert.Single(edit.Placements).IsAlways);
         Assert.Equal(edit.Id, vm.SelectedNode!.EditDefinitionId);
-        Assert.Equal("", ShadingRow(vm, edit.Id).AuthoredValues[MaterialValueSemantics.UseGiFlatten]);
+        Assert.Equal("0", ShadingRow(vm, edit.Id).AuthoredValues[MaterialValueSemantics.UseGiFlatten]);
         Assert.Contains(EditPageVm.AddsFirstEdit, shell.LastConfirmBody);
         Assert.Equal("Added Edit 1. Used in Always.", vm.Status);
     }
@@ -820,9 +1067,11 @@ public class EditPageVmTests
         var shell = new MainWindowViewModel(startLoad: false);
         var vm = new EditPageVm(shell);
         vm.Load(new AuthoredEditSession(TextureOnly()));
-        // The real shell completes its cold subject/install answer asynchronously. Let that landing redraw
-        // finish before exercising a command that walks the visible tree to publish its busy gate.
-        await Task.Delay(50);
+        // The real shell answers the install read on a worker, and the landing redraw replaces the tree
+        // there. Wait for the read rather than a fixed moment, so the row below is taken from the tree
+        // that redraw left, and a command that walks the visible tree to publish its busy gate walks a
+        // finished one.
+        await vm.InstallReadsLandedAsync();
         var row = ShadingRow(vm, "edit-long");
 
         await vm.EditShadingValuesCommand.ExecuteAsync(row);
@@ -853,20 +1102,47 @@ public class EditPageVmTests
     }
 
     [Fact]
-    public void A_failed_source_read_is_the_unreadable_copy_answer_not_an_empty_match()
+    public void A_failed_source_read_is_named_as_left_alone_not_an_empty_match()
     {
         var info = new EditShadingInfo(new[]
         {
             new EditShadingField(MaterialValueSemantics.UseGiFlatten, "Skin lighting",
                 MaterialValueKind.Float, 0, 1, "1"),
         });
-        var source = Ref(74001, "mat0");
+        var source = new EditShadingInfo(new[] { info.Fields[0] with { OriginalValue = null } });
+        var read = MainWindowViewModel.ReadShadingCopyRows(info, source);
+        Assert.Empty(read.Rows);
+        Assert.Equal("Skin lighting", Assert.Single(read.SkippedUnreadable));
+    }
 
-        var result = MainWindowViewModel.ReadShadingCopyRows(info, source, _ => null,
-            (_, _) => throw new InvalidOperationException("must not parse absent bytes"));
+    [Fact]
+    public void Copy_leaves_a_shared_original_alone_unless_the_edit_already_sets_it()
+    {
+        var field = new EditShadingField("_UseGIFlatten", "Skin lighting",
+            MaterialValueKind.Float, 0, 1, "1");
+        var target = new EditShadingInfo(new[] { field });
+        var source = new EditShadingInfo(new[] { field, new EditShadingField("_Anisotropy",
+            "Hair highlight", MaterialValueKind.Float, 0, 5, "3") });
+        Assert.Empty(MainWindowViewModel.ReadShadingCopyRows(target, source).Rows);
 
-        Assert.True(result.SourceUnreadable);
-        Assert.Empty(result.Rows);
+        var returned = Assert.Single(MainWindowViewModel.ReadShadingCopyRows(target, source,
+            new Dictionary<string, string> { ["_UseGIFlatten"] = "0" }).Rows);
+        Assert.Equal("_UseGIFlatten", returned.Semantic);
+        Assert.Null(returned.SourceValue);
+
+        var unreadable = MainWindowViewModel.ReadShadingCopyRows(target,
+            new EditShadingInfo(new[] { field with { OriginalValue = null } }));
+        Assert.Empty(unreadable.Rows);
+        Assert.Equal("Skin lighting", Assert.Single(unreadable.SkippedUnreadable));
+
+        // a field the target's drawn programs never read is not copied, and the editor shows it only
+        // when the edit already sets it
+        var unread = new EditShadingInfo(new[] { field with { Semantic = "_Anisotropy", Read = false } });
+        var richSource = new EditShadingInfo(new[] { field with { Semantic = "_Anisotropy", OriginalValue = "3" } });
+        Assert.Empty(MainWindowViewModel.ReadShadingCopyRows(unread, richSource).Rows);
+        Assert.Empty(MainWindowViewModel.ShadingDialogFields(unread, new Dictionary<string, string>()));
+        Assert.Single(MainWindowViewModel.ShadingDialogFields(unread,
+            new Dictionary<string, string> { ["_Anisotropy"] = "2" }));
     }
 
     [Fact]
@@ -2748,6 +3024,7 @@ public class EditPageVmTests
         public virtual Task<EditMeshPreview?> LoadPartMeshPreviewAsync(TargetPart part) =>
             Task.FromResult<EditMeshPreview?>(null);
         public virtual Task<string?> MeshEditBlockAsync(TargetPart part) => Task.FromResult<string?>(null);
+        public virtual Task<bool> HiddenPartAsync(TargetPart part) => Task.FromResult(false);
         public virtual Task OpenPartInBlenderAsync(TargetPart part, bool withReferences,
             IProgress<string> status) => Task.CompletedTask;
         public virtual Task OpenInBlenderAsync(EditRef edit, bool withReferences, IProgress<string> status) =>
@@ -2765,6 +3042,7 @@ public class EditPageVmTests
             Task.FromResult<EditShadingValuesResult?>(null);
         public virtual Task<EditShadingSource?> PickShadingSourceAsync(TargetPart part,
             int materialSlotIndex, string materialLabel, GameAssetRef? targetMaterial,
+            IReadOnlyDictionary<string, string> authored,
             IReadOnlyList<(string Subject, string Outfit)> subjects, IProgress<string> status) =>
             Task.FromResult<EditShadingSource?>(null);
         public virtual Task<EditAssetResult?> AcceptDroppedPictureAsync(EditSlotRef slot, string path,
@@ -3233,6 +3511,92 @@ public class EditPageVmTests
         Assert.Equal(refusal, row.PartRefusal);
     }
 
+    /// <summary>A part the game starts hidden opens in Blender centred at full size, so every row of it says
+    /// why it will not line up with the body, in the amber row under its action row, bare or edited. The
+    /// line blocks nothing.</summary>
+    [Fact]
+    public async Task A_hidden_part_says_so_on_its_row_bare_or_edited_and_on_each_edit_row()
+    {
+        var (bare, _, _) = Page(Bare(), s =>
+        {
+            s.Resolve = part => Installed(part);
+            s.Hidden = _ => true;
+        });
+        bare.SelectedNode = PartRow(bare);
+        for (int i = 0; i < 200 && !PartRow(bare).StartsHidden; i++) await Task.Delay(5);
+        Assert.Equal(EditNodeVm.HiddenPartNote, PartRow(bare).PartRefusal);
+        Assert.True(PartRow(bare).HasPartRefusal);
+        Assert.True(PartRow(bare).CanOpenInBlender);
+
+        var (edited, _, _) = Page(AuthoredEditFixtures.Golden(), s =>
+        {
+            s.Resolve = part => Installed(part);
+            s.Hidden = _ => true;
+        });
+        edited.SelectedNode = PartRow(edited);
+        for (int i = 0; i < 200 && !PartRow(edited).StartsHidden; i++) await Task.Delay(5);
+        var part = PartRow(edited);
+        Assert.False(part.IsBarePart);
+        Assert.Equal(EditNodeVm.HiddenPartNote, part.PartRefusal);
+        var edits = part.Children.Where(child => child.IsContentEdit).ToList();
+        Assert.NotEmpty(edits);
+        Assert.All(edits, row => Assert.Equal(EditNodeVm.HiddenPartNote, row.PartRefusal));
+        Assert.True(edits.All(row => row.CanOpenInBlender));
+        Assert.Equal("This part starts shrunk or off screen. Its position in Blender will not match the game.",
+            EditNodeVm.HiddenPartNote);
+        Assert.Equal("This part starts shrunk or off screen.", EditNodeVm.HiddenPartShrunk);
+
+        // a hide edit has no Blender opens, so its row says nothing about how the part opens there
+        edited.HidePartCommand.Execute(part);
+        var hide = PartRow(edited).Children.First(node => node.EditKind == EditDefinitionKind.Hide);
+        Assert.False(hide.StartsHidden);
+        Assert.False(hide.HasPartRefusal);
+    }
+
+    /// <summary>A hidden part the mesh-edit gate also refuses says the gate's reason first on every row of
+    /// it, bare, edited or an edit, and then only that the game starts it shrunk: how it opens in Blender
+    /// would contradict the greyed opens. A part the game does not start hidden shows neither the note nor
+    /// an empty row.</summary>
+    [Fact]
+    public async Task A_hidden_part_the_gate_blocks_says_the_gate_first_on_every_row_and_only_that_it_starts_shrunk()
+    {
+        const string refusal = "This mesh uses expressions and cannot be edited in Blender.";
+        string expected = refusal + "\n" + EditNodeVm.HiddenPartShrunk;
+        var (vm, _, _) = Page(Bare(), s =>
+        {
+            s.Resolve = part => Installed(part);
+            s.MeshEditBlock = _ => refusal;
+            s.Hidden = _ => true;
+        });
+        vm.SelectedNode = PartRow(vm);
+        for (int i = 0; i < 200 && !(PartRow(vm).HasMeshEditBlock && PartRow(vm).StartsHidden); i++)
+            await Task.Delay(5);
+        Assert.Equal(expected, PartRow(vm).PartRefusal);
+        Assert.DoesNotContain("Blender centred", PartRow(vm).PartRefusal);
+
+        var (edited, _, _) = Page(AuthoredEditFixtures.Golden(), s =>
+        {
+            s.Resolve = part => Installed(part);
+            s.MeshEditBlock = _ => refusal;
+            s.Hidden = _ => true;
+        });
+        edited.SelectedNode = PartRow(edited);
+        for (int i = 0; i < 200 && !(PartRow(edited).HasMeshEditBlock && PartRow(edited).StartsHidden); i++)
+            await Task.Delay(5);
+        var part = PartRow(edited);
+        Assert.False(part.IsBarePart);
+        Assert.Equal(expected, part.PartRefusal);
+        var edits = part.Children.Where(child => child.IsContentEdit).ToList();
+        Assert.NotEmpty(edits);
+        Assert.All(edits, row => Assert.Equal(expected, row.PartRefusal));
+
+        var (shown, _, _) = Page(Bare(), s => s.Resolve = part => Installed(part));
+        shown.SelectedNode = PartRow(shown);
+        await Task.Delay(20);
+        Assert.False(PartRow(shown).StartsHidden);
+        Assert.False(PartRow(shown).HasPartRefusal);
+    }
+
     /// <summary>The two shapes a source answer comes in, told apart by whether the slot it names belongs to
     /// an edit. One takes the game's own value from a place it names — the recorded keep-the-original — and
     /// the mod owns nothing there; the other takes a file the mod made for another of its own positions, and
@@ -3509,6 +3873,7 @@ public class EditPageVmTests
         {
             var project = AuthoredEditFixtures.Golden();
             project.RootDir = root;
+            project.TransportRoot = Path.Combine(root, "round-trips");
             var ramp = project.TargetSlots.Single(slot => slot.Id == "slot-ramp");
             project.TargetSlots.Add(new TargetSlot
             {
@@ -3574,9 +3939,8 @@ public class EditPageVmTests
 
             // The other half of the same rule: the build strips exactly this binding and says so.
             var plan = AuthoredBuildPlanner.Plan(project, new AuthoredBuildPlannerTests.Backend());
-            var stripped = plan.Bindings.Single(binding =>
-                binding.AuthoredSlot.Id == "slot-old-stock-picture");
-            Assert.Empty(stripped.Emissions);
+            Assert.DoesNotContain(plan.Bindings, binding => binding.EditDefinitionId == "edit-long"
+                && binding.AuthoredSlot.Id == "slot-old-stock-picture");
             Assert.Contains(plan.Warnings, warning =>
                 warning.Contains("will not take effect", StringComparison.Ordinal));
         }
@@ -4445,6 +4809,7 @@ public class EditPageVmTests
         {
             var project = AuthoredEditFixtures.Saved();
             project.RootDir = root;
+            project.TransportRoot = Path.Combine(root, "round-trips");
             var geometry = project.EditDefinitions.Single().Bindings
                 .Single(binding => binding.SlotId == "slot-geometry");
             geometry.Kind = BindingKind.TargetGameValue;

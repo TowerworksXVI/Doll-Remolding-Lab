@@ -203,7 +203,14 @@ public static class ModInstall
     /// <summary>Copy <paramref name="builtDir"/> into <paramref name="modsRoot"/> under its own folder name,
     /// replacing a same-named folder. The replaced folder is renamed aside for the length of the swap and
     /// restored if anything throws, so the Mods folder always holds one complete copy of the mod.</summary>
-    public static Outcome Install(string builtDir, string modsRoot, Action<string>? log = null)
+    public static Outcome Install(string builtDir, string modsRoot, Action<string>? log = null) =>
+        Install(builtDir, modsRoot, log, busyDelay: null);
+
+    /// <summary>The install with its busy-retry wait handed in, so a test can hold the retried path exactly
+    /// where it needs holding and count the waits instead of timing them. Production passes nothing and
+    /// sleeps.</summary>
+    internal static Outcome Install(string builtDir, string modsRoot, Action<string>? log,
+        Action<TimeSpan>? busyDelay)
     {
         if (!Directory.Exists(builtDir))
             throw new DirectoryNotFoundException($"the built mod folder is gone: {builtDir}");
@@ -254,7 +261,7 @@ public static class ModInstall
 
         void Retry(Action operation, string description)
         {
-            int attempts = RetryBusy(operation);
+            int attempts = RetryBusy(operation, busyDelay);
             if (attempts > 1)
                 log?.Invoke($"the Mods folder was busy {description}; succeeded on attempt {attempts}");
         }
@@ -318,11 +325,13 @@ public static class ModInstall
         }
     }
 
+    /// <summary>Access denied (5), a sharing violation (32), or a file swap whose outgoing file another
+    /// process holds open (1175, which leaves both files under their own names).</summary>
     private static bool IsBusy(Exception e) => e is UnauthorizedAccessException
-        || e is IOException io && (io.HResult & 0xffff) is 5 or 32;
+        || e is IOException io && (io.HResult & 0xffff) is 5 or 32 or 1175;
 
     /// <summary>Recursively delete a tree after clearing Windows' read-only deletion veto.</summary>
-    private static void DeleteTree(string path)
+    internal static void DeleteTree(string path)
     {
         if (!Directory.Exists(path)) return;
         var root = new DirectoryInfo(path);

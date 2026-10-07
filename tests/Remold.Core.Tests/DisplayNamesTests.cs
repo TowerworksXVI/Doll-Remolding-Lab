@@ -30,10 +30,16 @@ public class DisplayNamesTests
         g.WriteTable("GunWeaponData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
         g.WriteIntlTable("WeaponSkinData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
         g.WriteIntlTable("WeaponModSkinData", TempGame.TableBytes(System.Array.Empty<byte[]>()));
+        g.WriteTable("SupportData", TempGame.TableBytes(new[]
+        {
+            // a support team row: #1 = id, #2 = {#1 = team-name text-id}, #13 = model stem
+            Pb.Msg().Varint(1, 1001).Sub(2, Pb.Msg().Varint(1, 5003)).Str(13, "TEAM01").ToArray(),
+        }));
         string root = g.WriteTable("LangPackageTableEnusData", TempGame.TableBytes(new[]
         {
             TempGame.LangRow(5001, "Mirel"),
             TempGame.LangRow(5002, "Plum Fizz"),
+            TempGame.LangRow(5003, "First Team"),
             TempGame.LangRow(9999, "Not referenced by a roster table"),
         }));
         return GameDatabase.FromGameDir(root);
@@ -86,8 +92,9 @@ public class DisplayNamesTests
 
         Assert.False(coldHit);
         Assert.True(warmHit);
-        Assert.Equal(2, warm.Count);
+        Assert.Equal(3, warm.Count);
         Assert.Null(warm.Text(9999));
+        Assert.Equal("First Team", warm.Text(5003));   // the support-team name rides the compact snapshot
         Assert.Equal(coldNames.Character(1071), warmNames.Character(1071));
         Assert.Equal(coldNames.Outfit("VesnaSSR0101"), warmNames.Outfit("VesnaSSR0101"));
     }
@@ -101,6 +108,7 @@ public class DisplayNamesTests
     [InlineData("GunWeaponData")]
     [InlineData("WeaponSkinData")]
     [InlineData("WeaponModSkinData")]
+    [InlineData("SupportData")]
     public void Roster_display_name_snapshot_invalidates_on_any_contributing_table_identity(string table)
     {
         using var g = new TempGame();

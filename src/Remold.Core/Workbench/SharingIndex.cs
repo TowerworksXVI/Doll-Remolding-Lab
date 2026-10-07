@@ -37,7 +37,7 @@ public readonly record struct SharingProgress(int Done, int Total, bool Delta);
 
 /// <summary>
 /// Per-catalog measurement of asset sharing across the modding roster: which texture contents and which
-/// mesh index buffers are worn by more than one outfit. 3DMigoto matches overrides by content hash, so an
+/// mesh draw signatures are worn by more than one outfit. 3DMigoto matches overrides by content hash, so an
 /// edit's true reach is the hash's wearer set — this index lets a build scope shared edits and disclose
 /// the reach it cannot scope.
 ///
@@ -63,7 +63,7 @@ public sealed class SharingIndex
     /// fingerprint tracks the game's data and not this code.
     ///
     /// <para>A bump has to reach further than this file, and that reach is WIRED rather than remembered:
-    /// <see cref="AssetHashMemo"/> persists values this code computed (ib and texture hashes) under keys
+    /// <see cref="AssetHashMemo"/> persists values this code computed (draw selectors and texture hashes) under keys
     /// that name game content alone, so a bump that correctly re-measures every row would otherwise serve
     /// every value straight back out of the memo. The memo's file states the sharing schema it was written
     /// under and is dropped whole when that no longer matches, so a bump here invalidates those values by
@@ -76,26 +76,30 @@ public sealed class SharingIndex
     /// answers to that inside one arc (the physical filename, then the content hash), so the version is
     /// what tells them apart.</para>
     ///
-    /// <para>7: the reuse gate stopped keying on packaging identity. The fingerprint dropped its internalId
-    /// joins, the read record dropped its internalId key, and a row with no read record at all — the old
-    /// bootstrap allowance, which let the shipped seed be kept on a fingerprint alone — is no longer
-    /// reusable at any grain. Every row, the seed's included, now carries what it read.</para>
-    ///
-    /// <para>8: measurement now admits every renderer-slot tier, including <c>lodm</c> tiers. Rows measured
-    /// under schema 7 can omit those mesh and witness hashes while their fingerprint and read-bundle
-    /// content still match, so no schema-7 row is reusable. Each row also records which logical bundle
-    /// every catalog-resolved part address named, closing the case where an address retargets while every
-    /// bundle the old row read remains untouched.</para></summary>
-    public const int SchemaVersion = 8;
+    /// <para>Measurement follows renderer-root ownership and catalog-resolved recipe precedence at every
+    /// tier, including <c>lodm</c>, and measures the Mesh copy each recipe address's load key names.
+    /// Changes to those rules require fresh observations even when game content is unchanged. Every
+    /// reusable row records its read-bundle content and part-address resolutions, load keys
+    /// included.</para></summary>
+    public const int SchemaVersion = 11;
 
     /// <summary>One roster outfit that wears an asset. Display fields fall back to the internal
     /// names when localization resolved nothing.</summary>
     public sealed record Wearer(string Character, string? CharacterDisplay, string Stem, string? StemDisplay)
     {
         public string CharacterLabel => string.IsNullOrEmpty(CharacterDisplay) ? Character : CharacterDisplay!;
+        public string StemLabel => string.IsNullOrEmpty(StemDisplay) ? Stem : StemDisplay!;
+
+        /// <summary>The roster's kind for this outfit. A Dorm outfit is always shown alone, so no edit
+        /// co-changes with it.</summary>
+        public OutfitKind Kind { get; init; } = OutfitKind.Other;
+
+        /// <summary>Whether this outfit is on screen together with its character's other outfits
+        /// (<see cref="Model.Character.OutfitsAppearTogether"/>): a support-team member.</summary>
+        public bool AppearsWithSiblings { get; init; }
     }
 
-    /// <summary>One outfit's measurement: the mesh ibs and texture contents it wears, the subset of its
+    /// <summary>One outfit's measurement: the mesh draw selectors and texture contents it wears, the subset of its
     /// meshes ELIGIBLE to witness its presence, the <see cref="SubjectFingerprint"/> of the catalog shape it
     /// was measured under, its catalog-resolved part addresses, and the <see cref="BundleReads"/> record of
     /// what the bundles it read were holding. <see cref="WitnessCandidates"/> is eligibility only — privacy
@@ -113,6 +117,7 @@ public sealed class SharingIndex
     private readonly HashSet<int> _duplicateDoors;                  // ordinals filtered out of the population
     private readonly Dictionary<string, int[]> _texWearers;         // texture hash (x8) → wearer ordinals
     private readonly Dictionary<string, int[]> _meshWearers;        // ib hash (x8) → wearer ordinals
+    private readonly Dictionary<string, string[]> _meshKeysByHash;
     private readonly Dictionary<int, string[]> _witnesses;          // ordinal → private witness ib hashes
 
     public string CatalogVersion { get; }
@@ -153,6 +158,8 @@ public sealed class SharingIndex
             Add(wearer.CharacterDisplay);
             Add(wearer.Stem);
             Add(wearer.StemDisplay);
+            Add(wearer.Kind.ToString());
+            Add(wearer.AppearsWithSiblings ? "together" : "alone");
             Add(_duplicateDoors.Contains(i) ? "door" : "row");
             Add(row.Fingerprint);
             foreach (string value in row.Mesh) Add(value);
@@ -203,6 +210,8 @@ public sealed class SharingIndex
         }
         _texWearers = Compact(tex);
         _meshWearers = Compact(mesh);
+        _meshKeysByHash = _meshWearers.Keys.GroupBy(key => DrawSelector.Parse(key).Hash)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
 
         // A witness must be PRIVATE: worn by exactly its own outfit across the population.
         _witnesses = new Dictionary<int, string[]>();
@@ -210,7 +219,7 @@ public sealed class SharingIndex
         {
             if (_duplicateDoors.Contains(ord)) continue;
             var priv = observations[ord].WitnessCandidates
-                .Where(ib => _meshWearers.TryGetValue(ib, out var w) && w.Length == 1).ToArray();
+                .Where(key => MeshOrdinals(key).Length == 1).ToArray();
             if (priv.Length > 0) _witnesses[ord] = priv;
         }
 
@@ -242,7 +251,7 @@ public sealed class SharingIndex
 
         static string? Signature(Observation o)
         {
-            var distinct = o.Mesh.Distinct(StringComparer.Ordinal).ToList();
+            var distinct = o.Mesh.Select(key => DrawSelector.Parse(key).Hash).Distinct(StringComparer.Ordinal).ToList();
             if (distinct.Count == 0) return null;
             distinct.Sort(StringComparer.Ordinal);
             return string.Join(",", distinct);
@@ -276,11 +285,36 @@ public sealed class SharingIndex
     public IReadOnlyList<Wearer> TexOtherWearers(string texHash, string character, string stem) =>
         OtherWearers(_texWearers, texHash, character, stem);
 
-    /// <summary>Wearers of the mesh ib beyond the given outfit (empty ⇒ private to it).</summary>
-    public IReadOnlyList<Wearer> MeshOtherWearers(string ibHash, string character, string stem) =>
-        OtherWearers(_meshWearers, ibHash, character, stem);
+    /// <summary>Wearers of every mesh a section keyed on <paramref name="key"/> fires on, beyond the given
+    /// outfit (empty ⇒ private to it). The key may be bare or carry fewer slots than the measured selector;
+    /// it reaches exactly the roster meshes its section would act on.</summary>
+    public IReadOnlyList<Wearer> MeshOtherWearers(string key, string character, string stem)
+    {
+        int self = _ordinalByKey.TryGetValue(Key(character, stem), out var ordinal) ? ordinal : -1;
+        return MeshOrdinals(key).Where(o => o != self).Select(o => _wearers[o]).ToArray();
+    }
 
-    /// <summary>The outfit's presence witnesses: ib hashes of rendering tiers private to this outfit and
+    /// <summary>The wearer row of one outfit, or null when the outfit is not in this index.</summary>
+    public Wearer? WearerOf(string character, string stem) =>
+        _ordinalByKey.TryGetValue(Key(character, stem), out var ordinal) ? _wearers[ordinal] : null;
+
+    /// <summary>Every distinct draw selector measured on <paramref name="ibHash"/> across the population —
+    /// what a section on one of them has to exclude to fire on that mesh alone.</summary>
+    public IReadOnlyList<DrawSelector> SelectorsOn(string ibHash) =>
+        _meshKeysByHash.TryGetValue(ibHash, out var keys)
+            ? keys.Select(DrawSelector.Parse).ToArray() : Array.Empty<DrawSelector>();
+
+    // Accepted: the candidates on one ib are single digits, so parsing each on every call costs nothing
+    // measurable, and a parsed cache would be more code than the work it saves.
+    private int[] MeshOrdinals(string key)
+    {
+        var section = DrawSelector.Parse(key);
+        if (!_meshKeysByHash.TryGetValue(section.Hash, out var candidates)) return Array.Empty<int>();
+        return candidates.Where(candidate => section.FiresOn(DrawSelector.Parse(candidate)))
+            .SelectMany(candidate => _meshWearers[candidate]).Distinct().OrderBy(o => o).ToArray();
+    }
+
+    /// <summary>The outfit's presence witnesses: draw selectors of tiers private to this outfit and
     /// eligible to signal presence. Empty when the outfit has none (or is not covered).</summary>
     public IReadOnlyList<string> WitnessIbs(string character, string stem) =>
         Covers(character, stem) && _witnesses.TryGetValue(_ordinalByKey[Key(character, stem)], out var w)
@@ -391,7 +425,8 @@ public sealed class SharingIndex
             ct.ThrowIfCancellationRequested();
             if (reuse is not null)
             {
-                wearers.Add(new Wearer(character.Name, character.DisplayName, outfit.Stem, outfit.DisplayName));
+                wearers.Add(new Wearer(character.Name, character.DisplayName, outfit.Stem, outfit.DisplayName)
+                    { Kind = outfit.Kind, AppearsWithSiblings = character.OutfitsAppearTogether });
                 observations.Add(reuse);
                 continue;
             }
@@ -405,7 +440,7 @@ public sealed class SharingIndex
             var outfitMesh = new List<string>();
             var outfitTex = new List<string>();
             var outfitWitness = new List<string>();
-            var outfitResolutions = new List<(string Address, string Owner)>();
+            var outfitResolutions = new List<(string Address, string Owner, string? LoadKey)>();
             // Every bundle this outfit's measurement DEPENDS on, whether the value was read here or served
             // from a cross-outfit memo (a memo hit depends on the same bundle as the read that filled it):
             // the mesh and texture bundles gathered below, plus the assembly prefabs the model was parsed
@@ -445,7 +480,7 @@ public sealed class SharingIndex
                 // The shadow-pass flag and the visibility override are both keyed per TIER: the list
                 // interleaves the representative slot and the siblings, each tier is its own renderer with
                 // its own m_CastShadows, and the dorm lists name tier nodes one at a time.
-                var tiers = new List<(string Name, string Bundle, long PathId, bool Casts, VisibilityOverride Vis)>();
+                var tiers = new List<(string Name, string Bundle, MeshSelector Mesh, bool Casts, VisibilityOverride Vis)>();
                 void Tier(string name, string address, string? smrBundle, long smrPathId, bool casts,
                     VisibilityOverride vis)
                 {
@@ -453,8 +488,10 @@ public sealed class SharingIndex
                     if (string.IsNullOrEmpty(address)) { problems.Add($"{outfit.Stem}: '{name}' has no mesh identity"); return; }
                     var owner = catalog.ResolveAddress(address);
                     if (owner is null) { problems.Add($"{outfit.Stem}: no catalog entry for '{address}'"); return; }
-                    outfitResolutions.Add((address, owner));
-                    tiers.Add((name, owner, 0, casts, vis));
+                    // the load key picks which same-named copy is measured, so it is an input the row records
+                    var loadKey = catalog.LoadKeyForAddress(address);
+                    outfitResolutions.Add((address, owner, loadKey));
+                    tiers.Add((name, owner, MeshSelector.ByLoadKey(loadKey), casts, vis));
                 }
                 Tier(part.SlotName, part.MeshAddress, part.MeshBundle, part.MeshPathId, part.CastsShadows,
                     part.Visibility);
@@ -489,7 +526,7 @@ public sealed class SharingIndex
                         {
                             var bytes = Bytes(bundleId);
                             if (bytes is null) { problems.Add($"{outfit.Stem}: bundle missing for mesh '{name}'"); continue; }
-                            try { ib = BufferHash.Compute(bytes, name, pathId, reader).Ib.ToString("x8"); }
+                            try { ib = BufferHash.Compute(bytes, name, pathId, reader).Selector.Key; }
                             catch (Exception ex) { problems.Add($"{outfit.Stem}: mesh '{name}': {ex.Message}"); continue; }
                             hashes?.Put(memoKey, ib);
                         }
@@ -550,7 +587,8 @@ public sealed class SharingIndex
                 failedOutfits.Add(Key(character.Name, outfit.Stem));
                 continue;
             }
-            wearers.Add(new Wearer(character.Name, character.DisplayName, outfit.Stem, outfit.DisplayName));
+            wearers.Add(new Wearer(character.Name, character.DisplayName, outfit.Stem, outfit.DisplayName)
+                { Kind = outfit.Kind, AppearsWithSiblings = character.OutfitsAppearTogether });
             observations.Add(new Observation(fingerprint, outfitMesh, outfitTex, outfitWitness,
                 BundleReads.Of(catalog, contentHashOf, outfitReads),
                 PartAddressResolutions.Of(outfitResolutions)));
@@ -727,7 +765,8 @@ public sealed class SharingIndex
                 // A row missing either reuse record cannot be gated at that grain. Drop it so its outfit
                 // measures again like any uncovered one.
                 if (row.R is null || row.A is null) continue;
-                wearers.Add(new Wearer(hit.C.Name, hit.C.DisplayName, hit.O.Stem, hit.O.DisplayName));
+                wearers.Add(new Wearer(hit.C.Name, hit.C.DisplayName, hit.O.Stem, hit.O.DisplayName)
+                    { Kind = hit.O.Kind, AppearsWithSiblings = hit.C.OutfitsAppearTogether });
                 observations.Add(new Observation(row.F, row.M, row.T, row.W, row.R, row.A));
             }
             var failed = new List<string>();

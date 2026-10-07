@@ -370,7 +370,7 @@ public class RepairDataTests : IDisposable
             {
                 Submesh = 0,
                 NormalOrigin = SlotOrigin.ExplicitNeutral,
-                RmoOrigin = SlotOrigin.VanillaOwn,
+                RmoOrigin = SlotOrigin.Untouched,
             },
         });
 
@@ -385,6 +385,20 @@ public class RepairDataTests : IDisposable
         // and the model records the two as one answer.
         Assert.Equal("VanillaOwn", row.GetProperty("albedo").GetProperty("origin").GetString());
         Assert.False(row.GetProperty("albedo").TryGetProperty("file", out _));
+    }
+
+    /// <summary>An untouched slot persists under the spelling every released build wrote — in the repair
+    /// record above and in any row a project file carries. The member's name changed; the file's did not,
+    /// and a row written under either build reads back as the same answer.</summary>
+    [Fact]
+    public void An_untouched_slot_persists_under_its_released_spelling()
+    {
+        string written = JsonSerializer.Serialize(new SubmeshTextures { Submesh = 0, NormalOrigin = SlotOrigin.Untouched });
+        var read = JsonSerializer.Deserialize<SubmeshTextures>("{\"submesh\":0,\"normal_origin\":\"VanillaOwn\"}")!;
+
+        Assert.Contains("\"normal_origin\":\"VanillaOwn\"", written);
+        Assert.Equal(SlotOrigin.Untouched, read.NormalOrigin);
+        Assert.Equal("VanillaOwn", SlotOrigin.Untouched.RecordName());
     }
 
     [Fact]

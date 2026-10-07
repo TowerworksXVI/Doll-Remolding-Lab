@@ -311,7 +311,7 @@ public static class WeaponRoster
     }
 
     /// <summary>The owner-character core of a weapon stem: trailing digits stripped, then one tier
-    /// token (<c>SSR</c>/<c>SR</c>/<c>R</c>). <c>LennaSSR01</c> → <c>Lenna</c>.</summary>
+    /// token (<c>SSR</c>/<c>SR</c>/<c>R</c>). <c>&lt;name&gt;SSR01</c> → <c>&lt;name&gt;</c>.</summary>
     internal static string OwnerCore(string folderStem)
     {
         var core = folderStem.TrimEnd("0123456789".ToCharArray());

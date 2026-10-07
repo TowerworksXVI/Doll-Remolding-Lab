@@ -74,16 +74,6 @@ public sealed class BoneTable
         return null;
     }
 
-    /// <summary>The leaf segment of the matching bone-path suffix, for a user-facing single-bone name.</summary>
-    public static string? MatchingLeaf(uint hash, string? fullPath)
-    {
-        var suffix = MatchingSuffix(hash, fullPath);
-        if (suffix is null) return null;
-        int separator = suffix.LastIndexOf('/');
-        string leaf = suffix[(separator + 1)..];
-        return leaf.Length > 0 ? leaf : null;
-    }
-
     /// <summary>
     /// The hashed path of a bone: entry node down to the bone, '/'-joined, entry node included.
     /// Character rigs hang under a node named <c>root</c> (<c>root/Root_M/Spine1_M/…</c>); skinned

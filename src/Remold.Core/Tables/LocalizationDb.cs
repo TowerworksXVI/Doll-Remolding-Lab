@@ -58,6 +58,7 @@ public sealed class LocalizationDb
         ("GunWeaponData", new[] { 2 }),
         ("WeaponSkinData", new[] { 3 }),
         ("WeaponModSkinData", new[] { 3 }),
+        ("SupportData", new[] { 2 }),
     };
 
     private const uint SnapshotMagic = 0x4E534E44; // "DNSN"

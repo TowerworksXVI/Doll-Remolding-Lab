@@ -68,7 +68,7 @@ public static class RampConversion
     /// <summary>Whether this row's ramp slot is SETTLED — a pick, or the recorded keep-the-game's. Nothing
     /// about a settled row is re-decided, and nothing reaches another subject on its behalf.</summary>
     internal static bool RampSettled(SubmeshTextures row) =>
-        row.Ramp is not null || row.RampOrigin == SlotOrigin.VanillaOwn;
+        row.Ramp is not null || row.RampOrigin == SlotOrigin.Untouched;
 
     /// <summary>Which part a donor submesh's maps were exported from, by whichever picture slot names a
     /// materialized game texture first. The three slots of one submesh are shaded by ONE material, so any of

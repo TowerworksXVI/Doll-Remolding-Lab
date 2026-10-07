@@ -15,6 +15,9 @@ namespace Remold.Core.Tests;
 
 public sealed class MaterialValueTests : IDisposable
 {
+    /// <summary>The writes a fixture patch carries: one value at one component.</summary>
+    private static readonly MaterialPatchWrite[] TestWrites = { new("_Tint", 176, 1f) };
+
     private readonly string _root = Path.Combine(Path.GetTempPath(),
         "remold-material-values-" + Guid.NewGuid().ToString("N"));
 
@@ -114,8 +117,6 @@ public sealed class MaterialValueTests : IDisposable
             Assert.Equal(0, write.Value);
             Assert.Equal(new[] { "runtime-material-fields", "material-family", "_GI_FLATTEN" },
                 patch.CarrierOwnedState.Select(state => state.Name));
-            Assert.Contains($"material_bytes != {layout.ByteWidth}u",
-                MaterialValuePatchEmitter.EmitShader(patch));
 
             byte[] live = Enumerable.Range(0, layout.ByteWidth)
                 .Select(i => unchecked((byte)(i * 37 + 11))).ToArray();
@@ -160,19 +161,13 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Contains(patch.CarrierOwnedState,
             state => state.Kind == MaterialCarrierStateKind.Unsupported
                 && state.Name == "_GI_FLATTEN");
-
-        var file = Assert.Single(MaterialValuePatchEmitter.Emit(plan));
-        Assert.EndsWith(".hlsl", file.File, StringComparison.Ordinal);
-        Assert.Contains("material-patch:_UseGIFlatten:0:", file.FunctionalIdentity);
-        Assert.Contains("RWByteAddressBuffer material_state : register(u0);", file.Text);
-        Assert.Contains("material_state.Store(492, 0x00000000u);", file.Text);
-        Assert.DoesNotContain("ps-cb2", file.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(492, Assert.Single(patch.Writes).ByteOffset);
     }
 
     /// <summary>The emitter wraps a patched submesh's draw in EVERY list that issues it: the full draw
     /// list and — on a routed multi-material target — the per-range list its draw moved into. The gate
     /// reads the family filter value, every candidate variant carries a tag section, patches sharing the
-    /// draw share one snapshot, and the game's own resource is restored after the draw.</summary>
+    /// draw share one snapshot, and the game's own constant buffer is bound again after the draw.</summary>
     [Fact]
     public void The_emitter_wraps_the_patched_draw_in_every_list_that_issues_it()
     {
@@ -182,9 +177,6 @@ public sealed class MaterialValueTests : IDisposable
         string donor = Path.Combine(_root, "donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
         string outDir = Path.Combine(_root, "out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch_a.hlsl"), "// patch a");
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch_b.hlsl"), "// patch b");
 
         new MigotoEmitter().Build(new PoolBuildRequest
         {
@@ -203,10 +195,10 @@ public sealed class MaterialValueTests : IDisposable
             },
             MaterialPatches = new[]
             {
-                new MaterialPatchEmission("swap", 1, "patcha", 2, "generated/patch_a.hlsl",
-                    4978303, new[] { "45dbffd6cb513d80", "0175b3fa12ebdbc8" }, 544),
-                new MaterialPatchEmission("swap", 1, "patchb", 2, "generated/patch_b.hlsl",
-                    4978303, new[] { "45dbffd6cb513d80", "0175b3fa12ebdbc8" }, 544),
+                new MaterialPatchEmission("swap", 1, "patcha", 2,
+                    4978303, new[] { "45dbffd6cb513d80", "0175b3fa12ebdbc8" }, 544, Writes: TestWrites),
+                new MaterialPatchEmission("swap", 1, "patchb", 2,
+                    4978303, new[] { "45dbffd6cb513d80", "0175b3fa12ebdbc8" }, 544, Writes: TestWrites),
             },
         });
 
@@ -217,33 +209,30 @@ public sealed class MaterialValueTests : IDisposable
             + "filter_index = 4978303\nallow_duplicate_hash = true\n", ini);
         Assert.Contains("[ShaderOverride_MaterialPass_0175b3fa12ebdbc8]\nhash = 0175b3fa12ebdbc8\n"
             + "filter_index = 4978303\nallow_duplicate_hash = true\n", ini);
-        // one snapshot/work/draw trio per patched draw; both patch shaders run on the one working copy
+        // one source/target/draw trio per patched draw; both patches are written by the group's one pass
         Assert.Contains("[Resource_MaterialSource_swap_s1]", ini);
-        string workResource = Section(ini, "[Resource_MaterialWork_swap_s1]");
-        Assert.Contains("type = RWByteAddressBuffer\nstride = 0\n"
-            + "bind_flags = unordered_access\nmisc_flags = buffer_allow_raw_views", workResource);
-        Assert.DoesNotContain("byte_width", workResource);
-        Assert.DoesNotContain("constant_buffer", workResource);
+        Assert.Contains("[Resource_MaterialTarget_swap_s1]\ntype = Buffer\nformat = R32G32B32A32_UINT\n"
+            + "array = 34\nbind_flags = render_target\n", ini);
         Assert.Contains("[Resource_MaterialDraw_swap_s1]\ntype = Buffer\nbyte_width = 544\n"
             + "stride = 0\nbind_flags = constant_buffer", ini);
-        Assert.Empty(RawUavCopyResourceDescriptorErrors(ini));
-        Assert.Contains("[CustomShader_MaterialPatch_patcha]\ncs = generated/patch_a.hlsl\n"
-            + "cs-u0 = Resource_MaterialWork_swap_s1\nDispatch = 1, 1, 1\n"
-            + "post cs-u0 = null\n", ini);
-        Assert.DoesNotContain("cs-u0 = copy Resource_MaterialWork", ini);
-        Assert.Contains("[CustomShader_MaterialPatch_patchb]", ini);
+        Assert.Contains("ps = generated/material_pass_swap_s1.hlsl\no0 = set_viewport Resource_MaterialView_swap_s1\n"
+            + "o0 = Resource_MaterialTarget_swap_s1\ndraw = 3, 0\n", ini);
+        Assert.DoesNotContain("cs-u0", ini);
+        Assert.DoesNotContain("Resource_MaterialWork", ini);
+        Assert.DoesNotContain("CustomShader_MaterialPatch_swap_s1_patch", ini);
 
         // the gated wrap, in the full list AND in submesh 1's per-range list; submesh 0 stays bare
         string wrap = "local $zz_material_ps_swap_s1 = ps\n"
             + "if $zz_material_ps_swap_s1 == 4978303\n"
             + "Resource_MaterialSource_swap_s1 = ref ps-cb2\n"
-            + "Resource_MaterialWork_swap_s1 = copy ps-cb2\n"
-            + "run = CustomShader_MaterialPatch_patcha\n"
-            + "run = CustomShader_MaterialPatch_patchb\n"
-            + "Resource_MaterialDraw_swap_s1 = copy Resource_MaterialWork_swap_s1\n"
+            + "run = CustomShader_MaterialPatch_swap_s1\n"
+            + "Resource_MaterialDraw_swap_s1 = copy Resource_MaterialTarget_swap_s1\n"
             + "ps-cb2 = Resource_MaterialDraw_swap_s1\n"
             + "endif\n"
-            + "drawindexed = 12, 12, 0\n"
+            // a single-part pipeline draws through its per-copy pose route: range 1's one piece, bound
+            // and drawn directly
+            + "vb0 = Resource_PoseVB_swap_p1\nvb1 = Resource_PieceVB1_swap_p1\nvb3 = Resource_PoseVB_swap_p1\n"
+            + "ib = Resource_PieceIB_swap_p1\n" + Range1Draw(ini)
             + "if $zz_material_ps_swap_s1 == 4978303\n"
             + "ps-cb2 = Resource_MaterialSource_swap_s1\n"
             + "endif\n";
@@ -254,27 +243,16 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Contains(wrap, ranged);
         Assert.DoesNotContain("$zz_material", Section(ini, "[CommandListDrawS0_swap]"));
         // the wrap sits immediately around its one draw
-        Assert.True(full.IndexOf("drawindexed = 12, 0, 0", StringComparison.Ordinal)
+        Assert.True(full.IndexOf("ib = Resource_PieceIB_swap_p0\n", StringComparison.Ordinal)
             < full.IndexOf("local $zz_material_ps_swap_s1", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void Raw_uav_resources_first_copied_from_cb_slots_require_explicit_descriptor_flags()
+    /// <summary>The draw line of range 1's piece as the ini carries it: its index count is the donor's.</summary>
+    private static string Range1Draw(string ini)
     {
-        const string add88Shape = """
-            [Resource_MaterialWork_X]
-            type = RWByteAddressBuffer
-            byte_width = 544
-            stride = 0
-            bind_flags = unordered_access
-
-            [CommandListDraw_X]
-            Resource_MaterialWork_X = copy ps-cb2
-            run = CustomShader_MaterialPatch_X
-            """;
-
-        string error = Assert.Single(RawUavCopyResourceDescriptorErrors(add88Shape));
-        Assert.Contains("misc_flags", error);
+        var m = System.Text.RegularExpressions.Regex.Match(ini, @"ib = Resource_PieceIB_swap_p1\n(drawindexed = \d+, 0, 0\n)");
+        Assert.True(m.Success, "range 1's piece draw");
+        return m.Groups[1].Value;
     }
 
     [Fact]
@@ -286,8 +264,6 @@ public sealed class MaterialValueTests : IDisposable
         string donor = Path.Combine(_root, "fold-donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 4);
         string outDir = Path.Combine(_root, "fold-out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
 
         new MigotoEmitter().Build(new PoolBuildRequest
         {
@@ -306,15 +282,15 @@ public sealed class MaterialValueTests : IDisposable
             },
             MaterialPatches = new[]
             {
-                new MaterialPatchEmission("swap", 1, "patch", 2, "generated/patch.hlsl",
-                    4978303, new[] { "45dbffd6cb513d80" }, 544),
+                new MaterialPatchEmission("swap", 1, "patch", 2,
+                    4978303, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
             },
         });
 
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         const string wrap = "local $zz_material_ps_swap_s1 = ps";
         string full = Section(ini, "[CommandListDraw_swap]");
-        Assert.Equal(4, full.Split("drawindexed = ").Length - 1);
+        Assert.Equal(4, full.Split("drawindexed").Length - 1);
         // one declaration per section; the later wraps assign to the declared gate variable
         Assert.Equal(1, full.Split(wrap).Length - 1);
         Assert.Equal(3, full.Split("$zz_material_ps_swap_s1 = ps").Length - 1);
@@ -332,8 +308,6 @@ public sealed class MaterialValueTests : IDisposable
         string donor = Path.Combine(_root, "single-donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 4);
         string outDir = Path.Combine(_root, "single-out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
 
         new MigotoEmitter().Build(new PoolBuildRequest
         {
@@ -351,14 +325,14 @@ public sealed class MaterialValueTests : IDisposable
             },
             MaterialPatches = new[]
             {
-                new MaterialPatchEmission("swap", 0, "patch", 2, "generated/patch.hlsl",
-                    4978303, new[] { "45dbffd6cb513d80" }, 544),
+                new MaterialPatchEmission("swap", 0, "patch", 2,
+                    4978303, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
             },
         });
 
         string full = Section(File.ReadAllText(Path.Combine(outDir, "mod.ini")),
             "[CommandListDraw_swap]");
-        Assert.Equal(4, full.Split("drawindexed = ").Length - 1);
+        Assert.Equal(4, full.Split("drawindexed").Length - 1);
         Assert.Equal(1, full.Split("local $zz_material_ps_swap_s0 = ps").Length - 1);
         Assert.Equal(4, full.Split("$zz_material_ps_swap_s0 = ps").Length - 1);
     }
@@ -380,8 +354,6 @@ public sealed class MaterialValueTests : IDisposable
         PoolBuildRequest Request(string name, int materialPosition)
         {
             string outDir = Path.Combine(_root, name);
-            Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-            File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
             return new PoolBuildRequest
             {
                 OutDir = outDir,
@@ -399,7 +371,7 @@ public sealed class MaterialValueTests : IDisposable
                 MaterialPatches = new[]
                 {
                     new MaterialPatchEmission("swap", materialPosition, "patch", 2,
-                        "generated/patch.hlsl", 4978303, new[] { "45dbffd6cb513d80" }, 544),
+                        4978303, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
                 },
             };
         }
@@ -431,8 +403,6 @@ public sealed class MaterialValueTests : IDisposable
         PoolBuildRequest Request(string outName, params MaterialPatchEmission[] patches)
         {
             string outDir = Path.Combine(_root, outName);
-            Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-            File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
             return new PoolBuildRequest
             {
                 OutDir = outDir,
@@ -453,50 +423,69 @@ public sealed class MaterialValueTests : IDisposable
         }
 
         var wrongSuffix = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-            Request("o1", new MaterialPatchEmission("nosuch", 0, "k1", 2, "generated/patch.hlsl",
-                100, new[] { "45dbffd6cb513d80" }, 544))));
+            Request("o1", new MaterialPatchEmission("nosuch", 0, "k1", 2,
+                100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites))));
         Assert.Contains("does not draw", wrongSuffix.Message);
 
         var wrongSubmesh = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-            Request("o2", new MaterialPatchEmission("swap", 7, "k1", 2, "generated/patch.hlsl",
-                100, new[] { "45dbffd6cb513d80" }, 544))));
+            Request("o2", new MaterialPatchEmission("swap", 7, "k1", 2,
+                100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites))));
         Assert.Contains("receives no donor draws", wrongSubmesh.Message);
 
-        var splitFilter = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-            Request("o3",
-                new MaterialPatchEmission("swap", 0, "k1", 2, "generated/patch.hlsl",
-                    100, new[] { "45dbffd6cb513d80" }, 544),
-                new MaterialPatchEmission("swap", 1, "k2", 2, "generated/patch.hlsl",
-                    200, new[] { "45dbffd6cb513d80" }, 544))));
-        Assert.Contains("one shader carries one value", splitFilter.Message);
+        new MigotoEmitter().Build(Request("o3",
+            new MaterialPatchEmission("swap", 0, "k1", 2,
+                100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
+            new MaterialPatchEmission("swap", 1, "k2", 2,
+                200, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites)));
+        string shared = File.ReadAllText(Path.Combine(_root, "o3", "mod.ini"));
+        Assert.Equal(1, shared.Split("[ShaderOverride_MaterialPass_45dbffd6cb513d80]").Length - 1);
+        // two materials naming one program under different family values: the program's class derives
+        // its own value rather than carrying two
+        Assert.Contains($"filter_index = {DerivedMaterialEvidence.FamilyFilterValue(new[] { "45dbffd6cb513d80" })}\n",
+            shared);
+        Assert.DoesNotContain("filter_index = 100\n", shared);
+        Assert.DoesNotContain("filter_index = 200\n", shared);
+
+        new MigotoEmitter().Build(Request("neutral",
+            new MaterialPatchEmission("swap", 0, "fur", -1, 100,
+                new[] { "0000000000000000" }, 0, new[] { new MaterialEffectTexture(3, 0, 0, 0, 1) },
+                IsEffect: true)));
+        string neutral = File.ReadAllText(Path.Combine(_root, "neutral", "mod.ini"));
+        string neutralDraw = Section(neutral, "[CommandListDrawS0_swap]");
+        Assert.Contains("Resource_MaterialTextureSave_swap_s0_3 = ref ps-t3", neutralDraw);
+        Assert.Contains("ps-t3 = Resource_MaterialTexture_swap_s0_3", neutralDraw);
+        Assert.Contains("ps-t3 = ref Resource_MaterialTextureSave_swap_s0_3", neutralDraw);
+        Assert.DoesNotContain("Resource_MaterialWork", neutralDraw);
+        Assert.Contains("drawindexed", neutralDraw);
+        Assert.DoesNotContain("Resource_MaterialTexture", Section(neutral, "[CommandListDrawS1_swap]"));
+        Assert.Equal(new byte[] { 0, 0, 0, 255 }, File.ReadAllBytes(Path.Combine(_root,
+            "neutral", "effect_neutral_0001.dds"))[^4..]);
 
         var splitWidth = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
             Request("o4",
-                new MaterialPatchEmission("swap", 0, "k1", 2, "generated/patch.hlsl",
-                    100, new[] { "45dbffd6cb513d80" }, 544),
-                new MaterialPatchEmission("swap", 0, "k2", 2, "generated/patch.hlsl",
-                    100, new[] { "45dbffd6cb513d80" }, 592))));
+                new MaterialPatchEmission("swap", 0, "k1", 2,
+                    100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
+                new MaterialPatchEmission("swap", 0, "k2", 2,
+                    100, new[] { "45dbffd6cb513d80" }, 592, Writes: TestWrites))));
         Assert.Contains("constant-buffer byte width", splitWidth.Message);
 
-        var missingShader = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-            Request("o5", new MaterialPatchEmission("swap", 0, "k1", 2, "generated/absent.hlsl",
+        var noWrites = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
+            Request("o5", new MaterialPatchEmission("swap", 0, "k1", 2,
                 100, new[] { "45dbffd6cb513d80" }, 544))));
-        Assert.Contains("not in the mod folder", missingShader.Message);
+        Assert.Contains("writes no values", noWrites.Message);
     }
 
     [Fact]
-    public void Material_patch_contract_refuses_unsafe_keys_slots_and_shader_paths()
+    public void Material_patch_contract_refuses_unsafe_keys_and_slots()
     {
         string dumps = Path.Combine(_root, "contract-dumps");
         Migoto.SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64,
             boneHashes: new uint[] { 101, 102 });
         string donor = Path.Combine(_root, "contract-donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
-        PoolBuildRequest Request(string name, string key, int slot, string shader)
+        PoolBuildRequest Request(string name, string key, int slot)
         {
             string outDir = Path.Combine(_root, name);
-            Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-            File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
             return new PoolBuildRequest
             {
                 OutDir = outDir,
@@ -513,8 +502,8 @@ public sealed class MaterialValueTests : IDisposable
                 },
                 MaterialPatches = new[]
                 {
-                    new MaterialPatchEmission("swap", 0, key, slot, shader, 100,
-                        new[] { "45dbffd6cb513d80" }, 544),
+                    new MaterialPatchEmission("swap", 0, key, slot, 100,
+                        new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
                 },
             };
         }
@@ -523,27 +512,18 @@ public sealed class MaterialValueTests : IDisposable
         foreach (string key in new[] { "bad key", "bad[", "bad]", "bad=key", "bad\nkey" })
         {
             var refused = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-                Request("unsafe-key-" + invalid++, key, 2, "generated/patch.hlsl")));
+                Request("unsafe-key-" + invalid++, key, 2)));
             Assert.Contains("safe alphabet", refused.Message);
         }
         foreach (int slot in new[] { -1, 14 })
         {
             var refused = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-                Request("unsafe-slot-" + slot, "safe", slot, "generated/patch.hlsl")));
+                Request("unsafe-slot-" + slot, "safe", slot)));
             Assert.Contains("outside 0..13", refused.Message);
         }
 
-        string outside = Path.Combine(_root, "outside.hlsl");
-        File.WriteAllText(outside, "// outside");
-        Assert.Contains("escapes the mod folder", Assert.Throws<InvalidOperationException>(() =>
-            new MigotoEmitter().Build(Request("rooted-shader", "safe", 2, outside))).Message);
-        Assert.Contains("escapes the mod folder", Assert.Throws<InvalidOperationException>(() =>
-            new MigotoEmitter().Build(Request("escaped-shader", "safe", 2,
-                "../outside.hlsl"))).Message);
-
         string accepted = Path.Combine(_root, "safe-contract");
-        new MigotoEmitter().Build(Request("safe-contract", "safe-key_1", 13,
-            "generated/patch.hlsl"));
+        new MigotoEmitter().Build(Request("safe-contract", "safe-key_1", 13));
         Assert.True(File.Exists(Path.Combine(accepted, "mod.ini")));
     }
 
@@ -601,11 +581,10 @@ public sealed class MaterialValueTests : IDisposable
             "{ \"mesh\": \"donor\", \"verts\": 8, \"indexFormat\": \"R16_UINT\", "
             + "\"streams\": [{ \"stream\": 0, \"stride\": 40 }, "
             + "{ \"stream\": 1, \"stride\": 20 }], "
+            + Migoto.SyntheticPool.ChannelsJson(Migoto.SyntheticPool.SkinnedLayout()) + ", "
             + "\"submeshes\": [{ \"firstByte\": 0, \"indexCount\": 12, \"baseVertex\": 0 }, "
             + "{ \"firstByte\": 24, \"indexCount\": 12, \"baseVertex\": 0 }] }");
         string outDir = Path.Combine(_root, "rigid-shape-out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
 
         new MigotoEmitter().Build(new PoolBuildRequest
         {
@@ -617,6 +596,7 @@ public sealed class MaterialValueTests : IDisposable
                 {
                     Suffix = "swap", DonorDir = donor, Hash = "aaaa1111",
                     TierHashes = new[] { "bbbb2222" },
+                    TierLayouts = Migoto.SyntheticPool.RigidTiers(Migoto.SyntheticPool.SkinnedLayout(), "bbbb2222"),
                     ShapesByHash = new Dictionary<string, DrawShapeSet>
                     {
                         ["aaaa1111"] = new(new[]
@@ -629,7 +609,7 @@ public sealed class MaterialValueTests : IDisposable
             MaterialPatches = new[]
             {
                 new MaterialPatchEmission("swap", 0, "patch", 2,
-                    "generated/patch.hlsl", 100, new[] { "45dbffd6cb513d80" }, 544),
+                    100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
             },
         });
 
@@ -644,8 +624,13 @@ public sealed class MaterialValueTests : IDisposable
             Assert.Contains("run = CommandListRigidS0_swap", Section(ini, header));
     }
 
+    /// <summary>A tier orders its own materials, so its draw shapes
+    /// legitimately disagree with the lod0 mesh's; that used to refuse the whole build whenever a material
+    /// patch rode the replacement. The map answers the question the refusal was standing in for — the
+    /// patched lod0 position is carried at the tier, and the patched range's own list is what fires at the
+    /// tier shape carrying it.</summary>
     [Fact]
-    public void Material_patches_refuse_rigid_hashes_with_disagreeing_fold_signatures()
+    public void Material_patches_build_when_a_rigid_tier_orders_its_materials_differently()
     {
         string donor = Path.Combine(_root, "rigid-fold-donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
@@ -653,11 +638,72 @@ public sealed class MaterialValueTests : IDisposable
             "{ \"mesh\": \"donor\", \"verts\": 8, \"indexFormat\": \"R16_UINT\", "
             + "\"streams\": [{ \"stream\": 0, \"stride\": 40 }, "
             + "{ \"stream\": 1, \"stride\": 20 }], "
+            + Migoto.SyntheticPool.ChannelsJson(Migoto.SyntheticPool.SkinnedLayout()) + ", "
             + "\"submeshes\": [{ \"firstByte\": 0, \"indexCount\": 12, \"baseVertex\": 0 }, "
             + "{ \"firstByte\": 24, \"indexCount\": 12, \"baseVertex\": 0 }] }");
         string outDir = Path.Combine(_root, "rigid-fold-out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
+
+        var lod0Shapes = new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144);
+        var tierShapes = new DrawShapeSet(new[] { new DrawShape(0, 72), new DrawShape(72, 0) }, 72);
+
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = Array.Empty<ReplacePipeline>(),
+            Rigids = new[]
+            {
+                new RigidReplace
+                {
+                    Suffix = "swap", DonorDir = donor, Hash = "aaaa1111",
+                    TierHashes = new[] { "bbbb2222" },
+                    TierLayouts = Migoto.SyntheticPool.RigidTiers(Migoto.SyntheticPool.SkinnedLayout(), "bbbb2222"),
+                    ShapesByHash = new Dictionary<string, DrawShapeSet>
+                    {
+                        ["aaaa1111"] = lod0Shapes,
+                        ["bbbb2222"] = tierShapes,
+                    },
+                    MapsByHash = new Dictionary<string, TierMaterialMap>
+                    {
+                        ["bbbb2222"] = SwappedTwoMaterialMap(lod0Shapes, tierShapes),
+                    },
+                },
+            },
+            MaterialPatches = new[]
+            {
+                new MaterialPatchEmission("swap", 1, "patch", 2,
+                    100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
+            },
+        });
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        // the patch rides the donor range that folds onto lod0 position 1
+        Assert.Contains("local $zz_material_ps_swap_s1 = ps", Section(ini, "[CommandListRigidS1_swap]"));
+        // and at the tier that range draws at the one shape the tier carries it under
+        string tierDraw = Section(ini, "[TextureOverride_Rigid_swap_1_DrawS0]");
+        Assert.Contains("match_first_index = 0\nmatch_index_count = 72", tierDraw);
+        Assert.Contains("run = CommandListRigidS1_swap", tierDraw);
+        Assert.DoesNotContain("run = CommandListRigidS0_swap", tierDraw);
+    }
+
+    /// <summary>A material patch names a position of the replaced part as the modder picked it, on the
+    /// part's own draw. Where the build supplies no shapes for that draw, the position it names cannot be
+    /// resolved at all — and a tier's shapes are not an answer to it, since the tier orders its materials
+    /// on its own and the patch would land on a different one. The build refuses instead.</summary>
+    [Fact]
+    public void A_material_patch_refuses_when_the_replaced_parts_own_draw_shapes_are_missing()
+    {
+        string donor = Path.Combine(_root, "rigid-own-donor");
+        Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
+        File.WriteAllText(Path.Combine(donor, "meta.json"),
+            "{ \"mesh\": \"donor\", \"verts\": 8, \"indexFormat\": \"R16_UINT\", "
+            + "\"streams\": [{ \"stream\": 0, \"stride\": 40 }, "
+            + "{ \"stream\": 1, \"stride\": 20 }], "
+            + Migoto.SyntheticPool.ChannelsJson(Migoto.SyntheticPool.SkinnedLayout()) + ", "
+            + "\"submeshes\": [{ \"firstByte\": 0, \"indexCount\": 12, \"baseVertex\": 0 }, "
+            + "{ \"firstByte\": 24, \"indexCount\": 12, \"baseVertex\": 0 }] }");
+        string outDir = Path.Combine(_root, "rigid-own-out");
+
+        var tierShapes = new DrawShapeSet(new[] { new DrawShape(0, 72), new DrawShape(72, 0) }, 72);
 
         var refused = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
             new PoolBuildRequest
@@ -670,27 +716,41 @@ public sealed class MaterialValueTests : IDisposable
                     {
                         Suffix = "swap", DonorDir = donor, Hash = "aaaa1111",
                         TierHashes = new[] { "bbbb2222" },
+                    TierLayouts = Migoto.SyntheticPool.RigidTiers(Migoto.SyntheticPool.SkinnedLayout(), "bbbb2222"),
+                        // only the TIER's shapes: the replaced part's own draw says nothing here
                         ShapesByHash = new Dictionary<string, DrawShapeSet>
                         {
-                            ["aaaa1111"] = new(new[]
-                                { new DrawShape(0, 60), new DrawShape(60, 84) }, 144),
-                            ["bbbb2222"] = new(new[]
-                                { new DrawShape(0, 72), new DrawShape(72, 0) }, 72),
+                            ["bbbb2222"] = tierShapes,
                         },
                     },
                 },
                 MaterialPatches = new[]
                 {
-                    new MaterialPatchEmission("swap", 0, "patch", 2,
-                        "generated/patch.hlsl", 100, new[] { "45dbffd6cb513d80" }, 544),
+                    new MaterialPatchEmission("swap", 1, "patch", 2,
+                        100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
                 },
             }));
 
-        Assert.Contains("hashes that disagree on target draw shapes", refused.Message);
+        Assert.Contains("cannot resolve the target material positions", refused.Message);
     }
 
+    /// <summary>Two materials the tier binds in the opposite order, its second position holding no
+    /// geometry: lod0 position 1 is carried at tier position 0, and lod0 position 0 is carried nowhere the
+    /// tier draws.</summary>
+    private static TierMaterialMap SwappedTwoMaterialMap(DrawShapeSet lod0Shapes, DrawShapeSet tierShapes)
+    {
+        var first = new Remold.Core.Export.TierMaterialRef("bundle-a", 11, true);
+        var second = new Remold.Core.Export.TierMaterialRef("bundle-a", 22, true);
+        return TierMaterialMap.Build(new[] { first, second }, lod0Shapes,
+            new[] { second, first }, tierShapes,
+            _ => throw new InvalidOperationException("identity answers every position here"));
+    }
+
+    /// <summary>The pooled twin of the rigid case above: a tier whose
+    /// draw shapes disagree with the anchor's no longer refuses a material patch, and the patched range's
+    /// own list is what fires at the tier shape the map names.</summary>
     [Fact]
-    public void Material_patches_refuse_pipe_tiers_with_disagreeing_fold_signatures()
+    public void Material_patches_build_when_a_pipe_tier_orders_its_materials_differently()
     {
         string dumps = Path.Combine(_root, "pipe-fold-dumps");
         string lod0 = Path.Combine(dumps, "alpha");
@@ -702,39 +762,43 @@ public sealed class MaterialValueTests : IDisposable
         string donor = Path.Combine(_root, "pipe-fold-donor");
         Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
         string outDir = Path.Combine(_root, "pipe-fold-out");
-        Directory.CreateDirectory(Path.Combine(outDir, "generated"));
-        File.WriteAllText(Path.Combine(outDir, "generated", "patch.hlsl"), "// patch");
 
-        var refused = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(
-            new PoolBuildRequest
+        var anchorShapes = new DrawShapeSet(new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144);
+        var tierShapes = new DrawShapeSet(new[] { new DrawShape(0, 72), new DrawShape(72, 0) }, 72);
+
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
             {
-                OutDir = outDir,
-                Pipelines = new[]
+                new ReplacePipeline
                 {
-                    new ReplacePipeline
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", lod0) },
+                    DonorDir = donor,
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111" },
+                    AnchorShapes = anchorShapes,
+                    Tiers = new[]
                     {
-                        Suffix = "swap",
-                        Parts = new[] { new PoolPart("alpha", lod0) },
-                        DonorDir = donor,
-                        CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111" },
-                        AnchorShapes = new DrawShapeSet(
-                            new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144),
-                        Tiers = new[]
-                        {
-                            new PoolTier("alpha", "alpha_lod1", "lod1", lod1, "bbbb2222",
-                                Shapes: new DrawShapeSet(
-                                    new[] { new DrawShape(0, 72), new DrawShape(72, 0) }, 72)),
-                        },
+                        new PoolTier("alpha", "alpha_lod1", "lod1", lod1, "bbbb2222",
+                            Shapes: tierShapes,
+                            Map: SwappedTwoMaterialMap(anchorShapes, tierShapes)),
                     },
                 },
-                MaterialPatches = new[]
-                {
-                    new MaterialPatchEmission("swap", 0, "patch", 2,
-                        "generated/patch.hlsl", 100, new[] { "45dbffd6cb513d80" }, 544),
-                },
-            }));
+            },
+            MaterialPatches = new[]
+            {
+                new MaterialPatchEmission("swap", 1, "patch", 2,
+                    100, new[] { "45dbffd6cb513d80" }, 544, Writes: TestWrites),
+            },
+        });
 
-        Assert.Contains("tiers that disagree on target draw shapes", refused.Message);
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains("local $zz_material_ps_swap_s1 = ps", Section(ini, "[CommandListDrawS1_swap]"));
+        string tierDraw = Section(ini, "[TextureOverride_Cap_alpha_lod1_DrawS0]");
+        Assert.Contains("match_first_index = 0\nmatch_index_count = 72", tierDraw);
+        Assert.Contains("run = CommandListDrawS1_swap", tierDraw);
+        Assert.DoesNotContain("run = CommandListDrawS0_swap", tierDraw);
     }
 
     private static string Section(string ini, string header)
@@ -743,65 +807,6 @@ public sealed class MaterialValueTests : IDisposable
         Assert.True(start >= 0, $"section missing: {header}");
         int end = ini.IndexOf("\n[", start + header.Length, StringComparison.Ordinal);
         return end < 0 ? ini[start..] : ini[start..end];
-    }
-
-    private static IReadOnlyList<string> RawUavCopyResourceDescriptorErrors(string ini)
-    {
-        string normalized = ini.Replace("\r\n", "\n", StringComparison.Ordinal);
-        string[] lines = normalized.Split('\n');
-        var errors = new List<string>();
-        string[] sections = normalized.Split("\n[", StringSplitOptions.None);
-        for (int index = 0; index < sections.Length; index++)
-        {
-            string section = index == 0 ? sections[index] : "[" + sections[index];
-            if (!section.StartsWith("[Resource", StringComparison.Ordinal)) continue;
-            int headerEnd = section.IndexOf(']');
-            if (headerEnd < 0) continue;
-            string resource = section[1..headerEnd];
-            var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string rawLine in section[(headerEnd + 1)..].Split('\n'))
-            {
-                string line = rawLine.Trim();
-                int equals = line.IndexOf('=');
-                if (equals <= 0) continue;
-                fields.TryAdd(line[..equals].Trim(), line[(equals + 1)..].Trim());
-            }
-            if (!fields.TryGetValue("type", out string? type)
-                || !(type.StartsWith("RW", StringComparison.OrdinalIgnoreCase)
-                    || type.Contains("ByteAddressBuffer", StringComparison.OrdinalIgnoreCase)))
-                continue;
-
-            string? firstFill = lines.Select(line => line.Trim()).FirstOrDefault(line =>
-            {
-                int equals = line.IndexOf('=');
-                return equals > 0
-                    && string.Equals(line[..equals].Trim(), resource, StringComparison.Ordinal);
-            });
-            if (firstFill is null) continue;
-            string source = firstFill[(firstFill.IndexOf('=') + 1)..].Trim();
-            string[] copyParts = source.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            string slot = copyParts.Length == 2 ? copyParts[1] : "";
-            bool shaderStage = slot.Length >= 2
-                && (slot.AsSpan(0, 2).Equals("vs", StringComparison.OrdinalIgnoreCase)
-                    || slot.AsSpan(0, 2).Equals("hs", StringComparison.OrdinalIgnoreCase)
-                    || slot.AsSpan(0, 2).Equals("ds", StringComparison.OrdinalIgnoreCase)
-                    || slot.AsSpan(0, 2).Equals("gs", StringComparison.OrdinalIgnoreCase)
-                    || slot.AsSpan(0, 2).Equals("ps", StringComparison.OrdinalIgnoreCase)
-                    || slot.AsSpan(0, 2).Equals("cs", StringComparison.OrdinalIgnoreCase));
-            bool copiedFromCb = copyParts.Length == 2
-                && string.Equals(copyParts[0], "copy", StringComparison.OrdinalIgnoreCase)
-                && slot.Length >= 6
-                && shaderStage
-                && slot.AsSpan(2, 3).Equals("-cb", StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(slot.AsSpan(5), out _);
-            if (!copiedFromCb) continue;
-
-            if (!fields.ContainsKey("bind_flags"))
-                errors.Add($"[{resource}] is a raw/UAV resource first copied from a cb slot but has no bind_flags");
-            if (!fields.ContainsKey("misc_flags"))
-                errors.Add($"[{resource}] is a raw/UAV resource first copied from a cb slot but has no misc_flags");
-        }
-        return errors;
     }
 
     [Fact]
@@ -826,8 +831,6 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Equal(1f, BitConverter.ToSingle(patched, 92));
         for (int i = 0; i < live.Length; i++)
             if (i is < 80 or >= 96) Assert.Equal(live[i], patched[i]);
-        Assert.Equal(4, MaterialValuePatchEmitter.EmitShader(patch)
-            .Split("material_state.Store(").Length - 1);
     }
 
     // The emission test above proves the four writes are built. These prove the render-plan
@@ -886,7 +889,7 @@ public sealed class MaterialValueTests : IDisposable
     }
 
     [Fact]
-    public void Nonzero_value_has_a_nonzero_encoding_and_layout_guard()
+    public void Nonzero_value_has_a_nonzero_encoding()
     {
         var request = ProjectValueRequest(MaterialValueSemantics.UseGiFlatten, "1");
         var operation = MaterialValueBuildSupport.Resolve(request,
@@ -896,9 +899,6 @@ public sealed class MaterialValueTests : IDisposable
 
         byte[] patched = MaterialConstantBufferPatcher.Apply(patch, new byte[544]);
         Assert.Equal(new byte[] { 0, 0, 128, 63 }, patched[492..496]);
-        string shader = MaterialValuePatchEmitter.EmitShader(patch);
-        Assert.Contains("if (material_bytes != 544u) return;", shader);
-        Assert.Contains("material_state.Store(492, 0x3f800000u);", shader);
     }
 
     [Fact]
@@ -939,7 +939,7 @@ public sealed class MaterialValueTests : IDisposable
     }
 
     [Fact]
-    public void Every_active_contract_gets_a_distinct_guarded_patch_artifact()
+    public void Every_active_contract_gets_its_own_patch()
     {
         var request = ProjectValueRequest(MaterialValueSemantics.UseGiFlatten, "1");
         var render = Render(request.CurrentSlot, MaterialValueCatalog.UnityPerMaterial544);
@@ -952,23 +952,15 @@ public sealed class MaterialValueTests : IDisposable
         var operation = MaterialValueBuildSupport.Resolve(request,
             render with { Contracts = new[] { render.Contracts[0], second } });
         Assert.Equal(2, operation.Emissions!.Count);
-        Assert.Equal(2, operation.OutputArtifacts!.Count);
+        Assert.Equal(new[] { "edit-body:slot-value:material-value:0:constants",
+                "edit-body:slot-value:material-value:1:constants" },
+            operation.OutputArtifacts!.Select(output => output.Id));
+        Assert.All(operation.OutputArtifacts!, output => Assert.Null(output.File));
         Assert.Equal(new[] { "edit-body:slot-value:material-value:0",
                 "edit-body:slot-value:material-value:1" },
             operation.Emissions.Select(emission => emission.Id));
-
-        var plan = new AuthoredBuildPlan
-        {
-            RuntimeEmissions = operation.Emissions.Select(emission => new PlannedRuntimeEmission(
-                request.RowId, operation.Decision.Verdict, emission)).ToArray(),
-            OutputArtifacts = operation.OutputArtifacts.Select(output => new PlannedOutputArtifact(
-                request.RowId, operation.Decision.Verdict, output)).ToArray(),
-        };
-        var files = MaterialValuePatchEmitter.Emit(plan);
-        Assert.Equal(2, files.Count);
-        Assert.Contains(files, file => file.File.EndsWith("_0.hlsl", StringComparison.Ordinal));
-        Assert.Contains(files, file => file.File.EndsWith("_1.hlsl", StringComparison.Ordinal));
-        Assert.All(files, file => Assert.Contains("material_bytes != 544u", file.Text));
+        Assert.Equal(new[] { render.Contracts[0].Id, second.Id },
+            operation.Emissions.Select(emission => Assert.Single(emission.RenderContractIds)));
     }
 
     [Fact]
@@ -1125,8 +1117,11 @@ public sealed class MaterialValueTests : IDisposable
         _ = AuthoredBuildExecution.Create(project, plan);
     }
 
+    /// <summary>A shading value on an edit with no mesh replacement applies at the part's own draw of its
+    /// material: the plan keeps the patch and proves it by that draw, and the build execution carries it with
+    /// the position it applies in.</summary>
     [Fact]
-    public void Material_value_without_a_replacement_is_dropped_with_a_warning()
+    public void Material_value_without_a_replacement_applies_at_the_parts_own_draw()
     {
         var project = SourceProject(omitReplacement: true);
         AddOverlay(project);
@@ -1136,12 +1131,38 @@ public sealed class MaterialValueTests : IDisposable
                 new MaterialFamilyValueReader()));
 
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
-        Assert.DoesNotContain(plan.RuntimeEmissions,
+        var patch = Assert.Single(plan.RuntimeEmissions,
             row => row.Emission.Kind == BuildEmissionKind.MaterialValuePatch);
-        Assert.Contains(plan.Warnings, warning => warning.Contains(
-            "they apply only through this edit's own mesh replacement", StringComparison.Ordinal));
+        Assert.Equal(BuildTargetingProof.StockDrawRange, patch.Emission.TargetingProof.Kind);
+        var row = plan.Bindings.Single(binding => binding.RowId == patch.Consumer);
+        Assert.Equal(BuildTargetingProof.StockDrawRange, row.Decision.TargetingProof!.Kind);
+        Assert.DoesNotContain(plan.Warnings, warning => warning.Contains("mesh replacement",
+            StringComparison.Ordinal));
         var execution = AuthoredBuildExecution.Create(project, plan);
         Assert.Single(execution.Work);
+        var pick = Assert.Single(execution.StockMaterials);
+        Assert.Equal(patch.Consumer, pick.RowId);
+        Assert.Equal(row.CurrentSlot!.MaterialSlotIndex ?? row.CurrentSlot.SubmeshIndex, pick.MaterialPosition);
+    }
+
+    /// <summary>…and where the backend says that draw cannot be told apart from another material's, the row
+    /// blocks the build with the backend's reason rather than shipping a change to both.</summary>
+    [Fact]
+    public void Material_value_on_a_draw_shared_with_another_material_blocks_without_a_replacement()
+    {
+        var project = SourceProject(omitReplacement: true);
+        AddOverlay(project);
+
+        var plan = AuthoredBuildPlanner.Plan(project,
+            new MaterialBackend(MaterialValueCatalog.UnityPerMaterial544,
+                new MaterialFamilyValueReader()) { SharedDraw = "the draw is shared" });
+
+        Assert.False(plan.CanBuild);
+        var blocked = Assert.Single(plan.Bindings, binding => binding.Decision.BlocksBuild);
+        Assert.Equal(TargetInputKind.MaterialValue, blocked.AuthoredSlot.Input);
+        Assert.Equal("the draw is shared", blocked.Decision.Reason);
+        Assert.DoesNotContain(plan.RuntimeEmissions,
+            row => row.Emission.Kind == BuildEmissionKind.MaterialValuePatch);
     }
 
     [Fact]
@@ -1349,6 +1370,301 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Contains(plan.Conflicts,
             conflict => conflict.Contains("has conflicting values on the same material",
                 StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Disabled_effect_values_are_retained_without_resolving_or_building_their_source()
+    {
+        var project = SourceProject();
+        var target = project.TargetSlots.Single(slot => slot.Id == "slot-gi");
+        target.Semantic = "_DetailAlbedoIntensity";
+        project.TargetSlots.Single(slot => slot.Id == "source-gi").Semantic = target.Semantic;
+        project.EditDefinitions[0].DisabledMaterialEffects = new()
+        {
+            new DisabledMaterialEffect(0, "detail"),
+        };
+        var program = new MaterialEffectOperation("detail", new[] { "0123456789abcdef" },
+            new[] { new MaterialEffectBufferPatch(2, 592,
+                new[] { new MaterialPatchWrite("_DetailAlbedoIntensity", 568, 0) }) },
+            new[] { new MaterialEffectTexture(4, 1, 0, 0, 1) });
+        var backend = new ProductionAuthoredBuildBackend(part => new LegacyResolvedPart(part,
+            target.Renderer!, target.Mesh!, new[]
+            {
+                new LegacyResolvedMaterial(0, target.Material!.Name!, target.Material,
+                    Array.Empty<LegacyResolvedTexture>()),
+            }), effectEvidence: _ => new[] { program });
+
+        var plan = AuthoredBuildPlanner.Plan(project, backend);
+
+        Assert.True(plan.CanBuild, string.Join("; ", plan.Conflicts.Concat(plan.Diagnostics)));
+        Assert.Contains(plan.RuntimeEmissions, emission => emission.Emission.Kind == BuildEmissionKind.MaterialEffect);
+        Assert.DoesNotContain(plan.RuntimeEmissions, emission => emission.Emission.Kind == BuildEmissionKind.MaterialValuePatch);
+        Assert.DoesNotContain(plan.Bindings, row => row.AuthoredSlot.Id == target.Id);
+        Assert.Contains(project.EditDefinitions[0].Bindings, binding => binding.SlotId == target.Id
+            && binding.Kind == BindingKind.SourceSlot);
+        Assert.Single(AuthoredBuildExecution.Create(project, plan).Work);
+    }
+
+    [Fact]
+    public void An_unresolved_effect_disable_blocks_the_plan_instead_of_emitting_an_empty_edit()
+    {
+        var project = SourceProject();
+        var target = project.TargetSlots.Single(slot => slot.Id == "slot-gi");
+        project.EditDefinitions[0].Bindings.RemoveAll(binding => binding.SlotId == target.Id);
+        project.TargetSlots.RemoveAll(slot => slot.Input == TargetInputKind.MaterialValue);
+        project.EditDefinitions[0].DisabledMaterialEffects = new()
+        {
+            new DisabledMaterialEffect(0, "detail"),
+        };
+        var backend = new ProductionAuthoredBuildBackend(part => new LegacyResolvedPart(part,
+            target.Renderer!, target.Mesh!, new[]
+            {
+                new LegacyResolvedMaterial(0, target.Material!.Name!, target.Material,
+                    Array.Empty<LegacyResolvedTexture>()),
+            }), effectEvidence: _ => null);
+
+        var plan = AuthoredBuildPlanner.Plan(project, backend);
+
+        Assert.False(plan.CanBuild);
+        Assert.Contains(plan.Bindings, row => row.Decision.Reason.Contains("cannot be disabled",
+            StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.RuntimeEmissions, emission => emission.Verdict == BuildPlanVerdict.Resolved
+            && emission.Emission.Kind == BuildEmissionKind.MaterialEffect);
+    }
+
+    [Fact]
+    public void Effect_evidence_includes_owned_passes_without_the_materials_color_keyword_axes()
+    {
+        const string forward = "0123456789abcdef", outline = "123456789abcdef0", dormant = "23456789abcdef01";
+        var shading = DirectShading() with { EnabledKeywords = new HashSet<string> { "_DETAIL_MAP" } };
+        var detailed = Reading(Variant(592, forward) with { Keywords = new HashSet<string> { "_DETAIL_MAP" } },
+            ("_DetailAlbedoIntensity", 568), ("_DetailNormalIntensity", 572), ("_DetailRMIntensity", 576));
+        var variants = new[]
+        {
+            detailed,
+            Reading(Variant(0, outline) with { Pass = 1, PassName = "Outline", MaterialBufferSlot = null }),
+        };
+        var bytes = Guid.NewGuid().ToByteArray();
+        var evidence = EvidenceFor(_ => bytes, shading, variants);
+        var slot = MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle);
+        var operations = evidence.ResolveEffects(slot);
+        Assert.NotNull(operations);
+        var detail = Assert.Single(operations, operation => operation.EffectId == "detail");
+        Assert.Equal(new[] { forward }, detail.PixelShaderHashes);
+        Assert.Equal(new[] { 568, 572, 576 }, Assert.Single(detail.Buffers).Writes.Select(write => write.ByteOffset));
+        Assert.Contains(operations, operation => operation.EffectId == "outline" && operation.SkipDraw
+            && operation.PixelShaderHashes.SequenceEqual(new[] { outline }));
+        Assert.Equal(new[] { "detail", "outline" }, evidence.ResolvePresentEffects(slot));
+        Assert.Contains("_DetailAlbedoIntensity", evidence.ResolveReadSemantics(slot)!);
+        Assert.DoesNotContain(MaterialValueSemantics.UseGiFlatten, evidence.ResolveReadSemantics(slot)!);
+
+        // a program that declares the detail inputs but never reads them carries no detail effect
+        var declaring = EvidenceFor(_ => Guid.NewGuid().ToByteArray(), shading, new[]
+        {
+            detailed with { DxbcHash = dormant, MaterialReads = ConstantBufferReads.None },
+            variants[1],
+        });
+        Assert.DoesNotContain("detail", declaring.ResolvePresentEffects(slot)!);
+
+        var missingPass = EvidenceFor(_ => Guid.NewGuid().ToByteArray(), DirectShading(), new[]
+        {
+            variants[1],
+            variants[0],
+        });
+        Assert.Null(missingPass.ResolveEffects(slot));
+    }
+
+    [Fact]
+    public void Fields_a_drawn_program_never_reads_are_not_the_materials_values()
+    {
+        const string forward = "08947e9ffc2b6762", auxiliary = "1eef16c0cc856750";
+        var variants = new[]
+        {
+            Reading(Variant(544, forward) with { PassName = "GFCharForward" },
+                (MaterialValueSemantics.UseGiFlatten, 492)) with
+            {
+                VectorOffsets = new Dictionary<string, int>
+                {
+                    [MaterialValueSemantics.UseGiFlatten] = 492, ["_Anisotropy"] = 264,
+                },
+            },
+            Reading(Variant(544, auxiliary) with { Pass = 1, PassName = "GFCharHairTransE" },
+                ("_Anisotropy", 264)),
+        };
+        var evidence = EvidenceFor(_ => Guid.NewGuid().ToByteArray(), DirectShading(), variants);
+        var read = evidence.ResolveReadSemantics(MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle));
+
+        Assert.NotNull(read);
+        Assert.Contains(MaterialValueSemantics.UseGiFlatten, read);
+        Assert.DoesNotContain("_Anisotropy", read);
+
+        // a drawn program whose reads are unknown means nothing is hidden on a guess
+        var unknown = EvidenceFor(_ => Guid.NewGuid().ToByteArray(), DirectShading(), new[]
+        {
+            variants[0], variants[1] with { MaterialReads = null },
+        });
+        Assert.Null(unknown.ResolveReadSemantics(MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle)));
+    }
+
+    [Fact]
+    public void Effect_resolution_refuses_an_empty_draw_contract()
+    {
+        var value = ProjectValueRequest(MaterialValueSemantics.UseGiFlatten, "0");
+        var request = new BuildMaterialEffectRequest("effect", "edit", value.AuthoredSlot,
+            value.CurrentSlot, "outline", BuildEmissionGate.Unconditional);
+        var result = MaterialEffectBuildSupport.Resolve(request,
+            new BuildRenderPlan(Array.Empty<BuildRenderRole>(), Array.Empty<RenderContract>(), "empty"),
+            new[] { new MaterialEffectOperation("outline", new[] { "0123456789abcdef" },
+                Array.Empty<MaterialEffectBufferPatch>(), Array.Empty<MaterialEffectTexture>(), true) });
+        Assert.Equal(BuildPlanVerdict.Conflict, result.Decision.Verdict);
+        Assert.Empty(result.Emissions!);
+        Assert.Contains("no material draw contract", result.Decision.Detail);
+    }
+
+    [Theory]
+    [InlineData(false, "woven_uber")]
+    [InlineData(false, "strand_fringeuber")]
+    [InlineData(true, "woven_uber")]
+    [InlineData(true, "strand_fringeuber")]
+    public void Hair_highlight_presence_requires_a_selected_consumer_outside_the_auxiliary_pass(
+        bool enableHighlight, string materialName)
+    {
+        const string plain = "08947e9ffc2b6762", highlight = "661eae4687e4c2c2",
+            auxiliary = "1eef16c0cc856750";
+        var shading = DirectShading() with
+        {
+            Name = materialName,
+            EnabledKeywords = enableHighlight ? new HashSet<string> { "_ANISOTROPIC_SPECULAR" }
+                : new HashSet<string>(),
+            Floats = new Dictionary<string, float> { ["_Anisotropy"] = 2 },
+        };
+        var variants = new[]
+        {
+            Reading(Variant(544, plain) with { PassName = "GFCharForward" }),
+            Reading(Variant(544, highlight) with
+            {
+                PassName = "GFCharForward",
+                Keywords = new HashSet<string> { "_ANISOTROPIC_SPECULAR" },
+            }, ("_Anisotropy", 264)),
+            Reading(Variant(544, auxiliary) with { Pass = 1, PassName = "GFCharHairTransE" },
+                ("_Anisotropy", 264)),
+        };
+        byte[] bytes = Guid.NewGuid().ToByteArray();
+        var evidence = EvidenceFor(_ => bytes, shading, variants);
+        var slot = MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle);
+
+        var present = evidence.ResolvePresentEffects(slot);
+        var operations = evidence.ResolveEffects(slot);
+
+        Assert.NotNull(present);
+        Assert.Equal(enableHighlight, present.Contains("hair-highlight"));
+        Assert.NotNull(operations);
+        Assert.Contains(operations, operation => operation.EffectId == "hair-highlight"
+            && operation.PixelShaderHashes.Contains(auxiliary));
+        Assert.Equal(enableHighlight, operations.Any(operation => operation.EffectId == "hair-highlight"
+            && operation.PixelShaderHashes.Contains(highlight)));
+        Assert.Equal(enableHighlight, evidence.ResolveReadSemantics(slot)!.Contains("_Anisotropy"));
+        var existingOff = MaterialEffectBuildSupport.Resolve(new BuildMaterialEffectRequest("effect",
+            "edit", slot, slot, "hair-highlight", BuildEmissionGate.Unconditional),
+            Render(slot, MaterialValueCatalog.UnityPerMaterial544), operations);
+        Assert.Equal(BuildPlanVerdict.Resolved, existingOff.Decision.Verdict);
+    }
+
+    [Fact]
+    public void An_unused_saved_highlight_keyword_does_not_activate_the_auxiliary_capability()
+    {
+        var shading = DirectShading() with
+        {
+            EnabledKeywords = new HashSet<string> { "_ANISOTROPIC_SPECULAR" },
+        };
+        var variants = new[]
+        {
+            Variant(544, "08947e9ffc2b6762") with
+            {
+                PassName = "GFCharForward",
+                VectorOffsets = new Dictionary<string, int> { ["_Anisotropy"] = 264 },
+            },
+            Reading(Variant(544, "1eef16c0cc856750") with { Pass = 1, PassName = "GFCharHairTransE" },
+                ("_Anisotropy", 264)),
+        };
+        byte[] bytes = Guid.NewGuid().ToByteArray();
+        var evidence = EvidenceFor(_ => bytes, shading, variants);
+
+        var present = evidence.ResolvePresentEffects(MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle));
+
+        Assert.NotNull(present);
+        Assert.DoesNotContain("hair-highlight", present);
+    }
+
+    [Fact]
+    public void Programs_are_gated_by_the_exact_set_of_patches_that_reach_them()
+    {
+        const string a = "45dbffd6cb513d80", b = "0175b3fa12ebdbc8";
+        string dumps = Path.Combine(_root, "dumps");
+        Migoto.SyntheticPool.WritePartDump(Path.Combine(dumps, "alpha"), seed: 10, verts: 64,
+            boneHashes: new uint[] { 101, 102 });
+        string donor = Path.Combine(_root, "donor");
+        Migoto.SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2, submeshes: 2);
+        PoolBuildRequest Request(string outName, params MaterialPatchEmission[] patches)
+        {
+            string outDir = Path.Combine(_root, outName);
+            return new PoolBuildRequest
+            {
+                OutDir = outDir,
+                Pipelines = new[]
+                {
+                    new ReplacePipeline
+                    {
+                        Suffix = "swap",
+                        Parts = new[] { new PoolPart("alpha", Path.Combine(dumps, "alpha")) },
+                        DonorDir = donor,
+                        CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa1111" },
+                        AnchorShapes = new DrawShapeSet(
+                            new[] { new DrawShape(0, 60), new DrawShape(60, 84) }, 144),
+                    },
+                },
+                MaterialPatches = patches,
+            };
+        }
+        // a value edit over the whole family: one group, the family's own value, the released shape
+        new MigotoEmitter().Build(Request("family",
+            new MaterialPatchEmission("swap", 0, "value", 2, 4978303, new[] { a, b }, 544, Writes: TestWrites)));
+        string family = File.ReadAllText(Path.Combine(_root, "family", "mod.ini"));
+        Assert.Contains("local $zz_material_ps_swap_s0 = ps", family);
+        Assert.Equal(2, family.Split("filter_index = 4978303\n").Length - 1);
+        Assert.DoesNotContain("_c0", family);
+
+        // an effect proven for one program of that family splits it into two classes; the value edit
+        // rides both, the neutral texture only the program it is proven for
+        new MigotoEmitter().Build(Request("split",
+            new MaterialPatchEmission("swap", 0, "value", 2, 4978303, new[] { a, b }, 544, Writes: TestWrites),
+            new MaterialPatchEmission("swap", 0, "fur", -1, 1, new[] { b }, 0,
+                new[] { new MaterialEffectTexture(3, 0, 0, 0, 1) }, IsEffect: true)));
+        string split = File.ReadAllText(Path.Combine(_root, "split", "mod.ini"));
+        int filterA = DerivedMaterialEvidence.FamilyFilterValue(new[] { a });
+        int filterB = DerivedMaterialEvidence.FamilyFilterValue(new[] { b });
+        Assert.Contains($"hash = {a}\nfilter_index = {filterA}\n", split);
+        Assert.Contains($"hash = {b}\nfilter_index = {filterB}\n", split);
+        Assert.DoesNotContain("filter_index = 4978303", split);
+        string draw = Section(split, "[CommandListDrawS0_swap]");
+        Assert.Contains("local $zz_material_ps_swap_s0_c0 = ps", draw);
+        Assert.Contains("local $zz_material_ps_swap_s0_c1 = ps", draw);
+        // the value edit rides both classes, so each class runs it in a pass of its own that writes that
+        // class's own buffers; one section name for both would keep only the first
+        Migoto.ModBuilderTests.AssertNoDuplicateSections(split);
+        foreach (string gid in new[] { "swap_s0_c0", "swap_s0_c1" })
+        {
+            Assert.Contains($"[CustomShader_MaterialPatch_{gid}]\n", split);
+            Assert.Contains($"o0 = Resource_MaterialTarget_{gid}\n", split);
+            Assert.Contains($"Resource_MaterialSource_{gid} = ref ps-cb2\nrun = CustomShader_MaterialPatch_{gid}\n",
+                draw);
+        }
+        string groupB = filterA < filterB ? "swap_s0_c1" : "swap_s0_c0";
+        string groupA = filterA < filterB ? "swap_s0_c0" : "swap_s0_c1";
+        Assert.Contains($"ps-t3 = Resource_MaterialTexture_{groupB}_3", draw);
+        Assert.DoesNotContain($"Resource_MaterialTexture_{groupA}_3", draw);
+        Assert.Contains($"if $zz_material_ps_{groupB} == {filterB}\n", draw);
+        Assert.Contains($"if $zz_material_ps_{groupA} == {filterA}\n", draw);
     }
 
     private AuthoredProject SourceProject(int[]? replacementIndexCounts = null,
@@ -1603,6 +1919,11 @@ public sealed class MaterialValueTests : IDisposable
         internal bool StripPatchPayload { get; init; }
         internal Func<BuildBindingRequest, BuildRenderPlan>? RenderFactory { get; init; }
 
+        /// <summary>What the backend says about telling the material's own draw apart; null = it can.</summary>
+        internal string? SharedDraw { get; init; }
+
+        public string? StockDrawBlock(TargetSlot currentSlot) => SharedDraw;
+
         public BuildSlotResolution ResolveSlot(TargetSlot authoredSlot) => new(
             BuildPlanVerdict.Resolved, authoredSlot, "the structural slot resolves exactly");
 
@@ -1771,6 +2092,43 @@ public sealed class MaterialValueTests : IDisposable
     }
 
     [Fact]
+    public void A_pass_compiled_without_one_of_the_materials_keywords_still_carries_its_values()
+    {
+        // The front pass compiles the stocking axis; the back-face pass does not, yet draws the same
+        // material and reads the same base colour.
+        var front = PassVariant(0, "Front", "aaaaaaaaaaaaaaaa", 544, "_USE_STOCKING");
+        var frontPlain = PassVariant(0, "Front", "bbbbbbbbbbbbbbbb", 544);
+        var back = PassVariant(1, "Back", "cccccccccccccccc", 544);
+        var evidence = EvidenceFor(_ => new byte[] { 21 },
+            Shading("c_x_slg_legs_ubertrans", "_USE_STOCKING"), new[] { front, frontPlain, back });
+
+        var derived = evidence.Resolve(MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle));
+
+        Assert.NotNull(derived);
+        Assert.Equal(new[] { "aaaaaaaaaaaaaaaa", "cccccccccccccccc" }, derived!.PixelShaderHashes);
+    }
+
+    [Theory]
+    [InlineData("c_x_slg_fringeuber", true)]
+    [InlineData("c_x_slg_cloth_uber", false)]
+    public void A_pass_the_game_draws_only_for_one_family_carries_values_only_on_that_family(
+        string material, bool fringe)
+    {
+        // A narrower buffer on a pass the game never draws for the material must not refuse the
+        // material; on the family that draws it, the same layout joins the values' programs.
+        var forward = PassVariant(0, "GFCharForward", "1111111111111111", fringe ? 544 : 592);
+        var hairOverEyes = PassVariant(1, "GFCharHairTransE", "2222222222222222", 544);
+        var evidence = EvidenceFor(_ => new byte[] { fringe ? (byte)22 : (byte)23 },
+            Shading(material), new[] { forward, hairOverEyes });
+
+        var derived = evidence.Resolve(MaterialSlot(DerivedMaterialEvidence.CharacterShaderBundle));
+
+        Assert.NotNull(derived);
+        Assert.Equal(fringe ? new[] { "1111111111111111", "2222222222222222" } : new[] { "1111111111111111" },
+            derived!.PixelShaderHashes);
+    }
+
+    [Fact]
     public void The_family_filter_value_is_stable_and_exact_under_float_comparison()
     {
         var hashes = new[] { "45dbffd6cb513d80", "0175b3fa12ebdbc8" };
@@ -1795,6 +2153,27 @@ public sealed class MaterialValueTests : IDisposable
         IReadOnlyList<string> externalCabs) => new("material",
         new HashSet<string>(StringComparer.Ordinal), shaderFileId, 91, externalCabs,
         new Dictionary<string, float>(), new Dictionary<string, float[]>());
+
+    private static BundleReader.MaterialShading Shading(string name, params string[] keywords) => new(name,
+        keywords.ToHashSet(StringComparer.Ordinal), 0, 91, Array.Empty<string>(),
+        new Dictionary<string, float>(), new Dictionary<string, float[]>());
+
+    private static ShaderVariant PassVariant(int pass, string passName, string hash, int width,
+        params string[] keywords) => new("character", pass, passName,
+        keywords.ToHashSet(StringComparer.Ordinal), 2, width,
+        new Dictionary<string, int>(StringComparer.Ordinal) { ["_BaseColor"] = 176 }, hash);
+
+    /// <summary>A variant that declares and reads the named fields of its material buffer.</summary>
+    private static ShaderVariant Reading(ShaderVariant variant, params (string Semantic, int Offset)[] fields)
+    {
+        var offsets = new Dictionary<string, int>(variant.VectorOffsets, StringComparer.Ordinal);
+        foreach (var (semantic, offset) in fields) offsets[semantic] = offset;
+        return variant with
+        {
+            VectorOffsets = offsets,
+            MaterialReads = new ConstantBufferReads(fields.Select(field => field.Offset).ToHashSet(), false),
+        };
+    }
 
     private static ShaderVariant Variant(int width, string hash) => new("character", 0, "Forward",
         new HashSet<string>(StringComparer.Ordinal), 2, width,

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
+using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Remold.Core.Skeleton;
@@ -160,9 +161,10 @@ public class TierEmissionTests : IDisposable
         Assert.Contains("handling = skip", section);
         Assert.DoesNotContain("run = CommandListDraw", section);
 
-        // scatter: beta owns C (union slot 2) but not B (alpha's weight wins) → [Sentinel, 2]
+        // scatter: beta owns C (union slot 2), and B (slot 1) too — alpha outweighs it on B but recovers it
+        // only ill-conditioned, and beta holds it with a slim selection → [1, 2]
         var map = File.ReadAllBytes(Path.Combine(outDir, "beta_lod1_map_swap.buf"));
-        Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 0));
+        Assert.Equal(1u, BitConverter.ToUInt32(map, 0));
         Assert.Equal(2u, BitConverter.ToUInt32(map, 4));
     }
 
@@ -409,5 +411,229 @@ public class TierEmissionTests : IDisposable
         Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 4));
         Assert.Contains(result.Diagnostics, w => w.Contains("beta_lod1") && w.Contains("weakly supported"));
         Assert.Empty(result.Warnings);   // a fidelity observation is never a user-facing warning
+    }
+
+    // ---- stream-1 layout per tier ------------------------------------------------------------------
+    // A donor draw at a tier is read through the tier mesh's input layout, so a tier storing stream 1
+    // differently from the lod0 needs the stream re-encoded for it.
+
+    private const int Float32 = 0, Float16 = 1;
+
+    /// <summary>The fixtures' table with stream 1's UVs at <paramref name="uvFormat"/>, an optional second
+    /// UV pair after them, stream 1 dropped altogether, or stream 0's normals stored as halves.</summary>
+    private static UnityMesh.ChannelDef[] Layout(int uvFormat, bool secondUv = false, bool noStream1 = false,
+        bool halfNormals = false)
+    {
+        var t = SyntheticPool.SkinnedLayout();
+        t[4] = new(1, 16, uvFormat, 2);
+        if (secondUv) t[5] = new(1, uvFormat == Float32 ? 24 : 20, uvFormat, 2);
+        if (noStream1) t[3] = t[4] = t[5] = default;
+        if (halfNormals) t[1] = new(0, 12, Float16, 3);
+        return t;
+    }
+
+    /// <summary>Replace the channel table a dump's meta records.</summary>
+    private static void RecordLayout(string dir, UnityMesh.ChannelDef[]? table)
+    {
+        string path = Path.Combine(dir, "meta.json");
+        string meta = System.Text.RegularExpressions.Regex.Replace(File.ReadAllText(path),
+            ",\\s*\"channels\": \\[.*?\\]", "", System.Text.RegularExpressions.RegexOptions.Singleline).TrimEnd();
+        File.WriteAllText(path, table is null ? meta : meta[..^1] + ", " + SyntheticPool.ChannelsJson(table) + " }");
+    }
+
+    /// <summary>Overwrite a fixture dump's stride-20 stream 1 with readable values: color (v,0,0,1) and
+    /// half UVs (v/64, 1 - v/64).</summary>
+    private static void ReadableStream1(string dir, int verts)
+    {
+        var s1 = new byte[verts * 20];
+        for (int v = 0; v < verts; v++)
+        {
+            BitConverter.GetBytes((float)v).CopyTo(s1, v * 20);
+            BitConverter.GetBytes(1f).CopyTo(s1, v * 20 + 12);
+            BitConverter.GetBytes((Half)(v / 64f)).CopyTo(s1, v * 20 + 16);
+            BitConverter.GetBytes((Half)(1f - v / 64f)).CopyTo(s1, v * 20 + 18);
+        }
+        File.WriteAllBytes(Path.Combine(dir, "stream1.buf"), s1);
+    }
+
+    private PoolBuildRequest LayoutRequest(out string outDir, params (string Suffix, int UvFormat, bool SecondUv)[] tiers) =>
+        LayoutRequest(out outDir, tiers.Select(t => (t.Suffix, (UnityMesh.ChannelDef[]?)Layout(t.UvFormat, t.SecondUv))).ToArray());
+
+    private PoolBuildRequest LayoutRequest(out string outDir, params (string Suffix, UnityMesh.ChannelDef[]? Table)[] tiers)
+    {
+        var poolTiers = tiers.Select((t, i) =>
+        {
+            string td = Path.Combine(_root, "alpha_" + t.Suffix);
+            SyntheticPool.WritePartDump(td, 3 + i, 24, new[] { A, B });
+            RecordLayout(td, t.Table);
+            return new PoolTier("alpha", "alpha_" + t.Suffix, t.Suffix, td, $"aaaa00{i + 2:d2}");
+        }).ToArray();
+        var req = Request(out outDir, null, poolTiers);
+        foreach (var (part, verts) in new[] { ("alpha", 32), ("beta", 16) })
+            ReadableStream1(Path.Combine(_root, part), verts);
+        return req;
+    }
+
+    private static string Section(string ini, string header)
+    {
+        int at = ini.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(at >= 0, header);
+        int end = ini.IndexOf("\n\n", at, StringComparison.Ordinal);
+        return end < 0 ? ini[at..] : ini[at..end];
+    }
+
+    [Fact]
+    public void Anchor_tier_storing_stream1_differently_draws_a_reencoded_stream()
+    {
+        var req = LayoutRequest(out string outDir, ("lod1", Float32, false));
+        new MigotoEmitter().Build(req);
+
+        // the variant: same 48 vertices, color verbatim, the half UVs widened to float32
+        var primary = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap.buf"));
+        var variant = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap_v1.buf"));
+        Assert.Equal(48 * 20, primary.Length);
+        Assert.Equal(48 * 24, variant.Length);
+        for (int v = 0; v < 48; v++)
+        {
+            Assert.Equal(primary.AsSpan(v * 20, 16).ToArray(), variant.AsSpan(v * 24, 16).ToArray());
+            Assert.Equal((float)BitConverter.ToHalf(primary, v * 20 + 16), BitConverter.ToSingle(variant, v * 24 + 16));
+            Assert.Equal((float)BitConverter.ToHalf(primary, v * 20 + 18), BitConverter.ToSingle(variant, v * 24 + 20));
+        }
+
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains("global $zz_vb1_swap = 0\n", ini);
+        Assert.Contains("[Resource_NewVB1_swap_v1]\ntype = RWBuffer\nstride = 24\nfilename = combined_vb1_swap_v1.buf\n", ini);
+        // every anchor capture names its stream, so the selector never carries a stale value over
+        Assert.Contains("$zz_vb1_swap = 0\n", Section(ini, "[TextureOverride_Cap_alpha]"));
+        Assert.Contains("$zz_vb1_swap = 1\n", Section(ini, "[TextureOverride_Cap_alpha_lod1]"));
+        Assert.Contains("vb1 = Resource_NewVB1_swap\nif $zz_vb1_swap == 1\nvb1 = Resource_NewVB1_swap_v1\nendif\n",
+            Section(ini, "[CommandListDraw_swap]"));
+    }
+
+    [Fact]
+    public void Tiers_sharing_a_differing_layout_share_one_stream_and_a_matching_tier_binds_the_primary()
+    {
+        var req = LayoutRequest(out string outDir, ("lod1", Float32, false), ("lod2", Float16, false),
+            ("lod3", Float32, false));
+        new MigotoEmitter().Build(req);
+
+        Assert.True(File.Exists(Path.Combine(outDir, "combined_vb1_swap_v1.buf")));
+        Assert.False(File.Exists(Path.Combine(outDir, "combined_vb1_swap_v2.buf")));
+        string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+        Assert.Contains("$zz_vb1_swap = 1\n", Section(ini, "[TextureOverride_Cap_alpha_lod1]"));
+        Assert.Contains("$zz_vb1_swap = 0\n", Section(ini, "[TextureOverride_Cap_alpha_lod2]"));
+        Assert.Contains("$zz_vb1_swap = 1\n", Section(ini, "[TextureOverride_Cap_alpha_lod3]"));
+    }
+
+    [Fact]
+    public void Tiers_matching_the_lod0_layout_emit_no_selector()
+    {
+        var req = LayoutRequest(out string outDir, ("lod1", Float16, false));
+        new MigotoEmitter().Build(req);
+
+        Assert.False(File.Exists(Path.Combine(outDir, "combined_vb1_swap_v1.buf")));
+        Assert.DoesNotContain("zz_vb1_", File.ReadAllText(Path.Combine(outDir, "mod.ini")));
+    }
+
+    [Fact]
+    public void Tier_storing_a_uv_set_the_lod0_lacks_gets_it_filled_from_the_first()
+    {
+        var req = LayoutRequest(out string outDir, ("lod1", Float16, true));
+        var result = new MigotoEmitter().Build(req);
+
+        var primary = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap.buf"));
+        var variant = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap_v1.buf"));
+        Assert.Equal(48 * 24, variant.Length);
+        for (int v = 0; v < 48; v++)
+        {
+            Assert.Equal(primary.AsSpan(v * 20, 20).ToArray(), variant.AsSpan(v * 24, 20).ToArray());
+            Assert.Equal(primary.AsSpan(v * 20 + 16, 4).ToArray(), variant.AsSpan(v * 24 + 20, 4).ToArray());
+        }
+        Assert.Contains(result.Diagnostics, d => d.StartsWith("alpha_lod1: stores TexCoord1,", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Tier_storing_a_non_uv_channel_the_lod0_lacks_refuses_the_build()
+    {
+        // the fixtures' lod0 stores no color once it is dropped from the anchor's table
+        var req = LayoutRequest(out _, ("lod1", Layout(Float16)));
+        var noColor = Layout(Float16);
+        noColor[3] = default;
+        noColor[4] = new(1, 0, Float16, 2);
+        foreach (var (part, verts) in new[] { ("alpha", 32), ("beta", 16) })
+        {
+            File.WriteAllBytes(Path.Combine(_root, part, "stream1.buf"), new byte[verts * 4]);
+            RecordLayout(Path.Combine(_root, part), noColor);
+        }
+        var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
+        // the tier AND the part it belongs to, as the other tier refusals name them
+        Assert.Contains("LOD 'alpha_lod1' of 'alpha'", e.Message);
+        Assert.Contains("Color", e.Message);
+    }
+
+    [Fact]
+    public void A_tier_storing_nothing_in_stream1_needs_no_copy()
+    {
+        // its draw reads nothing from that slot, so whatever is bound there is never sampled
+        var req = LayoutRequest(out string outDir, ("lod1", Layout(Float16, noStream1: true)));
+        new MigotoEmitter().Build(req);
+
+        Assert.False(File.Exists(Path.Combine(outDir, "combined_vb1_swap_v1.buf")));
+        Assert.DoesNotContain("zz_vb1_", File.ReadAllText(Path.Combine(outDir, "mod.ini")));
+    }
+
+    [Fact]
+    public void A_tier_storing_stream0_differently_refuses_the_build()
+    {
+        // stream 0 is posed into one fixed shape every frame, so there is no copy to give such a tier
+        var req = LayoutRequest(out _, ("lod1", Layout(Float16, halfNormals: true)));
+        var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
+        Assert.Contains("LOD 'alpha_lod1' of 'alpha'", e.Message);
+        Assert.Contains("stream 0", e.Message);
+    }
+
+    [Fact]
+    public void A_tier_with_no_recorded_layout_is_an_error_not_a_guess()
+    {
+        var req = LayoutRequest(out _, ("lod1", (UnityMesh.ChannelDef[]?)null));
+        var e = Assert.Throws<InvalidOperationException>(() => new MigotoEmitter().Build(req));
+        Assert.Contains("alpha_lod1", e.Message);
+    }
+
+    [Fact]
+    public void The_reencoded_stream_is_named_by_mesh_in_the_build_log()
+    {
+        var req = LayoutRequest(out _, ("lod1", Float32, false));
+        var result = new MigotoEmitter().Build(req);
+        Assert.Contains(result.Diagnostics, d => d.StartsWith("alpha_lod1: stores stream 1 differently", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_compiled_donors_own_table_is_what_a_tier_is_checked_against()
+    {
+        // The app always builds with a compiled donor, and the donor's folder, not the anchor's dump,
+        // states the layout the shipped stream is sliced in.
+        string td = Path.Combine(_root, "alpha_lod1");
+        SyntheticPool.WritePartDump(td, 3, 24, new[] { A, B });
+        RecordLayout(td, Layout(Float32));
+        var req = Request(out string outDir, null, new PoolTier("alpha", "alpha_lod1", "lod1", td, "aaaa0002"));
+        string donor = Path.Combine(_root, "donor");
+        SyntheticPool.WriteDonor(donor, verts: 12, unionBones: 3, submeshes: 1);
+        ReadableStream1(donor, 12);
+        // the anchor's dump claims float UVs too: only the donor's table says the stream holds halves
+        RecordLayout(Path.Combine(_root, "alpha"), Layout(Float32));
+        req = new PoolBuildRequest
+        {
+            OutDir = req.OutDir,
+            Pipelines = new[] { req.Pipelines[0] with { DonorDir = donor } },
+        };
+        new MigotoEmitter().Build(req);
+
+        var primary = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap.buf"));
+        var variant = File.ReadAllBytes(Path.Combine(outDir, "combined_vb1_swap_v1.buf"));
+        Assert.Equal(12 * 20, primary.Length);
+        Assert.Equal(12 * 24, variant.Length);
+        for (int v = 0; v < 12; v++)
+            Assert.Equal((float)BitConverter.ToHalf(primary, v * 20 + 16), BitConverter.ToSingle(variant, v * 24 + 16));
     }
 }

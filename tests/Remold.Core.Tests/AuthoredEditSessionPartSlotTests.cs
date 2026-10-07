@@ -27,12 +27,12 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         session.EnsurePartSlots(hair, Resolve);
         var slots = session.Snapshot().TargetSlots.Where(slot => slot.Part.SameAs(hair)).ToList();
 
-        // The adapter's shape: lod0 geometry, one geometry slot per tier, then each material's supported
-        // inputs at its own position — and no visibility slot, which is a hide's to own.
+        // The adapter's shape: ONE geometry slot for the part, then each material's supported inputs at
+        // its own position — and no visibility slot, which is a hide's to own. The part's lower-detail
+        // versions take the same replacement the closest one does and get no slot of their own.
         Assert.Equal(new[]
         {
             ("lod0", TargetInputKind.Geometry, (int?)null),
-            ("lod1", TargetInputKind.Geometry, null),
             (null, TargetInputKind.BaseColor, 0),
             (null, TargetInputKind.Normal, 0),
             (null, TargetInputKind.Blend, 0),
@@ -40,7 +40,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         }, slots.Select(slot => (slot.Tier, slot.Input, slot.MaterialSlotIndex)).ToArray());
         Assert.All(slots, slot => Assert.Equal(TargetSlotDomain.Game, slot.Domain));
         Assert.All(slots, slot => Assert.Null(slot.OwnerEditId));
-        Assert.Equal(new[] { "slot-0001", "slot-0002", "slot-0003", "slot-0004", "slot-0005", "slot-0006" },
+        Assert.Equal(new[] { "slot-0001", "slot-0002", "slot-0003", "slot-0004", "slot-0005" },
             slots.Select(slot => slot.Id).ToArray());
         var picture = slots.Single(slot => slot.Input == TargetInputKind.BaseColor);
         Assert.Equal(picture.SubmeshIndex, picture.MaterialSlotIndex);
@@ -66,7 +66,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         session.EnsurePartSlots(hair, Resolve);
 
         string edit = session.CreateEdit(hair);
-        Assert.Equal(6, session.Slots(edit).Count);
+        Assert.Equal(5, session.Slots(edit).Count);
         Assert.Equal(edit, session.Part(hair).EditDefinitionId);
         session.PlaceEdit(session.CreateHideEdit(hair), group, 1);
 
@@ -155,8 +155,8 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         session.EnsurePartSlots(hair, Resolve);
 
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
-        // The second edit has exact output copies of the six game routes. Re-opening adds no third set.
-        Assert.Equal(12, session.Snapshot().TargetSlots.Count(slot => slot.Part.SameAs(hair)));
+        // The second edit has exact output copies of the five game routes. Re-opening adds no third set.
+        Assert.Equal(10, session.Snapshot().TargetSlots.Count(slot => slot.Part.SameAs(hair)));
     }
 
     [Fact]
@@ -257,7 +257,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
 
         Assert.Contains("not an authorable shading value",
             Assert.Throws<ArgumentException>(() =>
-                session.EnsureMaterialValueSlot(hair, 0, "_BaseColor", Resolve)).Message);
+                session.EnsureMaterialValueSlot(hair, 0, "_OnHitColor", Resolve)).Message);
         Assert.Contains("no material 7",
             Assert.Throws<AuthoredRefusalException>(() =>
                 session.EnsureMaterialValueSlot(hair, 7, "_UseGIFlatten", Resolve)).Message);
@@ -307,6 +307,38 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
     }
 
     [Fact]
+    public void Shading_values_no_drawn_pass_reads_return_to_the_original_and_unread_materials_keep_theirs()
+    {
+        var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
+        session.SetRootDir(_root);
+        var hair = AuthoredEditFixtures.Hair;
+        session.EnsurePartSlots(hair, Resolve);
+        string edit = session.CreateEdit(hair);
+        string flatten = session.EnsureMaterialValueSlot(hair, 0, "_UseGIFlatten", Resolve);
+        string colour = session.EnsureMaterialValueSlot(hair, 0, "_StockingCenterColor", Resolve);
+        session.ChooseMaterialValue(edit, flatten, "0");
+        session.ChooseMaterialValue(edit, colour, "0.5, 0.25, 1, 1");
+
+        // an unread material keeps every value, and a material that reads the field keeps it
+        Assert.Empty(session.RemoveMaterialValuesNoPassReads(_ => null));
+        Assert.Empty(session.RemoveMaterialValuesNoPassReads(_ =>
+            new HashSet<string> { "_UseGIFlatten", "_StockingCenterColor" }));
+
+        long revision = session.Revision;
+        var removed = session.RemoveMaterialValuesNoPassReads(_ => new HashSet<string> { "_UseGIFlatten" });
+
+        var only = Assert.Single(removed);
+        Assert.Equal((edit, colour, "_StockingCenterColor"), (only.EditDefinitionId, only.SlotId, only.Semantic));
+        Assert.NotEqual(revision, session.Revision);
+        var project = session.Snapshot();
+        Assert.DoesNotContain(project.TargetSlots, slot => slot.Id == colour);
+        Assert.Contains(project.TargetSlots, slot => slot.Id == flatten);
+        Assert.Empty(AuthoredProjectValidator.Errors(project));
+        // a second pass finds nothing left to remove
+        Assert.Empty(session.RemoveMaterialValuesNoPassReads(_ => new HashSet<string> { "_UseGIFlatten" }));
+    }
+
+    [Fact]
     public void Reapplying_a_shading_field_reuses_one_asset_and_one_stable_file()
     {
         var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
@@ -345,10 +377,9 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         var hair = AuthoredEditFixtures.Hair;
         string before = AuthoredProjectSerializer.Serialize(session.Snapshot());
 
-        Assert.Throws<KeyNotFoundException>(() => session.ApplyMaterialValues("missing-edit", hair, 0,
-            new[] { new AuthoredMaterialValueEdit(MaterialValueSemantics.UseGiFlatten, "0") }, Resolve));
-        Assert.Throws<KeyNotFoundException>(() => session.CopyMaterialValues("missing-edit", hair, 0,
-            hair, 0, new[] { MaterialValueSemantics.UseGiFlatten }, Resolve));
+        Assert.Throws<KeyNotFoundException>(() => session.ApplyMaterialShading("missing-edit", hair, 0,
+            new[] { new AuthoredMaterialValueEdit(MaterialValueSemantics.UseGiFlatten, "0") },
+            Array.Empty<AuthoredMaterialEffectEdit>(), Resolve));
 
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
         Assert.False(Directory.Exists(Path.Combine(_root, "values")));

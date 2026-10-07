@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Data;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
@@ -18,9 +19,33 @@ namespace Remold.App.Views;
 /// <see cref="EditPageVm.HandleDropAsync"/>.</summary>
 public partial class EditPageView : UserControl
 {
+    /// <summary>The width the tree pane was last dragged to. Null until the divider is first dragged: the pane
+    /// then stands at the width the markup gives it. Whatever is set here, the columns' own minimums still
+    /// hold, so a remembered width too wide for the window leaves the inspector its room.</summary>
+    public static readonly StyledProperty<double?> TreeWidthProperty =
+        AvaloniaProperty.Register<EditPageView, double?>(nameof(TreeWidth), defaultBindingMode: BindingMode.TwoWay);
+
+    public double? TreeWidth
+    {
+        get => GetValue(TreeWidthProperty);
+        set => SetValue(TreeWidthProperty, value);
+    }
+
+    private readonly ColumnDefinition _treeColumn;
+    private readonly ColumnDefinition _dividerColumn;
+    private readonly ColumnDefinition _inspectorColumn;
+    private readonly GridLength _markupTreeWidth;
+
     public EditPageView()
     {
         AvaloniaXamlLoader.Load(this);
+        var split = this.FindControl<Grid>("Split")!;
+        _treeColumn = split.ColumnDefinitions[0];
+        _dividerColumn = split.ColumnDefinitions[1];
+        _inspectorColumn = split.ColumnDefinitions[2];
+        _markupTreeWidth = _treeColumn.Width;
+        split.SizeChanged += (_, e) => CapTreeWidth(e.NewSize.Width);
+        this.FindControl<GridSplitter>("Divider")!.DragCompleted += (_, _) => RememberTreeWidth();
         // DragEnter as well as DragOver: crossing an element boundary mid-drag raises ENTER, not Over, and an
         // unhandled DragEnter leaves the platform's permissive effects standing — the cursor flickers, and a
         // release on that frame delivers a drop the pane meant to refuse.
@@ -28,6 +53,23 @@ public partial class EditPageView : UserControl
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
         AddHandler(DragDrop.DropEvent, OnDrop);
     }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == TreeWidthProperty)
+            _treeColumn.Width = TreeWidth is { } width ? new GridLength(width) : _markupTreeWidth;
+    }
+
+    /// <summary>The tree may take whatever the inspector's minimum leaves over, never more. A cap rather than a
+    /// rewrite of the width, so the remembered width comes back when the window grows again.</summary>
+    private void CapTreeWidth(double splitWidth) =>
+        _treeColumn.MaxWidth = Math.Max(_treeColumn.MinWidth,
+            splitWidth - _dividerColumn.Width.Value - _inspectorColumn.MinWidth);
+
+    /// <summary>A finished drag is what gets remembered: the width the tree actually stands at, which the
+    /// splitter has already held inside both minimums.</summary>
+    private void RememberTreeWidth() => TreeWidth = Math.Round(_treeColumn.ActualWidth);
 
     /// <summary>Only a file drag over something that could take it gets the copy cursor. The cursor asks the
     /// VM's own gate, so a target the drop has nothing to do with never offers one; a target that passes can

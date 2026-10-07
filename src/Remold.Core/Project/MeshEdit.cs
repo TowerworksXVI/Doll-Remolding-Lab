@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json.Serialization;
 
 namespace Remold.Core.Project;
@@ -44,9 +45,12 @@ public enum SlotOrigin
     /// <summary>The modder plugged the shipped neutral in. Nothing ships: the build binds its own flat
     /// map, blanking the slot.</summary>
     ExplicitNeutral,
-    /// <summary>The part's own stock image came back untouched. Nothing ships and nothing binds: the real
-    /// map keeps drawing.</summary>
-    VanillaOwn,
+    /// <summary>The slot keeps what it has. Off a return: the picture the session sent came back untouched —
+    /// the game's original or the modder's own — and the slot's binding stands, whatever it is. On a build
+    /// row: nothing of the modder's is on the slot, so the part's own map keeps drawing. Persisted under the
+    /// spelling every released build wrote (<see cref="SlotOrigins.UntouchedRecordName"/>).</summary>
+    [JsonStringEnumMemberName(SlotOrigins.UntouchedRecordName)]
+    Untouched,
 }
 
 /// <summary>The texture maps for one submesh, each with the ORIGIN that says what the modder asked for on
@@ -139,7 +143,7 @@ public sealed class SubmeshTextures
     public void KeepOwnRamp()
     {
         Ramp = null;
-        RampOrigin = SlotOrigin.VanillaOwn;
+        RampOrigin = SlotOrigin.Untouched;
         RampCarried = null;
     }
 
@@ -154,6 +158,13 @@ public sealed class SubmeshTextures
     [JsonIgnore] public SlotOrigin RampAsk => Ask(Ramp, RampOrigin);
     /// <inheritdoc cref="AlbedoAsk"/>
     [JsonIgnore] public SlotOrigin BlendAsk => Ask(Blend, BlendOrigin);
+
+    /// <summary>Whether any slot of this row asks for something (<see cref="SlotOrigins.IsAsk"/>). A row can
+    /// exist without asking: a return writes one for every submesh whose slots answered at all, untouched
+    /// slots included, and this is what tells a submesh that asked from one that only answered.</summary>
+    [JsonIgnore] public bool Asks => AlbedoAsk.IsAsk() || NormalAsk.IsAsk() || RmoAsk.IsAsk()
+        || RampAsk.IsAsk() || BlendAsk.IsAsk()
+        || Textures?.Any(texture => texture.Ask.IsAsk()) == true;
 
     /// <summary><see cref="SlotOrigin.Authored"/> means a file, both ways: the two cannot be recorded in
     /// disagreement, so nothing downstream has to handle an authored slot with nothing to bind.</summary>
@@ -215,10 +226,20 @@ public sealed class CarriedRamp
 /// send-back summary cannot drift apart on it.</summary>
 public static class SlotOrigins
 {
-    /// <summary>Whether the slot carries an ask of its own. Leaving a stock map alone, or having no image
-    /// at all, does not — which is what separates "blank this" from "don't touch this".</summary>
+    /// <summary>The spelling every released build persisted <see cref="SlotOrigin.Untouched"/> under — in
+    /// project files, donor rows and the repair record inside a built mod. The member was renamed because
+    /// the picture an untouched slot holds need not be the game's; what is on disk keeps its name.</summary>
+    public const string UntouchedRecordName = "VanillaOwn";
+
+    /// <summary>Whether the slot carries an ask of its own. Leaving the sent picture alone, or having no
+    /// image at all, does not — which is what separates "blank this" from "don't touch this".</summary>
     public static bool IsAsk(this SlotOrigin origin) =>
         origin is SlotOrigin.Authored or SlotOrigin.ExplicitNeutral;
+
+    /// <summary>The spelling a persisted record carries for an origin: the enum's own name, except where a
+    /// release fixed another (<see cref="UntouchedRecordName"/>).</summary>
+    public static string RecordName(this SlotOrigin origin) =>
+        origin == SlotOrigin.Untouched ? UntouchedRecordName : origin.ToString();
 }
 
 /// <summary>Which of a submesh row's three map slots ship the build's own FLAT map rather than an image or

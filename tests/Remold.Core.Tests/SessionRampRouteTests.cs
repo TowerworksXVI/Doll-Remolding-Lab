@@ -69,21 +69,19 @@ public sealed class SessionRampRouteTests
     }
 
     [Fact]
-    public void Ramp_image_accepts_a_valid_preview()
+    public Task Ramp_image_accepts_a_valid_preview() => HeadlessPictures.RunAsync(() =>
     {
-        EnsureAvalonia();
         byte[] fp16 = FloatRamp(256, 16, 0.5f);
 
         using var preview = RampImage.TryPreview(256, 16, fp16);
 
         Assert.NotNull(preview);
         Assert.Equal(new PixelSize(256, 64), preview.PixelSize);
-    }
+    });
 
     [Fact]
-    public void Project_dds_ramp_uses_the_ramp_preview_decoder()
+    public Task Project_dds_ramp_uses_the_ramp_preview_decoder() => HeadlessPictures.RunAsync(() =>
     {
-        EnsureAvalonia();
         using var game = new TempGame();
         string path = WriteDds(game.At("project-ramp.dds"),
             DdsWriter.R16G16B16A16_FLOAT, 256, 16);
@@ -94,7 +92,7 @@ public sealed class SessionRampRouteTests
         Assert.NotNull(image);
         Assert.Equal(new PixelSize(256, 64), image.PixelSize);
         Assert.Equal("256\u00d716", preview.Dimensions);
-    }
+    });
 
     [Fact]
     public async Task Picker_filter_never_hides_the_materials_own_row()
@@ -208,9 +206,9 @@ public sealed class SessionRampRouteTests
     }
 
     [Fact]
-    public void Ramp_cache_serves_a_second_open_and_misses_after_rescan_or_install_replacement()
+    public Task Ramp_cache_serves_a_second_open_and_misses_after_rescan_or_install_replacement() =>
+        HeadlessPictures.RunAsync(() =>
     {
-        EnsureAvalonia();
         var cache = new InstallRampCache();
         var install = new object();
         var replacement = new object();
@@ -236,7 +234,7 @@ public sealed class SessionRampRouteTests
         cache.Store(install, "catalog-a", choice, entry);
         cache.Clear();
         Assert.False(cache.TryGet(install, "catalog-a", choice, out _));
-    }
+    });
 
     [Fact]
     public async Task Picker_refused_import_adds_no_row()
@@ -413,14 +411,5 @@ public sealed class SessionRampRouteTests
             bytes[at + 1] = half[1];
         }
         return bytes;
-    }
-
-    private static bool _avaloniaReady;
-
-    private static void EnsureAvalonia()
-    {
-        if (_avaloniaReady) return;
-        AppBuilder.Configure<Remold.App.App>().UsePlatformDetect().SetupWithoutStarting();
-        _avaloniaReady = true;
     }
 }

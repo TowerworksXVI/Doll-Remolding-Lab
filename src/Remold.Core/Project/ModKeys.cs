@@ -28,8 +28,15 @@ public readonly record struct KeyRef(string Key, int State)
 /// <summary>One emitted key's cycle: how many positions it steps through, which one it holds at load, and
 /// whether the position it was left in survives a game restart. A key resets every session unless
 /// <see cref="Persist"/> opts it out, so <see cref="StartState"/> is where a session starts when no saved
-/// position stands — the first session, and every session of an unpersisted key.</summary>
-public sealed record KeyCycle(string Key, int StateCount, int StartState, bool Persist = false);
+/// position stands — the first session, and every session of an unpersisted key.
+///
+/// <para><see cref="Shortcuts"/> are the other keys that set this key's position directly. Null when the
+/// group has none.</para></summary>
+public sealed record KeyCycle(string Key, int StateCount, int StartState, bool Persist = false,
+    IReadOnlyList<KeyShortcut>? Shortcuts = null);
+
+/// <summary>A key that puts a cycle straight into one position, whatever position it stands in.</summary>
+public readonly record struct KeyShortcut(string Key, int State);
 
 /// <summary>
 /// The one place a toggle-key string is normalized, compared and turned into an ini identifier. A key is

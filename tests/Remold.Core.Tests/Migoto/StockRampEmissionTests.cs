@@ -9,9 +9,9 @@ using Xunit;
 namespace Remold.Core.Tests.Migoto;
 
 /// <summary>
-/// A toon ramp picked on a material of a part the mod does NOT replace: an index-buffer-keyed section that
-/// sights the target material, finds the register holding its ramp, swaps for the draw and puts it back.
-/// The emitted text is pinned here — it is what the runtime parses.
+/// A toon ramp picked on a material of a part the mod does NOT replace: a section keyed on the part's mesh
+/// that runs at that material's own draw range, finds the register holding its ramp, swaps for the draw and
+/// puts it back where it swapped. The emitted text is pinned here — it is what the runtime parses.
 /// </summary>
 public class StockRampEmissionTests : IDisposable
 {
@@ -24,7 +24,8 @@ public class StockRampEmissionTests : IDisposable
     private static readonly IReadOnlyList<int> StockSlots = ShaderSlotPlan.Shipped.StockMaps;
     private static readonly IReadOnlyList<int> RampSlots = ShaderSlotPlan.Shipped.Ramp;
 
-    private const string Ib = "aa11bb22", MatHash = "c0ffee01", RampHash = "d1ce0002";
+    private const string Ib = "aa11bb22", RampHash = "d1ce0002";
+    private static readonly DrawShape Range = new(120, 300);
 
     /// <summary>A ramp-shaped fp16 DDS, written through the container a shipped one goes out in.</summary>
     private string Ramp(string name = "picked_ramp.dds")
@@ -39,37 +40,38 @@ public class StockRampEmissionTests : IDisposable
     }
 
     private string Emit(IReadOnlyList<StockRampBind> binds, string tag = "run",
-        IReadOnlyList<string>? hides = null, string? modKey = null)
+        IReadOnlyList<string>? hides = null, string? modKey = null, IReadOnlyList<TwinGuard>? guards = null)
     {
         string outDir = Path.Combine(_root, $"out-{tag}");
         new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null, hideHashes: hides, modKey: modKey,
-            stockRamps: binds);
+            twinGuards: guards, stockRamps: binds);
         return File.ReadAllText(Path.Combine(outDir, "mod.ini"));
     }
 
-    private StockRampBind Bind(string? key = null, string? latch = null, string name = "body_lod0_ramp") =>
-        new(name, Ib, MatHash, RampHash, Ramp(), key is null ? (KeyRef?)null : new KeyRef(key), latch);
+    private StockRampBind Bind(string? key = null, string? latch = null, string name = "body_lod0_ramp",
+        DrawShape? shape = null, int? verdict = null) =>
+        new(name, Ib, shape ?? Range, RampHash, Ramp(), key is null ? (KeyRef?)null : new KeyRef(key), latch,
+            TwinVerdict: verdict);
 
-    // ---- the two tags ---------------------------------------------------------------------------------
+    // ---- the tag ----------------------------------------------------------------------------------
 
-    /// <summary>The material's ordinary map answers WHICH MATERIAL is drawing, by a value derived from its
-    /// own hash — sound, unlike a ramp's. The ramp answers WHICH REGISTER holds a ramp, by the kind value
-    /// every ramp bind in this build reads.</summary>
+    /// <summary>The ramp answers WHICH REGISTER holds a ramp, by the kind value every ramp bind in this
+    /// build reads. Nothing tags another map of the material: the draw range says which material it is.</summary>
     [Fact]
-    public void The_material_map_and_the_ramp_each_carry_their_own_tag()
+    public void Only_the_ramp_carries_a_tag()
     {
         string ini = Emit(new[] { Bind() });
 
-        Assert.Contains($"[TextureOverride_StockRampTag_{MatHash}]\nhash = {MatHash}\n"
-            + $"filter_index = {MigotoEmitter.RetexTag(MatHash)}\nmatch_priority = 100\n", ini);
         Assert.Contains($"[TextureOverride_SlotTag_{RampHash}]\nhash = {RampHash}\n"
             + $"filter_index = {MigotoEmitter.FilterRamp}\nmatch_priority = 100\n", ini);
+        Assert.DoesNotContain("StockRampTag", ini);
+        Assert.DoesNotContain("zz_srm", ini);
     }
 
     // ---- the section ----------------------------------------------------------------------------------
 
     [Fact]
-    public void The_bind_lives_in_one_section_keyed_on_the_parts_index_buffer()
+    public void The_bind_lives_in_one_section_keyed_on_the_parts_mesh()
     {
         string ini = Emit(new[] { Bind() });
 
@@ -79,55 +81,51 @@ public class StockRampEmissionTests : IDisposable
         Assert.DoesNotContain("this = Resource_", ini);
     }
 
+    /// <summary>One mesh draws every material of the part, each over an index range of its own, so the bind
+    /// runs only inside the test for its own material's range — probe, bind and bound flag alike.</summary>
     [Fact]
-    public void The_ramp_registers_are_saved_and_restored_around_the_draw()
+    public void The_swap_runs_only_at_the_materials_own_draw_range()
+    {
+        string section = Section(Emit(new[] { Bind() }));
+
+        int open = section.IndexOf($"if first_index == {Range.First}\nif index_count == {Range.Count}\n",
+            StringComparison.Ordinal);
+        Assert.True(open > 0);
+        Assert.Contains("$zz_slot_rm = -1\n", section);
+        foreach (int s in RampSlots)
+        {
+            Assert.Contains($"$zz_sr = ps-t{s}\nif $zz_sr == {MigotoEmitter.FilterRamp}\n"
+                + $"$zz_slot_rm = {s}\nendif\n", section);
+            int bind = section.IndexOf($"if $zz_slot_rm == {s}\nps-t{s} = Resource_Rtx0\n$zz_bt{s} = 1\nendif\n",
+                StringComparison.Ordinal);
+            Assert.True(bind > open, $"the bind at ps-t{s} must sit inside the draw-range test");
+        }
+    }
+
+    /// <summary>Every ramp register is saved before anything binds, and put back after the draw only where
+    /// this section bound it: a section that bound nothing leaves the register to whoever did.</summary>
+    [Fact]
+    public void Each_ramp_register_is_restored_only_where_the_section_bound_it()
     {
         string ini = Emit(new[] { Bind() });
+        string section = Section(ini);
 
         Assert.Contains(RampSlots, s => s > 6);   // the shipped plan exercises the high-register path
         foreach (int s in RampSlots)
         {
             Assert.Contains($"[Resource_SrSave{s}]\n", ini);
-            Assert.Contains($"Resource_SrSave{s} = ref ps-t{s}\n", ini);
-            Assert.Contains($"post ps-t{s} = Resource_SrSave{s}\n", ini);
+            Assert.Contains($"local $zz_bt{s} = 0\n", section);
+            Assert.Contains($"Resource_SrSave{s} = ref ps-t{s}\n", section);
+            Assert.Contains($"if $zz_bt{s} == 1\npost ps-t{s} = Resource_SrSave{s}\nendif\n", section);
+            Assert.DoesNotContain($"\npost ps-t{s} = Resource_SrSave{s}\n\n", section);
         }
+        // the saves come before the range test, the restores after it closes
+        int range = section.IndexOf("if first_index ==", StringComparison.Ordinal);
+        Assert.True(section.IndexOf($"Resource_SrSave{RampSlots[0]} = ref", StringComparison.Ordinal) < range);
+        Assert.True(section.IndexOf($"post ps-t{RampSlots[0]}", StringComparison.Ordinal) > range);
         // and nothing is saved outside the ramp's own range: the picture maps are untouched here
         foreach (int s in StockSlots.Except(RampSlots))
             Assert.DoesNotContain($"[Resource_SrSave{s}]", ini);
-    }
-
-    /// <summary>One index buffer draws every material of the part, so the ramp tag alone cannot say which
-    /// one is drawing — content-different ramps collide on the runtime hash. The material's own map is
-    /// sighted first, and the swap sits inside that verdict.</summary>
-    [Fact]
-    public void The_swap_waits_for_the_target_material_to_be_sighted_at_the_draw()
-    {
-        string ini = Emit(new[] { Bind() });
-        string section = Section(ini);
-
-        Assert.Contains("$zz_srm = 0\n", section);
-        foreach (int s in StockSlots)
-            Assert.Contains($"$zz_sr = ps-t{s}\nif $zz_sr == {MigotoEmitter.RetexTag(MatHash)}\n"
-                + "$zz_srm = 1\nendif\n", section);
-
-        Assert.Contains("$zz_slot_rm = -1\n", section);
-        foreach (int s in RampSlots)
-            Assert.Contains($"$zz_sr = ps-t{s}\nif $zz_sr == {MigotoEmitter.FilterRamp}\n"
-                + $"$zz_slot_rm = {s}\nendif\n", section);
-
-        // the binds, and only the binds, sit under the sighting
-        int seen = section.IndexOf("if $zz_srm == 1\n", StringComparison.Ordinal);
-        Assert.True(seen > 0);
-        foreach (int s in RampSlots)
-        {
-            int bind = section.IndexOf($"if $zz_slot_rm == {s}\nps-t{s} = Resource_Rtx0\nendif\n",
-                StringComparison.Ordinal);
-            Assert.True(bind > seen, $"the bind at ps-t{s} must sit inside the material sighting");
-        }
-        // the restores do NOT: a draw that never opened the verdict still has its own refs to put back
-        int restore = section.IndexOf($"post ps-t{RampSlots[0]} = Resource_SrSave{RampSlots[0]}",
-            StringComparison.Ordinal);
-        Assert.True(restore > section.LastIndexOf("endif\n", StringComparison.Ordinal) - 1);
     }
 
     /// <summary>A register outside the ramp's measured range is never asked about, and never written.</summary>
@@ -166,58 +164,86 @@ public class StockRampEmissionTests : IDisposable
         string ini = Emit(new[] { Bind(key: "F7", latch: "vesna") }, modKey: "F6");
         string section = Section(ini);
 
-        Assert.Contains($"if $zz_srm == 1\nif ${ModKeys.VariableFor("F6")} == 0\n"
+        Assert.Contains($"if ${ModKeys.VariableFor("F6")} == 0\n"
             + $"if ${ModKeys.VariableFor("F7")} == 0\nif $zz_gate_vesna == 1\n", section);
         foreach (int s in RampSlots)
-            Assert.Contains($"post ps-t{s} = Resource_SrSave{s}\n", section);
+            Assert.Contains($"if $zz_bt{s} == 1\npost ps-t{s} = Resource_SrSave{s}\nendif\n", section);
         // the keys the emission declares include the bind's own
         Assert.Contains($"global ${ModKeys.VariableFor("F7")} = 0\n", ini);
     }
 
-    /// <summary>An unkeyed pick emits no gate at all, so its section is the bare probe/bind/restore.</summary>
+    /// <summary>An unkeyed pick emits no gate at all, so its block is the bare probe and bind.</summary>
     [Fact]
     public void An_unkeyed_pick_emits_no_gate()
     {
         string ini = Emit(new[] { Bind() });
 
         Assert.DoesNotContain("[Key_", ini);
-        Assert.Contains($"if $zz_srm == 1\nif $zz_slot_rm == {RampSlots[0]}\n", Section(ini));
+        Assert.Contains($"$zz_slot_rm = {RampSlots[^1]}\nendif\nif $zz_slot_rm == {RampSlots[0]}\n", Section(ini));
+    }
+
+    /// <summary>Where another mesh draws on the same section key, the block waits for the twin guard's verdict
+    /// naming this part's own mesh, and the probe that writes it runs first.</summary>
+    [Fact]
+    public void A_twin_verdict_holds_the_block_to_the_parts_own_mesh()
+    {
+        var guard = new TwinGuard(Ib, MigotoEmitter.TwinVar(Ib), new[] { 2 },
+            new[] { new TwinProbeTag("0badf00d", 1_234_567, 1), new TwinProbeTag("0badf00e", 1_234_568, 2) });
+        string section = Section(Emit(new[] { Bind(verdict: 2) }, guards: new[] { guard }));
+
+        int probe = section.IndexOf($"if $zz_t == 1234568\n${guard.Var} = 2\nendif\n", StringComparison.Ordinal);
+        int open = section.IndexOf($"if ${guard.Var} == 2\n$zz_slot_rm = -1\n", StringComparison.Ordinal);
+        Assert.True(probe > 0 && open > probe);
+    }
+
+    [Fact]
+    public void A_pick_on_a_guarded_key_without_its_own_verdict_is_refused()
+    {
+        var guard = new TwinGuard(Ib, MigotoEmitter.TwinVar(Ib), new[] { 2 },
+            new[] { new TwinProbeTag("0badf00d", 1_234_567, 1) });
+
+        Assert.Throws<InvalidOperationException>(() => Emit(new[] { Bind() }, guards: new[] { guard }));
+        Assert.Throws<InvalidOperationException>(() =>
+            Emit(new[] { Bind(verdict: 1) }, tag: "wrong", guards: new[] { guard }));
     }
 
     // ---- several picks, several meshes ----------------------------------------------------------------
 
-    /// <summary>Two materials of ONE part share the part's index buffer, so both binds live in the one
-    /// section that hash owns — and each waits for its own material.</summary>
+    /// <summary>Two materials of ONE part share the part's mesh, so both binds live in the one section that
+    /// key owns — each inside its own material's draw range.</summary>
     [Fact]
-    public void Two_materials_of_one_part_share_the_section_and_keep_their_own_sightings()
+    public void Two_materials_of_one_part_share_the_section_and_keep_their_own_ranges()
     {
-        const string otherMat = "beef0003", otherRamp = "beef0004";
+        var other = new DrawShape(0, 120);
         string ini = Emit(new[]
         {
             Bind(name: "body_lod0_ramp"),
-            new StockRampBind("body_lod0_ramp2", Ib, otherMat, otherRamp, Ramp("second.dds")),
+            new StockRampBind("body_lod0_ramp2", Ib, other, "beef0004", Ramp("second.dds")),
         });
 
         ModBuilderTests.AssertNoDuplicateSections(ini);
         string section = Section(ini);
-        Assert.Contains($"if $zz_sr == {MigotoEmitter.RetexTag(MatHash)}\n", section);
-        Assert.Contains($"if $zz_sr == {MigotoEmitter.RetexTag(otherMat)}\n", section);
-        Assert.Contains($"ps-t{RampSlots[0]} = Resource_Rtx0\n", section);
-        Assert.Contains($"ps-t{RampSlots[0]} = Resource_Rtx1\n", section);
+        int first = section.IndexOf("if first_index == 0\nif index_count == 120\n", StringComparison.Ordinal);
+        int second = section.IndexOf($"if first_index == {Range.First}\nif index_count == {Range.Count}\n",
+            StringComparison.Ordinal);
+        Assert.True(first > 0 && second > first);
+        Assert.True(section.IndexOf("= Resource_Rtx1\n", StringComparison.Ordinal) is var one && one > first && one < second);
+        Assert.True(section.IndexOf("= Resource_Rtx0\n", StringComparison.Ordinal) > second);
         // one save/restore pair for the section, whatever it carries
         Assert.Equal(1, Count(ini, $"Resource_SrSave{RampSlots[0]} = ref ps-t{RampSlots[0]}\n"));
+        Assert.Equal(1, Count(ini, $"post ps-t{RampSlots[0]} = Resource_SrSave{RampSlots[0]}\n"));
     }
 
-    /// <summary>The part's other LOD tiers each draw on an index buffer of their own, and each takes its
-    /// own section — a tier left out shades with the game's ramp wherever the game picks it.</summary>
+    /// <summary>The part's other LOD tiers each draw on a mesh of their own, and each takes its own
+    /// section — a tier left out shades with the game's ramp wherever the game picks it.</summary>
     [Fact]
     public void Each_tier_takes_its_own_section()
     {
         string dds = Ramp();
         string ini = Emit(new[]
         {
-            new StockRampBind("body_lod0_ramp", Ib, MatHash, RampHash, dds),
-            new StockRampBind("body_lod1_ramp", "aa11bb33", MatHash, RampHash, dds),
+            new StockRampBind("body_lod0_ramp", Ib, Range, RampHash, dds),
+            new StockRampBind("body_lod1_ramp", "aa11bb33", new DrawShape(40, 90), RampHash, dds),
         });
 
         ModBuilderTests.AssertNoDuplicateSections(ini);
@@ -226,25 +252,28 @@ public class StockRampEmissionTests : IDisposable
         // one shipped file for the one ramp, however many draws bind it
         Assert.Equal(1, Count(ini, "[Resource_Rtx0]\n"));
         Assert.DoesNotContain("[Resource_Rtx1]", ini);
-        // …and the tag sections are minted once per hash, not once per section
-        Assert.Equal(1, Count(ini, $"[TextureOverride_StockRampTag_{MatHash}]\n"));
+        // …and the tag section is minted once per hash, not once per section
         Assert.Equal(1, Count(ini, $"[TextureOverride_SlotTag_{RampHash}]\n"));
     }
 
-    // ---- what it refuses, and what it costs a build that carries none ---------------------------------
+    // ---- a hidden mesh, and a build that carries none --------------------------------------------------
 
+    /// <summary>A mesh one key-group state hides and another state shades owns one section: the skip and the
+    /// ramp block both live in it. While the hiding state stands the draw is skipped, so the two never
+    /// contradict each other.</summary>
     [Fact]
-    public void A_hidden_mesh_carrying_a_ramp_pick_is_refused_rather_than_half_emitted()
+    public void A_hidden_mesh_carrying_a_ramp_pick_folds_the_bind_into_its_one_section()
     {
-        var ex = Assert.Throws<AuthoredRefusalException>(() =>
-            Emit(new[] { Bind() }, tag: "hidden", hides: new[] { Ib }));
+        string ini = Emit(new[] { Bind() }, tag: "hidden", hides: new[] { Ib });
 
-        Assert.Contains("is hidden", ex.Message);
-        Assert.Contains("toon ramp", ex.Message);
+        ModBuilderTests.AssertNoDuplicateSections(ini);
+        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        string section = ini[ini.IndexOf("[TextureOverride_Hide_0]", StringComparison.Ordinal)..];
+        Assert.Contains("handling = skip\n", section);
+        Assert.Contains($"if first_index == {Range.First}\n", section);
     }
 
-    /// <summary>The whole mechanism is declared only where a pick ships, so a build carrying none is
-    /// byte-identical to the emission that predates it.</summary>
+    /// <summary>The whole mechanism is declared only where a pick ships.</summary>
     [Fact]
     public void A_build_with_no_pick_carries_none_of_the_mechanism()
     {
@@ -252,11 +281,11 @@ public class StockRampEmissionTests : IDisposable
         new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null, hideHashes: new[] { Ib });
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
-        Assert.DoesNotContain("zz_srm", ini);
         Assert.DoesNotContain("zz_sr =", ini);
         Assert.DoesNotContain("zz_slot_rm", ini);
+        Assert.DoesNotContain("zz_bt", ini);
+        Assert.DoesNotContain("first_index", ini);
         Assert.DoesNotContain("Resource_SrSave", ini);
-        Assert.DoesNotContain("StockRampTag", ini);
     }
 
     // ---- a section carrying both a scoped retexture and a ramp bind -----------------------------------
@@ -280,8 +309,9 @@ public class StockRampEmissionTests : IDisposable
             $"a save at line {lastSave} is taken after the bind at line {firstBind}");
     }
 
-    /// <summary>…and each register the section touched is put back exactly once. Post commands run in
-    /// source order, so a register named twice is restored from whichever restore came last.</summary>
+    /// <summary>…and each register the section can touch is put back exactly once, from the save of the
+    /// family that took it first. Post commands run in source order, so a register named twice is restored
+    /// from whichever restore came last.</summary>
     [Fact]
     public void A_section_carrying_both_restores_each_register_once()
     {
@@ -291,6 +321,18 @@ public class StockRampEmissionTests : IDisposable
         var registers = restores
             .Select(l => int.Parse(l["post ps-t".Length..].Split(' ')[0])).ToList();
         Assert.Equal(StockSlots.Union(RampSlots).OrderBy(s => s), registers.OrderBy(s => s));
+        foreach (int s in StockSlots)
+            Assert.Contains($"post ps-t{s} = Resource_RtxSave{s}", restores);
+    }
+
+    /// <summary>A scoped bind raises the bound flag of the register it wrote, the same as a ramp bind.</summary>
+    [Fact]
+    public void A_scoped_bind_raises_its_registers_bound_flag()
+    {
+        string section = BothSection();
+
+        foreach (int s in StockSlots)
+            Assert.Contains($"if $zz_rslot == {s}\nps-t{s} = Resource_Rtx0\n$zz_bt{s} = 1\nendif\n", section);
     }
 
     /// <summary>One mesh drawn with both a draw-scoped retexture and a picked ramp: one section, both

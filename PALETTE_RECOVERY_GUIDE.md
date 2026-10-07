@@ -344,9 +344,11 @@ A robust selection is:
 3. Otherwise choose the sound admissible source with the strongest geometric support.
 4. If none is sound, use only an explicitly accepted approximation; otherwise refuse the dependency.
 
-**Policy:** The production implementation gives the anchor every bone its operator
-recovers soundly. For a bone the anchor cannot constrain, the summed-weight owner remains; if
-that owner's operator is weak, its configured rigid tie may stand in for recovery.
+**Policy:** The production implementation judges ownership by the operator that ships (§4.6). A
+bone the replacement uses stays with its owner, the anchor when the anchor recovers it soundly,
+when that owner's reduced operator holds it. Otherwise the pooled part whose reduced operator holds
+it, with the most summed weight on the bone, recovers it. When no part holds it, the owner's
+operator ties it rigidly to a co-riding bone that does.
 
 Ownership is local to one pipeline. Two independently hosted replacements do not need the same owner
 for a shared bone. They need their final posed geometry to agree in world space.
@@ -381,6 +383,10 @@ Per-draw object transforms can provide K when:
 Constant copies are not made coherent merely by being copied at their respective draws. If the
 anchor consumes before the source draws this frame, the source copy is stale.
 
+A dispatch binds a bounded number of constant ranges. A pool wider than that converts in several
+dispatches over one palette, in order, each writing only the rows its parts own, before anything reads
+the result.
+
 #### Conversion from a geometry witness
 
 When constants are unreadable, incorrectly windowed, or not provably coherent, use a shared witness
@@ -411,28 +417,60 @@ unvalidated inverse.
 conversion and names that dependency in the build log as riding draw order. A port that cannot
 prove or diagnose the fallback should refuse the cross-space dependency instead.
 
-### 4.4 Parts were authored in different bind spaces
+### 4.4 Parts bind a bone in different spaces
 
 *Typical symptom: one pooled part is rotated by a quarter-turn, lies face-down, or deforms around a
-consistent wrong axis while the other parts animate normally.*
+consistent wrong axis while the other parts animate normally; or a region riding one helper bone sits
+slightly off the neighbouring part.*
 
-Pooling keeps one bind statement per bone, so all source geometry and bind poses must be expressed in
-one reference space, normally the anchor's.
+Pooling keeps one bind statement per bone, but each part can bind a bone its own way. A whole part can
+be authored in another space, and a helper bone can be bound slightly off in one part and on the
+skeleton in the next.
 
-In general, a consistent invertible basis change can be applied to geometry and bind poses together.
-The exact formulas depend on the engine's matrix convention. The key invariant is that the
-bone-space quantity consumed by skinning remains unchanged.
+**Principle:** A recovered row is the bind-included skin matrix, `row = Bind_mesh · World` in row-vector
+convention. Restating it under another bind is
 
-**Principle:** A valid basis change is uniform across corroborating shared bones. A transform inferred
-from one coincidentally matching bone is not evidence.
+    row' = C · row
+    C = Bind_reference · inverse(Bind_mesh)
 
-**Policy:** The production implementation first composes measured scene-rest transforms for the part
-and reference. That route needs no shared bones, but the resulting relation must still snap to the
-supported pure axis-aligned signed-permutation rotation. When either measured rest is unavailable,
-the fallback fits the relation over shared bind poses and requires at least three corroborating
-bones. Translation, arbitrary rotation, scale, shear, nonuniform deltas, and weakly corroborated
-fallback matches are refused. That narrow gate reflects measured asset conventions, not a universal
-mathematical restriction.
+composed on the left. C is exact for any invertible difference and linear in the row, so it can be
+folded into the mesh's recovery operator. Apply it before anything else reads the row: a witness
+conversion (§4.3) solves a part's draw space from one shared bone, so an unconverted difference on
+that bone bends every row the part owns. A tied row (§4.5) carries its tie's matrix, so it converts by
+the tie's statement.
+
+**Principle:** The statement decides where the replacement's geometry sits relative to each bone. A
+bone the replaced part weights takes that part's own bind, so an unedited round trip skins exactly as
+the original part. A bone it does not weight takes the bind of a part that does, carried into the
+replaced part's mesh space by the two parts' placements in the rig: each mesh's bind for its
+renderer's root bone times that bone's rest. Geometry weighted to that bone then moves exactly as the
+lending part's geometry does. The authoring tool must show each joint where this statement puts it.
+
+**Measure:** A rig's saved rest pose can hide parts. In the production game, props and alternate
+shapes rest shrunk to 1% or 0.1%, some also parked far from the character, until an animation brings
+them on. A summoned creature beside its summoner is driven by a skeleton of its own. Neither rest
+relation says where those parts draw.
+
+**Policy:** The production implementation states the reference for the replaced part, whichever part
+hosts the draw. Where the host is stood up by a different snapped rotation than the replaced part, the
+statement is carried by the host's rotation times the transpose of the replaced part's before the rows
+are restated, so geometry authored in the replaced part's frame skins where its export showed it. A
+bone is carried between two parts by their placements only when neither placement is scaled, with one
+exception: a part the rest pose shrinks out of sight (every axis 0.1 or less) is carried by the
+placement the authoring tool shows it at, centred at the origin at full size, for geometry authored
+with such parts shown that way; geometry authored before keeps the shrunk part's bind as stated, and a
+part scaled by any other amount always does. Between two skeletons it carries a bone only where every
+bone both parts weight agrees under the carry, or, when they weight none in common, where their
+placements coincide. A bone crossing between two skeletons the rig does not relate has no statement,
+and weight on it is refused by name. Binds within 1e-5 of the statement count as the same, so a pool
+whose parts agree ships its solved operators unchanged; a mesh that needs conversion ships a converted
+copy of its operator for that replacement. A whole part authored rotated is restated together with
+its geometry by a snapped axis-aligned rotation, from measured scene rests or fitted over at least
+three corroborating shared bones.
+
+**Principle:** The fold multiplies a row's existing recovery error by C. Gate the recovery residual of
+converted rows, not only of the solved operator. The production implementation gates the solved
+operator, before the fold.
 
 Stable bone identifiers can collide across unrelated rigs. Validate identity using bind agreement,
 rig structure, and multiple shared bones rather than trusting a hash alone.
@@ -488,8 +526,11 @@ A reduced operator can select a per-bone subset:
 
 - Strongly weighted vertices distributed through bind space.
 - Discriminator vertices that constrain co-bones without carrying the target bone.
-- A widening schedule for bones that fail the local gate.
-- Dense-width fallback for an individual bone when reduction does not hold.
+- A widening schedule for bones that fail the local gate, run for each bone on its own so its
+  verdict does not depend on the others.
+- For a bone reduction does not hold, another pooled part that holds it, else a rigid tie to a
+  co-riding bone. A dense-width row reads every vertex of the mesh, and the recover dispatch lasts
+  as long as its widest row.
 
 Gate the reduced rows on their left-inverse defect, not only on one synthetic pose. A truncated solve
 can reproduce one palette while failing another.
@@ -664,15 +705,24 @@ in a controlled joint-name token, then resolve the returned skin by that identif
 If the game uses hashes, validate collisions rather than assuming the hash is globally unique.
 Preserve enough rig and bind context to diagnose an ambiguous identifier.
 
-Define unresolved influence behavior explicitly:
+Define unresolved influence behavior explicitly. Two policies are sound, and which one fits depends on
+who is present when it happens and how much weight is at stake:
 
-- If a vertex retains some supported weighted influences, drop unsupported ones, renormalize the
-  survivors, and warn.
-- If every weighted influence is unsupported, do not ship an all-zero skin. Refuse, or apply a clearly
-  documented fallback such as nearby original weights.
-- Report the number of affected vertices, missing bones, and materially dropped weight.
-- Reducing a four-wide authored skin to a narrower target should keep the strongest influences,
-  renormalize, and warn whenever nonzero weight was discarded.
+- **Refuse** when the author can repaint before anything ships, such as an interactive tool or a check
+  inside the DCC where the unsupported bone names are still visible.
+- **Degrade and warn** when refusing would block work that is mostly correct, such as an unattended
+  rebuild after a game update removed a bone. A vertex that keeps some supported influence drops the
+  unsupported ones and renormalizes the survivors, which stays close when the dropped share is small
+  and looks wrong when it is large. A vertex with no supported influence must not ship an all-zero
+  skin; give it a clearly documented fallback such as nearby original weights.
+
+Either way, report the number of affected vertices, missing bones, and materially dropped weight.
+Reducing a four-wide authored skin to a narrower target should keep the strongest influences,
+renormalize, and warn whenever nonzero weight was discarded.
+
+The exporter may apply its own policy before the pipeline sees the skin. Blender's glTF exporter, for
+example, moves weight on bones the exported armature lacks onto a generated joint and renormalizes
+partly supported vertices. A check that needs the original weights has to run in the DCC.
 
 Tolerant behavior is a policy, not an excuse to hide deformation. Warnings must be visible at build
 time and specific enough for the author to repaint the mesh.

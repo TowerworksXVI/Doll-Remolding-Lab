@@ -95,6 +95,14 @@ public sealed partial class UnityMesh
         _ => throw new FormatException($"unknown vertex format {fmt}"),
     };
 
+    /// <summary>A Mesh field's channel table as the codec reads it.</summary>
+    public static List<ChannelDef> ChannelsOf(AssetTypeValueField mesh) =>
+        mesh["m_VertexData"]["m_Channels"]["Array"].Children
+            // dimension's low nibble is the STORED component count (the storage stride), the high nibble
+            // the semantic count (0x34 on Normal = stored 4, semantic 3, 4th a zero pad). Mask to stored.
+            .Select(c => new ChannelDef(c["stream"].AsInt, c["offset"].AsInt, c["format"].AsInt, c["dimension"].AsInt & 0xF))
+            .ToList();
+
     /// <summary>Adapt an AssetsTools Mesh type-tree field and decode it. <paramref name="name"/> overrides
     /// the object's own <c>m_Name</c> for the decoded mesh's <see cref="Name"/> — the export routes pass the
     /// RENDERER SLOT name, which is what every glb the app writes carries its part under and what the
@@ -103,11 +111,7 @@ public sealed partial class UnityMesh
     {
         var vd = mesh["m_VertexData"];
         int n = vd["m_VertexCount"].AsInt;
-        var channels = vd["m_Channels"]["Array"].Children
-            // dimension's low nibble is the STORED component count (the storage stride), the high nibble
-            // the semantic count (0x34 on Normal = stored 4, semantic 3, 4th a zero pad). Mask to stored.
-            .Select(c => new ChannelDef(c["stream"].AsInt, c["offset"].AsInt, c["format"].AsInt, c["dimension"].AsInt & 0xF))
-            .ToList();
+        var channels = ChannelsOf(mesh);
         byte[] vertexData = ReadByteArray(vd["m_DataSize"]);
 
         int indexFormat = mesh["m_IndexFormat"].AsInt;       // 0 = uint16, 1 = uint32
@@ -171,8 +175,9 @@ public sealed partial class UnityMesh
         };
     }
 
-    /// <summary>Per-stream stride + 16-aligned start offsets.</summary>
-    private static (Dictionary<int, int> strides, Dictionary<int, int> starts) StreamInfo(
+    /// <summary>Per-stream stride + 16-aligned start offsets. Internal because the import route assembles
+    /// its blob out of separately shipped streams and has to lay them out under exactly this rule.</summary>
+    internal static (Dictionary<int, int> strides, Dictionary<int, int> starts) StreamInfo(
         IReadOnlyList<ChannelDef> channels, int n)
     {
         var strides = new Dictionary<int, int>();

@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using Remold.Core.Bundles;
 using Remold.Core.Mesh;
+using Remold.Core.Project;
 using Remold.Core.Skeleton;
+using Remold.Core.Workbench;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -178,5 +181,120 @@ public class SceneRigTests
         var skin = SkinFor(nodes, new long[] { 3, 4 }, Matrix4x4.Identity, Bip001Hashes);
         Assert.Null(SceneRig.FromScene(nodes, new long[] { 3, 999 }, skin));   // bone id not in the scene
         Assert.Null(SceneRig.FromScene(nodes, new long[] { 3 }, skin));        // 1 bone id vs 2-bone skin
+    }
+
+    /// <summary>The Spine's chain as <see cref="Bundles.BundleReader.RendererRig"/> hands it over: top first,
+    /// each link's saved local pose.</summary>
+    private static List<(string Name, Matrix4x4 Local)> SpineChain(IReadOnlyList<SceneRig.SceneNode> nodes) =>
+        nodes.Select(n => (n.Name, Matrix4x4.CreateScale(n.Scale) * Matrix4x4.CreateFromQuaternion(n.Rot)
+            * Matrix4x4.CreateTranslation(n.Pos))).ToList();
+
+    [Fact]
+    public void Placement_WithNoAvatar_IsTheMeshSpaceAgainstTheSavedTransforms()
+    {
+        var nodes = Nodes();
+        var mount = Matrix4x4.CreateScale(0.01f) * Matrix4x4.CreateTranslation(0.04f, -0.02f, 0);
+        var skin = SkinFor(nodes, new long[] { 3, 4 }, mount, Bip001Hashes);
+
+        var g = SceneRig.Placement(SpineChain(nodes), skin, avatarPose: null, Matrix4x4.Identity, out var problem);
+
+        Assert.Null(problem);
+        Assert.True(RestBake.TranslationDiff(g!.Value, mount) < 1e-6f && RestBake.RotationDiff(g.Value, mount) < 1e-6f,
+            $"placement {g.Value}");
+    }
+
+    /// <summary>An Avatar's pose is the rest the rig was set up in; the prefab's saved Transforms can be a
+    /// held pose (an enemy prefab saved mid-swing), and the Avatar is what the placement reads.</summary>
+    [Fact]
+    public void Placement_WithAnAvatar_ReadsTheAvatarsRestNotTheSavedTransforms()
+    {
+        var nodes = Nodes();
+        var skin = SkinFor(nodes, new long[] { 3, 4 }, G, Bip001Hashes);
+        var avatarRest = Matrix4x4.CreateTranslation(0.5f, 1.1f, 0.2f);
+        var pose = new Dictionary<uint, Matrix4x4> { [Bip001Hashes[1]] = avatarRest };
+
+        var g = SceneRig.Placement(SpineChain(nodes), skin, pose, Matrix4x4.Identity, out var problem);
+
+        Assert.Null(problem);
+        Assert.Equal(skin.BindPoses[1] * avatarRest, g);
+    }
+
+    /// <summary>An Avatar's pose is stated from its own root, which is the Animator's object; that object's
+    /// saved place in the file puts it among the file's other rigs, so two parts driven by different
+    /// Animators relate in one frame.</summary>
+    [Fact]
+    public void Placement_WithAnAvatar_IsStatedWhereTheAnimatorSitsInTheFile()
+    {
+        var nodes = Nodes();
+        var skin = SkinFor(nodes, new long[] { 3, 4 }, G, Bip001Hashes);
+        var avatarRest = Matrix4x4.CreateTranslation(0.5f, 1.1f, 0.2f);
+        var pose = new Dictionary<uint, Matrix4x4> { [Bip001Hashes[1]] = avatarRest };
+        var animator = Matrix4x4.CreateRotationY(MathF.PI / 2) * Matrix4x4.CreateTranslation(3, 0, 0);
+
+        var g = SceneRig.Placement(SpineChain(nodes), skin, pose, animator, out var problem);
+
+        Assert.Null(problem);
+        Assert.Equal(skin.BindPoses[1] * avatarRest * animator, g);
+    }
+
+    /// <summary>A weapon's root hangs under an attachment point the Avatar doesn't list: it rests at its
+    /// nearest listed ancestor's Avatar rest, carried down by the saved offsets below that ancestor.</summary>
+    [Fact]
+    public void Placement_OfARootTheAvatarDoesNotList_ComesDownFromItsNearestListedAncestor()
+    {
+        var nodes = Nodes();
+        var skin = SkinFor(nodes, new long[] { 3, 4 }, G, Bip001Hashes);
+        var chain = SpineChain(nodes);
+        // the Avatar lists the Pelvis, not the Spine the renderer is rooted at
+        var pelvisRest = Matrix4x4.CreateRotationZ(0.3f) * Matrix4x4.CreateTranslation(0.2f, 1.0f, 0);
+        var pose = new Dictionary<uint, Matrix4x4> { [Bip001Hashes[0]] = pelvisRest };
+
+        var g = SceneRig.Placement(chain, skin, pose, Matrix4x4.Identity, out var problem);
+
+        Assert.Null(problem);
+        Assert.Equal(skin.BindPoses[1] * (chain[^1].Local * pelvisRest), g);
+    }
+
+    /// <summary>The placement read reads a part's files as its caller reads every other file: a read that
+    /// refuses (the build naming a file it can't read, the game holding it) stops the read rather than becoming
+    /// a placement's reason, and a read that answers nothing is a reason.</summary>
+    [Fact]
+    public void ThePlacementRead_LetsARefusalThrough_AndNamesAFileItCouldNotRead()
+    {
+        var skin = SkinFor(Nodes(), new long[] { 3, 4 }, G, Bip001Hashes);
+        var poses = new Dictionary<(string, long), IReadOnlyDictionary<uint, Matrix4x4>>();
+
+        Assert.Throws<AuthoredRefusalException>(() => RigPlacement.Read(new BundleReader(),
+            _ => throw new AuthoredRefusalException("the game files for part 'body' can't be read in this install"),
+            dependenciesOf: null, "renderer.bundle", 7, pose: null, skin, poses));
+
+        var unread = RigPlacement.Read(new BundleReader(), _ => null, dependenciesOf: null, "renderer.bundle", 7,
+            pose: null, skin, poses);
+        Assert.Null(unread.Placement);
+        Assert.Equal("its skeleton can't be read", unread.Problem);
+    }
+
+    [Fact]
+    public void Placement_SaysWhy_WhenTheMeshDoesNotListTheRootBone()
+    {
+        var chain = SpineChain(Nodes());
+        var unlisted = new MeshSkin { BoneHashes = new uint[] { 0xDEADBEEF }, BindPoses = new[] { Matrix4x4.Identity } };
+        Assert.Null(SceneRig.Placement(chain, unlisted, null, Matrix4x4.Identity, out var why));
+        Assert.NotNull(why);
+    }
+
+    /// <summary>A chain the Avatar lists nothing of hangs outside the animated skeleton (a weapon hung off
+    /// the prefab root), so its saved pose is where it rests, exactly as for a rig with no Avatar.</summary>
+    [Fact]
+    public void Placement_OfAChainTheAvatarListsNothingOf_IsItsSavedPose()
+    {
+        var nodes = Nodes();
+        var skin = SkinFor(nodes, new long[] { 3, 4 }, G, Bip001Hashes);
+        var chain = SpineChain(nodes);
+
+        var g = SceneRig.Placement(chain, skin, new Dictionary<uint, Matrix4x4>(), Matrix4x4.Identity, out var why);
+
+        Assert.Null(why);
+        Assert.Equal(SceneRig.Placement(chain, skin, avatarPose: null, Matrix4x4.Identity, out _), g);
     }
 }

@@ -105,6 +105,41 @@ public static class RestBake
     /// transpose, still all-integer, so unapply(apply(m)) is bit-identical to m.</summary>
     public static UnityMesh Unapply(UnityMesh mesh, Matrix4x4 snapped) => Transform(mesh, Matrix4x4.Transpose(snapped));
 
+    /// <summary>Centre a part the game starts hidden (<see cref="Workbench.HiddenPart"/>): every position
+    /// moves by <c>−centre</c>. Positions only: a shift turns no normal or tangent. Returns a NEW mesh;
+    /// untouched channels pass through by reference. Kept apart from the rest record because
+    /// <see cref="FromList"/> refuses a translation, and the two are undone in the opposite order.</summary>
+    public static UnityMesh Shift(UnityMesh mesh, Vector3 centre) => Translate(mesh, centre, -1f);
+
+    /// <summary>Undo <see cref="Shift"/>: every position moves back by <c>+centre</c>. Exact wherever the
+    /// shifted value's rounding left nothing behind; elsewhere a coordinate can land up to one unit in the
+    /// last place of the larger of that coordinate and the centre away from the one shifted.</summary>
+    public static UnityMesh Unshift(UnityMesh mesh, Vector3 centre) => Translate(mesh, centre, 1f);
+
+    private static UnityMesh Translate(UnityMesh mesh, Vector3 centre, float sign)
+    {
+        var channels = new Dictionary<string, float[]>(mesh.Channels);
+        if (channels.TryGetValue("Vertex", out var pos) && mesh.Dims.GetValueOrDefault("Vertex") == 3)
+        {
+            var moved = new float[pos.Length];
+            for (int i = 0; i + 3 <= pos.Length; i += 3)
+            {
+                moved[i] = sign < 0 ? pos[i] - centre.X : pos[i] + centre.X;
+                moved[i + 1] = sign < 0 ? pos[i + 1] - centre.Y : pos[i + 1] + centre.Y;
+                moved[i + 2] = sign < 0 ? pos[i + 2] - centre.Z : pos[i + 2] + centre.Z;
+            }
+            channels["Vertex"] = moved;
+        }
+        return new UnityMesh
+        {
+            Name = mesh.Name,
+            VertexCount = mesh.VertexCount,
+            Channels = channels,
+            Dims = new Dictionary<string, int>(mesh.Dims),
+            Submeshes = mesh.Submeshes,
+        };
+    }
+
     private static UnityMesh Transform(UnityMesh mesh, Matrix4x4 rot)
     {
         var channels = new Dictionary<string, float[]>(mesh.Channels);

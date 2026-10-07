@@ -24,11 +24,11 @@ public static class PartSkinGate
     /// or carries no such mesh: that is a DIFFERENT failure, with its own loud route, and answering
     /// "unreplaceable" for it would blame the mesh for a read that never happened.</summary>
     /// <param name="tryDeobfuscate">non-throwing logical-bundle → plain bytes (null when absent/unreadable).</param>
-    /// <param name="pathId">the smr-body selector; 0 selects by <paramref name="meshName"/>.</param>
+    /// <param name="which">which of the bundle's Mesh objects (<see cref="MeshSelector"/>).</param>
     public static StreamDump.SkinRefusal? Blocked(Func<string, byte[]?> tryDeobfuscate, string bundle,
-        string meshName, long pathId = 0, BundleReader? reader = null)
+        string meshName, MeshSelector which = default, BundleReader? reader = null)
     {
-        TryBlocked(tryDeobfuscate, bundle, meshName, pathId, out var refusal, reader);
+        TryBlocked(tryDeobfuscate, bundle, meshName, which, out var refusal, reader);
         return refusal;
     }
 
@@ -36,8 +36,8 @@ public static class PartSkinGate
     /// null as <see cref="Blocked"/>, but identifies an unreadable bundle or a throwing mesh parse so a
     /// caller must not memoize that momentary answer.</summary>
     internal static bool TryBlocked(Func<string, byte[]?> tryDeobfuscate, string bundle,
-        string meshName, long pathId, out StreamDump.SkinRefusal? refusal, BundleReader? reader = null) =>
-        TryBlenderEditAnswers(tryDeobfuscate, bundle, meshName, pathId, out refusal, out _, reader,
+        string meshName, MeshSelector which, out StreamDump.SkinRefusal? refusal, BundleReader? reader = null) =>
+        TryBlenderEditAnswers(tryDeobfuscate, bundle, meshName, which, out refusal, out _, reader,
             readGeometry: false);
 
     /// <summary>Both per-mesh answers the Blender-edit surfaces need, from ONE bundle read: the
@@ -48,17 +48,17 @@ public static class PartSkinGate
     /// <see cref="Blocked"/> — the Build plan's question. Same settled-read contract as
     /// <see cref="TryBlocked"/>: false means nothing was read and nothing may be memoized.</summary>
     internal static bool TryBlenderEditAnswers(Func<string, byte[]?> tryDeobfuscate, string bundle,
-        string meshName, long pathId, out StreamDump.SkinRefusal? refusal, out bool collapsedBillboard,
+        string meshName, MeshSelector which, out StreamDump.SkinRefusal? refusal, out bool collapsedBillboard,
         BundleReader? reader = null, bool readGeometry = true)
     {
         refusal = null;
         collapsedBillboard = false;
-        if (string.IsNullOrEmpty(bundle) || (string.IsNullOrEmpty(meshName) && pathId == 0)) return true;
+        if (string.IsNullOrEmpty(bundle) || (string.IsNullOrEmpty(meshName) && !which.IsExact)) return true;
         try
         {
             var dec = tryDeobfuscate(bundle);
             if (dec is null) return false;
-            var field = (reader ?? new BundleReader()).GetMeshField(dec, meshName, pathId);
+            var field = (reader ?? new BundleReader()).GetMeshField(dec, meshName, which);
             if (field is null) return true;
             if (Skeleton.BoneTable.HasSpringChain(
                     field["m_BoneNameHashes"]["Array"].Children.Select(c => c.AsUInt)))

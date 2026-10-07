@@ -117,7 +117,7 @@ public class KeyOffModeEmissionTests : IDisposable
         foreach (bool hide in new[] { false, true })
         {
             string alpha = Section(Build(hideWhenOff: hide), "[TextureOverride_Cap_alpha]");
-            Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n", alpha);
+            Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\n", alpha);
         }
     }
 
@@ -226,7 +226,7 @@ public class KeyOffModeEmissionTests : IDisposable
             OutDir = pooled,
             ToggleKey = "F6",
             HideHashes = new[] { "cccc3333" },
-            HideKeys = new Dictionary<string, IReadOnlyList<KeyRef>> { ["cccc3333"] = new KeyRef[] { "F9" } },
+            HideClaims = new Dictionary<string, IReadOnlyList<HideClaim>> { ["cccc3333"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } },
             KeysStartingOff = new[] { "f8", "F9" },     // normalized on the way in, as a key always is
             Pipelines = new[]
             {
@@ -249,7 +249,7 @@ public class KeyOffModeEmissionTests : IDisposable
         string overlay = Path.Combine(_root, "overlay-start");
         new MigotoEmitter().BuildOverlaysOnly(overlay, entries: null,
             hideHashes: new[] { "dddd4444" }, modKey: "F6",
-            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>> { ["dddd4444"] = new KeyRef[] { "F9" } },
+            hideClaims: new Dictionary<string, IReadOnlyList<HideClaim>> { ["dddd4444"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } },
             keysStartingOff: new[] { "F9" });
         string overlayIni = File.ReadAllText(Path.Combine(overlay, "mod.ini"));
         Assert.Contains("global $zz_key_f6 = 0\n", overlayIni);
@@ -284,7 +284,7 @@ public class KeyOffModeEmissionTests : IDisposable
         Assert.Contains("global $zz_key_f8 = 1\n", ini);
         string alpha = Section(ini, "[TextureOverride_Cap_alpha]");
         // no mod key here, so the suppression is unconditional and the draw waits on the press
-        Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\nResource_alpha_CB = copy vs-cb1\n"
+        Assert.Contains("hash = aaaa0001\nmatch_priority = 0\nResource_alpha_Posed = ref vb0\n"
             + "handling = skip\nif $zz_key_f8 == 0\n", alpha);
     }
 
@@ -303,6 +303,7 @@ public class KeyOffModeEmissionTests : IDisposable
             "{\n  \"mesh\": \"donor\", \"verts\": 3, \"boneCount\": 0,\n"
             + "  \"indexFormat\": \"R16_UINT\", \"indexBufferBytes\": 6,\n"
             + "  \"streams\": [{ \"stream\": 0, \"stride\": 12 }],\n"
+            + "  " + SyntheticPool.ChannelsJson(SyntheticPool.PositionsLayout()) + ",\n"
             + "  \"submeshes\": [{ \"firstByte\": 0, \"indexCount\": 3, \"baseVertex\": 0 }]\n}\n");
         return dir;
     }
@@ -329,6 +330,7 @@ public class KeyOffModeEmissionTests : IDisposable
                     DonorDir = RigidDonor(),
                     Hash = "aaaa0001",
                     TierHashes = new[] { "aaaa0002" },
+                    TierLayouts = SyntheticPool.RigidTiers(SyntheticPool.PositionsLayout(), "aaaa0002"),
                     ToggleKey = changeKey is null ? (KeyRef?)null : new KeyRef(changeKey),
                     HideWhenOff = hideWhenOff,
                     Latch = latch,
@@ -460,9 +462,65 @@ public class KeyOffModeEmissionTests : IDisposable
         string outDir = Path.Combine(_root, "hides");
         new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
             hideHashes: new[] { "dddd4444" }, modKey: "F6",
-            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>> { ["dddd4444"] = new KeyRef[] { "F9" } });
+            hideClaims: new Dictionary<string, IReadOnlyList<HideClaim>> { ["dddd4444"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } });
 
         Assert.Contains("hash = dddd4444\nmatch_priority = 0\nif $zz_key_f6 == 0\nif $zz_key_f9 == 0\nhandling = skip\nendif\nendif\n",
             File.ReadAllText(Path.Combine(outDir, "mod.ini")));
+    }
+
+    // ---- the same pipeline on the pooled route: a donor, and both parts' renderers rooted at A ----
+
+    /// <summary>One pipeline over alpha + beta, anchored at beta, with a donor and both parts rooted at A, so
+    /// it draws each copy from its own pose and reads alpha through its ring.</summary>
+    private string BuildPooled(bool hideWhenOff, [System.Runtime.CompilerServices.CallerMemberName] string name = "")
+    {
+        string ad = Path.Combine(_root, "alpha"); SyntheticPool.WritePartDump(ad, 1, 32, new[] { A, B });
+        string bd = Path.Combine(_root, "beta"); SyntheticPool.WritePartDump(bd, 2, 32, new[] { A, B });
+        string donor = Path.Combine(_root, "donor"); SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2);
+        string outDir = Path.Combine(_root, name + (hideWhenOff ? "-hide" : "-vanilla"));
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            ToggleKey = "F6",
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("alpha", ad).Rooted(A, 200), new PoolPart("beta", bd).Rooted(A, 200) },
+                    Anchor = "beta",
+                    DonorDir = donor,
+                    CaptureHashes = new Dictionary<string, string> { ["alpha"] = "aaaa0001", ["beta"] = "bbbb0001" },
+                    ToggleKey = new KeyRef("F8"),
+                    HideWhenOff = hideWhenOff,
+                },
+            },
+        });
+        return File.ReadAllText(Path.Combine(outDir, "mod.ini"));
+    }
+
+    /// <summary>On the pooled route the passes that write the source part's ring and advance the frame
+    /// number run inside the change's draw gate, both keys, whichever the off state means: an off change
+    /// runs no pass at either part's draw and none at the end of the frame. The suppressions keep their own
+    /// gates.</summary>
+    [Fact]
+    public void On_the_pooled_route_an_off_change_runs_no_pass_at_any_draw_or_at_the_end_of_the_frame()
+    {
+        foreach (bool hide in new[] { false, true })
+        {
+            string ini = BuildPooled(hideWhenOff: hide);
+            string alpha = Section(ini, "[TextureOverride_Cap_alpha]");
+            Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CustomShaderRingBlock_alpha\n$zz_drew_alpha = 1\nendif\nendif\n", alpha);
+            Assert.Equal(1, Regex.Matches(alpha, Regex.Escape("run = ")).Count);
+            Assert.Contains(hide ? "if $zz_key_f6 == 0\nhandling = skip\nendif\n"
+                : "if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nhandling = skip\nendif\nendif\n", alpha);
+            Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CustomShaderPoseBlock_beta_swap\nrun = CommandListDraw_swap\n",
+                Section(ini, "[TextureOverride_Cap_beta]"));
+            Assert.StartsWith("run = CustomShaderGather_beta\nrun = CustomShaderPoseAnchorMat_swap\n",
+                PoseRouteEmissionTests.PoseBlock(ini, "beta_swap"));
+            Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CustomShaderPoseFrame\n"
+                + "Resource_PoseFrame = copy Resource_PoseFrameNext\nendif\nendif\n", ini);
+            Assert.DoesNotContain("zz_done_", ini);
+        }
     }
 }

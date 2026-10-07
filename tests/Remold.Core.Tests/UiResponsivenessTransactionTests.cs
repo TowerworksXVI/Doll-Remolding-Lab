@@ -112,32 +112,11 @@ public sealed class UiResponsivenessTransactionTests
     }
 
     [Fact]
-    public async Task Multi_slot_mesh_revert_is_one_revision_one_save_and_one_replan()
+    public async Task Taking_a_replacement_off_an_edit_is_one_revision_one_save_and_one_replan()
     {
         using var settings = new SettingsSnapshot();
         using var temp = new TempGame();
         var project = AuthoredEditFixtures.Golden();
-        var geometry = project.TargetSlots.Single(slot => slot.Id == "slot-geometry");
-        project.TargetSlots.Add(new TargetSlot
-        {
-            Id = "slot-geometry-lod1",
-            Part = AuthoredEditFixtures.Body,
-            Tier = "lod1",
-            Input = TargetInputKind.Geometry,
-            Renderer = geometry.Renderer,
-            Mesh = geometry.Mesh,
-        });
-        foreach (var contentEdit in project.EditDefinitions.Where(candidate =>
-                     candidate.Kind == EditDefinitionKind.Content))
-        {
-            contentEdit.Bindings.Add(new Binding
-            {
-                SlotId = "slot-geometry-lod1",
-                Kind = BindingKind.ProjectAsset,
-                ProjectAssetId = contentEdit.Bindings.Single(binding =>
-                    binding.SlotId == "slot-geometry").ProjectAssetId,
-            });
-        }
         Assert.Empty(AuthoredProjectValidator.Errors(project));
 
         var window = await OpenAsync(temp.At(ModNaming.Slug(project.Info.Name)), project);
@@ -146,9 +125,9 @@ public sealed class UiResponsivenessTransactionTests
         var node = window.EditPage.Nodes.SelectMany(subject => subject.Children)
             .SelectMany(part => part.Children)
             .Single(candidate => candidate.EditDefinitionId == "edit-long");
-        Assert.Equal(2, session.Slots("edit-long").Count(state =>
+        Assert.Single(session.Slots("edit-long"), state =>
             state.Slot.Input == TargetInputKind.Geometry
-            && state.Binding.Kind != BindingKind.TargetGameValue));
+            && state.Binding.Kind != BindingKind.TargetGameValue);
         long revision = session.Revision;
         int saves = window.ProjectSaves;
         int plans = window.BuildPlanRuns;

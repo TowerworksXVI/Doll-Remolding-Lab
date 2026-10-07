@@ -15,7 +15,7 @@ public class MeshPreviewCacheTests
         using var temp = new TempDir();
         var cache = new ThumbnailCache(temp.Root);
         var path = cache.MeshPathFor("bundle-a", "c_body_lod0", "24535");
-        Assert.Equal("meshes6", new FileInfo(path).Directory!.Parent!.Name);
+        Assert.Equal("meshes7", new FileInfo(path).Directory!.Parent!.Name);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, new byte[] { 1 });
         Assert.Null(cache.TryGetCachedMesh("bundle-a", "c_body_lod0", "24535"));

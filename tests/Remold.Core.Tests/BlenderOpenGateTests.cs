@@ -58,7 +58,7 @@ public sealed class BlenderOpenGateTests
         Assert.Equal(PartSkinGate.EditRefusal(StreamDump.SkinRefusal.BlendShapes), status.Value);
         Assert.Equal(revision, session.Revision);
         Assert.Equal(assets, session.Snapshot().ProjectAssets.Count);
-        Assert.Empty(Directory.GetFiles(root, "*.gf2session.json", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(RoundTripsOf(root), "*.gf2session.json", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -77,6 +77,11 @@ public sealed class BlenderOpenGateTests
         var before = SessionFiles(root);
         await vm.OpenPartInBlenderAsync(install.AllowedPart, withReferences: false, status);
         string stockOpened = OpenedFromNewSession(root, before);
+        // The open saved the id its round-trip folder is named by, so the next run finds this session.
+        string? id = session.RoundTripId;
+        Assert.True(RoundTripStore.IsId(id));
+        using var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(ModProject.ManifestPathFor(root)));
+        Assert.Equal(id, saved.RootElement.GetProperty("round_trip_id").GetString());
         var stock = BlenderBridge.ReadSessionDocument(stockOpened)!;
         Assert.Null(Assert.Single(stock.Parts).OpenedFromEditId);
         Assert.True(Assert.Single(BlenderBridge.ReadReturnTargets(
@@ -110,7 +115,7 @@ public sealed class BlenderOpenGateTests
 
         await vm.OpenSubjectInBlenderAsync(CharacterName, OutfitStem, status);
 
-        string sessionFile = Assert.Single(Directory.GetFiles(root, "*.gf2session.json",
+        string sessionFile = Assert.Single(Directory.GetFiles(RoundTripsOf(root), "*.gf2session.json",
             SearchOption.AllDirectories));
         const string suffix = ".gf2session.json";
         Assert.EndsWith(suffix, sessionFile, StringComparison.Ordinal);
@@ -196,7 +201,7 @@ public sealed class BlenderOpenGateTests
 
         Assert.Equal(PartSkinGate.CollapsedBillboardRefusal, status.Value);
         Assert.Equal(revision, session.Revision);
-        Assert.Empty(Directory.GetFiles(root, "*.gf2session.json", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(RoundTripsOf(root), "*.gf2session.json", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -213,7 +218,7 @@ public sealed class BlenderOpenGateTests
 
         await vm.OpenSubjectInBlenderAsync(CharacterName, OutfitStem, status);
 
-        string sessionFile = Assert.Single(Directory.GetFiles(root, "*.gf2session.json",
+        string sessionFile = Assert.Single(Directory.GetFiles(RoundTripsOf(root), "*.gf2session.json",
             SearchOption.AllDirectories));
         string opened = sessionFile[..^".gf2session.json".Length] + ".glb";
         var parts = BlenderBridge.ReadSessionDocument(opened)!.Parts;
@@ -226,7 +231,7 @@ public sealed class BlenderOpenGateTests
     }
 
     private static HashSet<string> SessionFiles(string root) =>
-        Directory.GetFiles(root, "*.gf2session.json", SearchOption.AllDirectories)
+        Directory.GetFiles(RoundTripsOf(root), "*.gf2session.json", SearchOption.AllDirectories)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string OpenedFromNewSession(string root, IReadOnlySet<string> before)
@@ -357,4 +362,7 @@ public sealed class BlenderOpenGateTests
 
     private sealed record GateInstall(GameVfs Vfs, SubjectModel Model, Character Character,
         TargetPart BlockedPart, TargetPart AllowedPart);
+
+    /// <summary>The folder a Blender open writes its session into for the mod in <paramref name="root"/>.</summary>
+    private static string RoundTripsOf(string root) => RoundTripRedirect.FolderOf(root);
 }

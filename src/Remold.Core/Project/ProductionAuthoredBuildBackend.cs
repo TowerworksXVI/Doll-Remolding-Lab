@@ -10,7 +10,8 @@ namespace Remold.Core.Project;
 /// material's draws that declares the patched layout — runtime state (shadow quality, fog, LOD, render
 /// features) picks among them per machine and per scene, so evidence pinned to one measured variant
 /// would ship a patch that silently never fires under other settings. All candidates carry ONE
-/// filter-index value; the runtime gate asks "is a declaring variant bound", not "is this one".</summary>
+/// filter-index value; the runtime gate asks "is a declaring variant bound", not "is this one". Effect
+/// operations proven for only part of the family split that family at emission, by operation.</summary>
 public sealed record MaterialRenderEvidence(
     string ShaderIdentity,
     IReadOnlyList<string> PixelShaderHashes,
@@ -27,6 +28,7 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
     private readonly Func<TargetSlot, MaterialRenderEvidence?>? _materialEvidence;
     private readonly IMaterialGameValueReader _materialValues;
     private readonly Func<TargetSlot, string?>? _meshReplaceBlock;
+    private readonly Func<TargetSlot, IReadOnlyList<MaterialEffectOperation>?>? _effectEvidence;
 
     /// <param name="meshReplaceBlock">Why the slot's game mesh cannot take replacement geometry, as the
     /// plan verdict's own reason, or null when it can. Asked only of geometry slots with active replacement
@@ -35,12 +37,14 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
     public ProductionAuthoredBuildBackend(Func<TargetPart, LegacyResolvedPart?> resolvePart,
         Func<TargetSlot, MaterialRenderEvidence?>? materialEvidence = null,
         IMaterialGameValueReader? materialValues = null,
-        Func<TargetSlot, string?>? meshReplaceBlock = null)
+        Func<TargetSlot, string?>? meshReplaceBlock = null,
+        Func<TargetSlot, IReadOnlyList<MaterialEffectOperation>?>? effectEvidence = null)
     {
         _resolvePart = resolvePart ?? throw new ArgumentNullException(nameof(resolvePart));
         _materialEvidence = materialEvidence;
         _materialValues = materialValues ?? new MaterialFamilyValueReader();
         _meshReplaceBlock = meshReplaceBlock;
+        _effectEvidence = effectEvidence;
     }
 
     public BuildSlotResolution ResolveSlot(TargetSlot authoredSlot)
@@ -192,6 +196,41 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
             });
     }
 
+    public BuildOperationResolution ResolveMaterialEffect(BuildMaterialEffectRequest request)
+    {
+        var render = Render(request.CurrentSlot, Proof(request.CurrentSlot, "material-draw"));
+        return MaterialEffectBuildSupport.Resolve(request, render, _effectEvidence?.Invoke(request.CurrentSlot));
+    }
+
+    public string? StockDrawBlock(TargetSlot currentSlot)
+    {
+        if ((currentSlot.MaterialSlotIndex ?? currentSlot.SubmeshIndex) is not { } position) return null;
+        LegacyResolvedPart? part;
+        try { part = _resolvePart(currentSlot.Part); }
+        catch (Exception e) when (e is not OperationCanceledException) { return null; }
+        return part is null ? null : SharedDrawReason(part, position);
+    }
+
+    /// <summary>Why the part's own draw of the material at <paramref name="position"/> cannot be told apart
+    /// from another material's, or null when it can. A part listing more materials than its mesh has
+    /// submeshes draws the last submesh once more for each extra material, over the same index range, so
+    /// every material from the last submesh on shares one draw range. Null where the mesh's submeshes did
+    /// not read: the build reads every tier again and refuses there.</summary>
+    private static string? SharedDrawReason(LegacyResolvedPart part, int position)
+    {
+        if (part.MaterialIndexCounts is not { Count: > 0 } counts) return null;
+        if (part.Materials.Count <= counts.Count || position < counts.Count - 1) return null;
+        return SharedDrawCause;
+    }
+
+    /// <summary>What a plan line and a build refusal both say about a material whose own draw cannot be told
+    /// apart from another material's. Written as a clause: the page and the refusal each put their own
+    /// "cannot build" in front of it.</summary>
+    internal const string SharedDrawCause =
+        "this part draws several of its materials over the same faces, so a change to one of them would "
+        + "change the others too. Replace the part's mesh to change this material on its own, or remove the "
+        + "change";
+
     public BuildOperationResolution ResolveVisibility(BuildVisibilityRequest request)
     {
         var slot = request.CurrentSlot;
@@ -324,35 +363,13 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
                               + "picked for it"
                             : $"the original material has {rampTargets.Count} toon ramps, so the build "
                               + "cannot choose one");
-                var ordinary = material.Textures.Where(texture => texture.Input is
-                    TargetInputKind.BaseColor or TargetInputKind.Normal or TargetInputKind.Rmo
-                        or TargetInputKind.Blend)
-                    .Where(texture => Exact(texture.Texture))
-                    .OrderBy(texture => texture.Input switch
-                    {
-                        TargetInputKind.BaseColor => 0,
-                        TargetInputKind.Normal => 1,
-                        TargetInputKind.Rmo => 2,
-                        TargetInputKind.Blend => 3,
-                        _ => 4,
-                    }).ToList();
-                var unique = ordinary.FirstOrDefault(texture => resolved!.Materials
-                    .Where(sibling => sibling.MaterialSlotIndex != material.MaterialSlotIndex)
-                    .SelectMany(sibling => sibling.Textures)
-                    .All(other => !SameObject(texture.Texture, other.Texture)));
-                if (unique is null)
-                    return Failure(BuildPlanVerdict.Unsupported, ordinary.Count == 0
-                        ? "this material has no base color, normal, RMO or effect map to tell it apart "
-                          + "by, so the toon ramp cannot be aimed at it. Pick the toon ramp on another "
-                          + "material, or remove it"
-                        : "this material shares every one of its textures with another material on the "
-                          + "part, so the toon ramp cannot be aimed at it. Pick the toon ramp on another "
-                          + "material, or remove it");
-                return (new BuildTargetingProof("unique-bound-resource",
-                        $"{ObjectId(unique.Texture)} / ramp {ObjectId(rampTargets[0].Texture)} "
-                        + $"on {ObjectId(slot.Renderer)}"),
-                    "an exact ordinary texture is unique to this material and its exact toon-ramp "
-                    + "resource supplies the target register", null);
+                if (SharedDrawReason(resolved!, material.MaterialSlotIndex) is { } shared)
+                    return Failure(BuildPlanVerdict.Unsupported, shared);
+                return (new BuildTargetingProof(BuildTargetingProof.StockDrawRange,
+                        $"{ObjectId(slot.Renderer)} / material {material.MaterialSlotIndex} / ramp "
+                        + ObjectId(rampTargets[0].Texture)),
+                    "the part's own draw of this material is told apart by its index range, and its exact "
+                    + "toon-ramp resource supplies the target register", null);
             }
         }
 
@@ -444,11 +461,6 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
     private static bool Exact(GameAssetRef? value) => value is not null
         && !string.IsNullOrWhiteSpace(value.GameBuild)
         && !string.IsNullOrWhiteSpace(value.LogicalBundle) && value.PathId != 0;
-
-    private static bool SameObject(GameAssetRef left, GameAssetRef right) =>
-        string.Equals(left.GameBuild, right.GameBuild, StringComparison.Ordinal)
-        && string.Equals(left.LogicalBundle, right.LogicalBundle, StringComparison.Ordinal)
-        && left.PathId == right.PathId;
 
     private static string ObjectId(GameAssetRef value) =>
         $"{value.GameBuild}:{value.LogicalBundle}:{value.PathId}";

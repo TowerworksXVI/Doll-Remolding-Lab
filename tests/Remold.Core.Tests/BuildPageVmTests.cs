@@ -13,6 +13,7 @@ using Remold.App.ViewModels.EditPage;
 using Remold.App.Views;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -135,13 +136,16 @@ public class BuildPageVmTests
     private static readonly BuildLoaderState UsableLoader = new(@"C:\3dmigoto\3DMigoto Loader.exe",
         true, @"C:\3dmigoto\Mods", new MigotoIniFacts(true, true, true));
 
+    /// <summary>A page over the fake shell, settled on its opening plan. Under <see cref="UiFactAttribute"/>
+    /// the page dispatches to the thread the test body runs on, as the window's page does: a plan that
+    /// lands on a worker redraws the board when the body next yields, never beside a read.</summary>
     private static async Task<(BuildPageVm Vm, AuthoredEditSession Session, FakeShell Shell)> Page(
         AuthoredProject project, Action<FakeShell>? arrange = null)
     {
         var session = new AuthoredEditSession(project);
         var shell = new FakeShell { Session = session };
         arrange?.Invoke(shell);
-        var vm = new BuildPageVm(shell);
+        var vm = new BuildPageVm(shell, PumpedUiThread.Current?.Dispatch);
         vm.Load(session);
         await vm.ReplanAsync();
         return (vm, session, shell);
@@ -150,7 +154,7 @@ public class BuildPageVmTests
     /// <summary>Every board change refreshes the page, and the preview picture must survive that: the
     /// bitmap is re-decoded only when the picture's own content stamp changed, or a checkbox click blanks
     /// the image for the decode's length on every unrelated edit.</summary>
-    [Fact]
+    [UiFact]
     public async Task An_unchanged_preview_picture_is_not_redecoded_by_a_board_refresh()
     {
         var project = AuthoredEditFixtures.Golden();
@@ -221,7 +225,7 @@ public class BuildPageVmTests
     /// <summary>The plan is re-derived for a change that moved it even when the page meets a newer revision
     /// first — otherwise the readiness verdict, the issue marks and the Build gate all stay on screen
     /// answering for a project that has moved, with nothing on the page saying so.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_plan_affecting_change_still_replans_when_a_reentrant_commit_arrives_first()
     {
         var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
@@ -242,14 +246,14 @@ public class BuildPageVmTests
         Assert.True(nested, "the re-entrant commit never happened");
         // Only the identity revision applied on the ordinary route: the rename is the superseded one.
         Assert.Equal(new[] { session.Revision }, shell.ChangedRevisions);
-        Assert.True(SpinWait.SpinUntil(() => shell.PlanCalls - before >= 1, TimeSpan.FromSeconds(5)),
+        Assert.True(await Eventually(() => shell.PlanCalls - before >= 1),
             "the superseded rename left the plan where it was");
         Assert.Equal(1, shell.PlanCalls - before);
     }
 
     /// <summary>The control: a re-entrant commit that is itself the plan's business. Both changes ask for a
     /// plan in one notification burst and the planner reads the current snapshot, so they share one run.</summary>
-    [Fact]
+    [UiFact]
     public async Task Reentrant_plan_affecting_commits_coalesce_into_one_plan()
     {
         var session = new AuthoredEditSession(AuthoredEditFixtures.Golden());
@@ -267,7 +271,7 @@ public class BuildPageVmTests
 
         Assert.True(nested, "the re-entrant commit never happened");
         Assert.Equal(new[] { session.Revision }, shell.ChangedRevisions);
-        Assert.True(SpinWait.SpinUntil(() => shell.PlanCalls - before >= 1, TimeSpan.FromSeconds(5)),
+        Assert.True(await Eventually(() => shell.PlanCalls - before >= 1),
             "the coalesced plan never reached the planner");
         Assert.Equal(1, shell.PlanCalls - before);
     }
@@ -277,12 +281,20 @@ public class BuildPageVmTests
     private static async Task<(BuildPageVm Vm, FakeShell Shell)> Reentrant(AuthoredEditSession session)
     {
         var shell = new FakeShell { Session = session };
-        var vm = new BuildPageVm(shell);
+        var vm = new BuildPageVm(shell, PumpedUiThread.Current?.Dispatch);
         vm.Load(session);
         await vm.ReplanAsync();
-        Assert.True(SpinWait.SpinUntil(() => shell.PlanCalls >= 1, TimeSpan.FromSeconds(5)),
+        Assert.True(await Eventually(() => shell.PlanCalls >= 1),
             "the page's opening plan never reached the planner");
         return (vm, shell);
+    }
+
+    /// <summary>Wait for a worker-side fact by yielding, never by spinning: under <see cref="UiFactAttribute"/>
+    /// the plan's own continuations need the thread this body runs on, and a spin here would hold it.</summary>
+    private static async Task<bool> Eventually(Func<bool> condition)
+    {
+        for (int i = 0; i < 200 && !condition(); i++) await Task.Delay(25);
+        return condition();
     }
 
     [Fact]
@@ -374,55 +386,6 @@ public class BuildPageVmTests
         return project;
     }
 
-    private static (AuthoredProject Project, AuthoredBuildPlan Plan) CompositionFixture()
-    {
-        var project = AuthoredEditFixtures.MultiPart();
-        project.Always.Clear();
-        project.Always.Add("edit-long");
-        string hide = project.Hide(AuthoredEditFixtures.Body);
-        project.KeyGroups.Add(new KeyGroup
-        {
-            Id = "key-body", Key = "F6", Label = "Body options", States =
-            {
-                new KeyGroupState
-                {
-                    Id = "body-mixed", ActiveEditIds = { "edit-long", hide },
-                },
-                new KeyGroupState { Id = "body-clear" },
-            },
-        });
-        project.KeyGroups.Add(new KeyGroup
-        {
-            Id = "key-hair", Key = "F7", Label = "Hair color", States =
-            {
-                new KeyGroupState { Id = "hair-on", ActiveEditIds = { "edit-hair" } },
-                new KeyGroupState { Id = "hair-off" },
-            },
-        });
-        Assert.Empty(AuthoredProjectValidator.Errors(project));
-
-        var bodyLocal = new PlanCondition("key-body", "F6", 0, 2, 0);
-        var hairLocal = new PlanCondition("key-hair", "F7", 0, 2, 0);
-        var body = CompositionPart(AuthoredEditFixtures.Body,
-            CompositionOperation(PlannedPartDisposition.Edit, "edit-long", PlanCondition.Always, bodyLocal),
-            CompositionOperation(PlannedPartDisposition.Hidden, hide, bodyLocal));
-        var hair = CompositionPart(AuthoredEditFixtures.Hair,
-            CompositionOperation(PlannedPartDisposition.Edit, "edit-hair", hairLocal));
-        return (project, new AuthoredBuildPlan { Parts = new[] { body, hair } });
-    }
-
-    private static PlannedPartOperation CompositionOperation(PlannedPartDisposition disposition,
-        string editId, params PlanCondition[] activeWhen) => new(activeWhen[0], disposition, editId, null,
-        Array.Empty<PlannedBinding>(), activeWhen);
-
-    private static PlannedPart CompositionPart(TargetPart target, params PlannedPartOperation[] operations) =>
-        new(target, operations.Any(operation => operation.Disposition == PlannedPartDisposition.Edit)
-                ? PlannedPartDisposition.Edit : PlannedPartDisposition.Hidden,
-            operations[0].EditDefinitionId, null, operations,
-            operations.Where(operation => operation.Disposition == PlannedPartDisposition.Hidden)
-                .SelectMany(operation => operation.ActiveWhen).ToArray(),
-            null, null, Array.Empty<PlannedBinding>(), Array.Empty<PlannedGroupTouch>());
-
     private static BuildEditRowVm Edit(BuildPageVm vm, string id) => vm.Subjects.SelectMany(row => row.Parts)
         .SelectMany(row => row.Edits).Single(row => row.EditDefinitionId == id);
 
@@ -492,8 +455,8 @@ public class BuildPageVmTests
         var checkbox = Assert.Single(document.Descendants(ui + "CheckBox"), element =>
             (string?)element.Attribute("Content") == "Editable by others");
 
-        Assert.Equal("Adds the file a later Doll Remolding Lab version will use to open this mod for editing "
-                + "and repair. Without it, the mod can only be rebuilt from your project.",
+        Assert.Equal("Lets anyone import this mod to edit or repair it. Without it, the mod can only be "
+                + "rebuilt from your project.",
             (string?)checkbox.Attribute("ToolTip.Tip"));
         Assert.Contains("Content = \"New mods are editable by others\"",
             File.ReadAllText(Path.Combine(app, "Views", "SettingsWindow.cs")), StringComparison.Ordinal);
@@ -532,7 +495,7 @@ public class BuildPageVmTests
             StringComparison.Ordinal);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Library_and_board_draw_every_placement_from_the_edit_first_outline()
     {
         var (vm, _, _) = await Page(TouchedByTwoGroups());
@@ -547,7 +510,7 @@ public class BuildPageVmTests
 
     /// <summary>An edit nothing selects says so in ② Edit's own words. Two names for one fact leave the
     /// modder deciding whether they mean the same thing.</summary>
-    [Fact]
+    [UiFact]
     public async Task An_unused_edit_wears_the_same_words_both_pages_use()
     {
         var (vm, _, _) = await Page(AuthoredEditFixtures.Golden());
@@ -559,7 +522,7 @@ public class BuildPageVmTests
     /// <summary>The ⚠ over the Edits list is about the rows under it. A warning that marks no row — a
     /// missing preview, a past run's line — is reported in Warnings and raises no glyph pointing at edits.
     /// </summary>
-    [Fact]
+    [UiFact]
     public async Task The_edits_glyph_answers_only_for_warnings_an_edit_wears()
     {
         var unattributed = new AuthoredBuildPlan { Warnings = new[] { "The mod folder moved." } };
@@ -581,7 +544,7 @@ public class BuildPageVmTests
         Assert.True(marked.EditsNeedAttention);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Use_in_checklist_places_and_unplaces_without_moving_the_edit()
     {
         var (vm, session, _) = await Page(AuthoredEditFixtures.Golden());
@@ -596,7 +559,7 @@ public class BuildPageVmTests
         Assert.Equal(2, session.Snapshot().EditDefinitions.Count);
     }
 
-    [Fact]
+    [UiFact]
     public async Task New_key_moves_an_Always_placement_into_its_first_state()
     {
         var (vm, session, _) = await Page(AuthoredEditFixtures.Golden());
@@ -611,7 +574,7 @@ public class BuildPageVmTests
         Assert.Empty(group.States[1].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Key_and_state_controls_route_clear_duplicate_reorder_and_remove_by_stable_id()
     {
         var (vm, session, _) = await Page(Keyed(key: null));
@@ -635,7 +598,7 @@ public class BuildPageVmTests
 
     /// <summary>A refusal is worded for the person reading it, so it reaches the status line as it stands.
     /// The greyed remove button states the same sentence before the click.</summary>
-    [Fact]
+    [UiFact]
     public async Task Removing_one_of_two_states_keeps_the_core_refusal_wording_on_the_page()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -649,7 +612,7 @@ public class BuildPageVmTests
 
     /// <summary>A defect is not a refusal. A row naming something the mod no longer has fails with the
     /// model's own text, key-group id and all, so the page says what it could not do instead.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_failure_that_is_not_a_refusal_keeps_the_models_own_text_off_the_page()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -662,7 +625,7 @@ public class BuildPageVmTests
             session.Snapshot().KeyGroups.Single().States[0].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Dropping_content_on_a_keyless_state_replaces_that_parts_previous_content()
     {
         var (vm, session, _) = await Page(Keyed(key: null));
@@ -680,7 +643,7 @@ public class BuildPageVmTests
     /// <summary>The board mints a part's hide once, then places it by the verb that places every edit — so
     /// asking again refuses in the ordinary words instead of silently succeeding, which is the one behaviour
     /// no content edit has.</summary>
-    [Fact]
+    [UiFact]
     public async Task Board_hide_mints_once_and_a_repeat_refuses_like_any_other_edit()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -720,7 +683,7 @@ public class BuildPageVmTests
 
     /// <summary>A token dragged to another state MOVES: the state it came from no longer uses the edit.
     /// The library row is the copy; a token is the use itself.</summary>
-    [Fact]
+    [UiFact]
     public async Task Dragging_a_token_to_another_state_takes_the_use_with_it()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -736,7 +699,7 @@ public class BuildPageVmTests
         Assert.Equal("Moved Long body to F6 · State 2. Short body is no longer used there.", vm.Status);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Dragging_a_token_onto_Always_takes_the_use_with_it()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -748,7 +711,7 @@ public class BuildPageVmTests
         Assert.Empty(project.KeyGroups.Single().States[0].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Dragging_a_token_off_Always_onto_a_state_takes_the_use_with_it()
     {
         var (vm, session, _) = await Page(AlwaysBesideStates());
@@ -762,7 +725,7 @@ public class BuildPageVmTests
 
     /// <summary>A token dropped where the edit is already used refuses in the same words a library drop
     /// refuses in, and moves nothing.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_token_dropped_where_the_edit_already_is_refuses_and_moves_nothing()
     {
         var (vm, session, _) = await Page(TouchedByTwoGroups());
@@ -773,7 +736,7 @@ public class BuildPageVmTests
         Assert.Equal(new[] { "edit-long" }, session.Snapshot().KeyGroups[0].States[0].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_token_dropped_back_where_it_came_from_changes_nothing()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -788,7 +751,7 @@ public class BuildPageVmTests
     /// <summary>A drag is one authored change, so the page redraws once and the file is written once. Seat
     /// and move as two commits fire the whole cascade twice, with the incumbent gone and the dragged edit
     /// not yet arrived in between.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_token_drag_commits_one_change()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -801,7 +764,7 @@ public class BuildPageVmTests
     }
 
     /// <summary>The same for a placement: one change, and the sentence names what it unseated.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_placement_that_replaces_an_answer_commits_once_and_names_what_left()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -817,7 +780,7 @@ public class BuildPageVmTests
     }
 
     /// <summary>A placement that displaced nothing says nothing about displacement.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_placement_into_an_empty_state_says_only_what_it_added()
     {
         var (vm, _, _) = await Page(EmptyStates());
@@ -829,7 +792,7 @@ public class BuildPageVmTests
 
     /// <summary>What the cursor asks while a drag is still in the air. An edit used in two states dragged
     /// onto the other one would only refuse, and the drag has to say so before the release.</summary>
-    [Fact]
+    [UiFact]
     public async Task The_page_answers_whether_an_edit_is_already_used_where_a_drag_is_hovering()
     {
         var (vm, _, _) = await Page(TouchedByTwoGroups());
@@ -843,7 +806,7 @@ public class BuildPageVmTests
 
     /// <summary>Every surface names a place the same way, so a state the modder named is called by its
     /// name on the board's chips, its checklist and the line a placement leaves.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_named_state_is_named_by_its_name_on_every_board_surface()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -857,7 +820,7 @@ public class BuildPageVmTests
 
     /// <summary>The board sleeps while a build runs: a tick that cannot land cannot leave a box ticked for
     /// an answer the mod never took.</summary>
-    [Fact]
+    [UiFact]
     public async Task The_board_and_library_are_shut_while_a_build_runs()
     {
         var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -875,7 +838,7 @@ public class BuildPageVmTests
 
     /// <summary>The library row stays a copy: dropping it somewhere new leaves every place it was already
     /// used exactly as it was.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_library_drop_copies_and_keeps_the_places_the_edit_already_had()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -887,7 +850,7 @@ public class BuildPageVmTests
         Assert.Equal(new[] { "edit-long" }, states[1].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_library_drop_on_a_place_the_edit_already_has_refuses()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -899,7 +862,7 @@ public class BuildPageVmTests
             session.Snapshot().KeyGroups.Single().States[0].ActiveEditIds);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Dropping_a_state_header_on_another_state_reorders_them()
     {
         var (vm, session, _) = await Page(Keyed());
@@ -936,7 +899,7 @@ public class BuildPageVmTests
     /// <summary>One content answer per part per place, on the Always tick exactly as on a state's. Two
     /// content edits of one part that can be active together is a conflict the plan refuses the build for,
     /// so a checkbox must not be able to author one quietly.</summary>
-    [Fact]
+    [UiFact]
     public async Task Ticking_a_second_content_edit_into_Always_takes_the_first_ones_seat()
     {
         var (vm, session, _) = await Page(AuthoredEditFixtures.Golden());
@@ -951,7 +914,7 @@ public class BuildPageVmTests
     /// attached to. Each tick commits a change and a change redraws the page: replacing the rows takes the
     /// open checklist away with the row that owned it, and the second tick has nothing left to land on.
     /// </summary>
-    [Fact]
+    [UiFact]
     public async Task Two_ticks_on_one_checklist_both_land_without_replacing_the_row()
     {
         var (vm, session, _) = await Page(EmptyStates());
@@ -975,7 +938,7 @@ public class BuildPageVmTests
 
     /// <summary>A row that leaves the mod does go, and one that arrives is added where it belongs: keeping
     /// rows is not the same as never changing them.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_deleted_edit_leaves_the_library_and_a_rename_reaches_the_row_that_stayed()
     {
         var (vm, session, _) = await Page(AuthoredEditFixtures.Golden());
@@ -992,7 +955,7 @@ public class BuildPageVmTests
     /// <summary>A line the plan says is about one edit marks that edit and no other. Reading ownership off
     /// the text marks every edit whose name the line happens to contain, and two parts are free to carry
     /// edits named alike.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_line_marks_the_edits_the_plan_names_not_the_ones_its_text_mentions()
     {
         const string warning = "Long body and Short body are alike. This one is about the short one.";
@@ -1009,7 +972,7 @@ public class BuildPageVmTests
 
     /// <summary>One line reached twice keeps one row and is about both owners. Dropping the second used to
     /// leave a token unmarked by a line that is genuinely about it.</summary>
-    [Fact]
+    [UiFact]
     public async Task One_line_two_owners_keeps_one_row_that_marks_both()
     {
         const string reason = "This part's answer cannot be resolved.";
@@ -1054,7 +1017,7 @@ public class BuildPageVmTests
             Array.Empty<PlannedBinding>(), Array.Empty<PlannedGroupTouch>());
     }
 
-    [Theory]
+    [UiTheory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task A_blocking_render_plan_projects_its_own_reason(bool suppression)
@@ -1075,7 +1038,7 @@ public class BuildPageVmTests
         Assert.DoesNotContain(decisionReason, row.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Board_marks_keep_the_raw_reason_while_diagnostics_keep_attribution()
     {
         const string reason = "This part's answer cannot be resolved.";
@@ -1102,7 +1065,7 @@ public class BuildPageVmTests
         Assert.Equal(vm.Status, vm.StatusTip);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_second_diagnostic_chip_moves_the_exact_mark_and_board_input_clears_it()
     {
         var (vm, _, _) = await Page(TouchedByTwoGroups());
@@ -1132,7 +1095,7 @@ public class BuildPageVmTests
         Assert.Equal(0, MarkedCardCount(vm));
     }
 
-    [Fact]
+    [UiFact]
     public async Task Edit_selection_does_not_create_a_board_mark()
     {
         var (vm, _, _) = await Page(Keyed());
@@ -1193,7 +1156,7 @@ public class BuildPageVmTests
                 new[] { new BuildIssueOwner("edit-long", "Long body", "body") }));
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_lifecycle_blocker_reaches_the_blocked_rows_gate_and_owned_chip()
     {
         const string reason = "Lifecycle coverage is incomplete.";
@@ -1210,7 +1173,7 @@ public class BuildPageVmTests
         Assert.Equal(row.Placements, vm.PrimaryBlockedPlacements);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Keyless_group_blockers_keep_the_group_text_and_have_an_exact_group_chip()
     {
         const string named = "Key group 'Body options' has no key. This blocks the build. "
@@ -1249,7 +1212,7 @@ public class BuildPageVmTests
         Assert.Equal("group:key-0001", unnamedRow.Placements[0].Target);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Strip_states_own_counts_result_text_and_only_one_primary_chip()
     {
         var (vm, _, shell) = await Page(Keyed(), recorder =>
@@ -1291,7 +1254,7 @@ public class BuildPageVmTests
         Assert.DoesNotContain("Something is blocking", vm.BuildDisabledReason, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Switching_projects_clears_and_notifies_the_last_build_result_cluster()
     {
         var (vm, _, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1320,85 +1283,7 @@ public class BuildPageVmTests
         Assert.Contains(nameof(BuildPageVm.HasBuildLog), changed);
     }
 
-    [Fact]
-    public async Task State_composition_is_lazy_omits_foreign_parts_and_counts_hide_precedence()
-    {
-        var fixture = CompositionFixture();
-        var (vm, _, _) = await Page(fixture.Project,
-            shell => shell.Planning = new BuildPlanningResult(fixture.Plan));
-        var body = vm.Groups.Single(group => group.Id == "key-body");
-        var mixed = body.States.Single(state => state.Id == "body-mixed");
-        var clear = body.States.Single(state => state.Id == "body-clear");
-
-        Assert.Equal("1 hidden", mixed.CountLine);
-        Assert.Empty(mixed.Composition);
-        mixed.OpenCompositionCommand.Execute(null);
-
-        Assert.Equal(mixed.ActiveCount,
-            mixed.Composition.Count(row => row.State == BuildResolvedPartState.Active));
-        Assert.Equal(mixed.HiddenCount,
-            mixed.Composition.Count(row => row.State == BuildResolvedPartState.Hidden));
-        Assert.Equal("hidden", mixed.Composition.Single(row => row.Part == "body").Answer);
-        Assert.Equal("original", mixed.Composition.Single(row => row.Part == "cape").Answer);
-        Assert.DoesNotContain(mixed.Composition, row => row.Part == "hair");
-
-        Assert.Equal("1 active", clear.CountLine);
-        Assert.Empty(clear.Composition);
-        clear.OpenCompositionCommand.Execute(null);
-        Assert.Equal(clear.ActiveCount,
-            clear.Composition.Count(row => row.State == BuildResolvedPartState.Active));
-        Assert.Equal(clear.HiddenCount,
-            clear.Composition.Count(row => row.State == BuildResolvedPartState.Hidden));
-        Assert.Equal("Long body", clear.Composition.Single(row => row.Part == "body").Answer);
-        Assert.Equal("original", clear.Composition.Single(row => row.Part == "cape").Answer);
-        Assert.DoesNotContain(clear.Composition, row => row.Part == "hair");
-    }
-
-    [Fact]
-    public async Task Composition_cache_advances_only_when_a_presentation_is_applied()
-    {
-        var fixture = CompositionFixture();
-        var (vm, session, shell) = await Page(fixture.Project,
-            recorder => recorder.Planning = new BuildPlanningResult(fixture.Plan));
-        var state = vm.Groups.Single(group => group.Id == "key-body").States
-            .Single(row => row.Id == "body-mixed");
-        state.OpenCompositionCommand.Execute(null);
-        var cached = state.Composition.Single(row => row.Part == "body");
-
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var release = new ManualResetEventSlim();
-        shell.Plan = (_, _) =>
-        {
-            entered.TrySetResult();
-            release.Wait(TimeSpan.FromSeconds(5));
-            return new BuildPlanningResult(fixture.Plan);
-        };
-        Task pending = vm.ReplanAsync();
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        try
-        {
-            state.OpenCompositionCommand.Execute(null);
-            Assert.Same(cached, state.Composition.Single(row => row.Part == "body"));
-        }
-        finally { release.Set(); }
-        await pending;
-
-        var applied = vm.Groups.Single(group => group.Id == "key-body").States
-            .Single(row => row.Id == "body-mixed");
-        applied.OpenCompositionCommand.Execute(null);
-        Assert.NotSame(cached, applied.Composition.Single(row => row.Part == "body"));
-
-        shell.Plan = null;
-        shell.Planning = new BuildPlanningResult(fixture.Plan);
-        session.RenameEdit("edit-long", "Long body renamed");
-        await vm.ReplanAsync();
-        var renamed = vm.Groups.Single(group => group.Id == "key-body").States
-            .Single(row => row.Id == "body-clear");
-        renamed.OpenCompositionCommand.Execute(null);
-        Assert.Equal("Long body renamed", renamed.Composition.Single(row => row.Part == "body").Answer);
-    }
-
-    [Fact]
+    [UiFact]
     public async Task Delete_group_confirm_names_removed_placements_and_every_edit_left_unused()
     {
         var (vm, session, shell) = await Page(Keyed());
@@ -1414,7 +1299,7 @@ public class BuildPageVmTests
         Assert.Equal(2, session.Snapshot().EditDefinitions.Count);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Plan_conflict_marks_both_named_tokens_and_joins_warnings_with_clickable_placements()
     {
         const string conflict = "Long body and Short body can be active together.";
@@ -1442,7 +1327,7 @@ public class BuildPageVmTests
         Assert.Equal(attributed, vm.BuildDisabledReason);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Completed_run_and_live_plan_warnings_share_one_channel_and_pill_count()
     {
         var plan = new AuthoredBuildPlan { Warnings = new[] { "Live warning." } };
@@ -1467,7 +1352,7 @@ public class BuildPageVmTests
         Assert.Equal(1, shell.RunCalls);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_stale_run_warning_that_is_now_blocking_is_not_reused_as_a_warning_issue()
     {
         const string conflict = "Long body and Short body can be active together.";
@@ -1491,7 +1376,7 @@ public class BuildPageVmTests
         Assert.Equal("Blocked 1 · Warnings 1", vm.DiagnosticCounts);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Preview_routes_through_the_session_and_same_name_stamp_changes_make_a_result_stale()
     {
         var project = AuthoredEditFixtures.Golden();
@@ -1513,7 +1398,7 @@ public class BuildPageVmTests
         Assert.Null(session.Snapshot().Info.Preview);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Opening_a_project_with_a_preview_finishes_reading_it()
     {
         var project = AuthoredEditFixtures.Golden();
@@ -1528,7 +1413,7 @@ public class BuildPageVmTests
         Assert.True(vm.PreviewUndecodable);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Running_build_holds_page_mutations_until_the_run_lands()
     {
         var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1546,7 +1431,7 @@ public class BuildPageVmTests
         Assert.Equal(1, shell.RunCalls);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Whole_mod_and_group_key_collision_is_disclosed_on_both_controls()
     {
         var (vm, _, _) = await Page(Keyed(), shell => shell.WholeModKey = "f6");
@@ -1555,7 +1440,55 @@ public class BuildPageVmTests
         Assert.Equal("Same key as the whole mod. They switch together.", vm.Groups.Single().CollisionTip);
     }
 
-    [Fact]
+    [UiFact]
+    public async Task A_state_shortcut_routes_to_the_session_and_a_refused_one_leaves_the_field_as_it_was()
+    {
+        var (vm, session, _) = await Page(Keyed());
+
+        vm.Groups.Single().States[1].Shortcut = "F8";
+        Assert.Equal("F8", session.Snapshot().KeyGroups.Single().States[1].Shortcut);
+        Assert.Equal("Shortcut set to F8.", vm.Status);
+
+        vm.Groups.Single().States[0].Shortcut = "F6";
+        Assert.Equal("Key F6 already switches this key group. Pick another key for the shortcut.", vm.Status);
+        Assert.Null(session.Snapshot().KeyGroups.Single().States[0].Shortcut);
+        Assert.Null(vm.Groups.Single().States[0].Shortcut);
+        Assert.Equal("F8", vm.Groups.Single().States[1].Shortcut);
+
+        vm.Groups.Single().States[1].Shortcut = null;
+        Assert.Null(session.Snapshot().KeyGroups.Single().States[1].Shortcut);
+        Assert.Equal("Shortcut cleared.", vm.Status);
+    }
+
+    /// <summary>One shortcut on states of two groups is the feature working, so neither warns. A shortcut
+    /// on another group's key or on the whole-mod key is allowed and disclosed on both controls.</summary>
+    [UiFact]
+    public async Task A_shortcut_on_a_group_key_or_the_whole_mod_key_is_disclosed_and_a_shared_one_is_not()
+    {
+        var project = Keyed();
+        project.KeyGroups[0].States[0].Shortcut = "F8";
+        project.KeyGroups[0].States[1].Shortcut = "F9";
+        project.KeyGroups.Add(new KeyGroup
+        {
+            Id = "key-0002", Key = "F7", States =
+            {
+                new KeyGroupState { Id = "state-0001", Shortcut = "F6" },
+                new KeyGroupState { Id = "state-0002", Shortcut = "F8" },
+            },
+        });
+        var (vm, _, _) = await Page(project, shell => shell.WholeModKey = "f9");
+        var body = vm.Groups.Single(group => group.Id == "key-0001");
+        var other = vm.Groups.Single(group => group.Id == "key-0002");
+
+        Assert.False(body.States[0].HasCollision);
+        Assert.False(other.States[1].HasCollision);
+        Assert.Equal("Same key as Body options. One press does both.", other.States[0].CollisionTip);
+        Assert.Equal("Same key as Key F7 · State 1. One press does both.", body.CollisionTip);
+        Assert.Equal("Same key as the whole mod. One press does both.", body.States[1].CollisionTip);
+        Assert.Equal("Same key as Body options · State 2. One press does both.", vm.WholeModKeyCollisionTip);
+    }
+
+    [UiFact]
     public async Task Loader_stand_in_changes_from_set_to_fix_and_carries_the_disk_diagnosis()
     {
         var (unset, _, _) = await Page(AuthoredEditFixtures.Golden(), shell =>
@@ -1573,7 +1506,7 @@ public class BuildPageVmTests
     /// <summary>The window shell's four sentences about a missing artifact are written for the person
     /// reading them, so they reach the status line whole. Anything else the open throws is a defect and
     /// gets the action's own words instead.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_gone_artifact_keeps_its_own_sentence_on_the_status_line()
     {
         var window = new MainWindowViewModel(startLoad: false);
@@ -1592,7 +1525,7 @@ public class BuildPageVmTests
         Assert.Equal("The build folder is gone. Build again.", vm.Status);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Install_lands_its_outcome_and_keeps_the_built_result_available()
     {
         var (vm, _, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1608,7 +1541,7 @@ public class BuildPageVmTests
         Assert.Equal(@"C:\3dmigoto\Mods\test-mod", vm.InstalledFolderTip);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Plan_blockers_do_not_hide_install_running_or_result_lines()
     {
         const string conflict = "Long body and Short body can be active together.";
@@ -1642,7 +1575,7 @@ public class BuildPageVmTests
         Assert.False(vm.ShowBlockedVerdict);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Cancelling_install_restores_the_standing_build_footer()
     {
         var (vm, _, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1656,7 +1589,7 @@ public class BuildPageVmTests
         Assert.True(vm.HasLastBuild);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_failed_first_run_exposes_its_build_log_without_a_result_folder()
     {
         var (vm, session, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1673,7 +1606,7 @@ public class BuildPageVmTests
 
     /// <summary>A failure that wrote no log leaves no Log button. Offering the previous run's log labels
     /// another build's account as this one's.</summary>
-    [Fact]
+    [UiFact]
     public async Task A_failure_with_no_log_stops_offering_the_last_runs_log()
     {
         var (vm, session, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1689,7 +1622,7 @@ public class BuildPageVmTests
         Assert.Equal("", vm.LastLogPath);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_failed_rebuild_clears_the_result_when_the_new_run_starts()
     {
         var (vm, session, shell) = await Page(AuthoredEditFixtures.Golden());
@@ -1705,7 +1638,7 @@ public class BuildPageVmTests
         Assert.True(vm.HasFailureLog);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Library_row_and_board_token_hop_to_the_exact_edit()
     {
         var (vm, _, shell) = await Page(Keyed());
@@ -1744,6 +1677,10 @@ public class BuildPageVmTests
         await Task.Run(() => session.RenameEdit("edit-long", "Newer")).WaitAsync(TimeSpan.FromSeconds(5));
         releaseOlder.Set();
         await older.WaitAsync(TimeSpan.FromSeconds(5));
+        // Both renames started a plan on a worker, and this page dispatches inline, so each would redraw
+        // the library on its own thread as it lands. A plan asked for here supersedes them and is applied
+        // before the row is read.
+        await vm.ReplanAsync();
 
         Assert.Equal(new long[] { 2 }, shell.ChangedRevisions);
         Assert.Equal("Newer", Edit(vm, "edit-long").Label);
@@ -1788,7 +1725,7 @@ public class BuildPageVmTests
         Assert.DoesNotContain("Older warning.", vm.Warnings);
     }
 
-    [Fact]
+    [UiFact]
     public async Task Result_and_footer_survive_step_reentry_but_switching_session_drops_them()
     {
         var (vm, _, _) = await Page(AuthoredEditFixtures.Golden());
@@ -1836,7 +1773,7 @@ public class BuildPageVmTests
         Assert.Null(InstallGate.Reason(true, UsableLoader));
     }
 
-    [Fact]
+    [UiFact]
     public async Task The_state_remove_button_greys_at_the_two_state_floor_instead_of_refusing_after_the_click()
     {
         var (vm, _, _) = await Page(Keyed());
@@ -1850,7 +1787,7 @@ public class BuildPageVmTests
         Assert.Equal(3, vm.Groups.Single().States.Count);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_group_with_no_key_or_label_yet_reads_as_the_unnamed_key_group_everywhere()
     {
         var (vm, _, _) = await Page(AuthoredEditFixtures.Golden());
@@ -1935,7 +1872,7 @@ public class BuildPageVmTests
         }));
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_blocking_issue_takes_the_blocked_tier_and_never_reads_as_a_warning()
     {
         const string conflict = "Long body and Short body can be active together.";
@@ -1962,7 +1899,7 @@ public class BuildPageVmTests
         Assert.True(vm.Groups.Single().States[1].Tokens.Single().IsBlocked);
     }
 
-    [Fact]
+    [UiFact]
     public async Task A_plain_warning_stays_amber_and_out_of_the_blocked_tier()
     {
         var plan = new AuthoredBuildPlan { Warnings = new[] { "Long body is redundant." } };

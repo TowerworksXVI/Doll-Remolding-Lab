@@ -217,7 +217,7 @@ public sealed class BuildExecutionTests : IDisposable
         Assert.Equal("spc.png", row.Blend);
         Assert.Equal(SlotOrigin.Authored, row.BlendAsk);
         Assert.Null(row.Albedo);
-        Assert.Equal(SlotOrigin.VanillaOwn, row.AlbedoAsk);
+        Assert.Equal(SlotOrigin.Untouched, row.AlbedoAsk);
     }
 
     private static AuthoredProject ProjectWithAlternative()

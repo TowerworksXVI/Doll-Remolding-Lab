@@ -160,7 +160,7 @@ public class TextureTransportTests
             .GetProperty(GltfTextureTransport.ExtrasKey);
         var binding = carrier.GetProperty("bindings").EnumerateArray().Single();
 
-        Assert.Equal("rigged-build-spec-v5", AssetExporter.RiggedBuildSpec);
+        Assert.Equal("rigged-build-spec-v7", AssetExporter.RiggedBuildSpec);
         Assert.Equal(1, carrier.GetProperty("version").GetInt32());
         Assert.Equal(new[]
         {
@@ -233,9 +233,9 @@ public class TextureTransportTests
         var mask = Assert.Single(bindings, row => row.ShaderProperty == "_MaskTex");
 
         Assert.Equal(MapKind.Blend, effect.Kind);
-        Assert.Equal(MapOrigin.Authored, effect.Map.Origin);
+        Assert.Equal(MapAnswer.Authored, effect.Map.Answer);
         Assert.Equal(MapKind.Texture, mask.Kind);
-        Assert.Equal(MapOrigin.Vanilla, mask.Map.Origin);
+        Assert.Equal(MapAnswer.Untouched, mask.Map.Answer);
         Assert.Contains(notes, note => note.Contains("Not In Session", System.StringComparison.Ordinal)
             && note.Contains("wasn't in the file this session opened", System.StringComparison.Ordinal));
 
@@ -243,7 +243,8 @@ public class TextureTransportTests
         var row = Assert.Single(normalized);
         Assert.NotNull(row.Blend);
         Assert.Equal(SlotOrigin.Authored, row.BlendAsk);
-        Assert.Null(row.Textures);
+        // the generic picture came back as sent: listed as answered, and asking for nothing
+        Assert.Equal(SlotOrigin.Untouched, Assert.Single(row.Textures!).Ask);
 
         TextureTransportSource Source(string property, MapKind kind, string png, int? texCoord = null) =>
             new("veil", 0, 0, property, kind, png, "shared", "bundle", 71, true,
@@ -271,9 +272,9 @@ public class TextureTransportTests
         Assert.Null(carried.Png);
         Assert.Equal(outbound.OutboundHash, carried.OutboundHash);
         var map = Assert.Single(maps).BaseColor;
-        Assert.Equal(MapOrigin.Vanilla, map.Origin);
-        Assert.Equal(Path.GetFullPath(stock), map.StockPng);
-        Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(MapAnswer.Untouched, map.Answer);
+        Assert.Equal(Path.GetFullPath(stock), map.Sent?.Png);
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(maps, game.At("staging")), r => r.Asks);
     }
 
     [Fact]
@@ -403,7 +404,7 @@ public class TextureTransportTests
         // With no record at all, the legacy read classifies the returned picture as authored — the same
         // answer this fixture gets before hash-only rows existed. The pin is that the sibling's marker
         // neither refuses this part nor invents exact rows for it.
-        Assert.Equal(MapOrigin.Authored, Assert.Single(maps).BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, Assert.Single(maps).BaseColor.Answer);
         Assert.Null(Assert.Single(maps).Textures);
     }
 
@@ -429,26 +430,234 @@ public class TextureTransportTests
         Assert.Empty(notes);
     }
 
+    /// <summary>The modder's own picture, sent and returned as sent, is untouched: not an ask, and not the
+    /// game's map either. The answer names the picture and says whose it is, which is what lets the publish
+    /// keep the asset the slot already binds. A re-encode that changes the bytes and nothing else answers
+    /// the same; a repaint is the modder's ask as it always was. The normalized row says the slot answered
+    /// and asked for nothing.</summary>
     [Fact]
-    public void An_untouched_authored_outbound_picture_is_a_baseline_not_a_new_ask()
+    public void An_untouched_authored_outbound_picture_is_the_modders_own_and_not_an_ask()
     {
         using var game = new TempGame();
         string authored = Png(game.At("authored.png"), 20);
         string changed = Png(game.At("changed.png"), 90);
+        byte[] reencoded = Reencoded(authored);
+        Assert.NotEqual(PreviewMaps.Hash(File.ReadAllBytes(authored)), PreviewMaps.Hash(reencoded));
         var binding = new PreviewMaps.TransportBinding("veil", 0, 0, "_BaseMap",
             MapKind.BaseColor, authored, PreviewMaps.Hash(File.ReadAllBytes(authored)),
             new PreviewMaps.TransportStock("stock", "bundle", 71), Origin: MapOrigin.Authored);
 
         var untouched = PreviewMaps.ResolveTransport(File.ReadAllBytes(authored), binding);
+        var samePixels = PreviewMaps.ResolveTransport(reencoded, binding);
         var repainted = PreviewMaps.ResolveTransport(File.ReadAllBytes(changed), binding);
 
-        Assert.Equal(MapOrigin.Vanilla, untouched.Origin);
-        Assert.Equal(Path.GetFullPath(authored), untouched.StockPng);
-        Assert.Equal(MapOrigin.Authored, repainted.Origin);
-        Assert.Empty(BlenderMaterialReturn.Normalize(new[]
+        var sent = new SentPicture(Path.GetFullPath(authored), MapOrigin.Authored);
+        Assert.Equal(MapAnswer.Untouched, untouched.Answer);
+        Assert.Equal(sent, untouched.Sent!.Value);
+        Assert.Equal(MapAnswer.Untouched, samePixels.Answer);
+        Assert.Equal(sent, samePixels.Sent!.Value);
+        Assert.Equal(MapAnswer.Authored, repainted.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(new[]
         {
             new IncomingMaps(untouched, default, default, "material"),
         }, game.At("normalized")));
+        Assert.Equal(SlotOrigin.Untouched, row.AlbedoAsk);
+        Assert.False(row.Asks);
+    }
+
+    /// <summary>The add-on marks a picture it never touched with the session's own hash and no bytes. On a
+    /// normal of the modder's own, that marker is the untouched answer naming THEIR picture — and the
+    /// re-split that re-embeds it records it as theirs on both sides of the record, the carrier row and
+    /// the image list, or the next record lists the modder's normal among the game's pictures.</summary>
+    [Fact]
+    public void An_unchanged_marker_on_an_authored_normal_resplits_as_the_modders_own_picture()
+    {
+        using var game = new TempGame();
+        string texDir = game.At("textures");
+        Directory.CreateDirectory(texDir);
+        string stockBase = Png(Path.Combine(texDir, "stock-base.png"), 20);
+        Directory.CreateDirectory(game.At("project"));
+        string authoredNormal = Png(game.At(Path.Combine("project", "authored-normal.png")), 140);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        string resplit = game.At("resplit.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockBase, "base", "bundle", 71,
+                true),
+            new TextureTransportSource("veil", 0, 0, "_NormalMap", MapKind.Normal, authoredNormal, "normal",
+                "bundle", 72, false, Origin: MapOrigin.Authored),
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        WriteHashOnlyRow(returned, Assert.Single(PreviewMaps.ReadTransportBindings(opened),
+            binding => binding.ShaderProperty == "_NormalMap"));
+
+        var normal = Assert.Single(MeshGltf.ReadSubmeshMaps(returned, "veil", opened)).Normal;
+        MeshGltf.ReexportPartGlb(returned, "veil", resplit, recordGlb: opened);
+
+        Assert.Equal(MapAnswer.Untouched, normal.Answer);
+        Assert.Equal(new SentPicture(Path.GetFullPath(authoredNormal), MapOrigin.Authored), normal.Sent!.Value);
+        var carried = Assert.Single(PreviewMaps.ReadTransportBindings(resplit),
+            binding => binding.ShaderProperty == "_NormalMap");
+        Assert.Equal(MapOrigin.Authored, carried.Origin);
+        Assert.Equal(Path.GetFullPath(authoredNormal), carried.Source);
+        using var record = JsonDocument.Parse(File.ReadAllText(PreviewMaps.SidecarPath(resplit)));
+        var image = Assert.Single(record.RootElement.GetProperty("images").EnumerateArray(),
+            entry => entry.GetProperty("source").GetString()!
+                .EndsWith("authored-normal.png", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("authored", image.GetProperty("origin").GetString());
+        // ...which is why nothing classifies against it: a picture reproducing the modder's own is theirs
+        Assert.DoesNotContain(PreviewMaps.ReadSidecar(resplit).Values,
+            entry => string.Equals(entry.Source, Path.GetFullPath(authoredNormal), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A row's own picture coming back as sent is untouched whatever origin the row recorded: a
+    /// row cannot turn its own return into an ask. A base colour answering "neutral" would refuse the
+    /// whole return, and no producer writes that origin onto a row today, so the pin is on the rule.</summary>
+    [Fact]
+    public void A_rows_own_picture_back_as_sent_is_untouched_whatever_origin_the_row_records()
+    {
+        using var game = new TempGame();
+        string picture = Png(game.At("picture.png"), 20);
+        byte[] bytes = File.ReadAllBytes(picture);
+        foreach (var origin in new[] { MapOrigin.Vanilla, MapOrigin.Authored, MapOrigin.Neutral, MapOrigin.None })
+        {
+            var binding = new PreviewMaps.TransportBinding("veil", 0, 0, "_BaseMap", MapKind.BaseColor,
+                picture, PreviewMaps.Hash(bytes), new PreviewMaps.TransportStock("stock", "bundle", 71),
+                Origin: origin);
+
+            var byBytes = PreviewMaps.ResolveTransport(bytes, binding);
+            var byPixels = PreviewMaps.ResolveTransport(Reencoded(picture), binding);
+
+            Assert.Equal(MapAnswer.Untouched, byBytes.Answer);
+            Assert.Equal(MapAnswer.Untouched, byPixels.Answer);
+            Assert.Equal(new SentPicture(Path.GetFullPath(picture), origin), byBytes.Sent!.Value);
+            Assert.Equal(new SentPicture(Path.GetFullPath(picture), origin), byPixels.Sent!.Value);
+        }
+    }
+
+    /// <summary>A picture of the modder's own that comes back with nothing in its place goes back to the
+    /// original map, and the return says so by name. The original picture coming back the same way is
+    /// nothing to report: the slot ends up where it was.</summary>
+    [Fact]
+    public void An_authored_picture_that_comes_back_missing_is_reported_by_name()
+    {
+        using var game = new TempGame();
+        string texDir = game.At("textures");
+        Directory.CreateDirectory(texDir);
+        string stockBase = Png(Path.Combine(texDir, "stock-base.png"), 20);
+        Directory.CreateDirectory(game.At("project"));
+        string authoredNormal = Png(game.At(Path.Combine("project", "authored-normal.png")), 140);
+        string opened = game.At("opened.glb");
+        string returned = game.At("returned.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockBase, "base", "bundle", 71,
+                true),
+            new TextureTransportSource("veil", 0, 0, "_NormalMap", MapKind.Normal, authoredNormal, "normal",
+                "bundle", 72, false, Origin: MapOrigin.Authored),
+        });
+        MeshGltf.ExportGlb(Patch(), returned);
+        var notes = new List<string>();
+
+        var maps = Assert.Single(MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add));
+
+        Assert.Equal(MapAnswer.None, maps.BaseColor.Answer);
+        Assert.Equal(MapAnswer.None, maps.Normal.Answer);
+        string note = Assert.Single(notes);
+        Assert.Contains(Textures.TextureMap.PropertyLabel("_NormalMap"), note, StringComparison.Ordinal);
+        Assert.Contains("came back from Blender without a picture", note, StringComparison.Ordinal);
+        Assert.DoesNotContain(Textures.TextureMap.PropertyLabel("_BaseMap"), note, StringComparison.Ordinal);
+
+        // the same picture taken off a part whose other rows came back: reported the same way
+        string takenOff = game.At("taken-off.glb");
+        MeshGltf.ExportGlb(Patch(), takenOff);
+        WriteHashOnlyRow(takenOff, Assert.Single(PreviewMaps.ReadTransportBindings(opened),
+            binding => binding.ShaderProperty == "_BaseMap"));
+        notes.Clear();
+
+        maps = Assert.Single(MeshGltf.ReadSubmeshMaps(takenOff, "veil", opened, notes.Add));
+
+        Assert.Equal(MapAnswer.Removed, maps.Normal.Answer);
+        Assert.Contains(Textures.TextureMap.PropertyLabel("_NormalMap"), Assert.Single(notes),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>A tagged node the modder deleted comes back as no row under a part that has rows: the
+    /// picture was taken off, and what Blender showed is a material with nothing there. The normal goes
+    /// flat; the base colour has no flat map and goes back to the original. A picture the modder linked
+    /// by hand on Blender's own channel instead is what came back. A part with no rows at all cannot say
+    /// any of this — an older add-on, a hand-written file — and keeps the no-picture answer.</summary>
+    [Fact]
+    public void A_sent_picture_with_no_row_under_a_part_with_rows_was_taken_off()
+    {
+        using var game = new TempGame();
+        string texDir = game.At("textures");
+        Directory.CreateDirectory(texDir);
+        string stockBase = Png(Path.Combine(texDir, "stock-base.png"), 20);
+        string stockNormal = Png(Path.Combine(texDir, "stock-normal.png"), 60);
+        string opened = game.At("opened.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            new TextureTransportSource("veil", 0, 0, "_BaseMap", MapKind.BaseColor, stockBase, "base", "bundle", 71,
+                true),
+            new TextureTransportSource("veil", 0, 0, "_NormalMap", MapKind.Normal, stockNormal, "normal",
+                "bundle", 72, false),
+        });
+        var outbound = PreviewMaps.ReadTransportBindings(opened);
+        var baseRow = Assert.Single(outbound, binding => binding.ShaderProperty == "_BaseMap");
+        var normalRow = Assert.Single(outbound, binding => binding.ShaderProperty == "_NormalMap");
+
+        // the normal node deleted: the base comes back as its marker, the normal has no row
+        string normalGone = game.At("normal-gone.glb");
+        MeshGltf.ExportGlb(Patch(), normalGone);
+        WriteHashOnlyRow(normalGone, baseRow);
+        var maps = Assert.Single(MeshGltf.ReadSubmeshMaps(normalGone, "veil", opened));
+        Assert.Equal(MapAnswer.Untouched, maps.BaseColor.Answer);
+        Assert.Equal(MapAnswer.Removed, maps.Normal.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(new[] { maps }, game.At("normal-gone")));
+        Assert.Equal(SlotOrigin.Untouched, row.AlbedoAsk);
+        Assert.Equal(SlotOrigin.ExplicitNeutral, row.NormalAsk);
+        Assert.True(row.Asks);
+
+        // the base node deleted: no flat base colour exists, so the slot keeps the original picture
+        string baseGone = game.At("base-gone.glb");
+        MeshGltf.ExportGlb(Patch(), baseGone);
+        WriteHashOnlyRow(baseGone, normalRow);
+        maps = Assert.Single(MeshGltf.ReadSubmeshMaps(baseGone, "veil", opened));
+        Assert.Equal(MapAnswer.Removed, maps.BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, maps.Normal.Answer);
+        row = Assert.Single(BlenderMaterialReturn.Normalize(new[] { maps }, game.At("base-gone")));
+        Assert.Equal(SlotOrigin.None, row.AlbedoAsk);
+        Assert.False(row.Asks);
+
+        // the tagged node deleted, the same picture linked by hand on Blender's own normal channel
+        string relinked = game.At("relinked.glb");
+        MeshGltf.ExportGlb(Patch(), relinked,
+            perSubmesh: new[] { ((string?)null, (string?)stockNormal, (string?)null) });
+        WriteHashOnlyRow(relinked, baseRow);
+        maps = Assert.Single(MeshGltf.ReadSubmeshMaps(relinked, "veil", opened));
+        Assert.Equal(MapAnswer.Untouched, maps.Normal.Answer);
+
+        // no rows at all: nothing can be read into the silence
+        string silent = game.At("silent.glb");
+        MeshGltf.ExportGlb(Patch(), silent);
+        maps = Assert.Single(MeshGltf.ReadSubmeshMaps(silent, "veil", opened));
+        Assert.Equal(MapAnswer.None, maps.BaseColor.Answer);
+        Assert.Equal(MapAnswer.None, maps.Normal.Answer);
+        Assert.Empty(BlenderMaterialReturn.Normalize(new[] { maps }, game.At("silent")));
+    }
+
+    /// <summary>The same picture through another encoder: different bytes, identical pixels.</summary>
+    private static byte[] Reencoded(string png)
+    {
+        using var image = SixLabors.ImageSharp.Image.Load<Rgba32>(png);
+        using var stream = new MemoryStream();
+        image.SaveAsPng(stream, new SixLabors.ImageSharp.Formats.Png.PngEncoder
+        {
+            ColorType = SixLabors.ImageSharp.Formats.Png.PngColorType.Rgb,
+        });
+        return stream.ToArray();
     }
 
     [Fact]
@@ -599,7 +808,7 @@ public class TextureTransportTests
 
         var maps = MeshGltf.ReadSubmeshMaps(glb);
 
-        Assert.Equal(MapOrigin.Vanilla, Assert.Single(maps).BaseColor.Origin);
+        Assert.Equal(MapAnswer.Untouched, Assert.Single(maps).BaseColor.Answer);
         Assert.Null(Assert.Single(maps).Textures);
     }
 
@@ -638,13 +847,13 @@ public class TextureTransportTests
 
         var incoming = Assert.Single(maps);
         Assert.Empty(notes);
-        Assert.Equal(MapOrigin.Authored, incoming.BaseColor.Origin);
-        Assert.Equal(MapOrigin.Authored, incoming.Normal.Origin);
+        Assert.Equal(MapAnswer.Authored, incoming.BaseColor.Answer);
+        Assert.Equal(MapAnswer.Authored, incoming.Normal.Answer);
         var textures = Assert.IsAssignableFrom<IReadOnlyList<IncomingTexture>>(incoming.Textures);
         var baseSlot = Assert.Single(textures, t => t.ShaderProperty == "_BaseMap");
-        Assert.Equal(MapOrigin.Authored, baseSlot.Map.Origin);
+        Assert.Equal(MapAnswer.Authored, baseSlot.Map.Answer);
         Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(baseSlot.Map.AuthoredPng!));
-        Assert.Equal(MapOrigin.Authored, Assert.Single(textures, t => t.ShaderProperty == "_NormalMap").Map.Origin);
+        Assert.Equal(MapAnswer.Authored, Assert.Single(textures, t => t.ShaderProperty == "_NormalMap").Map.Answer);
         var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
         Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
         Assert.Equal(SlotOrigin.Authored, row.NormalAsk);
@@ -668,9 +877,9 @@ public class TextureTransportTests
 
         Assert.Empty(notes);
         var incoming = Assert.Single(maps);
-        Assert.Equal(MapOrigin.Vanilla, incoming.BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, incoming.Normal.Origin);
-        Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(MapAnswer.Untouched, incoming.BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, incoming.Normal.Answer);
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(maps, game.At("staging")), r => r.Asks);
     }
 
     [Fact]
@@ -697,10 +906,10 @@ public class TextureTransportTests
 
         Assert.Empty(notes);
         Assert.Equal(2, maps.Count);
-        Assert.Equal(MapOrigin.Authored, maps[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, maps[0].BaseColor.Answer);
         Assert.Equal(new Rgba32(80, 81, 82, 255), FirstPixel(maps[0].BaseColor.AuthoredPng!));
-        Assert.Equal(MapOrigin.Vanilla, maps[1].BaseColor.Origin);
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(MapAnswer.Untouched, maps[1].BaseColor.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")), r => r.Asks);
         Assert.Equal(0, row.Submesh);
     }
 
@@ -730,7 +939,7 @@ public class TextureTransportTests
         var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
 
         var incoming = Assert.Single(maps);
-        Assert.Equal(MapOrigin.Authored, incoming.BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, incoming.BaseColor.Answer);
         Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(incoming.BaseColor.AuthoredPng!));
         string note = Assert.Single(notes);
         Assert.Contains("on-channel_base", note);
@@ -761,7 +970,7 @@ public class TextureTransportTests
         var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
 
         Assert.Empty(notes);
-        Assert.Equal(MapOrigin.Authored, Assert.Single(maps).BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, Assert.Single(maps).BaseColor.Answer);
     }
 
     [Fact]
@@ -786,8 +995,8 @@ public class TextureTransportTests
         Assert.Contains("painted-normal_nrm", note);
         Assert.Contains("has no Normal map slot", note);
         var incoming = Assert.Single(maps);
-        Assert.Equal(MapOrigin.None, incoming.Normal.Origin);
-        Assert.Equal(MapOrigin.None, incoming.BaseColor.Origin);
+        Assert.Equal(MapAnswer.None, incoming.Normal.Answer);
+        Assert.Equal(MapAnswer.None, incoming.BaseColor.Answer);
         Assert.Empty(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
     }
 
@@ -813,7 +1022,7 @@ public class TextureTransportTests
         string note = Assert.Single(notes);
         Assert.Contains("painted_base", note);
         Assert.Contains("has no Base color slot", note);
-        Assert.Equal(MapOrigin.None, Assert.Single(maps).BaseColor.Origin);
+        Assert.Equal(MapAnswer.None, Assert.Single(maps).BaseColor.Answer);
         Assert.Null(Assert.Single(maps).Textures);
     }
 
@@ -848,7 +1057,7 @@ public class TextureTransportTests
 
         Assert.Empty(notes);
         var incoming = Assert.Single(maps);
-        Assert.Equal(edited ? MapOrigin.Authored : MapOrigin.Vanilla, incoming.Rmo.Origin);
+        Assert.Equal(edited ? MapAnswer.Authored : MapAnswer.Untouched, incoming.Rmo.Answer);
         if (edited) Assert.Equal(new Rgba32(90, 91, 92, 255), FirstPixel(incoming.Rmo.AuthoredPng!));
     }
 
@@ -955,17 +1164,17 @@ public class TextureTransportTests
 
         Assert.Empty(notes);
         Assert.Equal(3, maps.Count);
-        Assert.Equal(MapOrigin.Vanilla, maps[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, maps[1].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Authored, maps[2].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Untouched, maps[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, maps[1].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Authored, maps[2].BaseColor.Answer);
         var extra = Assert.Single(maps[2].Textures!, t => t.ShaderProperty == "_BaseMap");
         Assert.Equal((1, 2, "_BaseMap"), (extra.MaterialIndex, extra.PrimitiveIndex, extra.ShaderProperty));
         Assert.Equal(new Rgba32(200, 201, 202, 255), FirstPixel(extra.Map.AuthoredPng!));
         // the folded submesh knows which RMO its emissive mask is rebuilt over, though the record's
         // per-submesh RMO rows stop at the two it was written for
-        Assert.Equal(Path.GetFullPath(stockRmoB), maps[2].RmoStockSource);
-        Assert.Null(maps[0].RmoStockSource);
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
+        Assert.Equal(Path.GetFullPath(stockRmoB), maps[2].RmoSentSource);
+        Assert.Null(maps[0].RmoSentSource);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")), r => r.Asks);
         Assert.Equal(2, row.Submesh);
     }
 
@@ -1050,7 +1259,7 @@ public class TextureTransportTests
         var maps = MeshGltf.ReadSubmeshMaps(returned, "veil", opened, notes.Add);
 
         Assert.Empty(notes);
-        Assert.Equal(MapOrigin.Neutral, Assert.Single(maps).Normal.Origin);
+        Assert.Equal(MapAnswer.Neutral, Assert.Single(maps).Normal.Answer);
         var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, game.At("staging")));
         Assert.Equal(SlotOrigin.ExplicitNeutral, row.NormalAsk);
     }
@@ -1128,7 +1337,7 @@ public class TextureTransportTests
                 },
             },
         };
-        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root });
+        var session = new AuthoredEditSession(new AuthoredProject { RootDir = root, TransportRoot = Path.Combine(root, "round-trips") });
         session.EnsurePartSlots(part, _ => resolved);
         string edit = session.CreateEdit(part);
         var geometry = session.Slots(edit).Single(state => state.Slot.Domain == TargetSlotDomain.Game

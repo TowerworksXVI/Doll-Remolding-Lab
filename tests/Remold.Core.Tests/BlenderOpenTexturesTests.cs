@@ -145,7 +145,7 @@ public class BlenderOpenTexturesTests
     private static IReadOnlyList<string> Open(TempGame g, GameVfs vfs, string glbOut, string texDir,
         string? cacheRoot = null, ICollection<string>? unreadable = null) =>
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, TheOutfit, Character,
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth", MeshLogical, Slot, glbOut, null, 0L, null),
             },
@@ -157,7 +157,7 @@ public class BlenderOpenTexturesTests
         IReadOnlyDictionary<string, IReadOnlyList<(string?, string?, string?)>>? authored = null,
         ICollection<string>? unreadable = null) =>
         AssetExporter.BuildRiggedGlbs(g.Root, vfs, TheOutfit, Character,
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("cloth", MeshLogical, Slot, null, null, 0L, null),
                 ("body", BodyMeshLogical, BodySlot, null, null, 0L, null),
@@ -491,10 +491,10 @@ public class BlenderOpenTexturesTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(combined, Slot, combined);
         // submesh 0 shows the modder's painted file, not the game map underneath it
-        Assert.Equal(Path.GetFullPath(painted), incoming[0].BaseColor.StockPng);
+        Assert.Equal(Path.GetFullPath(painted), incoming[0].BaseColor.Sent?.Png);
         // submesh 1 was never painted, so it stays on the game's own map
         Assert.Equal(Path.Combine(texDir, ScopedName(Mat2Logical, "cloth_b_d")),
-            incoming[1].BaseColor.StockPng);
+            incoming[1].BaseColor.Sent?.Png);
     }
 
     /// <summary>The control: with no authored maps threaded through, the same combined build embeds the game's
@@ -511,9 +511,9 @@ public class BlenderOpenTexturesTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(combined, Slot, combined);
         Assert.Equal(Path.Combine(texDir, ScopedName(Mat1Logical, "cloth_a_d")),
-            incoming[0].BaseColor.StockPng);
+            incoming[0].BaseColor.Sent?.Png);
         Assert.Equal(Path.Combine(texDir, ScopedName(Mat2Logical, "cloth_b_d")),
-            incoming[1].BaseColor.StockPng);
+            incoming[1].BaseColor.Sent?.Png);
     }
 
     // ---- what a populated folder makes possible downstream --------------------------------------------
@@ -535,8 +535,8 @@ public class BlenderOpenTexturesTests
         // what a session that repainted submesh 0's RMO hands back
         var rows = BlenderMaterialReturn.Normalize(new List<IncomingMaps>
         {
-            new(new ResolvedMap(MapOrigin.None), new ResolvedMap(MapOrigin.None),
-                new ResolvedMap(MapOrigin.Authored, AuthoredPng: FlatPng(new Rgba32(10, 20, 30, 255)))),
+            new(new ResolvedMap(MapAnswer.None), new ResolvedMap(MapAnswer.None),
+                new ResolvedMap(MapAnswer.Authored, AuthoredPng: FlatPng(new Rgba32(10, 20, 30, 255)))),
         }, g.At("return"), submesh => sources.GetValueOrDefault(submesh));
 
         using var shipped = Image.Load<Rgba32>(Assert.Single(rows).Rmo!);

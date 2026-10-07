@@ -17,7 +17,12 @@ public sealed record RosterProbeResult(
     Dictionary<string, SubjectPart> BySlot,
     List<PoolDerive.MissingPart> HeldBack,
     Dictionary<string, Matrix4x4?> Rests,
-    Dictionary<uint, string> BonePaths);
+    Dictionary<uint, string> BonePaths)
+{
+    /// <summary>Each readable part's skin, by slot name, for the bind reference a Replace is posed
+    /// under.</summary>
+    public Dictionary<string, MeshSkin> Skins { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+}
 
 /// <summary>
 /// Reads a subject the way a Replace's pool derivation reads it, and answers the one question a caller
@@ -71,10 +76,12 @@ public sealed class SubjectPoolProbe
             $"the game files for {why} can't be read in this install");
     }
 
-    /// <summary>Every tier of a part, forward-resolved: (mesh name, bundle id, path id).</summary>
-    public List<(string Name, string BundleId, long PathId)> Tiers(SubjectPart part)
+    /// <summary>Every tier of a part, forward-resolved off the catalog alone: (mesh name, bundle id, which
+    /// Mesh of that bundle). A recipe tier is selected by its address's load key, so the read that opens the
+    /// bundle takes the copy the game loads; nothing is opened here.</summary>
+    public List<(string Name, string BundleId, Bundles.MeshSelector Mesh)> Tiers(SubjectPart part)
     {
-        var list = new List<(string, string, long)>
+        var list = new List<(string, string, Bundles.MeshSelector)>
         {
             ResolveTier(part.SlotName, part.MeshAddress, part.MeshBundle, part.MeshPathId),
         };
@@ -82,7 +89,8 @@ public sealed class SubjectPoolProbe
             list.Add(ResolveTier(t.SlotName, t.MeshAddress, t.MeshBundle, t.MeshPathId));
         return list;
 
-        (string, string, long) ResolveTier(string name, string address, string? smrBundle, long smrPathId)
+        (string, string, Bundles.MeshSelector) ResolveTier(string name, string address, string? smrBundle,
+            long smrPathId)
         {
             RefuseBlocked(name, address);
             if (!string.IsNullOrEmpty(smrBundle) && smrPathId != 0) return (name, smrBundle!, smrPathId);
@@ -92,7 +100,7 @@ public sealed class SubjectPoolProbe
             var owner = _env.ResolveAddress(address)
                 ?? throw new InvalidOperationException(
                     $"no catalog entry for mesh address '{address}' (mesh '{name}')");
-            return (name, owner, 0);
+            return (name, owner, Bundles.MeshSelector.ByLoadKey(_env.LoadKeyOf?.Invoke(address)));
         }
     }
 
@@ -168,6 +176,7 @@ public sealed class SubjectPoolProbe
         var bySlot = new Dictionary<string, SubjectPart>(StringComparer.OrdinalIgnoreCase);
         var heldBack = new List<PoolDerive.MissingPart>();
         var rests = new Dictionary<string, Matrix4x4?>(StringComparer.OrdinalIgnoreCase);
+        var skins = new Dictionary<string, MeshSkin>(StringComparer.OrdinalIgnoreCase);
         // One skeleton per subject: hash → '/'-joined full path, from the subject's OWN skeleton — per-part
         // scene rigs only name a part's skin bones and can fail to read at all, while the prefab skeleton
         // holds every chain. A mesh-stored bone hash can name any chain SUFFIX, not just the leaf (SceneRig's
@@ -256,11 +265,12 @@ public sealed class SubjectPoolProbe
                 try
                 {
                     var skin = MeshSkin.Decode(field);
+                    skins[p.SlotName] = skin;
                     if (skin is { IsSkinned: true })
                         rests[p.SlotName] = (Skeleton.SceneRig.TryRead(Bundle(bid, $"part '{p.Token}'"), name, skin, pid)
-                            ?? (pid != 0 && model.PrimaryBundle.Length > 0
+                            ?? (pid.IsExact && model.PrimaryBundle.Length > 0
                                 ? Skeleton.SceneRig.TryReadForMeshRef(
-                                    Bundle(model.PrimaryBundle, "assembly prefab"), pid, skin)
+                                    Bundle(model.PrimaryBundle, "assembly prefab"), pid.PathId, skin)
                                 : null))?.MeasuredRest;
                 }
                 catch { /* no rest to compose with — the fitted path decides */ }
@@ -272,7 +282,116 @@ public sealed class SubjectPoolProbe
                 _diagnostics?.Add($"part '{p.Token}' excluded from pool derivation: {ex.Message}");
             }
         }
-        return _probes[subjectKey] = new RosterProbeResult(bones, bySlot, heldBack, rests, bonePaths);
+        return _probes[subjectKey] = new RosterProbeResult(bones, bySlot, heldBack, rests, bonePaths)
+        {
+            Skins = skins,
+        };
+    }
+
+    private readonly Dictionary<(string, string), RigPlacement.Placed> _placements = new();
+    private readonly Dictionary<(string, long), IReadOnlyDictionary<uint, Matrix4x4>> _poses = new();
+
+    /// <summary>The bind reference a Replace of <paramref name="replaced"/> is posed under
+    /// (<see cref="BindReference"/>), stated for that part whichever part anchors the pool, as the part's
+    /// Blender export states it: its other bones sourced from the Replace's pool candidates and coverage
+    /// groups in <see cref="BindReference.SourceOrder"/>. A part's placement is read only when one of its
+    /// bones needs carrying into the replaced part's space. <paramref name="carryHidden"/> is the relation
+    /// the replacement's geometry was authored under (<see cref="BindReference.For"/>).
+    /// <paramref name="recordedCentre"/> is the centre the replacement's file records it was moved by, where
+    /// the replaced part is one the game starts hidden: that part is carried by the display placement
+    /// Blender showed it at, which that centre fixes. Null takes the centre of the part's stock geometry,
+    /// as every source part does.</summary>
+    public BindReference.Resolution ReferenceFor(SubjectModel model, string replaced,
+        IReadOnlyList<PoolDerive.PartBones> candidates, IReadOnlyList<PoolDerive.VariantGroup> groups,
+        bool carryHidden, Vector3? recordedCentre = null)
+    {
+        var probed = Probe(model);
+        var posedOf = probed.Bones.ToDictionary(b => b.Mesh, b => b.Posed, StringComparer.OrdinalIgnoreCase);
+        BindReference.Part? PartOf(string slot) =>
+            probed.Skins.TryGetValue(slot, out var skin) && posedOf.TryGetValue(slot, out var posed)
+                ? new BindReference.Part(slot, skin.BoneHashes, skin.BindPoses, posed,
+                    new Lazy<(Matrix4x4?, string?)>(() =>
+                    {
+                        var placed = PlacementOf(model, slot, skin);
+                        return (placed.Placement, placed.Problem);
+                    }),
+                    new Lazy<string?>(() => PlacementOf(model, slot, skin).Skeleton),
+                    new Lazy<(Matrix4x4?, string?)>(() => DisplayOf(model, slot, skin,
+                        string.Equals(slot, replaced, StringComparison.OrdinalIgnoreCase) ? recordedCentre : null)))
+                : null;
+        var order = BindReference.SourceOrder(candidates.Select(c => c.Mesh),
+            groups.SelectMany(g => g.Members).Select(m => m.Mesh));
+        return BindReference.For(PartOf(replaced) ?? throw new InvalidOperationException(
+                $"the replaced part '{replaced}' is not a readable part of its subject"),
+            order.Select(PartOf).OfType<BindReference.Part>().ToList(), carryHidden);
+    }
+
+    private readonly Dictionary<(string, string), ((Matrix4x4 Display, Vector3 Centre)? Shown, string? Problem)>
+        _displays = new();
+
+    private const string Uncentrable = "its geometry can't be read to centre it";
+
+    /// <summary>Where the Blender export shows a part the game starts hidden
+    /// (<see cref="HiddenPart"/>): its uprighting, then minus <paramref name="recordedCentre"/> where the
+    /// replacement records the centre its file was moved by, else minus the centre of the part's stock lod0
+    /// geometry, read off the same mesh with the same helper the export uses, so the two state one display
+    /// placement. Asked only of a part the placement hides; the reason where its geometry can't be
+    /// read.</summary>
+    private (Matrix4x4? Placement, string? Problem) DisplayOf(SubjectModel model, string slot, MeshSkin skin,
+        Vector3? recordedCentre)
+    {
+        if (recordedCentre is { } recorded) return (HiddenPart.Display(UprightingOf(model, slot), recorded), null);
+        var (shown, problem) = StockDisplayOf(model, slot, skin);
+        return shown is { } s ? (s.Display, null) : (null, problem ?? Uncentrable);
+    }
+
+    /// <summary>The centre of the stock lod0 geometry of <paramref name="slot"/>, where the game starts that
+    /// part hidden, the one the Blender export opens it centred by today; null for a part it does not hide
+    /// or whose geometry can't be read.</summary>
+    public Vector3? StockCentre(SubjectModel model, string slot) =>
+        Probe(model).Skins.TryGetValue(slot, out var skin) ? StockDisplayOf(model, slot, skin).Shown?.Centre : null;
+
+    /// <summary>The part's uprighting, as the export snaps it off the measured rest.</summary>
+    private Matrix4x4? UprightingOf(SubjectModel model, string slot) =>
+        Probe(model).Rests.GetValueOrDefault(slot) is { } measured ? RestBake.Snap(measured) : null;
+
+    private ((Matrix4x4 Display, Vector3 Centre)? Shown, string? Problem) StockDisplayOf(SubjectModel model,
+        string slot, MeshSkin skin)
+    {
+        var key = (model.Stem.ToLowerInvariant(), slot.ToLowerInvariant());
+        if (_displays.TryGetValue(key, out var have)) return have;
+        var part = Probe(model).BySlot[slot];
+        try
+        {
+            var (name, bid, pid) = Tiers(part)[0];
+            var shown = HiddenPart.For(PlacementOf(model, slot, skin).Placement,
+                () => UnityMesh.Decode(_reader.GetMeshField(Bundle(bid, $"part '{part.Token}'"), name, pid)
+                    ?? throw new InvalidDataException($"the game files no longer hold the mesh '{name}'"), name),
+                UprightingOf(model, slot));
+            return _displays[key] = (shown, shown is null ? Uncentrable : null);
+        }
+        catch (Exception ex) when (ex is not IOException and not AuthoredRefusalException
+                                   and not BlockedAssetException)
+        {
+            return _displays[key] = (null, $"{Uncentrable} ({ex.Message})");
+        }
+    }
+
+    /// <summary>Where a part's mesh space sits in its rig (<see cref="Skeleton.SceneRig.Placement"/>), or
+    /// the reason it can't be read, and the skeleton that drives it, remembered per part.</summary>
+    private RigPlacement.Placed PlacementOf(SubjectModel model, string slot, MeshSkin skin)
+    {
+        var key = (model.Stem.ToLowerInvariant(), slot.ToLowerInvariant());
+        if (_placements.TryGetValue(key, out var have)) return have;
+        var part = Probe(model).BySlot[slot];
+        if (_env.PlacementOf is { } stated)
+        {
+            var (placement, problem) = stated(model, part, skin);
+            return _placements[key] = new RigPlacement.Placed(placement, problem, Skeleton: null);
+        }
+        // read as every other file this build reads: one it can't read refuses the build by the part's name
+        return _placements[key] = RigPlacement.Read(_reader, id => Bundle(id, $"part '{part.Token}'"),
+            _env.DependenciesOf, part.RendererBundle, part.RendererPathId, part.Pose, skin, _poses);
     }
 
     /// <summary>The pool a Replace on <paramref name="part"/> derives, over the probed roster: the candidate

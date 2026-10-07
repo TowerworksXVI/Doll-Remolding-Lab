@@ -13,8 +13,18 @@ public static class RosterLookup
     /// <summary>The roster's outfit for <paramref name="character"/>/<paramref name="stem"/>; null when
     /// either half is unknown. Callers decide what an unknown pair means.</summary>
     public static Outfit? FindOutfit(IReadOnlyList<Character> roster, string character, string stem) =>
-        roster.FirstOrDefault(c => string.Equals(c.Name, character, StringComparison.OrdinalIgnoreCase))
-              ?.Outfits.FirstOrDefault(o => string.Equals(o.Stem, stem, StringComparison.OrdinalIgnoreCase));
+        FindCharacter(roster, character)
+            ?.Outfits.FirstOrDefault(o => string.Equals(o.Stem, stem, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The stem of every outfit the roster holds for <paramref name="character"/>, in roster order;
+    /// empty when the character is unknown. The character is matched exactly as <see cref="FindOutfit"/>
+    /// matches it, so every stem listed here is one that <see cref="FindOutfit"/> answers for.</summary>
+    public static IReadOnlyList<string> OutfitStems(IReadOnlyList<Character> roster, string character) =>
+        FindCharacter(roster, character)?.Outfits.Select(o => o.Stem).ToList()
+            ?? (IReadOnlyList<string>)Array.Empty<string>();
+
+    private static Character? FindCharacter(IReadOnlyList<Character> roster, string character) =>
+        roster.FirstOrDefault(c => string.Equals(c.Name, character, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>A playable character, from <c>GunCharacterData</c>.</summary>
@@ -30,6 +40,12 @@ public sealed record Character(
     /// from the internal <see cref="Name"/>. Null when unnamed or unresolved, and the UI falls back to
     /// <see cref="Name"/> — which stays the stable grouping key mesh stems match on.</summary>
     public string? DisplayName { get; init; }
+
+    /// <summary>Whether this character's outfits are on screen together every time — a support team's
+    /// members — so an edit on a mesh two of them share visibly changes both, and no presence gate can
+    /// separate them. False for a doll: its outfits meet only when another player's copy wears a different
+    /// one, which a build discloses and gates the way it does any other outfit wearing the mesh.</summary>
+    public bool OutfitsAppearTogether { get; init; }
 }
 
 /// <summary>

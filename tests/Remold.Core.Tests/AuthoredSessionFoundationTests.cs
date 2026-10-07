@@ -88,6 +88,7 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
         var project = new AuthoredProject
         {
             RootDir = Path.Combine(_root, "execution"),
+            TransportRoot = Path.Combine(Path.Combine(_root, "execution"), "round-trips"),
             Info = new ProjectInfo { Name = "Emission only", Version = "1.0" },
         };
 
@@ -138,6 +139,7 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
         AuthoredProjectSerializer.Save(project, _root);
         var document = AuthoredProjectDocument.Load(_root);
         var session = document.Session!;
+        session.SetTransportRoot(Path.Combine(_root, "round-trips"));
 
         Publish(session, "slot-base-0", 21);
         Publish(session, "slot-base-1", 31);
@@ -509,6 +511,7 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
         WritePng(shared, 1);
         var project = AuthoredEditFixtures.Golden();
         project.RootDir = _root;
+        project.TransportRoot = Path.Combine(_root, "round-trips");
         var geometry = project.TargetSlots.Single(slot => slot.Id == "slot-geometry");
         var material = project.TargetSlots.Single(slot => slot.Id == "slot-ramp").Material!;
         project.ProjectAssets.Add(new ProjectAsset

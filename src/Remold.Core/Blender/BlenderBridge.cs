@@ -122,7 +122,14 @@ public sealed record BlenderPartTarget
 /// name when it targets a new edit. <see cref="ViewportVisible"/> is presentation metadata only and never a
 /// return/hide signal. <see cref="Label"/> is the part's own short token as the app names it
 /// (<c>cloth2</c>, <c>P3_body_fight</c>) — what the bridge panel and its messages call the part, so
-/// Blender never re-derives a display name from the asset name's structure.</para></summary>
+/// Blender never re-derives a display name from the asset name's structure.</para>
+///
+/// <para><see cref="Hidden"/> declares a part the game starts shrunk out of sight, which opens centred at
+/// full size: a session that names no part gathers such parts in their own collection, hidden until the
+/// modder shows it. <see cref="HiddenBones"/> is the bones of the part's subject that only such parts
+/// weight, as eight-digit hex hashes, and <see cref="StockMixes"/> says the game's own part already weights
+/// one of them together with another bone; the bridge warns on a send that weights both kinds only where
+/// the game's own part does not.</para></summary>
 public readonly record struct SessionPart(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("edited")] bool Edited,
@@ -144,7 +151,16 @@ public readonly record struct SessionPart(
     bool? ViewportVisible = null,
     [property: JsonPropertyName("label")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Label = null)
+    string? Label = null,
+    [property: JsonPropertyName("hidden")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool Hidden = false,
+    [property: JsonPropertyName("hiddenBones")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? HiddenBones = null,
+    [property: JsonPropertyName("stockMixes")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool StockMixes = false)
 {
     /// <summary>Whether the session may write this part back. Only an EXPLICIT false declares a part context;
     /// an absent flag is a session that said nothing about it, which reads the same as writable — matching the
@@ -251,7 +267,7 @@ public static class BlenderBridge
 {
     /// <summary>The send sidecar's name suffix. Also the watcher's filter and its scan pattern, so the one
     /// naming rule the bridge script writes to has one home here.</summary>
-    internal const string SidecarSuffix = ".gf2send.json";
+    public const string SidecarSuffix = ".gf2send.json";
     private const string SessionSuffix = ".gf2session.json";
     private const string PartSendSuffix = ".send.glb";
 
@@ -773,6 +789,9 @@ public sealed class BlenderSendWatcher : IDisposable
         {
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
             IncludeSubdirectories = includeSubdirectories,
+            // The name filter is applied after the operating system reports a change, so every write a
+            // Blender open makes under this folder fills the buffer; the default overflows on one open.
+            InternalBufferSize = 64 * 1024,
             EnableRaisingEvents = true,
         };
         _fsw.Created += OnSidecar;

@@ -72,6 +72,15 @@ internal sealed class BuildWorkItem
     /// of what a state answers, so every state of one part carries the same one.</summary>
     public IReadOnlyList<float>? BakedRest { get; init; }
 
+    /// <summary>Replace only — the centre the donor file was moved by because the game starts its part
+    /// hidden (<see cref="ProjectAsset.Shift"/>), taken back off before the rest; null for a file left where
+    /// it was modelled.</summary>
+    public IReadOnlyList<float>? Shift { get; init; }
+
+    /// <summary>Replace only — whether the donor was authored with hidden parts shown centred
+    /// (<see cref="ProjectAsset.HiddenCentred"/>): the relation its bind reference is built under.</summary>
+    public bool HiddenCentred { get; init; }
+
     /// <summary>The target mesh's recorded vertex count, for the repair record.</summary>
     public int? OriginalVerts { get; init; }
 
@@ -102,6 +111,26 @@ internal sealed class BuildWorkItem
     }
 }
 
+/// <summary>One shading value or effect disable of an edit with no mesh replacement: the plan row it came
+/// from, the part and material it changes, and the key position or content flag it applies under, carried
+/// exactly as a stock ramp pick carries them. Identity is the object, for the reason
+/// <see cref="BuildWorkItem"/>'s is.</summary>
+internal sealed class StockMaterialPick
+{
+    public required string RowId { get; init; }
+    public required string EditDefinitionId { get; init; }
+    public required TargetPart Part { get; init; }
+    public required int MaterialPosition { get; init; }
+
+    /// <summary>The position the change applies in, or null for one no key switches or one a content flag
+    /// answers.</summary>
+    public KeyRef? Gate { get; init; }
+
+    /// <summary>The content flag the change applies under, where the edit answers more than one
+    /// position.</summary>
+    public string? ShownBy { get; init; }
+}
+
 /// <summary>The complete input to the production runtime compiler. Change selection, effective sources,
 /// capability and file inclusion have already been settled by <see cref="AuthoredBuildPlan"/>.</summary>
 public sealed class AuthoredBuildExecution
@@ -111,8 +140,13 @@ public sealed class AuthoredBuildExecution
         IReadOnlyList<KeyCycle> cycles,
         IReadOnlyList<HiddenFlag> hiddenFlags, IReadOnlyList<ShownFlag> shownFlags,
         IReadOnlyDictionary<StockRampPick, KeyRef?> rampGates,
-        IReadOnlyDictionary<StockRampPick, string?> rampShown)
+        IReadOnlyDictionary<StockRampPick, string?> rampShown,
+        IReadOnlyDictionary<StockRampPick, string> rampEdits,
+        IReadOnlyList<StockMaterialPick> stockMaterials, IReadOnlySet<string> coveredRows)
     {
+        RampEdits = rampEdits;
+        StockMaterials = stockMaterials;
+        CoveredRows = coveredRows;
         RampGates = rampGates;
         RampShownFlags = rampShown;
         ShownFlags = shownFlags;
@@ -134,6 +168,14 @@ public sealed class AuthoredBuildExecution
     internal IReadOnlyList<BuildWorkItem> Work { get; }
     internal IReadOnlyList<StockRampPick> StockRamps { get; }
 
+    /// <summary>The shading values and effect disables that apply at a part's own draws, one per plan
+    /// row.</summary>
+    internal IReadOnlyList<StockMaterialPick> StockMaterials { get; }
+
+    /// <summary>The plan rows of content a hide covers wherever the content is placed. The plan warns about
+    /// each such placement, and nothing of it ships: the part never draws there.</summary>
+    internal IReadOnlySet<string> CoveredRows { get; }
+
     /// <summary>Every key this build declares, with the cycle its group gives it.</summary>
     internal IReadOnlyList<KeyCycle> KeyCycles { get; }
 
@@ -152,6 +194,9 @@ public sealed class AuthoredBuildExecution
     /// <summary>The content flag each entry in <see cref="StockRamps"/> binds under, where the change that
     /// picked it answers more than one position. Null for a pick one position answers.</summary>
     internal IReadOnlyDictionary<StockRampPick, string?> RampShownFlags { get; }
+
+    /// <summary>The edit that made each entry in <see cref="StockRamps"/>, by the pick itself.</summary>
+    internal IReadOnlyDictionary<StockRampPick, string> RampEdits { get; }
 
     public static AuthoredBuildExecution Create(AuthoredProject project, AuthoredBuildPlan plan)
     {
@@ -172,6 +217,9 @@ public sealed class AuthoredBuildExecution
         var shownFlags = new List<ShownFlag>();
         var rampGates = new Dictionary<StockRampPick, KeyRef?>(RampComparer.Instance);
         var rampShown = new Dictionary<StockRampPick, string?>(RampComparer.Instance);
+        var rampEdits = new Dictionary<StockRampPick, string>(RampComparer.Instance);
+        var stockMaterials = new List<StockMaterialPick>();
+        var coveredRows = new HashSet<string>(StringComparer.Ordinal);
         var cycles = Cycles(project);
         var workspace = new AuthoredWorkspaceFacts(project);
         var released = ReleasedToggles(project);
@@ -185,6 +233,8 @@ public sealed class AuthoredBuildExecution
             var content = part.Operations
                 .Where(operation => operation.Disposition == PlannedPartDisposition.Edit).ToList();
             var liveContent = content.Where(operation => !FullyHidden(operation, hideConditions)).ToList();
+            foreach (var covered in content.Except(liveContent))
+                coveredRows.UnionWith(covered.Bindings.Select(binding => binding.RowId));
             bool singleGroup = part.GroupTouches is { Count: 1 }
                 && part.Operations.SelectMany(operation => operation.ActiveWhen)
                     .All(condition => !condition.IsAlways
@@ -238,7 +288,26 @@ public sealed class AuthoredBuildExecution
                     // position as a term, several as the content flag raised in each of them
                     rampGates[pick] = shownName is null ? Term(operation.Condition) : null;
                     rampShown[pick] = shownName;
+                    rampEdits[pick] = binding.EditDefinitionId;
                 }
+                // A shading row the plan sent to the part's own draws rides what answers it, the same way
+                // a ramp pick does.
+                foreach (var binding in bindings.Where(binding => binding.Emissions.Any(emission =>
+                             emission.Kind is BuildEmissionKind.MaterialValuePatch
+                                 or BuildEmissionKind.MaterialEffect
+                             && emission.TargetingProof.Kind == BuildTargetingProof.StockDrawRange)))
+                    stockMaterials.Add(new StockMaterialPick
+                    {
+                        RowId = binding.RowId,
+                        EditDefinitionId = binding.EditDefinitionId,
+                        Part = part.Target,
+                        MaterialPosition = binding.CurrentSlot?.MaterialSlotIndex
+                            ?? binding.CurrentSlot?.SubmeshIndex
+                            ?? throw new InvalidOperationException(
+                                $"stock shading row '{binding.RowId}' names no material"),
+                        Gate = shownName is null ? Term(operation.Condition) : null,
+                        ShownBy = shownName,
+                    });
 
                 // Every state of this item's own group answers the part hidden or replaced, so a
                 // REPLACEMENT's group term drops out of its skip gate entirely — the released
@@ -285,13 +354,8 @@ public sealed class AuthoredBuildExecution
             }
         }
 
-        if (work.Count == 0 && ramps.Count == 0
-            && plan.RuntimeEmissions.Any(emission => emission.Emission.Kind
-                == BuildEmissionKind.MaterialValuePatch))
-            throw new AuthoredRefusalException(
-                "material values can only be changed on a part this mod also replaces");
         return new AuthoredBuildExecution(project, plan, work, ramps, cycles, flags,
-            shownFlags, rampGates, rampShown);
+            shownFlags, rampGates, rampShown, rampEdits, stockMaterials, coveredRows);
     }
 
     /// <summary>One condition as a runtime key position, or null for the condition no key decides.</summary>
@@ -327,8 +391,18 @@ public sealed class AuthoredBuildExecution
             .Where(group => group.Key is not null && ModKeys.Normalize(group.Key) is not null
                 && group.States is { Count: > 0 })
             .Select(group => new KeyCycle(ModKeys.Normalize(group.Key)!, group.States.Count, 0,
-                group.Persist))
+                group.Persist, Shortcuts(group)))
             .ToArray();
+
+    /// <summary>The group's state shortcuts in state order, or null when it has none.</summary>
+    private static IReadOnlyList<KeyShortcut>? Shortcuts(KeyGroup group)
+    {
+        var shortcuts = group.States
+            .Select((state, index) => ModKeys.Normalize(state?.Shortcut) is { } key
+                ? new KeyShortcut(key, index) : (KeyShortcut?)null)
+            .OfType<KeyShortcut>().ToArray();
+        return shortcuts.Length > 0 ? shortcuts : null;
+    }
 
     /// <summary>The released two-state key answer of every change that has one, by the edit definition it
     /// answers with. <see cref="AuthoredComposition.Head"/> is the whole rule and reads authored intent
@@ -395,6 +469,10 @@ public sealed class AuthoredBuildExecution
                 // taken), else the target's workspace record (a converted 0.3.x project); the vertex count
                 // is a fact of the TARGET mesh, not of what a state answers
                 BakedRest = geometryAsset.BakedRest ?? workspace.BakedRestOf(part.Target),
+                // the centre and the relation are the asset's own: every return and every import that can
+                // state them records them on the asset it makes
+                Shift = geometryAsset.Shift,
+                HiddenCentred = geometryAsset.HiddenCentred == true,
                 OriginalVerts = workspace.OriginalVerticesOf(part.Target),
                 Gate = collapsible
                     ? gate with { HiddenWhen = Array.Empty<KeyRef>(), SuppressesInEveryState = true }
@@ -436,7 +514,7 @@ public sealed class AuthoredBuildExecution
             string? file = binding.EffectiveValue?.ProjectAsset?.File;
             SlotOrigin origin = file is not null ? SlotOrigin.Authored
                 : binding.EffectiveValue?.Kind == EffectiveValueKind.Neutral
-                    ? SlotOrigin.ExplicitNeutral : SlotOrigin.VanillaOwn;
+                    ? SlotOrigin.ExplicitNeutral : SlotOrigin.Untouched;
             bool additionalExactFixed = binding.AuthoredSlot.Input is TargetInputKind.BaseColor
                     or TargetInputKind.Normal or TargetInputKind.Rmo or TargetInputKind.Blend
                 && binding.AuthoredSlot.ShaderProperty is { Length: > 0 }

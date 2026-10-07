@@ -11,8 +11,9 @@ namespace Remold.Core.Bundles;
 
 /// <summary>
 /// The game's Addressables binary catalog (<c>catalog_main_*.bin</c>), reduced to: <b>which logical
-/// bundle owns an address</b>. The corpus alone cannot answer it — the same asset name ships as distinct
-/// copies in several bundles and only the catalog says which one the game loads. Read-only, in-memory,
+/// bundle owns an address, and which object in it the address loads</b>. The corpus alone cannot answer
+/// either — the same asset name ships as distinct copies across bundles and inside one, and only the
+/// catalog says which one the game loads. Read-only, in-memory,
 /// parsed once per session; an absent catalog returns null and callers degrade with a note.
 /// </summary>
 public sealed class CatalogIndex
@@ -20,6 +21,8 @@ public sealed class CatalogIndex
     private readonly Dictionary<string, string> _keyToOwner;   // dash-hex primaryKey → logical bundle id
     // dash-hex primaryKey → the row's FULL ordered dependency list (owner first)
     private readonly Dictionary<string, string[]> _keyToDeps;
+    // dash-hex primaryKey → the key the owning bundle's m_Container files the asset under
+    private readonly Dictionary<string, string> _keyToLoadKey;
 
     public int AssetCount { get; }
 
@@ -38,10 +41,11 @@ public sealed class CatalogIndex
 
     private CatalogIndex(Dictionary<string, string> keyToOwner, int bundleCount,
         Dictionary<string, string>? nameToInternalId = null, IReadOnlyList<string>? conflicted = null,
-        Dictionary<string, string[]>? keyToDeps = null)
+        Dictionary<string, string[]>? keyToDeps = null, Dictionary<string, string>? keyToLoadKey = null)
     {
         _keyToOwner = keyToOwner;
         _keyToDeps = keyToDeps ?? new Dictionary<string, string[]>(StringComparer.Ordinal);
+        _keyToLoadKey = keyToLoadKey ?? new Dictionary<string, string>(StringComparer.Ordinal);
         AssetCount = keyToOwner.Count;
         BundleCount = bundleCount;
         BundleNameToInternalId = nameToInternalId ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -74,6 +78,50 @@ public sealed class CatalogIndex
     /// game's load set, and the resolution scope for everything the asset references.</summary>
     public IReadOnlyList<string>? DepsForAddress(string address) =>
         _keyToDeps.TryGetValue(KeyForAddress(address), out var deps) ? deps : null;
+
+    /// <summary>The key <paramref name="address"/>'s owning bundle files the asset under in its
+    /// <c>m_Container</c> — the row's own internal id, which is what the game hands the bundle to load it.
+    /// A bundle can ship several objects of one name; this key names the one the address loads. Null when
+    /// the catalog has no such address, or its row carries no internal id.</summary>
+    public string? LoadKeyForAddress(string address) =>
+        _keyToLoadKey.TryGetValue(KeyForAddress(address), out var key) ? key : null;
+
+    /// <summary>The catalog's own address key to load-key rows, beside <see cref="AddressOwners"/>.</summary>
+    internal IReadOnlyDictionary<string, string> AddressLoadKeys => _keyToLoadKey;
+
+    /// <summary>Where one part tier's mesh is read, and which object of that bundle: the serialized renderer
+    /// mesh it carries where it names both halves of one; else its recipe address's owning bundle and load
+    /// key; else whatever bundle it names, read by name. Catalog-only — nothing is opened to answer, so a
+    /// route asks it wherever it stands and reads the bundle only where it already did.</summary>
+    public (string? Bundle, MeshSelector Which) TierMesh(string? address, string? serializedBundle,
+        long serializedPathId) =>
+        TierMesh(address, serializedBundle, serializedPathId, ResolveAddress, LoadKeyForAddress);
+
+    /// <summary><see cref="TierMesh(string?, string?, long)"/> over any catalog's two address answers, for a
+    /// caller that holds them as functions (a build environment).</summary>
+    public static (string? Bundle, MeshSelector Which) TierMesh(string? address, string? serializedBundle,
+        long serializedPathId, Func<string, string?> ownerOf, Func<string, string?>? loadKeyOf)
+    {
+        if (!string.IsNullOrEmpty(serializedBundle) && serializedPathId != 0)
+            return (serializedBundle, serializedPathId);
+        if (!string.IsNullOrEmpty(address) && ownerOf(address) is { } owner)
+            return (owner, MeshSelector.ByLoadKey(loadKeyOf?.Invoke(address)));
+        return (string.IsNullOrEmpty(serializedBundle) ? null : serializedBundle, default);
+    }
+
+    /// <summary>The load dependencies of every asset <paramref name="bundle"/> owns, deduped in catalog
+    /// order, the bundle itself excluded: the closure a route that names a bundle rather than an address
+    /// reaches. One pass over the catalog.</summary>
+    public IReadOnlyList<string> DepsForBundle(string bundle)
+    {
+        var deps = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal) { bundle };
+        foreach (var (key, owner) in _keyToOwner)
+            if (string.Equals(owner, bundle, StringComparison.Ordinal) && _keyToDeps.TryGetValue(key, out var row))
+                foreach (var dep in row)
+                    if (seen.Add(dep)) deps.Add(dep);
+        return deps;
+    }
 
     /// <summary>Parse the game's current catalog, or null when no catalog file exists. A
     /// present-but-corrupt catalog THROWS rather than degrading silently.</summary>
@@ -117,7 +165,7 @@ public sealed class CatalogIndex
     // into one string table. A schema bump forces a reparse — regenerable cache, not a format contract.
 
     private const uint SnapshotMagic = 0x50414E53;   // "SNAP"
-    private const byte SnapshotSchema = 1;
+    private const byte SnapshotSchema = 2;
 
     private void SaveSnapshot(string path, long catalogLength, long catalogMtimeTicks)
     {
@@ -153,6 +201,7 @@ public sealed class CatalogIndex
                     w.Write(key);
                     w.Write(deps.Length);
                     foreach (var d in deps) w.Write(table[d]);
+                    w.Write(_keyToLoadKey.TryGetValue(key, out var loadKey) ? loadKey : "");
                 }
             }
             File.Move(tmp, path, overwrite: true);
@@ -186,6 +235,7 @@ public sealed class CatalogIndex
             int keyCount = r.ReadInt32();
             var keyToOwner = new Dictionary<string, string>(keyCount, StringComparer.Ordinal);
             var keyToDeps = new Dictionary<string, string[]>(keyCount, StringComparer.Ordinal);
+            var keyToLoadKey = new Dictionary<string, string>(keyCount, StringComparer.Ordinal);
             for (int i = 0; i < keyCount; i++)
             {
                 var key = r.ReadString();
@@ -193,8 +243,11 @@ public sealed class CatalogIndex
                 for (int j = 0; j < deps.Length; j++) deps[j] = strings[r.ReadInt32()];
                 keyToOwner[key] = deps[0];
                 keyToDeps[key] = deps;
+                var loadKey = r.ReadString();
+                if (loadKey.Length > 0) keyToLoadKey[key] = loadKey;
             }
-            return new CatalogIndex(keyToOwner, bundleCount, nameToInternalId, conflicted, keyToDeps);
+            return new CatalogIndex(keyToOwner, bundleCount, nameToInternalId, conflicted, keyToDeps,
+                keyToLoadKey);
         }
         catch { return null; }
     }
@@ -204,10 +257,18 @@ public sealed class CatalogIndex
     /// synthesise.</summary>
     internal static CatalogIndex ForTest(IEnumerable<(string Address, string OwnerBundle)> rows,
         IEnumerable<(string Address, string[] Deps)>? depRows = null,
-        IEnumerable<(string Logical, string InternalId)>? bundleRows = null)
+        IEnumerable<(string Logical, string InternalId)>? bundleRows = null,
+        IEnumerable<(string Address, string LoadKey)>? loadKeyRows = null)
     {
         var keyToOwner = new Dictionary<string, string>(StringComparer.Ordinal);
         var keyToDeps = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        // The fixture convention: an address loads the object its last path segment names, so a synthetic
+        // mesh filed under its own name answers the address a fixture spells for it. Explicit rows override.
+        var keyToLoadKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (address, _) in rows)
+            keyToLoadKey[KeyForAddress(address)] = System.IO.Path.GetFileNameWithoutExtension(address);
+        foreach (var (address, loadKey) in loadKeyRows ?? Array.Empty<(string, string)>())
+            keyToLoadKey[KeyForAddress(address)] = loadKey;
         int bundles = 0;
         var seenBundles = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (address, owner) in rows)
@@ -225,7 +286,8 @@ public sealed class CatalogIndex
             nameToInternalId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var (logical, internalId) in bundleRows) nameToInternalId[logical] = internalId;
         }
-        return new CatalogIndex(keyToOwner, bundles, nameToInternalId, keyToDeps: keyToDeps);
+        return new CatalogIndex(keyToOwner, bundles, nameToInternalId, keyToDeps: keyToDeps,
+            keyToLoadKey: keyToLoadKey);
     }
 
     /// <summary>Parse catalog bytes (split out for tests and offline runs).</summary>
@@ -267,6 +329,7 @@ public sealed class CatalogIndex
         // the row's full bundle dep list
         var keyToOwner = new Dictionary<string, string>(StringComparer.Ordinal);
         var keyToDeps = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        var keyToLoadKey = new Dictionary<string, string>(StringComparer.Ordinal);
         var depList = new List<string>();
         var depSeen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var kv in ccd.Resources)
@@ -287,9 +350,10 @@ public sealed class CatalogIndex
                 if (depList.Count == 0) continue;
                 keyToOwner.Add(loc.PrimaryKey, depList[0]);
                 keyToDeps.Add(loc.PrimaryKey, depList.ToArray());
+                if (!string.IsNullOrEmpty(loc.InternalId)) keyToLoadKey.Add(loc.PrimaryKey, loc.InternalId);
             }
 
         return new CatalogIndex(keyToOwner, internalToLogical.Count, nameToInternalId,
-            new List<string>(conflicted), keyToDeps);
+            new List<string>(conflicted), keyToDeps, keyToLoadKey);
     }
 }

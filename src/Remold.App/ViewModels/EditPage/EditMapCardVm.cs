@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Remold.Core;
@@ -793,11 +794,18 @@ public sealed class EditMapGroupVm
     public string CopyText => Title;
 }
 
-/// <summary>The shading row under one material group's cards: numbers the material's shader reads,
-/// copied from another part's material or typed in, rather than painted. The row names the state and
-/// carries the two dialogs; every write goes back through the page's one session.</summary>
+/// <summary>The shading controls belonging to one material group. Writes go through the page's session.</summary>
 public sealed partial class EditShadingRowVm : ObservableObject
 {
+    public EditShadingRowVm()
+    {
+        Effects.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasEffects));
+            RefreshEffectAvailability();
+        };
+    }
+
     public required EditRef Edit { get; init; }
     public required TargetPart Part { get; init; }
     public required int MaterialSlotIndex { get; init; }
@@ -818,10 +826,50 @@ public sealed partial class EditShadingRowVm : ObservableObject
     /// <summary>The bound slots behind <see cref="AuthoredValues"/>, for the revert.</summary>
     public required IReadOnlyList<string> AuthoredSlotIds { get; init; }
 
-    public bool IsEdited => AuthoredSlotIds.Count > 0;
+    public IReadOnlyList<string> DisabledEffectIds { get; init; } = Array.Empty<string>();
 
-    public string Summary => AuthoredSlotIds.Count == 0 ? ""
-        : $"{AuthoredSlotIds.Count} value{(AuthoredSlotIds.Count == 1 ? "" : "s")} set";
+    public ObservableCollection<EditShadingEffectRowVm> Effects { get; } = new();
+
+    public bool HasEffects => Effects.Count > 0;
+
+    public IReadOnlyList<MaterialEffectOperation> EffectOperations { get; set; } =
+        Array.Empty<MaterialEffectOperation>();
+
+    /// <summary>The material this position's shading was last copied from, while anything copied
+    /// remains. Provenance for the card; the numbers are the edit's own.</summary>
+    public string? CopiedFrom { get; init; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasEffectsNote))]
+    private string _effectsNote = "";
+
+    public bool HasEffectsNote => EffectsNote.Length > 0;
+
+    public void SetEffects(IEnumerable<EditShadingEffect> effects)
+    {
+        Effects.Clear();
+        foreach (var effect in effects)
+            Effects.Add(new EditShadingEffectRowVm(this, effect));
+        RefreshEffectAvailability();
+    }
+
+    internal void RefreshEffectAvailability()
+    {
+        foreach (var effect in Effects) effect.RefreshAvailability();
+        OnPropertyChanged(nameof(CanDisableAllEffects));
+        OnPropertyChanged(nameof(DisableAllEffectsHint));
+    }
+
+    public bool IsEdited => AuthoredSlotIds.Count > 0 || DisabledEffectIds.Count > 0;
+
+    public string Summary => string.Join(" · ", new[]
+    {
+        AuthoredSlotIds.Count == 0 ? "" :
+            $"{AuthoredSlotIds.Count} value{(AuthoredSlotIds.Count == 1 ? "" : "s")} set",
+        DisabledEffectIds.Count == 0 ? "" :
+            $"{DisabledEffectIds.Count} effect{(DisabledEffectIds.Count == 1 ? "" : "s")} disabled",
+        CopiedFrom is { Length: > 0 } ? $"copied from '{CopiedFrom}'" : "",
+    }.Where(value => value.Length > 0));
 
     public bool HasSummary => IsEdited;
 
@@ -833,13 +881,19 @@ public sealed partial class EditShadingRowVm : ObservableObject
     [NotifyPropertyChangedFor(nameof(CopyFromMaterialHint))]
     [NotifyPropertyChangedFor(nameof(EditValuesHint))]
     [NotifyPropertyChangedFor(nameof(RevertHint))]
+    [NotifyPropertyChangedFor(nameof(CanDisableAllEffects))]
+    [NotifyPropertyChangedFor(nameof(DisableAllEffectsHint))]
     private bool _isBusy;
+
+    partial void OnIsBusyChanged(bool value) => RefreshEffectAvailability();
 
     /// <summary>A Revert is drawn at all — the map cards' rule on this row: only a row that belongs to an
     /// edit has anything to take back, and a bare part's row hides the verb until its first edit mints.</summary>
     public bool ShowsRevert => !IsFirstEdit;
 
     public bool CanRevert => IsEdited && !IsBusy;
+
+    public bool CanDisableAllEffects => !IsBusy && Effects.Any(effect => effect.IsActive);
 
     // Why the button is off when it is, else what the verb does — the page's rule, and the reason the
     // Revert below leads with what it can never do rather than with what it would do.
@@ -850,8 +904,61 @@ public sealed partial class EditShadingRowVm : ObservableObject
     public string EditValuesHint => IsBusy ? BlenderGate.Busy
         : "Sets this material's shading values by hand.";
 
+    public string DisableAllEffectsHint => IsBusy ? BlenderGate.Busy
+        : !HasEffects ? "This material has no removable effects."
+        : !Effects.Any(effect => effect.IsActive) ? "Every effect is already disabled."
+        : "Disables the effects on this material and keeps their saved values.";
+
     /// <summary>Why it is off first, in the map card Revert's own words for the same state.</summary>
     public string RevertHint => !IsEdited ? EditMapCardVm.NothingToRevert
         : IsBusy ? BlenderGate.Busy
-        : "Returns every shading value here to the original.";
+        : "Returns this material's shading to the original.";
+}
+
+/// <summary>The user's enabled choice for one effect. Parent state controls availability without
+/// changing that choice.</summary>
+public sealed partial class EditShadingEffectRowVm : ObservableObject
+{
+    public EditShadingEffectRowVm(EditShadingRowVm owner, EditShadingEffect effect)
+    {
+        Owner = owner;
+        Id = effect.Id;
+        Label = effect.Label;
+        ParentId = effect.ParentId;
+        HasEditedValues = effect.IsEdited;
+        OriginalIsEnabled = effect.IsEnabled;
+        _isEnabled = effect.IsEnabled;
+    }
+
+    public EditShadingRowVm Owner { get; }
+    public string Id { get; }
+    public string Label { get; }
+    public string? ParentId { get; }
+    public bool HasEditedValues { get; }
+    public bool OriginalIsEnabled { get; }
+    public bool IsChild => ParentId is not null;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsEdited))]
+    private bool _isEnabled;
+
+    public bool IsEdited => IsActive && HasEditedValues;
+
+    public bool IsActive => IsEnabled && ParentIsEnabled;
+
+    private bool ParentIsEnabled => ParentId is null ||
+        Owner.Effects.Any(effect => effect.Id == ParentId && effect.IsActive);
+
+    public bool IsAvailable => !Owner.IsBusy && ParentIsEnabled;
+
+    public void ResetEnabled() => IsEnabled = OriginalIsEnabled;
+
+    partial void OnIsEnabledChanged(bool value) => Owner.RefreshEffectAvailability();
+
+    internal void RefreshAvailability()
+    {
+        OnPropertyChanged(nameof(IsAvailable));
+        OnPropertyChanged(nameof(IsActive));
+        OnPropertyChanged(nameof(IsEdited));
+    }
 }

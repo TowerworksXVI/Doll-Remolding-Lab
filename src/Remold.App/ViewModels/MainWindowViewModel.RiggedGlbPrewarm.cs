@@ -230,17 +230,16 @@ public partial class MainWindowViewModel
         string partsDir = Path.Combine(buildRun, "parts");
         string texturesDir = Path.Combine(buildRun, "textures");
         var specs = new List<(string Part, string SourceBundle, string MeshName, string? GlbOut,
-            IReadOnlyList<float>? BakedRest, long PathId, string? EditedGlb)>();
+            IReadOnlyList<float>? BakedRest, Remold.Core.Bundles.MeshSelector Which, string? EditedGlb)>();
         var plans = new List<SessionPartPlan>();
         foreach (var part in model.Parts)
         {
             token.ThrowIfCancellationRequested();
             var recipe = part.ToRecipePart();
-            string? bundle = recipe.MeshBundle ?? (recipe.MeshAddress.Length == 0
-                ? null : vfs.Catalog.ResolveAddress(recipe.MeshAddress));
+            var (bundle, which) = vfs.Catalog.TierMesh(recipe.MeshAddress, recipe.MeshBundle, recipe.MeshPathId);
             if (bundle is null) continue;
             string rigged = Path.Combine(partsDir, StorageName(part.SlotName) + ".rigged.glb");
-            specs.Add((part.Token, bundle, recipe.SlotName, rigged, null, recipe.MeshPathId, null));
+            specs.Add((part.Token, bundle, recipe.SlotName, rigged, null, which, null));
             plans.Add(new SessionPartPlan(part.Token, recipe.SlotName, rigged,
                 Path.Combine(partsDir, StorageName(part.SlotName) + ".glb"),
                 part.IsStatic, null, null));

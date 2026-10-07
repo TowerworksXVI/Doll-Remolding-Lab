@@ -57,6 +57,30 @@
     <Style Selector="Button.flat:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="{StaticResource HudBorderBrush}" />
     </Style>
+    <!-- addChip = the empty slot at the end of a place's edits: a dashed outline the size of an edit
+         chip, so adding an edit reads as filling a slot and never as a key binding -->
+    <Style Selector="Button.addChip">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Padding" Value="8,3" />
+      <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Panel>
+            <Rectangle Name="PART_Dash" RadiusX="3" RadiusY="3" StrokeThickness="1" StrokeDashArray="4,3"
+                       Stroke="{StaticResource HudSubtextBrush}" Fill="Transparent" />
+            <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Content}"
+                              Padding="{TemplateBinding Padding}" Foreground="{TemplateBinding Foreground}" />
+          </Panel>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="Button.addChip:pointerover">
+      <Setter Property="Foreground" Value="{StaticResource HudTextBrush}" />
+    </Style>
+    <Style Selector="Button.addChip:pointerover /template/ Rectangle#PART_Dash">
+      <Setter Property="Stroke" Value="{StaticResource HudTextBrush}" />
+      <Setter Property="Fill" Value="{StaticResource HudBorderBrush}" />
+    </Style>
     <Style Selector="Button.diagnosticCounts">
       <Setter Property="Foreground" Value="{StaticResource HudSubtextBrush}" />
     </Style>
@@ -254,7 +278,7 @@
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <Button Content="＋ Edit ▾" FontSize="11" Padding="6,2" HorizontalAlignment="Left">
+                    <Button Classes="addChip" Content="＋ Add edit ▾" HorizontalAlignment="Left">
                       <Button.Flyout>
                         <Flyout Placement="BottomEdgeAlignedLeft">
                           <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
@@ -288,7 +312,7 @@
                         <StackPanel Spacing="7">
                           <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
                             <views:KeyCaptureButton Grid.Column="0" BoundKey="{Binding Key, Mode=TwoWay}"
-                                                    EmptyLabel="＋ Key"
+                                                    EmptyLabel="No key"
                                                     ToolTip.Tip="Click, then press a key. Delete or Backspace clears it." />
                             <TextBox Grid.Column="1" Text="{Binding Label, Mode=OneWay}"
                                      Watermark="{Binding DisplayName}" FontSize="12"
@@ -301,7 +325,7 @@
                           </Grid>
                           <Border Background="{StaticResource HudBgBrush}" CornerRadius="3" Padding="7,5"
                                   IsVisible="{Binding IsKeyless}">
-                            <TextBlock Text="✗ No key set. This blocks the build. Set one with ＋ Key above."
+                            <TextBlock Text="✗ No key set. This blocks the build. Click the key field above, then press a key."
                                        Foreground="{StaticResource HudErrorBrush}" FontSize="11"
                                        TextWrapping="Wrap" />
                           </Border>
@@ -325,37 +349,18 @@
                                       <TextBox Grid.Column="1" Width="115" Text="{Binding Label, Mode=OneWay}"
                                                Watermark="{Binding DisplayName}" FontSize="11"
                                                KeyDown="OnBoardLabelKeyDown" LostFocus="OnBoardLabelLostFocus" />
-                                      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4"
+                                      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5"
                                                   VerticalAlignment="Center">
+                                        <views:KeyCaptureButton BoundKey="{Binding Shortcut, Mode=TwoWay}"
+                                                                EmptyLabel="No shortcut"
+                                                                ToolTip.Tip="A key that jumps straight to this state. Click, then press a key. Delete or Backspace clears it." />
+                                        <TextBlock Text="⚠" Foreground="{StaticResource HudAmberBrush}"
+                                                   IsVisible="{Binding HasCollision}"
+                                                   ToolTip.Tip="{Binding CollisionTip}"
+                                                   VerticalAlignment="Center" />
                                         <TextBlock Text="at launch" FontSize="10"
                                                    Foreground="{StaticResource HudAccentBrush}"
-                                                   IsVisible="{Binding IsLaunch}" />
-                                        <Button Classes="flat" FontSize="10"
-                                                 Foreground="{StaticResource HudSubtextBrush}"
-                                                Command="{Binding OpenCompositionCommand}"
-                                                IsVisible="{Binding CountLine, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}">
-                                          <StackPanel Orientation="Horizontal" Spacing="3">
-                                            <TextBlock Text="{Binding CountLine}" />
-                                            <TextBlock Text="▾" />
-                                          </StackPanel>
-                                          <Button.Flyout>
-                                            <Flyout Placement="BottomEdgeAlignedLeft">
-                                              <ItemsControl ItemsSource="{Binding Composition}" MinWidth="230">
-                                                <ItemsControl.ItemTemplate>
-                                                  <DataTemplate x:DataType="bp:BuildResolvedPartVm">
-                                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12"
-                                                          Margin="0,2">
-                                                      <TextBlock Text="{Binding Part}" FontSize="11" />
-                                                      <TextBlock Grid.Column="1" Text="{Binding Answer}"
-                                                                 FontSize="11"
-                                                                 Foreground="{StaticResource HudSubtextBrush}" />
-                                                    </Grid>
-                                                  </DataTemplate>
-                                                </ItemsControl.ItemTemplate>
-                                              </ItemsControl>
-                                            </Flyout>
-                                          </Button.Flyout>
-                                        </Button>
+                                                   IsVisible="{Binding IsLaunch}" VerticalAlignment="Center" />
                                       </StackPanel>
                                       <Button Grid.Column="3" Classes="flat" Content="↑"
                                               Command="{Binding MoveUpCommand}" IsEnabled="{Binding CanMoveUp}"
@@ -392,7 +397,7 @@
                                       </ItemsControl.ItemTemplate>
                                     </ItemsControl>
 
-                                    <Button Content="＋ Edit ▾" FontSize="11" Padding="6,2"
+                                    <Button Classes="addChip" Content="＋ Add edit ▾"
                                             HorizontalAlignment="Left">
                                       <Button.Flyout>
                                         <Flyout Placement="BottomEdgeAlignedLeft">
@@ -477,7 +482,7 @@
                   <TextBlock Text="Key" Classes="sectionLabel" VerticalAlignment="Center" />
                   <StackPanel Grid.Column="1" Spacing="4">
                     <views:KeyCaptureButton BoundKey="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Mode=TwoWay}"
-                                            EmptyLabel="＋ Key" HorizontalAlignment="Left"
+                                            EmptyLabel="No key" HorizontalAlignment="Left"
                                             ToolTip.Tip="Turns the whole mod on and off. Delete or Backspace clears it." />
                     <CheckBox Content="Persist after restart" FontSize="11"
                               IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackagePersistToggleKey, Mode=TwoWay}"
@@ -490,7 +495,7 @@
                 </Grid>
                 <CheckBox Content="Editable by others"
                           IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageIncludesRepairData, Mode=TwoWay}"
-                          ToolTip.Tip="Adds the file a later Doll Remolding Lab version will use to open this mod for editing and repair. Without it, the mod can only be rebuilt from your project." />
+                          ToolTip.Tip="Lets anyone import this mod to edit or repair it. Without it, the mod can only be rebuilt from your project." />
               </StackPanel>
             </Border>
 

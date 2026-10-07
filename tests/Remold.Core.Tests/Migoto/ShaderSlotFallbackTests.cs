@@ -74,7 +74,7 @@ public class ShaderSlotFallbackTests : IDisposable
         {
             Assert.Contains($"Resource_RtxSave{s} = ref ps-t{s}\n", ini);
             Assert.Contains($"if $zz_rt == {MigotoEmitter.RetexTag("ffff0000")}\n$zz_rslot = {s}\nendif\n", ini);
-            Assert.Contains($"if $zz_rslot == {s}\nps-t{s} = Resource_Rtx0\nendif\n", ini);
+            Assert.Contains($"if $zz_rslot == {s}\nps-t{s} = Resource_Rtx0\n$zz_bt{s} = 1\nendif\n", ini);
             Assert.Contains($"post ps-t{s} = Resource_RtxSave{s}\n", ini);
         }
     }

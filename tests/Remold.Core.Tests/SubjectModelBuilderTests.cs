@@ -24,13 +24,16 @@ public class SubjectModelBuilderTests
     }
 
     /// <summary>A catalog whose formula row resolves the stem's prefab and whose dep closure carries the
-    /// subject's other bundles.</summary>
+    /// subject's other bundles. <paramref name="meshAddresses"/> are recipe mesh addresses the catalog
+    /// resolves (to a bundle nothing reads): a recipe address the catalog does NOT resolve is inert to
+    /// the builder, so a test that wants the recipe route taken registers the address.</summary>
     private static CatalogIndex Catalog(string stem, string prefabLogical,
-        string[]? closure = null, string contextRoot = "Character/Player")
+        string[]? closure = null, string contextRoot = "Character/Player", string[]? meshAddresses = null)
     {
         var address = GameVfs.PrefabAddress(contextRoot, stem);
         return CatalogIndex.ForTest(
-            new[] { (address, prefabLogical) },
+            new[] { (address, prefabLogical) }
+                .Concat((meshAddresses ?? Array.Empty<string>()).Select(a => (a, "mesh.bundle"))),
             new[] { (address, new[] { prefabLogical }.Concat(closure ?? Array.Empty<string>()).ToArray()) });
     }
 
@@ -640,7 +643,10 @@ public class SubjectModelBuilderTests
             bones: new[] { ("Bip001", -1) },
             visibility: new WorkbenchPrefab.VisibilityLists(DormHideNodes: new[] { lod1 }));
 
-        var model = SubjectModelBuilder.Build(Catalog("TestySSR01", "prefab.bundle"),
+        // the recipe route is only taken for an address the catalog resolves, so both tiers register
+        var catalog = Catalog("TestySSR01", "prefab.bundle",
+            meshAddresses: new[] { $"Assets/X/{lod0}.mesh", $"Assets/X/{lod1}.mesh" });
+        var model = SubjectModelBuilder.Build(catalog,
             FixtureCrawl.DeobfuscateOver(abw), new Outfit(1071, "TestySSR01", OutfitKind.Base), "Testy");
 
         var body = Assert.Single(model.Parts, p => p.Token == "body");
@@ -1322,5 +1328,131 @@ public class SubjectModelBuilderTests
         Assert.Null(bare.Materials.Single().Problem);           // not a resolution failure
         Assert.NotNull(bare.Problem);                            // the part-level "no textures" flag
         Assert.Contains("no texture maps", bare.Problem);
+    }
+
+    // ---- the material-array reconciliation: the prefabs a subject is assembled from can serialize
+    // DIFFERENT m_Materials for one renderer slot, and every reader — the tree, the Edit page, the build —
+    // has to be handed the same arrays. One prefab supplies all of a part's arrays, by three rules. ----
+
+    /// <summary>The two prefabs carrying the part state the same materials in the same order. Nothing is
+    /// reconciled away, the arrays are what they have always been, and nothing is marked.</summary>
+    [Fact]
+    public void PrefabModel_CandidatesAgreeingOnMaterials_KeepThemAndMarkNothing()
+    {
+        var model = TwoCandidateModel(
+            first: new[] { (1, 21L), (2, 22L) },
+            second: new[] { (1, 21L), (2, 22L) });
+
+        var cloth1 = model.Parts.Single(p => p.Token == "cloth1");
+        Assert.Equal(new[] { "M_cloth1", "M_cloth1b" }, cloth1.Materials.Select(m => m.Name).ToArray());
+        Assert.False(cloth1.AmbiguousMaterials);
+    }
+
+    /// <summary>One prefab leaves a renderer slot empty where the other binds a material. The game draws
+    /// nothing at an empty slot, so the filled array is right wherever either is: it is the one the part
+    /// takes, whichever prefab holds it, and there is nothing to tell the modder.</summary>
+    [Theory]
+    [InlineData(true)]    // the filled array in the higher-priority prefab
+    [InlineData(false)]   // and in the other one
+    public void PrefabModel_OneCandidateFillingAnothersEmptySlot_TakesTheFilledArray(bool filledFirst)
+    {
+        var filled = new[] { (1, 21L), (2, 22L) };
+        var empty = new[] { (1, 21L), (0, 0L) };
+        var model = TwoCandidateModel(
+            first: filledFirst ? filled : empty,
+            second: filledFirst ? empty : filled);
+
+        var cloth1 = model.Parts.Single(p => p.Token == "cloth1");
+        Assert.Equal(new[] { "M_cloth1", "M_cloth1b" }, cloth1.Materials.Select(m => m.Name).ToArray());
+        Assert.False(cloth1.Materials[1].IsPlaceholder);
+        Assert.False(cloth1.AmbiguousMaterials);
+    }
+
+    /// <summary>The same two materials in the other ORDER is a different configuration, not a filled-in
+    /// one: the two prefabs bind different materials at the same submesh, and which the game draws depends
+    /// on which prefab it assembled the doll from. The highest-priority prefab's array stands and the part
+    /// is marked, which is what puts the sentence in front of the modder at Build.</summary>
+    [Fact]
+    public void PrefabModel_CandidatesOrderingMaterialsDifferently_KeepsPriorityAndMarksThePart()
+    {
+        var model = TwoCandidateModel(
+            first: new[] { (1, 21L), (2, 22L) },
+            second: new[] { (2, 22L), (1, 21L) });
+
+        var cloth1 = model.Parts.Single(p => p.Token == "cloth1");
+        Assert.Equal(new[] { "M_cloth1", "M_cloth1b" }, cloth1.Materials.Select(m => m.Name).ToArray());
+        Assert.True(cloth1.AmbiguousMaterials);
+    }
+
+    /// <summary>One prefab supplies ALL of a part's arrays: its lod0 and its reduced tiers state the same
+    /// material identities, so a region drawn under a material at one detail level is drawn under that
+    /// material at the others. Here the filled arrays sit in the prefab that does not hold the part's own
+    /// lod0, and the tier takes them too rather than keeping the empty slot beside it.</summary>
+    [Fact]
+    public void PrefabModel_ReconciledMaterials_ComeFromOneCandidateForEveryTier()
+    {
+        var model = TwoCandidateModel(
+            first: new[] { (1, 21L), (0, 0L) },
+            second: new[] { (1, 21L), (2, 22L) },
+            withTier: true);
+
+        var cloth1 = model.Parts.Single(p => p.Token == "cloth1");
+        Assert.Equal(new[] { "M_cloth1", "M_cloth1b" }, cloth1.Materials.Select(m => m.Name).ToArray());
+        var tier = Assert.Single(cloth1.SiblingTiers!);
+        Assert.Equal("c_TestySSR01_slg_cloth1_lod1", tier.SlotName);
+        Assert.NotNull(tier.Materials);
+        Assert.Equal(2, tier.Materials!.Count);
+        Assert.All(tier.Materials, m => Assert.False(m.IsPlaceholder));
+        Assert.Equal(22L, tier.Materials[1].PathId);
+        Assert.False(cloth1.AmbiguousMaterials);
+    }
+
+    /// <summary>Two prefabs carrying one part's renderer slots, each with the material array the caller
+    /// gives it. <paramref name="withTier"/> gives both of them the part's lod1 as well, so a test can ask
+    /// where a TIER's array came from.</summary>
+    private static SubjectModel TwoCandidateModel((int FileId, long PathId)[] first,
+        (int FileId, long PathId)[] second, bool withTier = false)
+    {
+        using var g = new TempGame();
+        var abw = g.At("AssetBundles_Windows");
+        Directory.CreateDirectory(abw);
+
+        WorkbenchPrefab.SlotSpec[] SlotsOf((int FileId, long PathId)[] materials) => withTier
+            ? new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_cloth1_lod0", materials, Mesh: (0, 901L)),
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_cloth1_lod1", materials, Mesh: (0, 902L)),
+            }
+            : new[]
+            {
+                new WorkbenchPrefab.SlotSpec("c_TestySSR01_slg_cloth1_lod0", materials, Mesh: (0, 901L)),
+            };
+
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('1', 32) + ".bundle"),
+            "prefab.bundle", rootName: "TestySSR01", slots: SlotsOf(first),
+            recipe: Array.Empty<(string, string)>(),
+            externalCabs: new[] { "CAB-matA", "CAB-matB" },
+            bones: new[] { ("Bip001", -1) });
+        WorkbenchPrefab.Build(Path.Combine(abw, new string('2', 32) + ".bundle"),
+            "sibling.bundle", rootName: "c_TestySSR0101_slg_skin_model", slots: SlotsOf(second),
+            recipe: Array.Empty<(string, string)>(),
+            externalCabs: new[] { "CAB-matA", "CAB-matB" });
+
+        SyntheticBundle.BuildOneMaterial(Path.Combine(abw, new string('3', 32) + ".bundle"),
+            "matA.bundle", materialName: "M_cloth1", materialPathId: 21,
+            texEnvs: new[] { ("_BaseMap", 0, 2L) }, externalCabs: Array.Empty<string>(),
+            localTexture: new SyntheticBundle.TextureSpec("c_TestySSR01_slg_cloth1_d", 4, 4,
+                SyntheticBundle.SolidRgba32(4, 4, 0xAA, 0x22, 0x22, 0xFF)), cabName: "CAB-matA");
+        SyntheticBundle.BuildOneMaterial(Path.Combine(abw, new string('4', 32) + ".bundle"),
+            "matB.bundle", materialName: "M_cloth1b", materialPathId: 22,
+            texEnvs: new[] { ("_BaseMap", 0, 2L) }, externalCabs: Array.Empty<string>(),
+            localTexture: new SyntheticBundle.TextureSpec("c_TestySSR01_slg_cloth1b_d", 4, 4,
+                SyntheticBundle.SolidRgba32(4, 4, 0x22, 0xAA, 0x22, 0xFF)), cabName: "CAB-matB");
+
+        var deobfuscate = FixtureCrawl.DeobfuscateOver(abw);
+        var cat = Catalog("TestySSR01", "prefab.bundle",
+            new[] { "sibling.bundle", "matA.bundle", "matB.bundle" });
+        var outfit = new Outfit(1071, "TestySSR01", OutfitKind.Base);
+        return SubjectModelBuilder.Build(cat, deobfuscate, outfit, "Testy");
     }
 }

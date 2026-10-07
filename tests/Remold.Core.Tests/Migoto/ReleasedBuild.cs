@@ -18,9 +18,11 @@ namespace Remold.Core.Tests.Migoto;
 /// steps stay in this order and keep their semantics.</para></summary>
 internal static class ReleasedBuild
 {
+    /// <param name="adapted">handed the authored project the released one reads as, before it is planned,
+    /// for a test stating what only the authored shape can carry (a geometry asset's own records).</param>
     internal static ModBuilder.Result Build(ModProject project, BuildEnv env, string outRoot,
         Action<string>? log = null, bool zip = true, BuildCaches? caches = null,
-        int? encoderCpuLimit = null)
+        int? encoderCpuLimit = null, Action<AuthoredProject>? adapted = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         RefuseBlockedDonorSources(project, env);
@@ -30,6 +32,7 @@ internal static class ReleasedBuild
             throw new InvalidOperationException("this project can't be read against the current install: "
                 + string.Join("; ", adaptation.Report.Items.Where(item => item.BlocksSave)
                     .Select(item => $"{item.Scope}: {item.Detail}")));
+        adapted?.Invoke(adaptation.Project);
         var plan = AuthoredBuildPlanner.Plan(adaptation.Project,
             new ProductionAuthoredBuildBackend(resolver.ResolvePart));
         return ModBuilder.Build(AuthoredBuildExecution.Create(adaptation.Project, plan), env, outRoot,

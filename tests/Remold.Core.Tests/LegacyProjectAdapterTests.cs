@@ -44,8 +44,9 @@ public sealed class LegacyProjectAdapterTests : IDisposable
         Assert.Contains(adapted.Project.Always, id => adapted.Project.EditDefinitions.Single(e => e.Id == id)
             .Target.RendererSlot == "c_vesna_coat_lod0");
 
-        Assert.Equal(7, bodyEdit.Bindings.Count);
-        Assert.Equal(2, bodyEdit.Bindings.Count(b => Slot(adapted.Project, b).Input == TargetInputKind.Geometry));
+        Assert.Equal(6, bodyEdit.Bindings.Count);
+        // one geometry binding for the part: its lower-detail versions take the same replacement
+        Assert.Single(bodyEdit.Bindings, b => Slot(adapted.Project, b).Input == TargetInputKind.Geometry);
         Assert.Equal(BindingKind.ProjectAsset, Binding(bodyEdit, adapted.Project, TargetInputKind.BaseColor).Kind);
         Assert.Equal(BindingKind.Neutral, Binding(bodyEdit, adapted.Project, TargetInputKind.Normal).Kind);
         Assert.Equal(BindingKind.Neutral, Binding(bodyEdit, adapted.Project, TargetInputKind.Rmo).Kind);
@@ -488,7 +489,7 @@ public sealed class LegacyProjectAdapterTests : IDisposable
         // and the row the compiler folds out of those bindings names no ramp file, with the decision on it
         var row = Assert.Single(AuthoredDonorRows.Rows(DonorRows(edit, adapted.Project))!);
         Assert.Null(row.Ramp);
-        Assert.Equal(SlotOrigin.VanillaOwn, row.RampOrigin);
+        Assert.Equal(SlotOrigin.Untouched, row.RampOrigin);
     }
 
     [Fact]
@@ -525,8 +526,8 @@ public sealed class LegacyProjectAdapterTests : IDisposable
 
         var expected = new[]
         {
+            // one geometry route for the part; its lower-detail versions take the same replacement
             ("lod0", TargetInputKind.Geometry, (int?)null),
-            ("lod1", TargetInputKind.Geometry, null),
             (null, TargetInputKind.BaseColor, 0),
             (null, TargetInputKind.Ramp, 0),
         };

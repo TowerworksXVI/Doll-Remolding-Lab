@@ -109,6 +109,7 @@ public static class InvalidationCases
     {
         var project = AuthoredEditFixtures.Golden();
         project.RootDir = root;
+        project.TransportRoot = Path.Combine(root, "round-trips");
         return new AuthoredEditSession(project);
     }
 

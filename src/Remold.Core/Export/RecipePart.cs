@@ -16,11 +16,33 @@ namespace Remold.Core.Export;
 ///
 /// <para><see cref="Visibility"/> is the game-side override that can leave THIS tier undrawn. It is keyed
 /// per tier because the dorm lists name individual tier nodes, so one tier of a part can be withheld while
-/// its siblings draw.</para></summary>
+/// its siblings draw.</para>
+///
+/// <para><see cref="Materials"/> is the tier renderer's ordered <c>m_Materials</c> as IDENTITIES only.
+/// The game orders each tier's materials on its own, so position k at one tier is not position k at
+/// another; matching these identities against the lod0 slot's is what says which tier position carries a
+/// given lod0 region. Null when nothing filled it (a hand-built part, or a tier read before this field
+/// existed).</para></summary>
 public readonly record struct RecipeTierSlot(string SlotName, string MeshAddress,
     string? MeshBundle = null, long MeshPathId = 0, bool CastsShadows = true,
     VisibilityOverride Visibility = VisibilityOverride.None,
-    string? RendererBundle = null, long RendererPathId = 0);
+    string? RendererBundle = null, long RendererPathId = 0,
+    IReadOnlyList<TierMaterialRef>? Materials = null);
+
+/// <summary>One ordered material reference of a tier renderer, reduced to what identifies it: the logical
+/// <see cref="Bundle"/> the reference resolved to and its <see cref="PathId"/>. No name and no maps — the
+/// tier's materials are read for correspondence, and reading their names would open every tier material
+/// asset for a question identity already answers.
+///
+/// <para>Three forms. A PLACEHOLDER (an empty renderer slot, PPtr 0:0) is <c>(null, 0, true)</c> and holds
+/// its position; it corresponds only to another placeholder. A reference whose CAB no bundle in scope
+/// provides is <c>(null, pathId, false)</c> — <see cref="Resolved"/> false — and corresponds to nothing,
+/// because nothing says what it is. Everything else carries its bundle and path id.</para></summary>
+public readonly record struct TierMaterialRef(string? Bundle, long PathId, bool Resolved)
+{
+    /// <summary>True for an empty renderer slot (PPtr 0:0) — a placeholder that holds submesh order.</summary>
+    public bool IsPlaceholder => Resolved && Bundle is null && PathId == 0;
+}
 
 /// <summary>
 /// The prefab-exact identity of one workbench part, so the mesh is read by exact identity, never

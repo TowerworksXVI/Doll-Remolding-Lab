@@ -17,6 +17,64 @@ namespace Remold.Core.Tests.Migoto;
 /// </summary>
 public static class SyntheticPool
 {
+    /// <summary>The vertex list a slim operator of <paramref name="name"/> reads, as the build shipped it:
+    /// its <c>_sel.buf</c> where a chain's recover binds that, else the list the cache kernel reads through
+    /// the mesh's packet, each place's packet entry mapped back to the entry's vertex. Null when neither
+    /// ships, as for a dense operator.</summary>
+    public static uint[]? ShippedSel(string outDir, string name)
+    {
+        static uint[] Words(string path)
+        {
+            var bytes = File.ReadAllBytes(path);
+            var words = new uint[bytes.Length / 4];
+            Buffer.BlockCopy(bytes, 0, words, 0, bytes.Length);
+            return words;
+        }
+        string sel = Path.Combine(outDir, $"{name}_sel.buf");
+        if (File.Exists(sel)) return Words(sel);
+        string packetSel = Path.Combine(outDir, $"packet_sel_{name}.buf");
+        if (!File.Exists(packetSel)) return null;
+        var index = Words(Path.Combine(outDir, $"packet_index_{name}.buf"));
+        return Words(packetSel).Select(e => index[e]).ToArray();
+    }
+
+    /// <summary><see cref="ShippedSel"/> as the bytes of a <c>_sel.buf</c>; the operator must be slim.</summary>
+    public static byte[] ShippedSelBytes(string outDir, string name) =>
+        (ShippedSel(outDir, name) ?? throw new InvalidOperationException($"{name} shipped no slim operator"))
+            .SelectMany(BitConverter.GetBytes).ToArray();
+
+    /// <summary>The channel table every skinned fixture here is sliced in: position, normal and tangent
+    /// in the 40-byte stream 0, color float4 + half UVs in the 20-byte stream 1, float4 weights + uint4
+    /// indices in the 32-byte stream 2.</summary>
+    public static UnityMesh.ChannelDef[] SkinnedLayout()
+    {
+        var t = new UnityMesh.ChannelDef[14];
+        t[0] = new(0, 0, 0, 3); t[1] = new(0, 12, 0, 3); t[2] = new(0, 24, 0, 4);
+        t[3] = new(1, 0, 0, 4); t[4] = new(1, 16, 1, 2);
+        t[12] = new(2, 0, 0, 4); t[13] = new(2, 16, 10, 4);
+        return t;
+    }
+
+    /// <summary>A static fixture's table: float3 positions alone, a 12-byte stream 0.</summary>
+    public static UnityMesh.ChannelDef[] PositionsLayout()
+    {
+        var t = new UnityMesh.ChannelDef[14];
+        t[0] = new(0, 0, 0, 3);
+        return t;
+    }
+
+    /// <summary>The <c>"channels": [...]</c> member of a fixture <c>meta.json</c>, as the real writers
+    /// spell it.</summary>
+    public static string ChannelsJson(IReadOnlyList<UnityMesh.ChannelDef> table) =>
+        "\"channels\": [" + string.Join(", ", table.Select(c =>
+            $"{{ \"stream\": {c.Stream}, \"offset\": {c.Offset}, \"format\": {c.Format}, \"dimension\": {c.Dimension} }}")) + "]";
+
+    /// <summary>Rigid tier layouts for <paramref name="hashes"/>, every tier stored as
+    /// <paramref name="table"/>.</summary>
+    public static Dictionary<string, RigidTierLayout> RigidTiers(IReadOnlyList<UnityMesh.ChannelDef> table,
+        params string[] hashes) =>
+        hashes.ToDictionary(h => h, h => new RigidTierLayout("tier_" + h, table), StringComparer.Ordinal);
+
     /// <summary>Deterministic small floats: k spread over ±2 with three decimals, never NaN/huge.</summary>
     private static float F(int k) => ((k * 37 % 400) - 200) / 100f;
 
@@ -57,7 +115,7 @@ public static class SyntheticPool
         File.WriteAllText(Path.Combine(dir, "meta.json"),
             $"{{ \"mesh\": \"synthetic\", \"verts\": {verts}, \"boneCount\": {nb}, " +
             "\"indexFormat\": \"R16_UINT\", " +
-            $"\"indexBufferBytes\": {ib.Length}, \"streams\": [] }}");
+            $"\"indexBufferBytes\": {ib.Length}, \"streams\": [], {ChannelsJson(SkinnedLayout())} }}");
 
         var bones = string.Join(",", boneHashes.Select(h =>
             $"{{ \"hash\": {h}, \"bindpose\": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] }}"));
@@ -257,6 +315,33 @@ public static class SyntheticPool
         MapBindPoses(dir, b => hashes[i++] == hash ? bind : b);
     }
 
+    /// <summary>Bind ONE bone of a dump so its rest origin (where the bone sits in the mesh's bind space)
+    /// is <paramref name="origin"/>.</summary>
+    public static void SetRestOrigin(string dir, uint hash, Vector3 origin) =>
+        SetBindPose(dir, hash, Matrix4x4.CreateTranslation(-origin));
+
+    /// <summary>The part with its renderer's root chain stated: the root bone first, then its ancestors up
+    /// to the skeleton's top.</summary>
+    public static PoolPart Rooted(this PoolPart part, params uint[] rootFirst) => part with { RootChain = rootFirst };
+
+    /// <summary>The tier with its own renderer's root chain stated, as <see cref="Rooted(PoolPart, uint[])"/>.</summary>
+    public static PoolTier Rooted(this PoolTier tier, params uint[] rootFirst) => tier with { RootChain = rootFirst };
+
+    /// <summary>Weight a donor's every vertex to one of <paramref name="rows"/> alone, round-robin, so the rows
+    /// left out are palette rows the donor does not weight.</summary>
+    public static void WeightDonorOn(string donorDir, params int[] rows)
+    {
+        string path = Path.Combine(donorDir, "stream2.buf");
+        var s2 = File.ReadAllBytes(path);
+        for (int v = 0, n = s2.Length / 32; v < n; v++)
+        {
+            Array.Clear(s2, v * 32, 32);
+            BitConverter.GetBytes(1f).CopyTo(s2, v * 32);
+            BitConverter.GetBytes((uint)rows[v % rows.Length]).CopyTo(s2, v * 32 + 16);
+        }
+        File.WriteAllBytes(path, s2);
+    }
+
     /// <summary>A donor streams dir: vertices weighted round-robin to union bones, its triangles split
     /// evenly into <paramref name="submeshes"/> index ranges (the remainder rides the last).</summary>
     public static void WriteDonor(string dir, int verts, int unionBones, int submeshes = 2)
@@ -288,7 +373,7 @@ public static class SyntheticPool
         File.WriteAllBytes(Path.Combine(dir, "ib.buf"), ib);
 
         var meta = new StringBuilder();
-        meta.Append("{ \"mesh\": \"donor.swap\", ");
+        meta.Append("{ \"mesh\": \"donor.swap\", ").Append(ChannelsJson(SkinnedLayout())).Append(", ");
         meta.Append($"\"verts\": {verts}, \"indexFormat\": \"R16_UINT\", ");
         meta.Append("\"submeshes\": [");
         for (int s = 0, done = 0; s < submeshes; s++)
@@ -347,7 +432,7 @@ public static class SyntheticPool
         File.WriteAllText(Path.Combine(dir, "meta.json"),
             $"{{ \"mesh\": \"synthetic\", \"verts\": {verts}, \"boneCount\": 2, " +
             "\"indexFormat\": \"R16_UINT\", " +
-            $"\"indexBufferBytes\": {ib.Length}, \"streams\": [] }}");
+            $"\"indexBufferBytes\": {ib.Length}, \"streams\": [], {ChannelsJson(SkinnedLayout())} }}");
         File.WriteAllText(Path.Combine(dir, "bindpose.json"),
             $"{{ \"boneCount\": 2, \"bones\": [" +
             $"{{ \"hash\": {strongHash}, \"bindpose\": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] }}," +

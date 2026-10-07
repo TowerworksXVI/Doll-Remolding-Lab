@@ -78,6 +78,10 @@ public sealed record SubjectModel(
     public bool AllPartsStatic => Parts.Count > 0 && Parts.All(p => p.IsStatic);
 }
 
+/// <summary>Where a rig's saved rest pose (an Avatar) lives: the logical bundle holding it and its path id.
+/// A null <paramref name="Bundle"/> means the rig names an Avatar that can't be read from this install.</summary>
+public sealed record RigPose(string? Bundle, long PathId);
+
 /// <summary>
 /// One renderer slot family (all LOD tiers of a garment collapse to one part). <see cref="SlotName"/> is
 /// the representative <c>_lod0</c> slot's GameObject name, <see cref="MeshAddress"/> the recipe's mesh
@@ -107,6 +111,13 @@ public sealed record SubjectModel(
 /// it costs no mesh read, and only a list that named this node sets it.</param>
 /// <param name="RendererBundle">Logical bundle containing the representative renderer object.</param>
 /// <param name="RendererPathId">Exact path id of the representative renderer object.</param>
+/// <param name="AmbiguousMaterials">The game files hold more than one stock material configuration for
+/// this part: the prefabs the subject is assembled from bind DIFFERENT materials at its renderer slots,
+/// and not merely one filling in where another leaves a slot empty. The arrays here are the
+/// highest-priority prefab's; a build that changes this part says so, since on the other configurations
+/// the edit's colours land on different pieces.</param>
+/// <param name="Pose">The saved rest pose (an Avatar) the rig drawing the representative renderer names.
+/// Null when the rig names none, and then it rests at its prefab's saved Transforms.</param>
 public sealed record SubjectPart(
     string Token,
     string SlotName,
@@ -121,7 +132,9 @@ public sealed record SubjectPart(
     bool CastsShadows = true,
     Remold.Core.Model.VisibilityOverride Visibility = Remold.Core.Model.VisibilityOverride.None,
     string? RendererBundle = null,
-    long RendererPathId = 0)
+    long RendererPathId = 0,
+    bool AmbiguousMaterials = false,
+    RigPose? Pose = null)
 {
     /// <summary>The prefab-exact identity of one part: representative slot + sibling tiers, recipe-backed
     /// (address) or smr-backed (bundle+path-id). A part backed neither way yields a

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using Remold.Core.Project;
 using Xunit;
 
@@ -86,6 +88,7 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
     {
         string manifest = Saved();
         var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
         var skirt = Part("c_vesna_skirt_lod0");
         session.EnsurePartSlots(skirt, Resolve);
         var opened = session.Snapshot();
@@ -109,6 +112,7 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
     {
         string manifest = Saved();
         var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
         var skirt = Part("c_vesna_skirt_lod0");
         session.EnsurePartSlots(skirt, Resolve);
         string edit = session.CreateEdit(skirt, "Skirt");
@@ -135,6 +139,46 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
             after.ProjectAssets.Single(candidate => candidate.Id == asset).File, StringComparison.Ordinal);
     }
 
+    /// <summary>A Blender return of a part the game starts hidden records the centre its session file was
+    /// moved by and that hidden parts opened centred; both survive a save and a reopen, and a return that
+    /// says neither writes neither.</summary>
+    [Fact]
+    public void A_returned_geometry_keeps_its_centre_and_its_relation_through_a_save()
+    {
+        string manifest = Saved();
+        var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
+        var skirt = Part("c_vesna_skirt_lod0");
+        session.EnsurePartSlots(skirt, Resolve);
+        string edit = session.CreateEdit(skirt, "Skirt");
+        string geometry = session.Slots(edit)
+            .Single(slot => slot.Slot.Input == TargetInputKind.Geometry).Slot.Id;
+        Directory.CreateDirectory(Path.Combine(_root, "meshes"));
+        string source = Path.Combine(_root, "meshes", "skirt.glb");
+        File.WriteAllBytes(source, new byte[] { 7 });
+        var ingress = ProjectAssetIngress.Begin(session.Snapshot(), edit, geometry, source);
+        var centred = session.PublishAssetForBinding(ingress, ProjectAssetKind.Geometry, "Skirt",
+            ProjectAssetIngress.Binary, shift: new[] { 0.5f, -1.25f, 3f }, hiddenCentred: true);
+        string plainEdit = session.CreateEdit(skirt, "Plain");
+        string plainSlot = session.Slots(plainEdit)
+            .Single(slot => slot.Slot.Input == TargetInputKind.Geometry).Slot.Id;
+        File.WriteAllBytes(source, new byte[] { 8 });
+        var plain = session.PublishAssetForBinding(
+            ProjectAssetIngress.Begin(session.Snapshot(), plainEdit, plainSlot, source), ProjectAssetKind.Geometry,
+            "Plain", ProjectAssetIngress.Binary);
+        Write(manifest, session.Snapshot());
+
+        var after = AuthoredProjectSerializer.Load(manifest);
+        var asset = after.ProjectAssets.Single(candidate => candidate.Id == centred.ProjectAssetId);
+        Assert.Equal(new[] { 0.5f, -1.25f, 3f }, asset.Shift);
+        Assert.True(asset.HiddenCentred);
+        var bare = after.ProjectAssets.Single(candidate => candidate.Id == plain.ProjectAssetId);
+        Assert.Null(bare.Shift);
+        Assert.Null(bare.HiddenCentred);
+        string json = File.ReadAllText(manifest);
+        Assert.Equal(1, json.Split("\"hidden_centred\"").Length - 1);
+    }
+
     /// <summary>Opening a part the adapter has already filed slots for, judged against the shape a real save
     /// produces rather than a hand-written one. Adaptation now files the full install answer, so opening the
     /// part is idempotent and the existing edit already gives each untouched game input its own value.</summary>
@@ -143,6 +187,7 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
     {
         string manifest = Saved();
         var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
         var before = session.Snapshot();
 
         session.EnsurePartSlots(Body(), Resolve);
@@ -172,6 +217,7 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
     {
         string manifest = Saved();
         var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
         session.EnsurePartSlots(Body(), Resolve);
         var authored = session.Snapshot();
         // The installed material's own base colour, which the replacement's edit-output one is not.
@@ -232,6 +278,7 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
     private AuthoredProject TwoEdits(string manifest, bool secondEditLeads)
     {
         var session = new AuthoredEditSession(AuthoredProjectSerializer.Load(manifest));
+        session.SetTransportRoot(Path.Combine(session.Snapshot().RootDir!, "round-trips"));
         string second = session.CreateEdit(Body(), "Short body");
         string copy = session.Slots(second).Single(slot => slot.Slot.Input == TargetInputKind.Geometry
             && slot.Slot.Tier == "lod0").Slot.Id;
@@ -255,6 +302,55 @@ public sealed class AuthoredSaveRoundTripTests : IDisposable
         var authored = session.Snapshot();
         Write(manifest, authored);
         return authored;
+    }
+
+    /// <summary>The swap that puts a saved manifest in place is refused while another process holds the live
+    /// file — a scanner reading what just changed — and the save rides that out rather than failing the one
+    /// ledger the project has. The hold here allows reads, as a scanner's does, so the save's own schema
+    /// check passes and only the swap is refused.</summary>
+    [Fact]
+    public void A_save_rides_out_a_moment_the_live_manifest_is_held()
+    {
+        string manifest = Saved();
+        var project = AuthoredProjectSerializer.Load(manifest);
+        project.Info.Name = "Held while saving";
+        var hold = File.Open(manifest, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var release = new Thread(() => { Thread.Sleep(150); hold.Dispose(); }) { IsBackground = true };
+        var since = Stopwatch.StartNew();
+        release.Start();
+
+        AuthoredProjectSerializer.Save(project, manifest);
+
+        Assert.True(release.Join(5_000), "the holder never let go");
+        // A swap that was never refused lands in a few milliseconds; the first retry waits a hundred.
+        Assert.True(since.ElapsedMilliseconds >= 100,
+            $"the save landed in {since.ElapsedMilliseconds} ms, so the hold refused nothing");
+        Assert.Equal("Held while saving", AuthoredProjectSerializer.Load(manifest).Info.Name);
+        Assert.False(File.Exists(manifest + ".tmp"), "the temp file was left beside the manifest");
+    }
+
+    /// <summary>The released manifest's own writer is the twin of the authored one, and rides out the same
+    /// hold.</summary>
+    [Fact]
+    public void A_released_manifest_save_rides_out_a_moment_the_live_manifest_is_held()
+    {
+        string root = Path.Combine(_root, "released");
+        var project = new ModProject { Info = { Name = "Before" } };
+        project.Save(root);
+        string manifest = ModProject.ManifestPathFor(root);
+        project.Info.Name = "Held while saving";
+        var hold = File.Open(manifest, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var release = new Thread(() => { Thread.Sleep(150); hold.Dispose(); }) { IsBackground = true };
+        var since = Stopwatch.StartNew();
+        release.Start();
+
+        project.Save(root);
+
+        Assert.True(release.Join(5_000), "the holder never let go");
+        Assert.True(since.ElapsedMilliseconds >= 100,
+            $"the save landed in {since.ElapsedMilliseconds} ms, so the hold refused nothing");
+        Assert.Equal("Held while saving", ModProject.Load(root).Info.Name);
+        Assert.False(File.Exists(manifest + ".tmp"), "the temp file was left beside the manifest");
     }
 
     private static void Write(string manifest, AuthoredProject project)

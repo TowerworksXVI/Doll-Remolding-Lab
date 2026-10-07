@@ -7,7 +7,7 @@ using Remold.Core.Mesh;
 namespace Remold.Core.Migoto;
 
 /// <summary>
-/// The 3DMigoto D3D11 buffer hashes (vb0 / vb1 / ib) for a character mesh, computed straight from its
+/// The 3DMigoto D3D11 buffer hashes (ib / vb0 / vb1 / vb2) for a character mesh, computed straight from its
 /// bundle — NO frame dump, so a mod is authored fully offline.
 ///
 /// 3DMigoto hashes each buffer at CreateBuffer as standard CRC32C (Castagnoli, init 0xFFFFFFFF, final
@@ -15,24 +15,31 @@ namespace Remold.Core.Migoto;
 ///   vb0  DYNAMIC, created with NO initial data -> hash = CRC32C(desc) alone, depending only on
 ///        ByteWidth. It therefore COLLIDES for any two parts with the same vertex count.
 ///   vb1  color/UV, static -> hash includes the stream-1 content bytes.
+///   vb2  original static skin/attribute stream; never a repacked donor stream.
 ///   ib   topology, static -> includes the index bytes. Unique per TOPOLOGY, not per mesh: distinct
 ///        meshes sharing an index buffer (one garment pattern, per-character vertex remodels) share
 ///        it. Still the robust match key — that wider radius is what an anchored override fires on.
 /// </summary>
 public static class BufferHash
 {
-    /// <summary>The three offline buffer hashes plus the mesh facts that determine them. <c>Vb1</c> is
-    /// null when the mesh has only one vertex stream.</summary>
+    /// <summary>The offline buffer hashes plus the mesh facts that determine them. Static slot hashes are
+    /// null when the original mesh has no corresponding stream ID.</summary>
     public readonly record struct Hashes(
         int VertexCount, int Stream0Stride, int IndexBytes, int IndexFormat,
-        uint Ib, uint Vb0, uint? Vb1);
+        uint Ib, uint Vb0, uint? Vb1, uint? Vb2 = null)
+    {
+        // VB0 describes the posed-buffer allocation rather than static vertex content.
+        // Match topology plus the original static attributes.
+        public DrawSelector Selector => new(Ib.ToString("x8"), null,
+            Vb1?.ToString("x8"), Vb2?.ToString("x8"));
+    }
 
     /// <summary><paramref name="reader"/> lets a caller hashing several meshes out of one bundle share the
     /// parse; null opens the bundle for this call alone.</summary>
-    public static Hashes Compute(byte[] deobfuscatedBundle, string meshName, long pathId = 0,
+    public static Hashes Compute(byte[] deobfuscatedBundle, string meshName, MeshSelector which = default,
         BundleReader? reader = null)
     {
-        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, pathId)
+        var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, which)
             ?? throw new InvalidDataException(
                 $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
         return Compute(MeshRaw.From(field));
@@ -42,12 +49,18 @@ public static class BufferHash
     {
         if (mesh.StreamIds.Count == 0) throw new InvalidDataException("mesh has no vertex streams");
 
-        int stride0 = mesh.Stride(0);
+        int stream0 = mesh.StreamIds.IndexOf(0);
+        // Accepted: no roster mesh lacks stream 0, so only a malformed asset reaches this. The signature
+        // index swallows it as an unreadable mesh and the sharing pass records a problem row; a build meets
+        // it only through the out-of-index fallback, as a plain failure naming nothing more.
+        if (stream0 < 0) throw new InvalidDataException("mesh has no position stream");
+        int stride0 = mesh.Stride(stream0);
         uint vb0 = HashDynamicVertexBuffer((uint)(mesh.VertexCount * stride0));
         uint ib = HashStatic(mesh.Index, bind: 2);                                       // D3D11_BIND_INDEX_BUFFER
-        uint? vb1 = mesh.StreamIds.Count > 1 ? HashStatic(mesh.StreamBytes(1), bind: 1)  // D3D11_BIND_VERTEX_BUFFER
-                                             : (uint?)null;
-        return new Hashes(mesh.VertexCount, stride0, mesh.Index.Length, mesh.IndexFormat, ib, vb0, vb1);
+        uint? StaticSlot(int slot) => mesh.StreamIds.IndexOf(slot) is var ordinal && ordinal >= 0
+            ? HashStatic(mesh.StreamBytes(ordinal), bind: 1) : null;
+        return new Hashes(mesh.VertexCount, stride0, mesh.Index.Length, mesh.IndexFormat, ib, vb0,
+            StaticSlot(1), StaticSlot(2));
     }
 
     // D3D11_USAGE: DEFAULT=0, DYNAMIC=2.  BindFlags: VERTEX=1, INDEX=2.  CPUAccess: WRITE=0x10000.

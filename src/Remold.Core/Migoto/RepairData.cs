@@ -59,7 +59,11 @@ public static class RepairData
     public sealed record IntentSourceSlotRecord(
         [property: JsonPropertyName("slot_id")] string SlotId,
         [property: JsonPropertyName("edit_definition_id")]
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EditDefinitionId = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EditDefinitionId = null,
+        [property: JsonPropertyName("authored_slot")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TargetSlot? AuthoredSlot = null,
+        [property: JsonPropertyName("authored_binding")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Binding? AuthoredBinding = null);
 
     public sealed record IntentProofRecord(
         [property: JsonPropertyName("kind")] string Kind,
@@ -111,18 +115,29 @@ public static class RepairData
         [property: JsonPropertyName("disposition")] string Disposition,
         [property: JsonPropertyName("edit_definition_id")]
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EditDefinitionId,
-        [property: JsonPropertyName("bindings")] IReadOnlyList<IntentBindingRecord> Bindings);
+        [property: JsonPropertyName("bindings")] IReadOnlyList<IntentBindingRecord> Bindings,
+        [property: JsonPropertyName("disabled_material_effects")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<DisabledMaterialEffect>? DisabledMaterialEffects = null,
+        [property: JsonPropertyName("retained_material_sources")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<IntentSourceSlotRecord>? RetainedMaterialSources = null);
 
     /// <summary>What ONE position of a key group answers for the part this record belongs to.
     /// <paramref name="Label"/> is the edit's own name as the author gave it, carried so a read can show
-    /// the position without having to invent one.</summary>
+    /// the position without having to invent one. <paramref name="StateLabel"/> is the POSITION's own
+    /// name, which the author gives separately and which no edit name stands in for.</summary>
     public sealed record KeyGroupStateRecord(
         [property: JsonPropertyName("state")] int State,
         [property: JsonPropertyName("disposition")] string Disposition,
         [property: JsonPropertyName("edit_definition_id")]
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EditDefinitionId = null,
         [property: JsonPropertyName("label")]
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Label = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Label = null,
+        [property: JsonPropertyName("state_label")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StateLabel = null,
+        [property: JsonPropertyName("shortcut")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Shortcut = null);
 
     /// <summary>One key group containing a placement for this change's part.</summary>
     public sealed record KeyGroupRecord(
@@ -211,8 +226,12 @@ public static class RepairData
     /// <summary>The bone order the emitted blend indices address, with the bind pose each bone was stated
     /// under. <paramref name="BindPoses"/> is base64 little-endian float32, 16 per bone in
     /// <paramref name="Bones"/> order, row-major as the game stores them — number text would be several
-    /// times the size for a few hundred bones. <paramref name="Space"/> names which space those poses are
-    /// in: <c>scene_rest</c> or the anchor part's own.</summary>
+    /// times the size for a few hundred bones. <paramref name="Space"/> is <c>scene_rest</c> or <c>anchor</c>.
+    /// For a Replace hosted at its own part the poses are that part's own binds, in scene-rest space or in
+    /// its own mesh space. Where a neighbouring part hosts the draw they are the replaced part's statement,
+    /// the bind its Blender export states each bone under: in scene-rest space under <c>scene_rest</c>, and
+    /// under <c>anchor</c> in the replaced part's own mesh space, not the space of the part hosting the
+    /// draw.</summary>
     public sealed record UnionRecord(
         [property: JsonPropertyName("bones")] IReadOnlyList<string> Bones,
         [property: JsonPropertyName("bind_poses")] string BindPoses,
@@ -298,13 +317,27 @@ public static class RepairData
         [property: JsonPropertyName("textures")]
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<SubmeshRecord>? Textures = null,
         [property: JsonPropertyName("intent")]
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IntentRecord? Intent = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IntentRecord? Intent = null,
+        /// <summary>Replace only: the centre the replacement's file was moved by because the game starts its
+        /// part hidden (3 floats, see <see cref="Workbench.HiddenPart"/>). The build took it back off before
+        /// anything else, so what shipped sits where the part was modelled. Informational: an import writes
+        /// the geometry as it shipped and does not read it. Absent on geometry left where it was
+        /// modelled.</summary>
+        [property: JsonPropertyName("shift")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<float>? Shift = null,
+        /// <summary>Replace only: true where the replacement was authored with hidden parts shown centred,
+        /// which is the relation its bind reference was built under (<see cref="Mesh.BindReference.For"/>).
+        /// Written only when true.</summary>
+        [property: JsonPropertyName("hidden_centred")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? HiddenCentred = null);
 
     /// <summary>One toon ramp the mod binds on a material of a part it does NOT replace. It is no
     /// <see cref="ChangeRecord"/>: nothing about the part's geometry or its pictures moves, so there is no
     /// verb, no suffix and no shipped geometry — only which material shades with which file. Identity is
     /// the MATERIAL, exactly as the project records the pick, since the runtime's texture hash reads too
-    /// little of a ramp to tell two of them apart.
+    /// little of a ramp to tell two of them apart. The intent is the edit that made the pick, and the key
+    /// groups say which positions that edit answers, as a change record's do. A record written by 0.4
+    /// carries the part's first edit's intent and no key groups.
     ///
     /// <para><paramref name="Ramp"/> is the shipped <c>.dds</c>'s name inside the mod folder, which is not
     /// derivable from the pick: the build names the shipped copy itself.</para></summary>
@@ -315,7 +348,25 @@ public static class RepairData
         [property: JsonPropertyName("material")] string Material,
         [property: JsonPropertyName("ramp")] string Ramp,
         [property: JsonPropertyName("intent")]
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IntentRecord? Intent = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IntentRecord? Intent = null,
+        [property: JsonPropertyName("key_groups")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<KeyGroupRecord>? KeyGroups = null);
+
+    /// <summary>One edit whose shading values or effect disables the mod applies at the game's own draws of a
+    /// part it does NOT replace. Like a <see cref="StockRampRecord"/> it is no <see cref="ChangeRecord"/>:
+    /// nothing about the part's geometry or pictures moves, so there is no verb, no suffix and no shipped
+    /// file. The intent holds the edit's rows, which is what a read makes the edit again from, and the key
+    /// groups say which positions it answers, as a change record's do.</summary>
+    public sealed record StockMaterialRecord(
+        [property: JsonPropertyName("character")] string Character,
+        [property: JsonPropertyName("outfit")] string Outfit,
+        [property: JsonPropertyName("mesh")] string Mesh,
+        [property: JsonPropertyName("intent")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IntentRecord? Intent = null,
+        [property: JsonPropertyName("key_groups")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<KeyGroupRecord>? KeyGroups = null);
 
     /// <summary>The whole file.</summary>
     public sealed record Payload(
@@ -336,7 +387,119 @@ public static class RepairData
         IReadOnlyList<StockRampRecord>? StockRamps = null,
         [property: JsonPropertyName("intent_assets")]
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        IReadOnlyList<IntentAssetRecord>? IntentAssets = null);
+        IReadOnlyList<IntentAssetRecord>? IntentAssets = null,
+        /// <summary>Whether the mod's own key keeps its position across launches. Written only when it
+        /// does, so a mod whose key is per-session writes the bytes it always has. A record without it
+        /// says nothing either way, and a read falls back to the emitted <c>mod.ini</c>.</summary>
+        [property: JsonPropertyName("toggle_key_persist")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        bool? ToggleKeyPersist = null,
+        /// <summary>The edits whose shading changes the mod applies at unreplaced parts' own draws. Absent
+        /// where it ships none.</summary>
+        [property: JsonPropertyName("stock_materials")]
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<StockMaterialRecord>? StockMaterials = null);
+
+    // ---- the shapes this app writes -----------------------------------------------------------------
+
+    /// <summary>Every property name this app's own writer puts in a record, by the record it belongs to.
+    ///
+    /// <para>The deserializer ignores a property it does not know, which turns a record written by another
+    /// build into a record that reads as SMALLER than it is — a pre-release build wrote a change's key
+    /// groups under another name, and a read that dropped them would come back with every placement
+    /// collapsed into Always and nothing said about it. So a record carrying a property none of these sets
+    /// names is refused whole.</para>
+    ///
+    /// <para>A field added to a record above is added to its set here in the same edit, or the record this
+    /// app writes refuses to read back.</para></summary>
+    public static class KnownProperties
+    {
+        /// <inheritdoc cref="Payload"/>
+        public static readonly IReadOnlyCollection<string> Top = Set(
+            "schema", "game_catalog", "app_version", "toggle_key", "toggle_key_persist", "subjects",
+            "changes", "stock_ramps", "intent_assets", "stock_materials");
+
+        /// <inheritdoc cref="ChangeRecord"/>
+        public static readonly IReadOnlyCollection<string> Change = Set(
+            "verb", "character", "outfit", "mesh", "bundle", "path_id", "bundle_content", "suffix",
+            "route", "toggle_key", "key_groups", "baked_rest", "original_verts", "donor_materials",
+            "geometry", "textures", "intent", "shift", "hidden_centred");
+
+        /// <inheritdoc cref="IntentRecord"/>
+        public static readonly IReadOnlyCollection<string> Intent = Set(
+            "disposition", "edit_definition_id", "bindings", "disabled_material_effects",
+            "retained_material_sources");
+
+        /// <inheritdoc cref="StockRampRecord"/>
+        public static readonly IReadOnlyCollection<string> StockRamp = Set(
+            "character", "outfit", "mesh", "material", "ramp", "intent", "key_groups");
+
+        /// <inheritdoc cref="StockMaterialRecord"/>
+        public static readonly IReadOnlyCollection<string> StockMaterial = Set(
+            "character", "outfit", "mesh", "intent", "key_groups");
+
+        /// <inheritdoc cref="KeyGroupRecord"/>
+        public static readonly IReadOnlyCollection<string> KeyGroup = Set(
+            "group_id", "key", "state_count", "start_state", "state_index", "states", "persist");
+
+        private static HashSet<string> Set(params string[] names) => new(names, StringComparer.Ordinal);
+    }
+
+    /// <summary>The first property of the record at <paramref name="path"/> that
+    /// <see cref="KnownProperties"/> does not name, or null when every one of them is known. A record this
+    /// app cannot parse at all answers null: what is wrong with it is the reader's to report.</summary>
+    public static string? FirstUnknownProperty(string path)
+    {
+        string file = Directory.Exists(path) ? Path.Combine(path, FileName) : path;
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(File.ReadAllText(file)); }
+        catch (JsonException) { return null; }
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            if (Unknown(root, KnownProperties.Top) is { } top) return top;
+            foreach (var change in Array(root, "changes"))
+            {
+                if (Unknown(change, KnownProperties.Change) is { } inChange) return inChange;
+                if (IntentOf(change) is { } intent) return intent;
+                foreach (var group in Array(change, "key_groups"))
+                    if (Unknown(group, KnownProperties.KeyGroup) is { } inGroup) return inGroup;
+            }
+            foreach (var pick in Array(root, "stock_ramps"))
+            {
+                if (Unknown(pick, KnownProperties.StockRamp) is { } inPick) return inPick;
+                if (IntentOf(pick) is { } intent) return intent;
+                foreach (var group in Array(pick, "key_groups"))
+                    if (Unknown(group, KnownProperties.KeyGroup) is { } inGroup) return inGroup;
+            }
+            foreach (var material in Array(root, "stock_materials"))
+            {
+                if (Unknown(material, KnownProperties.StockMaterial) is { } inMaterial) return inMaterial;
+                if (IntentOf(material) is { } intent) return intent;
+                foreach (var group in Array(material, "key_groups"))
+                    if (Unknown(group, KnownProperties.KeyGroup) is { } inGroup) return inGroup;
+            }
+            return null;
+        }
+
+        static string? IntentOf(JsonElement owner) =>
+            owner.ValueKind == JsonValueKind.Object && owner.TryGetProperty("intent", out var intent)
+                ? Unknown(intent, KnownProperties.Intent) : null;
+
+        static IEnumerable<JsonElement> Array(JsonElement owner, string name) =>
+            owner.ValueKind == JsonValueKind.Object && owner.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.Array
+                ? value.EnumerateArray() : Enumerable.Empty<JsonElement>();
+
+        static string? Unknown(JsonElement record, IReadOnlyCollection<string> known)
+        {
+            if (record.ValueKind != JsonValueKind.Object) return null;
+            foreach (var property in record.EnumerateObject())
+                if (!known.Contains(property.Name)) return property.Name;
+            return null;
+        }
+    }
 
     // ---- writing ----------------------------------------------------------------------------------
 
@@ -363,31 +526,56 @@ public static class RepairData
             throw new InvalidDataException("repair data has no subject or change list");
         if (payload.SchemaVersion == Schema
             && (payload.Changes.Any(change => change.Intent is null)
-                || payload.StockRamps?.Any(ramp => ramp.Intent is null) == true))
+                || payload.StockRamps?.Any(ramp => ramp.Intent is null) == true
+                || payload.StockMaterials?.Any(material => material.Intent is null) == true))
             throw new InvalidDataException("schema-2 repair data has a shipped change without intent metadata");
         if (payload.SchemaVersion == Schema)
         {
             var assetIds = (payload.IntentAssets ?? Array.Empty<IntentAssetRecord>())
                 .Select(asset => asset.Id).ToHashSet(StringComparer.Ordinal);
-            var bindings = payload.Changes.SelectMany(change => change.Intent!.Bindings)
-                .Concat(payload.StockRamps?.SelectMany(ramp => ramp.Intent!.Bindings)
-                    ?? Enumerable.Empty<IntentBindingRecord>()).ToList();
+            var intents = payload.Changes.Select(change => change.Intent!)
+                .Concat(payload.StockRamps?.Select(ramp => ramp.Intent!)
+                    ?? Enumerable.Empty<IntentRecord>())
+                .Concat(payload.StockMaterials?.Select(material => material.Intent!)
+                    ?? Enumerable.Empty<IntentRecord>()).ToList();
+            var bindings = intents.SelectMany(intent => intent.Bindings).ToList();
             string? missing = bindings.SelectMany(binding => new[]
                 {
                     binding.RequestedProjectAssetId,
                     binding.EffectiveProjectAssetId,
-                }).FirstOrDefault(id => id is not null && !assetIds.Contains(id));
+                }).Concat(intents.SelectMany(intent => intent.RetainedMaterialSources
+                    ?? Array.Empty<IntentSourceSlotRecord>()).Select(source => source.AuthoredBinding?.ProjectAssetId))
+                .FirstOrDefault(id => id is not null && !assetIds.Contains(id));
             if (missing is not null)
                 throw new InvalidDataException(
                     $"schema-2 repair data references missing intent asset '{missing}'");
+            foreach (var intent in intents)
+            {
+                var effects = new HashSet<(int, string)>();
+                foreach (var effect in intent.DisabledMaterialEffects ?? Array.Empty<DisabledMaterialEffect>())
+                    if (effect is null || effect.MaterialSlotIndex < 0
+                        || MaterialEffectCatalog.Definition(effect.EffectId) is null
+                        || !effects.Add((effect.MaterialSlotIndex, effect.EffectId)))
+                        throw new InvalidDataException("repair data has an invalid disabled material effect");
+                var sources = new HashSet<(string, string?)>();
+                foreach (var source in intent.RetainedMaterialSources ?? Array.Empty<IntentSourceSlotRecord>())
+                    if (source.AuthoredSlot is null || source.AuthoredSlot.Id != source.SlotId
+                        || !sources.Add((source.SlotId, source.EditDefinitionId))
+                        || source.EditDefinitionId is not null && source.AuthoredBinding?.SlotId != source.SlotId)
+                        throw new InvalidDataException("repair data has an invalid retained material source");
+            }
             // A key-group record whose numbers disagree with its own state list describes a group nothing
             // could have produced. Refused here rather than read: a reader taking the counts on trust would
             // show a position that is not there, or file this change's content under the wrong one.
-            foreach (var change in payload.Changes)
+            foreach (var (mesh, groups) in payload.Changes.Select(change => (change.Mesh, change.KeyGroups))
+                         .Concat((payload.StockRamps ?? Array.Empty<StockRampRecord>())
+                             .Select(pick => (pick.Mesh, pick.KeyGroups)))
+                         .Concat((payload.StockMaterials ?? Array.Empty<StockMaterialRecord>())
+                             .Select(material => (material.Mesh, material.KeyGroups))))
             {
-                foreach (var group in change.KeyGroups ?? Array.Empty<KeyGroupRecord>())
+                foreach (var group in groups ?? Array.Empty<KeyGroupRecord>())
                 {
-                    string at = $"'{change.Mesh}'";
+                    string at = $"'{mesh}'";
                     if (group.States is not { Count: > 0 } states)
                         throw new InvalidDataException($"schema-2 key group for {at} names no positions");
                     if (group.StateCount != states.Count)
@@ -402,8 +590,49 @@ public static class RepairData
                 }
             }
         }
-        return payload;
+        return DropNonLod0Geometry(payload);
     }
+
+    /// <summary>The same record without its geometry bindings on a tier other than <c>lod0</c>. Released
+    /// 0.4 builds wrote one geometry binding per level of detail, all of them answered by the one
+    /// replacement; a separate replacement per level was never something a modder could make, and no
+    /// surface, plan or build reads those bindings any more. Dropped on the way IN so every reader sees
+    /// one shape — nothing writes them again.</summary>
+    private static Payload DropNonLod0Geometry(Payload payload)
+    {
+        var intents = payload.Changes.Select(change => change.Intent)
+            .Concat(payload.StockRamps?.Select(pick => pick.Intent)
+                ?? Enumerable.Empty<IntentRecord?>())
+            .Concat(payload.StockMaterials?.Select(material => material.Intent)
+                ?? Enumerable.Empty<IntentRecord?>());
+        if (!intents.Any(intent => intent?.Bindings.Any(IsAlternateTierGeometry) == true)) return payload;
+        return payload with
+        {
+            Changes = payload.Changes
+                .Select(change => change.Intent is { } intent
+                    ? change with { Intent = Kept(intent) } : change).ToList(),
+            StockRamps = payload.StockRamps?
+                .Select(pick => pick.Intent is { } intent
+                    ? pick with { Intent = Kept(intent) } : pick).ToList(),
+            StockMaterials = payload.StockMaterials?
+                .Select(material => material.Intent is { } intent
+                    ? material with { Intent = Kept(intent) } : material).ToList(),
+        };
+
+        static IntentRecord Kept(IntentRecord intent) =>
+            intent.Bindings.Any(IsAlternateTierGeometry)
+                ? intent with
+                {
+                    Bindings = intent.Bindings.Where(binding => !IsAlternateTierGeometry(binding)).ToList(),
+                }
+                : intent;
+    }
+
+    /// <inheritdoc cref="DropNonLod0Geometry"/>
+    private static bool IsAlternateTierGeometry(IntentBindingRecord binding) =>
+        string.Equals(binding.Input, "geometry", StringComparison.Ordinal)
+        && binding.Target.Tier is { Length: > 0 } tier
+        && !string.Equals(tier, "lod0", StringComparison.OrdinalIgnoreCase);
 
     // ---- shaping helpers --------------------------------------------------------------------------
 
@@ -455,7 +684,7 @@ public static class RepairData
                 carriedOrigin?.Invoke(t, which) is { } carried
                     ? new SlotRecord(carried, shipped(t, which), stockOf?.Invoke(t, which))
                     : ask != SlotOrigin.None
-                        ? new SlotRecord(ask.ToString(), shipped(t, which), stockOf?.Invoke(t, which))
+                        ? new SlotRecord(ask.RecordName(), shipped(t, which), stockOf?.Invoke(t, which))
                         : null;
             var albedo = Slot(t.AlbedoAsk, DonorMapSlot.BaseColor);
             var normal = Slot(t.NormalAsk, DonorMapSlot.Normal);
@@ -467,7 +696,7 @@ public static class RepairData
                     && texture.Ask != SlotOrigin.None)
                 .OrderBy(texture => texture.ShaderProperty, StringComparer.Ordinal)
                 .Select(texture => new PropertySlotRecord(texture.ShaderProperty,
-                    new SlotRecord(texture.Ask.ToString(),
+                    new SlotRecord(texture.Ask.RecordName(),
                         shippedProperty?.Invoke(t, texture.ShaderProperty),
                         stockProperty?.Invoke(t, texture.ShaderProperty))))
                 .ToList();

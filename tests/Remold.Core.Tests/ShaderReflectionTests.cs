@@ -13,9 +13,18 @@ public sealed class ShaderReflectionTests
     [Fact]
     public void FragmentVariants_enumerates_a_serialized_d3d11_fragment_variant()
     {
-        byte[] dxbc = Enumerable.Range(0, 32).Select(index => (byte)(index * 7 + 3)).ToArray();
+        // a minimal container: one SHDR chunk holding a ps_4_0 program of a single ret
+        uint[] tokens = { 0x00000040, 3, 62 | (1u << 24) };
+        byte[] dxbc = new byte[32 + 4 + 8 + 12];
         Encoding.ASCII.GetBytes("DXBC").CopyTo(dxbc, 0);
+        BitConverter.GetBytes(1u).CopyTo(dxbc, 20);
         BitConverter.GetBytes((uint)dxbc.Length).CopyTo(dxbc, 24);
+        BitConverter.GetBytes(1u).CopyTo(dxbc, 28);
+        BitConverter.GetBytes(36u).CopyTo(dxbc, 32);
+        Encoding.ASCII.GetBytes("SHDR").CopyTo(dxbc, 36);
+        BitConverter.GetBytes(12u).CopyTo(dxbc, 40);
+        for (int index = 0; index < tokens.Length; index++)
+            BitConverter.GetBytes(tokens[index]).CopyTo(dxbc, 44 + 4 * index);
 
         var variant = Assert.Single(ShaderReflection.FragmentVariants(ShaderField(dxbc)));
 
@@ -26,6 +35,26 @@ public sealed class ShaderReflectionTests
         Assert.Equal(544, variant.MaterialBufferWidth);
         Assert.Equal(492, variant.VectorOffsets["_UseGIFlatten"]);
         Assert.Equal(ShaderReflection.Fnv64(dxbc).ToString("x16"), variant.DxbcHash);
+        Assert.NotNull(variant.MaterialReads);
+        Assert.Empty(variant.MaterialReads.Offsets);
+        Assert.False(variant.MaterialReads.Dynamic);
+        Assert.Empty(variant.TextureSlots!);
+    }
+
+    [Fact]
+    public void A_program_the_walker_cannot_read_keeps_its_variant_with_unknown_reads()
+    {
+        // a container with no instruction chunk: the hash still comes off the bytes, the reads do not
+        byte[] dxbc = new byte[32];
+        Encoding.ASCII.GetBytes("DXBC").CopyTo(dxbc, 0);
+        BitConverter.GetBytes(1u).CopyTo(dxbc, 20);
+        BitConverter.GetBytes((uint)dxbc.Length).CopyTo(dxbc, 24);
+
+        var variant = Assert.Single(ShaderReflection.FragmentVariants(ShaderField(dxbc)));
+
+        Assert.Equal(ShaderReflection.Fnv64(dxbc).ToString("x16"), variant.DxbcHash);
+        Assert.Equal(492, variant.VectorOffsets["_UseGIFlatten"]);
+        Assert.Null(variant.MaterialReads);
     }
 
     private static AssetTypeValueField ShaderField(byte[] dxbc)

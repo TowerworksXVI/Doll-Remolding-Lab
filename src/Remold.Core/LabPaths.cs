@@ -28,17 +28,20 @@ public static class LabPaths
     // folder that isn't named here (the opt-in launch-timing log) is never swept.
     private const string IndexFolder = "index";
     private const string OperatorFolder = "operators";
+    private const string TierMapFolder = "tiermaps";
     private const string TextureFolder = "textures";
     private const string StockTextureFolder = "stocktex";
     private const string RiggedGlbFolder = "rigs";
     private const string ThumbFolder = "thumbs";
+    private const string ImportFolder = "import";
 
     /// <summary>The regenerable derived-cache trees, as folder names under a cache root. THE definition the
     /// force-rescan sweep works from (<see cref="CacheReset.ClearDerivedCaches"/>) — names rather than full
     /// paths, so the sweep can be driven against a temp root. Anything a future cache adds is swept only
     /// once it is listed here.</summary>
     public static IReadOnlyList<string> DerivedCacheFolders { get; } =
-        new[] { IndexFolder, OperatorFolder, TextureFolder, StockTextureFolder, RiggedGlbFolder, ThumbFolder };
+        new[] { IndexFolder, OperatorFolder, TierMapFolder, TextureFolder, StockTextureFolder,
+            RiggedGlbFolder, ThumbFolder, ImportFolder };
 
     /// <summary>Durable-state root: the folder holding the app EXE. In the release layout the exe sits
     /// alone at the root with the assemblies in an <c>app</c> subfolder (so the modder's state — mods,
@@ -139,9 +142,23 @@ public static class LabPaths
     /// <summary>The preview/thumbnail cache root.</summary>
     public static string ThumbnailRoot => Path.Combine(CacheRoot, ThumbFolder);
 
+    /// <summary>Where a mod zip is extracted while it is being read back into a project
+    /// (<see cref="Migoto.ModImport"/>). Each extraction is removed as soon as the import that owns it
+    /// ends; the tree is named here so the force-rescan sweep clears anything a killed run left.</summary>
+    public static string ImportCacheRoot => ImportCacheRootIn(CacheRoot);
+
+    /// <summary>The <see cref="ImportCacheRoot"/> rule under an explicit cache root, shared by redirected
+    /// writers and the force-rescan sweep.</summary>
+    public static string ImportCacheRootIn(string cacheRoot) => Path.Combine(cacheRoot, ImportFolder);
+
     /// <summary>Solved palette-recovery operators, keyed by source-mesh identity and the conditioning
     /// algorithm that produced them.</summary>
     public static string OperatorCacheRoot => Path.Combine(CacheRoot, OperatorFolder);
+
+    /// <summary>Where a measured tier material map is filed (<see cref="Migoto.TierMapCache"/>). A build
+    /// files none: its routing is decided by material identity alone. The folder is swept with the other
+    /// derived caches, so anything left here goes on a force rescan.</summary>
+    public static string TierMapCacheRoot => Path.Combine(CacheRoot, TierMapFolder);
 
     /// <summary>Encoded texture blobs, keyed by source content and encode settings.</summary>
     public static string EncodedTextureRoot => Path.Combine(CacheRoot, TextureFolder);
@@ -186,18 +203,19 @@ public static class LabPaths
     /// folder, which is where the copy lands. The catalog version it was measured under is inside the file,
     /// never in the name.
     ///
-    /// <para><b>Minting a release seed</b> is copying one install's cache artifacts, and it is two files —
-    /// ALWAYS two, and always from ONE pass. On a current game install, clear the derived caches
-    /// (Tools · Rescan game files) so the pass measures the whole population, let it finish, then copy
-    /// <see cref="SharingIndexFile"/> for that catalog over this file and <see cref="AssetHashMemoFile"/>
-    /// over <see cref="AssetHashSeedFile"/>. The pair is the unit: the index's rows are gated on what its
-    /// own read records say the bundles held, and the memo is what spares a fresh install the reads behind
-    /// the rows that no longer match — so a seed minted without its memo ships a measurement whose
-    /// invalidations each cost a full bundle read again. <b>Any tooling that regenerates a seed outside
-    /// this repo must produce the pair too</b>; a runner written before the memo existed will happily
-    /// write half of it. Neither file carries a game-derived string, which is what makes one machine's
-    /// measurement shippable, and the release pack refuses a pair whose schemas this build does not read
-    /// (see <see cref="Workbench.ShippedMeasurement"/>).</para>
+    /// <para><b>Minting a seed</b> is the maintainer's mint tool, kept outside this repo: one headless
+    /// measure of the app's whole population on a current install with the game closed, with no earlier
+    /// index to reuse rows from and a fresh memo, whose output replaces this file and
+    /// <see cref="AssetHashSeedFile"/>. A seed is never minted by running the app and copying its caches;
+    /// that pass rewrites the machine's own cache for the install. The seed is minted again in the same
+    /// change that moves <see cref="Workbench.SharingIndex.SchemaVersion"/>, and again at each release; the
+    /// seed tests fail until it is. It is two files — ALWAYS two, and always from ONE pass. The pair is the
+    /// unit: the index's rows are gated on what its own read records say the bundles held, and the memo is
+    /// what spares a fresh install the reads behind the rows that no longer match — so a seed minted
+    /// without its memo ships a measurement whose invalidations each cost a full bundle read again.
+    /// Neither file carries a game-derived string, which is what makes one machine's measurement
+    /// shippable, and the release pack refuses a pair whose schemas this build does not read (see
+    /// <see cref="Workbench.ShippedMeasurement"/>).</para>
     /// </summary>
     public static string SharingSeedFile => Path.Combine(AppContext.BaseDirectory, SharingSeedRelativePath);
 

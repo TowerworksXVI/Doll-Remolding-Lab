@@ -17,11 +17,11 @@ namespace Remold.Core.Mesh;
 /// <c>v' = v·D</c> for the geometry; the pair leaves <c>v·B</c> — the bone-space position skinning
 /// consumes — unchanged, so the part poses exactly as before while sharing the reference's palette.</para>
 ///
-/// <para>The conversion is only valid when D is the SAME on every shared bone, rigid after the snap, and
-/// measured over enough shared bones to mean anything. Bone-name hashes collide across unrelated rigs, so
-/// a delta that varies bone to bone, or carries a translation or a shear, is a coincidence rather than a
-/// space difference — converting on it would deform the geometry. <see cref="Delta"/> returns null there
-/// and the caller refuses.</para>
+/// <para>This restatement moves a part's GEOMETRY, so it is only made when D is the SAME on every shared
+/// bone, an exact axis-aligned rotation after the snap, and measured over enough shared bones to mean
+/// anything; <see cref="Delta"/> returns null otherwise. What it declines — a translated or scaled mesh
+/// space, a bone one part binds elsewhere than another — is no refusal: those differences are absorbed
+/// row by row, with the geometry left alone (see <see cref="BindReference"/>).</para>
 /// </summary>
 public static class BindSpace
 {
@@ -34,10 +34,10 @@ public static class BindSpace
     public const int MinSharedBones = 3;
 
     /// <summary>How far two statements of ONE bone's bindpose may differ and still be the same bindpose.
-    /// The last gate after every conversion this class can make: a pooled union keeps one bindpose per bone,
-    /// so a difference past this is one no measured or corroborated rigid rotation explained, and posing
-    /// geometry on it would deform it. Every consumer of that verdict — the union order, the tier scatter —
-    /// gates at the same width, or a bone one stage admits the next refuses.</summary>
+    /// Statements within it need no conversion, so a pool whose parts agree ships the bytes it always
+    /// has; past it, the mesh's recovered rows for that bone are converted onto the pool's reference
+    /// (<see cref="BindReference.Constant"/>). Every reader of that verdict compares at this one width, or
+    /// the donor compile and the emission could state one bone under two binds.</summary>
     public const double MaxBindDisagreement = 1e-5;
 
     /// <summary>The snapped part→reference delta over the bones the two share, or null when there is no

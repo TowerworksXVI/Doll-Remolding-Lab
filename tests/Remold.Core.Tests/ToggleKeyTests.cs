@@ -334,49 +334,6 @@ public class ToggleKeyTests : IDisposable
         Assert.Equal("F7", proj.GetChangeKey("Other", "OtherSSR01", "body", EditVerbs.Replace));
     }
 
-    // ---- the hide collapse's key ----
-
-    [Fact]
-    public void A_second_hide_on_one_hash_with_another_key_says_which_key_survives()
-    {
-        var w = ModBuilder.HideKeyCollisionWarning("c_vesna01_cloth1_lod0", "F6", "F8");
-
-        Assert.NotNull(w);
-        Assert.Contains("c_vesna01_cloth1_lod0", w);
-        Assert.Contains("F6 applies", w);
-    }
-
-    [Fact]
-    public void A_second_hide_arriving_on_an_unkeyed_one_says_no_key_applies() =>
-        Assert.Contains("no key applies", ModBuilder.HideKeyCollisionWarning("mesh", null, "F8"));
-
-    [Theory]
-    [InlineData("F6", "f6")]      // the same binding, however it was typed
-    [InlineData(null, null)]      // two unkeyed hides collapse with nothing to say
-    public void A_hide_collapse_that_loses_no_key_warns_about_nothing(string? kept, string? incoming) =>
-        Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh", kept, incoming));
-
-    /// <summary>A hide under a plan answers to EVERY state that asks for it, so what collapsed is judged on
-    /// the whole or-list rather than whichever term happens to sit at its front.</summary>
-    [Fact]
-    public void A_hide_collapse_judges_the_whole_list_of_positions_each_claimant_carries()
-    {
-        // two positions of one key against another key: what survives is the first claimant's key
-        Assert.Contains("F6 applies", ModBuilder.HideKeyCollisionWarning("mesh",
-            new[] { new KeyRef("F6", 0), new KeyRef("F6", 2) }, new[] { new KeyRef("F8", 1) }));
-        // the same keys in another order are the same claim, and reading the front term would disagree
-        Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh",
-            new[] { new KeyRef("F6", 0), new KeyRef("F8", 1) },
-            new[] { new KeyRef("F8", 0), new KeyRef("F6", 2) }));
-        // a claimant on two keys against one of them: reading the front term would call these agreed
-        Assert.Contains("F6, F8 applies", ModBuilder.HideKeyCollisionWarning("mesh",
-            new[] { new KeyRef("F6", 0), new KeyRef("F8", 0) }, new[] { new KeyRef("F6", 0) }));
-        // an unkeyed claimant arriving on a keyed one, and two unkeyed ones with nothing to say
-        Assert.Contains("no key applies",
-            ModBuilder.HideKeyCollisionWarning("mesh", Array.Empty<KeyRef>(), new[] { new KeyRef("F8", 0) }));
-        Assert.Null(ModBuilder.HideKeyCollisionWarning("mesh", Array.Empty<KeyRef>(), null));
-    }
-
     // ---- emission shape (the golden test pins the bytes; this pins the intent) ----
 
     [Fact]
@@ -426,8 +383,8 @@ public class ToggleKeyTests : IDisposable
         string outDir = Path.Combine(_root, "persist-mixed");
         new MigotoEmitter().BuildOverlaysOnly(outDir, entries: null,
             hideHashes: new[] { "aaaa1111" }, modKey: "F6",
-            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>>
-                { ["aaaa1111"] = new KeyRef[] { "F7" } },
+            hideClaims: new Dictionary<string, IReadOnlyList<HideClaim>>
+                { ["aaaa1111"] = new[] { new HideClaim(new KeyRef[] { "F7" }) } },
             keyCycles: new[] { new KeyCycle("F7", 2, 0, Persist: true) });
         var ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
 
@@ -450,8 +407,8 @@ public class ToggleKeyTests : IDisposable
         new MigotoEmitter().BuildOverlaysOnly(overlayDir,
             new[] { new RetexEntry("skin", "bbbb2222", dds, "F8") },
             hideHashes: new[] { "aaaa1111" }, modKey: "F6",
-            hideKeys: new Dictionary<string, IReadOnlyList<KeyRef>>
-                { ["aaaa1111"] = new KeyRef[] { "F9" } });
+            hideClaims: new Dictionary<string, IReadOnlyList<HideClaim>>
+                { ["aaaa1111"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } });
         Assert.DoesNotContain("persist", File.ReadAllText(Path.Combine(overlayDir, "mod.ini")));
 
         string pooledDir = Path.Combine(_root, "nokeep-pooled");
@@ -462,7 +419,7 @@ public class ToggleKeyTests : IDisposable
             OutDir = pooledDir,
             ToggleKey = "F6",
             HideHashes = new[] { "cccc3333" },
-            HideKeys = new Dictionary<string, IReadOnlyList<KeyRef>> { ["cccc3333"] = new KeyRef[] { "F9" } },
+            HideClaims = new Dictionary<string, IReadOnlyList<HideClaim>> { ["cccc3333"] = new[] { new HideClaim(new KeyRef[] { "F9" }) } },
             Pipelines = new[]
             {
                 new ReplacePipeline

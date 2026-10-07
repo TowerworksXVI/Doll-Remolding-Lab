@@ -124,6 +124,8 @@ public sealed partial class EditPageVm : ObservableObject
         _refusals.Clear();
         _meshEditBlocks.Clear();
         _meshEditReads.Clear();
+        _hiddenParts.Clear();
+        _hiddenReads.Clear();
         _meshEditEpoch++;
         ForgetInstallReads();
         _busy.Clear();
@@ -468,6 +470,7 @@ public sealed partial class EditPageVm : ObservableObject
             ordered.Count == 0 ? "no edits yet" : Count(ordered.Count, "edit"));
         node.Problem = _refusals.TryGetValue(Key(part), out string? refusal) ? refusal : null;
         node.MeshEditBlock = _meshEditBlocks.TryGetValue(Key(part), out string? meshBlock) ? meshBlock : null;
+        node.StartsHidden = _hiddenParts.Contains(Key(part));
 
         for (int i = 0; i < ordered.Count; i++)
         {
@@ -540,6 +543,9 @@ public sealed partial class EditPageVm : ObservableObject
             // The edit inspector carries the same two Blender opens, so it carries the same gate.
             node.MeshEditBlock = _meshEditBlocks.TryGetValue(Key(part), out string? meshBlock)
                 ? meshBlock : null;
+            // …and the note on how it opens there. A hide edit's row has neither: it has no Blender opens,
+            // so it says nothing about how the part opens in Blender.
+            node.StartsHidden = _hiddenParts.Contains(Key(part));
 
             // Each of the edit's own materials is also a child row, closed by default, whose inspector is
             // that one material's slice of the pane above: the SAME group object, so its cards, thumbs and
@@ -759,9 +765,9 @@ public sealed partial class EditPageVm : ObservableObject
     }
 
     /// <summary>The shading row under one material group: what the edit sets at that position today.
-    /// Whether the position supports any values at all is the install's answer, read when a dialog opens
-    /// — the row itself must stay cheap enough to build on every redraw.</summary>
-    private static EditShadingRowVm BuildShadingRow(EditRef edit, int index, string materialLabel,
+    /// Effect capabilities come from the outfit's prepared install data; rebuilding only overlays the
+    /// edit's saved values and disabled choices.</summary>
+    private EditShadingRowVm BuildShadingRow(EditRef edit, int index, string materialLabel,
         IReadOnlyList<EditSlotState> all)
     {
         var authored = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -777,7 +783,10 @@ public sealed partial class EditPageVm : ObservableObject
                 : "";
             slotIds.Add(state.Slot.Id);
         }
-        return new EditShadingRowVm
+        // The page's one board snapshot answers for the edit; a row never takes a snapshot of its own.
+        var definition = _board?.Project.EditDefinitions
+            .FirstOrDefault(candidate => candidate.Id == edit.EditDefinitionId);
+        return WithShadingEffects(new EditShadingRowVm
         {
             Edit = edit,
             Part = edit.Part,
@@ -789,14 +798,20 @@ public sealed partial class EditPageVm : ObservableObject
                 && slot.Material is not null)?.Material,
             AuthoredValues = authored,
             AuthoredSlotIds = slotIds,
-        };
+            DisabledEffectIds = definition?.DisabledMaterialEffects?
+                .Where(effect => effect.MaterialSlotIndex == index)
+                .Select(effect => effect.EffectId).ToArray()
+                ?? Array.Empty<string>(),
+            CopiedFrom = definition?.CopiedMaterialShading?
+                .FirstOrDefault(copy => copy.MaterialSlotIndex == index)?.SourceMaterialName,
+        });
     }
 
     /// <summary>The same row shape for a part with no edit. Empty authored state disables only Revert; the
     /// two dialog commands bridge the missing edit after, and only after, a committed effective answer.</summary>
-    private static EditShadingRowVm BuildBareShadingRow(TargetPart part, int index, string materialLabel,
+    private EditShadingRowVm BuildBareShadingRow(TargetPart part, int index, string materialLabel,
         GameAssetRef material) =>
-        new()
+        WithShadingEffects(new EditShadingRowVm
         {
             Edit = new EditRef(part, "", ""),
             Part = part,
@@ -805,7 +820,7 @@ public sealed partial class EditPageVm : ObservableObject
             Material = material,
             AuthoredValues = new Dictionary<string, string>(StringComparer.Ordinal),
             AuthoredSlotIds = Array.Empty<string>(),
-        };
+        });
 
     /// <param name="gameMaterialPosition">Which installed material position this slot's output draws at,
     /// where the group's fold answered. Null on a game-domain slot, whose own position is the answer.</param>
@@ -884,7 +899,9 @@ public sealed partial class EditPageVm : ObservableObject
             && counts[materialPosition.Value] > 0;
     }
 
-    private static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
+    /// <summary>A count and its noun, pluralised: <c>1 edit</c>, <c>7 edits</c>. Shared with the shell so a
+    /// sentence built there counts the same way a sentence built here does.</summary>
+    internal static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
 
     private static string Join(params string[] parts) =>
         string.Join(" · ", parts.Where(p => !string.IsNullOrEmpty(p)));
@@ -915,6 +932,40 @@ public sealed partial class EditPageVm : ObservableObject
 
     /// <summary>The mesh-edit gate for one part: the settled answer, or the read the first ask
     /// started.</summary>
+    // The parts the game starts hidden, by part, kept like the mesh-edit gate's blocked answers: only a yes
+    // is kept, since "not hidden" cannot be told from "the game was holding the file". The in-flight reads
+    // sit beside them.
+    private readonly HashSet<string> _hiddenParts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<bool>> _hiddenReads = new(StringComparer.Ordinal);
+
+    /// <summary>Whether the game starts one part hidden: the settled answer, or the read the first ask
+    /// started. The answer lands on the part's row and on each of its edit rows.</summary>
+    private Task<bool> HiddenPartAsync(TargetPart part)
+    {
+        string key = Key(part);
+        if (_hiddenParts.Contains(key)) return Task.FromResult(true);
+        if (_hiddenReads.TryGetValue(key, out var inFlight)) return inFlight;
+        var read = ReadHiddenPartAsync(part, key);
+        if (!read.IsCompleted) _hiddenReads[key] = read;
+        return read;
+    }
+
+    private async Task<bool> ReadHiddenPartAsync(TargetPart part, string key)
+    {
+        int epoch = _meshEditEpoch;
+        bool answer;
+        try { answer = await _shell.HiddenPartAsync(part); }
+        catch { answer = false; }   // an unreadable part says nothing; the note is information, never a gate
+        if (epoch != _meshEditEpoch) return answer;   // another session took the page mid-read
+        _hiddenReads.Remove(key);
+        if (answer) _hiddenParts.Add(key);
+        // part and content-edit rows only: a hide edit has no Blender opens, so its row carries no note
+        foreach (var node in Flatten(Nodes))
+            if ((node.IsPart || node.IsContentEdit) && node.Part is { } p && Key(p) == key)
+                node.StartsHidden = answer;
+        return answer;
+    }
+
     private Task<string?> MeshEditBlockAsync(TargetPart part)
     {
         string key = Key(part);
@@ -970,6 +1021,18 @@ public sealed partial class EditPageVm : ObservableObject
             _resolveEpoch++;
             Interlocked.Increment(ref _resolveRebuildGeneration);
         }
+    }
+
+    /// <summary>The install reads this page has in flight, as one task: complete when the last of them has
+    /// landed. A headless consumer that drives the page inline gets the landing redraw on the read's own
+    /// thread, before that read's task completes, so waiting here is reading the tree AFTER the answers
+    /// rather than beside them. (The window coalesces those redraws onto its dispatcher instead, where a
+    /// read's task completes before its redraw is queued.)</summary>
+    internal Task InstallReadsLandedAsync()
+    {
+        Task[] reads;
+        lock (_changeGate) reads = _resolveReads.Values.ToArray<Task>();
+        return Task.WhenAll(reads);
     }
 
     /// <summary>Ask the install for one part's original maps again, where the last ask FAILED. The card
@@ -1409,7 +1472,10 @@ public sealed partial class EditPageVm : ObservableObject
         // Selecting a row with Blender opens also starts the mesh-edit gate's read, so the buttons settle
         // while the previews render; the answer lands on every row of the part.
         if ((node.IsPart || node.IsContentEdit) && node.Part is { } gated)
+        {
             _ = MeshEditBlockAsync(gated);
+            _ = HiddenPartAsync(gated);
+        }
 
         var meshTask = LoadMeshPreviewAsync(node);
         var cardTask = LoadCardPreviewsAsync(node);
@@ -1931,9 +1997,7 @@ public sealed partial class EditPageVm : ObservableObject
     [RelayCommand]
     private void RevertRamp(EditMapCardVm? card) => RevertCard(card);
 
-    /// <summary>Pick another material and copy its differing shading values onto this one. Each copied
-    /// value binds the exact source material, so a rebuild reads the source's current numbers rather
-    /// than a copy frozen at pick time.</summary>
+    /// <summary>Copy the chosen material's numeric values and disable effects it does not have.</summary>
     [RelayCommand]
     private async Task CopyShadingFromMaterial(EditShadingRowVm? row)
     {
@@ -1955,7 +2019,7 @@ public sealed partial class EditPageVm : ObservableObject
         try
         {
             source = await _shell.PickShadingSourceAsync(row.Part, row.MaterialSlotIndex,
-                row.MaterialLabel, row.Material, SessionSubjects(), _progress);
+                row.MaterialLabel, row.Material, row.AuthoredValues, SessionSubjects(), _progress);
         }
         catch (EditShadingFailureException failure)
         {
@@ -1968,29 +2032,54 @@ public sealed partial class EditPageVm : ObservableObject
             return;
         }
         if (source is null) return;
-        if (source.Rows.Count == 0)
+        var disabled = source.EffectsToDisable ?? Array.Empty<string>();
+        var warnings = source.SourceOnlyEffects ?? Array.Empty<string>();
+        var skipped = source.SkippedUnreadable ?? Array.Empty<string>();
+        string skippedLine = skipped.Count == 0 ? ""
+            : $"Leaves {string.Join(", ", skipped)} unchanged: the source material doesn't state "
+              + (skipped.Count == 1 ? "it." : "them.");
+        if (source.Rows.Count == 0 && disabled.Count == 0 && !source.CopyRamp)
         {
-            Status = ShadingAlreadyMatches;
+            Status = skipped.Count > 0 ? "Nothing to copy. " + skippedLine
+                : warnings.Count == 0 ? ShadingAlreadyMatches
+                : "This material cannot use these source effects: " + string.Join(", ", warnings) + ".";
+            if (!source.EffectsCompared) Status += " " + EffectsNotCompared;
             return;
         }
-        string list = string.Join(", ", source.Rows.Select(candidate => candidate.Label));
-        string firstEdit = row.IsFirstEdit ? " " + AddsFirstEdit : "";
-        // Named as the button and the pick list name the act, with the body carrying what is copied: the
-        // question is asked away from the row, where "Shading" is no longer on screen beside it.
-        if (!await _shell.ConfirmAsync($"Copy from {source.Label}?",
-                $"Sets {Count(source.Rows.Count, "shading value")}: {list}. "
-                    + $"Other values stay as they are.{firstEdit}",
-                "Copy"))
+        var body = new List<string>();
+        int copies = source.Rows.Count(value => value.SourceValue is not null);
+        int returned = source.Rows.Count - copies;
+        if (copies > 0) body.Add($"Copies {Count(copies, "shading value")}.");
+        if (returned > 0) body.Add($"Returns {Count(returned, "value")} to the original.");
+        if (disabled.Count > 0)
+            body.Add("Disables " + string.Join(", ", disabled.Select(id =>
+                MaterialEffectCatalog.Definition(id)?.Label ?? id)) + ".");
+        if (source.CopyRamp) body.Add("Copies the toon ramp.");
+        if (skipped.Count > 0) body.Add(skippedLine);
+        if (warnings.Count > 0)
+            body.Add("This material cannot use these source effects: " + string.Join(", ", warnings) + ".");
+        if (!source.EffectsCompared) body.Add(EffectsNotCompared);
+        if (row.IsFirstEdit) body.Add(AddsFirstEdit);
+        if (!await _shell.ConfirmAsync($"Copy from {source.Label}?", string.Join(" ", body), "Copy"))
             return;
         var session = _session;
         WriteShading(row, "copy these shading values", edit =>
             {
-                session.CopyMaterialValues(edit.EditDefinitionId, row.Part,
-                    row.MaterialSlotIndex, source.SourcePart, source.SourceMaterialSlotIndex,
-                    source.Rows.Select(value => value.Semantic).ToArray(), _shell.ResolvePart);
-                return $"Copied {Count(source.Rows.Count, "shading value")} from {source.Label}.";
+                session.ApplyMaterialShading(edit.EditDefinitionId, row.Part,
+                    row.MaterialSlotIndex, source.Rows.Select(value =>
+                        new AuthoredMaterialValueEdit(value.Semantic, value.SourceValue)).ToArray(),
+                    disabled.Select(id => new AuthoredMaterialEffectEdit(id, false)).ToArray(),
+                    _shell.ResolvePart, source.EffectOperations,
+                    source.CopyRamp ? source.SourcePart : null, source.SourceMaterialSlotIndex,
+                    new MaterialShadingSource(source.SourcePart, source.SourceMaterialSlotIndex,
+                        source.SourceMaterialName));
+                return $"Copied shading from {source.Label}.";
             });
     }
+
+    /// <summary>Copy compares effects only when both materials' effects were read.</summary>
+    internal const string EffectsNotCompared =
+        "Effects are not compared: this material's effects couldn't be read.";
 
     /// <summary>The two materials already agree on every value the shader reads, so a copy has nothing
     /// to set.</summary>
@@ -2041,7 +2130,8 @@ public sealed partial class EditPageVm : ObservableObject
             return;
         }
         if (answer is null) return;
-        if (answer.Edits.Count == 0)
+        var effects = answer.EffectEdits ?? Array.Empty<EditShadingEffectEdit>();
+        if (answer.Edits.Count == 0 && effects.Count == 0)
         {
             if (answer.MatchesOriginal) Status = ShadingMatchesOriginal;
             return;
@@ -2052,17 +2142,23 @@ public sealed partial class EditPageVm : ObservableObject
         if (row.IsFirstEdit)
         {
             edits = edits.Where(value => value.Value is { Length: > 0 }).ToArray();
-            if (edits.Count == 0) return;
+            effects = effects.Where(effect => !effect.Enabled).ToArray();
+            if (edits.Count == 0 && effects.Count == 0) return;
         }
+        EditShadingInfo? proof = effects.Any(effect => !effect.Enabled)
+            ? await ReadShadingEffectsAsync(row) : null;
+        if (effects.Any(effect => !effect.Enabled) && proof?.EffectOperations is null) return;
         var session = _session;
         WriteShading(row, "set these shading values", edit =>
             {
                 int set = edits.Count(value => value.Value is { Length: > 0 });
                 int cleared = edits.Count - set;
-                session.ApplyMaterialValues(edit.EditDefinitionId, row.Part,
+                session.ApplyMaterialShading(edit.EditDefinitionId, row.Part,
                     row.MaterialSlotIndex, edits.Select(value =>
                         new AuthoredMaterialValueEdit(value.Semantic, value.Value)).ToArray(),
-                    _shell.ResolvePart);
+                    effects.Select(effect => new AuthoredMaterialEffectEdit(effect.EffectId,
+                        effect.Enabled)).ToArray(), _shell.ResolvePart, proof?.EffectOperations);
+                if (effects.Count > 0) return "Updated shading.";
                 return set > 0 && cleared > 0
                     ? $"Set {Count(set, "value")}, returned {Count(cleared, "value")} to the original."
                     : set > 0 ? $"Set {Count(set, "value")}."
@@ -2105,17 +2201,17 @@ public sealed partial class EditPageVm : ObservableObject
     [RelayCommand]
     private void RevertShading(EditShadingRowVm? row)
     {
-        if (row is null || _session is null || row.AuthoredSlotIds.Count == 0) return;
+        if (row is null || _session is null || !row.IsEdited) return;
         var session = _session;
         Mutate(row.Part, EditBusy(row.Part, row.Edit.EditDefinitionId),
             EditIsBusy(row.Part, row.Edit.EditDefinitionId), "revert these shading values", () =>
             {
-                session.Compound(change =>
-                {
-                    foreach (var slotId in row.AuthoredSlotIds)
-                        change.ChooseTargetGameValue(row.Edit.EditDefinitionId, slotId);
-                });
-                return $"Returned {Count(row.AuthoredSlotIds.Count, "value")} to the original.";
+                session.ApplyMaterialShading(row.Edit.EditDefinitionId, row.Part,
+                    row.MaterialSlotIndex, row.AuthoredValues.Keys.Select(semantic =>
+                        new AuthoredMaterialValueEdit(semantic, null)).ToArray(),
+                    row.DisabledEffectIds.Select(id => new AuthoredMaterialEffectEdit(id, true)).ToArray(),
+                    _shell.ResolvePart);
+                return "Returned shading to the original.";
             },
             after: () => Reselect(row.Edit.Part, row.Edit.EditDefinitionId, EditNodeKind.Edit));
     }

@@ -58,7 +58,7 @@ public class OperatorConditioningTests : IDisposable
         // Both the 4 slim rows AND the anchor-vertex segment are byte-copies: coefficients are meaningless
         // without the vertices they index, so a tie must carry both.
         var cp = File.ReadAllBytes(Path.Combine(outDir, "alpha_cpinv.buf"));
-        var sel = File.ReadAllBytes(Path.Combine(outDir, "alpha_sel.buf"));
+        var sel = SyntheticPool.ShippedSelBytes(outDir, "alpha");
         int k = sel.Length / 4 / 2;                 // 2 bones × K uint indices
         Assert.Equal(2 * 4 * k * 4, cp.Length);     // 4 rows of K floats per bone
         int rowBytes = k * 4;
@@ -69,6 +69,46 @@ public class OperatorConditioningTests : IDisposable
             Assert.Equal(strongRow, weakRow);
         }
         Assert.Equal(sel.Take(k * 4).ToArray(), sel.Skip(k * 4).Take(k * 4).ToArray());
+    }
+
+    /// <summary>A tied bone ships its tie's rows, so where the reference restates the tie, the tied bone's
+    /// rows are restated by the TIE's statement too: the two blocks stay copies of one converted block.</summary>
+    [Fact]
+    public void A_tied_bone_is_restated_by_its_ties_statement()
+    {
+        string ad = Path.Combine(_root, "tied");
+        SyntheticPool.WriteCoWeightedDump(ad, Strong, Weak, strongVerts: 62);
+        var (hashes, binds) = PosedPoolSim.ReadBinds(ad);
+        // the reference states the sound bone 4 cm off the mesh's own bind, and says nothing of the weak one
+        var reference = new System.Collections.Generic.Dictionary<uint, System.Numerics.Matrix4x4>
+        {
+            [Strong] = System.Numerics.Matrix4x4.CreateTranslation(0.04f, 0, 0) * binds[System.Array.IndexOf(hashes, Strong)],
+        };
+        string outDir = Path.Combine(_root, "out-tied");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("tied", ad) },
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["tied"] = "aaaa0004" },
+                    ReferenceBinds = reference,
+                },
+            },
+        });
+
+        // restated at all, and the weak block a byte-copy of the restated sound block: were the weak bone
+        // restated by its own (absent) statement, it would still carry the solved rows
+        var cp = File.ReadAllBytes(Path.Combine(outDir, "tied_cpinv_swap.buf"));
+        var sel = SyntheticPool.ShippedSelBytes(outDir, "tied");
+        int k = sel.Length / 4 / 2;
+        int rowBytes = k * 4;
+        for (int r = 0; r < 4; r++)
+            Assert.Equal(cp.Skip((0 * 4 + r) * rowBytes).Take(rowBytes).ToArray(),
+                cp.Skip((1 * 4 + r) * rowBytes).Take(rowBytes).ToArray());
     }
 
     [Fact]
@@ -94,8 +134,8 @@ public class OperatorConditioningTests : IDisposable
         });
 
         var cp = new FileInfo(Path.Combine(outDir, "big_cpinv.buf"));
-        var sel = new FileInfo(Path.Combine(outDir, "big_sel.buf"));
-        int k = (int)(sel.Length / 4 / 2);
+        var sel = SyntheticPool.ShippedSelBytes(outDir, "big");
+        int k = sel.Length / 4 / 2;
         Assert.Equal(4L * 2 * k * 4, cp.Length);
         Assert.True(k < 512, $"K={k} did not slim below the vertex count");
         // both shipped buffers count against dense: coefficients are useless without their anchors
@@ -145,7 +185,7 @@ public class OperatorConditioningTests : IDisposable
             },
         });
 
-        Assert.True(File.Exists(Path.Combine(outDir, "reported_sel.buf")), "the part failed to slim");
+        Assert.True(SyntheticPool.ShippedSel(outDir, "reported") is not null, "the part failed to slim");
         var diag = Assert.Single(result.Diagnostics, w => w.Contains("slim operator ships"));
         Assert.StartsWith("reported: ", diag);
         Assert.Contains("worst defect", diag);
@@ -181,17 +221,19 @@ public class OperatorConditioningTests : IDisposable
         });
 
         var cp = new FileInfo(Path.Combine(outDir, "size_cpinv.buf"));
-        var sel = new FileInfo(Path.Combine(outDir, "size_sel.buf"));
+        var sel = SyntheticPool.ShippedSel(outDir, "size");
         var off = new FileInfo(Path.Combine(outDir, "size_off.buf"));
-        Assert.Equal(slims, sel.Exists);
+        Assert.Equal(slims, sel is not null);
         Assert.Equal(slims, off.Exists);
-        if (slims) Assert.True(cp.Length + sel.Length + off.Length < 4L * 1 * verts * 4);
+        if (slims) Assert.True(cp.Length + 4L * sel!.Length + off.Length < 4L * 1 * verts * 4);
         else Assert.Equal(4L * 1 * verts * 4, cp.Length);
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("slimming declined"));
 
         // The buffers are only half the verdict: the shader and the ini have to agree with them, or the
         // part ships dense rows behind a shader that indexes them through anchors that were never written.
-        string hlsl = File.ReadAllText(Path.Combine(outDir, "recover_size_cs.hlsl"));
+        // A part replaced on its own bones recovers inside its per-copy palette pass, which is stamped with
+        // the same operator body the recover shader carries.
+        string hlsl = File.ReadAllText(Path.Combine(outDir, "pose_palette_size_swap.hlsl"));
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         if (!slims)
         {
@@ -200,14 +242,16 @@ public class OperatorConditioningTests : IDisposable
             Assert.DoesNotContain("Off", hlsl);
             Assert.DoesNotContain("[Resource_size_Sel]", ini);
             Assert.DoesNotContain("[Resource_size_Off]", ini);
-            Assert.DoesNotContain("cs-t3", ini);
-            Assert.DoesNotContain("cs-t4", ini);
+            Assert.DoesNotContain("ps-t3", ini);
+            Assert.DoesNotContain("ps-t4", ini);
         }
         else
         {
             Assert.DoesNotContain("static const uint N=", hlsl);
-            Assert.Contains("[Resource_size_Sel]", ini);
-            Assert.Contains("cs-t4 = Resource_size_Off", ini);
+            // the kernel reads the vertex list through its packet, so the list itself is not declared
+            Assert.Contains("[Resource_size_PacketSel]", ini);
+            Assert.Contains("ps-t3 = Resource_size_PacketSel\nps-t4 = Resource_size_Off", ini);
+            Assert.DoesNotContain("[Resource_size_Sel]", ini);
         }
     }
 
@@ -238,7 +282,7 @@ public class OperatorConditioningTests : IDisposable
             && w.Contains("no sound bone to ride"));
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("slimming declined"));
         Assert.Contains(result.Diagnostics, w => w.Contains("slim operator ships"));
-        Assert.True(File.Exists(Path.Combine(outDir, "unridable_sel.buf")), "the part failed to slim");
+        Assert.True(SyntheticPool.ShippedSel(outDir, "unridable") is not null, "the part failed to slim");
 
         // the unweighted bone has nothing to anchor ON, so it takes a single zero row — which recovers the
         // same zero palette row the dense operator gives it, at 1/512th of the width
@@ -280,8 +324,8 @@ public class OperatorConditioningTests : IDisposable
         // no bone may reach the gate by widening to the whole mesh — that is the escape hatch, not the win
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("dense width"));
         // slim must stay slim while doing it: escalation may raise widths, but not to the vertex count
-        var sel = new FileInfo(Path.Combine(outDir, "blend_sel.buf"));
-        int k = (int)(sel.Length / 4 / 40);
+        var sel = SyntheticPool.ShippedSelBytes(outDir, "blend");
+        int k = sel.Length / 4 / 40;
         Assert.True(k <= 128, $"widths averaged {k}; the local solve is not holding at practical widths");
     }
 
@@ -312,7 +356,7 @@ public class OperatorConditioningTests : IDisposable
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("slimming declined"));
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("tied rigidly"));
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("dense width"));
-        Assert.True(File.Exists(Path.Combine(outDir, "smallsel_sel.buf")), "the part failed to slim");
+        Assert.True(SyntheticPool.ShippedSel(outDir, "smallsel") is not null, "the part failed to slim");
         // and no width exceeds the vertex count, however the escalation ran
         foreach (var (_, width) in ReadOff(outDir, "smallsel"))
             Assert.True(width <= 100, $"a width of {width} overshot the 100-vertex mesh");
@@ -346,7 +390,7 @@ public class OperatorConditioningTests : IDisposable
 
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("slimming declined"));
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("tied rigidly"));
-        Assert.True(File.Exists(Path.Combine(outDir, "trace_sel.buf")), "the part failed to slim");
+        Assert.True(SyntheticPool.ShippedSel(outDir, "trace") is not null, "the part failed to slim");
         var diag = Assert.Single(result.Diagnostics, w => w.Contains("slim operator ships"));
         double worst = double.Parse(
             System.Text.RegularExpressions.Regex.Match(diag, @"worst defect (\S+) ").Groups[1].Value,
@@ -357,7 +401,7 @@ public class OperatorConditioningTests : IDisposable
         // green while the trace columns pushed bones off the narrow solve one by one. Both escape hatches
         // are shut here: none may widen, and the shipped selection stays a slim multiple of the bone count.
         Assert.DoesNotContain(result.Diagnostics, w => w.Contains("dense width"));
-        long selRows = new FileInfo(Path.Combine(outDir, "trace_sel.buf")).Length / 4;
+        long selRows = SyntheticPool.ShippedSelBytes(outDir, "trace").Length / 4;
         Assert.True(selRows <= 40L * 128, $"the 40 bones ship {selRows} anchor rows between them");
     }
 
@@ -397,23 +441,24 @@ public class OperatorConditioningTests : IDisposable
         Assert.True(off[1].Width < n, $"the bad bone widened to {off[1].Width} of {n}");
 
         long slim = new FileInfo(Path.Combine(outDir, "pair_cpinv.buf")).Length
-            + new FileInfo(Path.Combine(outDir, "pair_sel.buf")).Length
+            + SyntheticPool.ShippedSelBytes(outDir, "pair").Length
             + new FileInfo(Path.Combine(outDir, "pair_off.buf")).Length;
         Assert.True(slim < 16L * 2 * n, $"the ragged operator ({slim}B) did not undercut dense ({16 * 2 * n}B)");
 
-        string hlsl = File.ReadAllText(Path.Combine(outDir, "recover_pair_cs.hlsl"));
+        string hlsl = File.ReadAllText(Path.Combine(outDir, "pose_palette_pair_swap.hlsl"));
         Assert.Contains("Off    : register(t4)", hlsl);
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         Assert.Contains("[Resource_pair_Off]", ini);
-        Assert.Contains("cs-t4 = Resource_pair_Off", ini);
+        Assert.Contains("ps-t4 = Resource_pair_Off", ini);
     }
 
     [Fact]
-    public void A_bone_no_selection_can_separate_ships_at_dense_width_alone()
+    public void A_bone_no_selection_can_hold_rides_its_co_riding_bone_instead_of_every_vertex()
     {
         // Proportional over every vertex it can anchor on, and no vertex carries its neighbour without it —
-        // neither escalation nor discriminators reach a selection that separates the two. That bone takes
-        // every vertex, and ONLY that bone: the part still slims around it.
+        // neither escalation nor discriminators reach a selection that separates the two. Shipped at every
+        // vertex, its recover row would run as long as the mesh is big; it rides the bone it moves with
+        // instead, the same rigid tie a weak bone takes, and the part slims around it.
         // the 50/50 region has to outnumber the candidate pool the spread ranks over (4·K at the cap), or
         // the escalation reaches the 90/10 vertices and separates the pair after all
         const int mixed = 1100, skew = 200, n = mixed + skew;
@@ -434,33 +479,25 @@ public class OperatorConditioningTests : IDisposable
             },
         });
 
-        Assert.DoesNotContain(result.Diagnostics, w => w.Contains("slimming declined"));
-        Assert.DoesNotContain(result.Diagnostics, w => w.Contains("tied rigidly"));   // both bones are dense-sound
+        Assert.DoesNotContain(result.Diagnostics, w => w.Contains("dense width"));
+        var tieDiag = Assert.Single(result.Diagnostics, w => w.Contains("tied rigidly"));
+        Assert.Contains($"wide: no small set of vertices recovers bone 0x{Weak:x8}", tieDiag);
+        Assert.Contains($"co-riding bone 0x{Strong:x8}", tieDiag);
+
+        // the tie carries the stand-in's rows AND its anchor segment, at the stand-in's width
         var off = ReadOff(outDir, "wide");
-        var (badBase, badWidth) = off[1];
-        var (_, goodWidth) = off[0];
-        Assert.Equal(n, badWidth);
-        Assert.True(goodWidth < n, $"the sound bone widened too ({goodWidth} of {n})");
-
-        // a dense-width bone ships the identity selection — no implicit special case for the shader to know
-        var sel = ReadUints(outDir, "wide_sel.buf");
-        for (int t = 0; t < n; t++) Assert.Equal((uint)t, sel[badBase + t]);
-        Assert.Contains(result.Diagnostics, w => w.Contains($"wide: bone 0x{Weak:x8} ships at dense width")
-            && w.Contains($"{n} rows"));
-
-        // and the whole point: the part is still smaller than shipping dense for everyone
-        long slim = new FileInfo(Path.Combine(outDir, "wide_cpinv.buf")).Length
-            + new FileInfo(Path.Combine(outDir, "wide_sel.buf")).Length
-            + new FileInfo(Path.Combine(outDir, "wide_off.buf")).Length;
-        Assert.True(slim < 16L * 2 * n, $"the ragged operator ({slim}B) did not undercut dense ({16 * 2 * n}B)");
+        Assert.True(off[0].Width < n, $"the sound bone widened ({off[0].Width} of {n})");
+        Assert.Equal(off[0].Width, off[1].Width);
+        var sel = SyntheticPool.ShippedSel(outDir, "wide")!;
+        for (int t = 0; t < off[0].Width; t++) Assert.Equal(sel[off[0].Base + t], sel[off[1].Base + t]);
     }
 
     [Fact]
-    public void A_tie_onto_a_dense_width_bone_names_the_width_it_inherited()
+    public void A_weak_bone_whose_stand_in_took_a_tie_rides_where_the_stand_in_rides()
     {
-        // A tie copies its target's anchor segment, so riding a bone that took every vertex costs the tied
-        // bone 20·n bytes of its own. "tied rigidly" alone reads like the cheap outcome it usually is, and
-        // the dense-width line names only the bone that widened — the rider goes unaccounted for.
+        // The rider (two vertices of its own, co-weighted onto Weak) picks Weak as its stand-in, and Weak,
+        // which no slim selection holds, rides Strong. The rider's rows and its reported tie must both be
+        // Strong's: a tie naming Weak would convert the rider's rows under the wrong bone's bind.
         const int mixed = 1100, skew = 200, n = mixed + skew + 2;
         string ad = Path.Combine(_root, "tiedwide");
         SyntheticPool.WriteProportionalPairDump(ad, seed: 7, mixed: mixed, skew: skew, Strong, Weak, tiedHash: 103);
@@ -479,16 +516,14 @@ public class OperatorConditioningTests : IDisposable
             },
         });
 
-        Assert.True(File.Exists(Path.Combine(outDir, "tiedwide_sel.buf")), "the part failed to slim");
-        var tieDiag = Assert.Single(result.Diagnostics, w => w.Contains("tied rigidly"));
-        Assert.Contains($"0x{103:x8}", tieDiag);                       // the rider
-        Assert.Contains($"0x{Weak:x8}", tieDiag);                      // the bone it rides, which widened
-        Assert.Contains($"at dense width ({n} rows)", tieDiag);
+        Assert.DoesNotContain(result.Diagnostics, w => w.Contains("dense width"));
+        var riderDiag = Assert.Single(result.Diagnostics, w => w.Contains("tied rigidly") && w.Contains($"0x{103:x8}"));
+        Assert.Contains($"co-riding bone 0x{Strong:x8}", riderDiag);
 
         var off = ReadOff(outDir, "tiedwide");
-        Assert.Equal(n, off[1].Width);                                 // the ride target
-        Assert.Equal(n, off[2].Width);                                 // and the rider, at the same cost
-        Assert.True(off[0].Width < n, "the sound bone widened too");
+        Assert.True(off[0].Width < n, "the sound bone widened");
+        Assert.Equal(off[0].Width, off[1].Width);
+        Assert.Equal(off[0].Width, off[2].Width);
     }
 
     [Fact]
@@ -623,51 +658,6 @@ public class OperatorConditioningTests : IDisposable
     }
 
     [Fact]
-    public void A_dense_width_bone_ships_the_dense_operators_own_rows()
-    {
-        // A bone that widens to every vertex takes the DENSE operator's rows — the ones the residual gate is
-        // calibrated against. They reach the buffer through a per-row read of the factors rather than the
-        // whole materialized matrix, and a disagreement between those two routes would ship a bone whose
-        // coefficients no gate ever measured.
-        const int mixed = 1100, skew = 200, n = mixed + skew;
-        string ad = Path.Combine(_root, "denserows");
-        SyntheticPool.WriteProportionalPairDump(ad, seed: 7, mixed: mixed, skew: skew, Strong, Weak);
-        string outDir = Path.Combine(_root, "out-denserows");
-        new MigotoEmitter().Build(new PoolBuildRequest
-        {
-            OutDir = outDir,
-            Pipelines = new[]
-            {
-                new ReplacePipeline
-                {
-                    Suffix = "swap",
-                    Parts = new[] { new PoolPart("denserows", ad) },
-                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["denserows"] = "aaaa00fd" },
-                },
-            },
-        });
-
-        var off = ReadOff(outDir, "denserows");
-        var (bas, width) = off[1];
-        Assert.Equal(n, width);          // the bone that could not slim
-
-        var (p, w, bi) = LoadDump(ad);
-        var dense = PoolMath.PInv(PoolMath.BuildC(p, w, bi, nbones: 2));
-        var shipped = ReadFloats(outDir, "denserows_cpinv.buf");
-        for (int r = 0; r < 4; r++)
-            for (int t = 0; t < n; t++)
-                Assert.Equal(dense[(4 * 1 + r) * n + t], shipped[4 * bas + r * width + t]);
-    }
-
-    private static float[] ReadFloats(string outDir, string file)
-    {
-        var bytes = File.ReadAllBytes(Path.Combine(outDir, file));
-        var v = new float[bytes.Length / 4];
-        Buffer.BlockCopy(bytes, 0, v, 0, bytes.Length);
-        return v;
-    }
-
-    [Fact]
     public void Ragged_offsets_tile_the_shipped_buffers_exactly()
     {
         // The offset table is the only thing that says where a bone's rows are. If it disagrees with the
@@ -697,7 +687,7 @@ public class OperatorConditioningTests : IDisposable
             Assert.Equal(expected, bas);          // blocks tile in bone order: no gaps, no overlap
             expected += width;
         }
-        Assert.Equal(expected * 4, new FileInfo(Path.Combine(outDir, "ragged_sel.buf")).Length);
+        Assert.Equal(expected * 4, SyntheticPool.ShippedSelBytes(outDir, "ragged").Length);
         Assert.Equal(expected * 16, new FileInfo(Path.Combine(outDir, "ragged_cpinv.buf")).Length);
     }
 

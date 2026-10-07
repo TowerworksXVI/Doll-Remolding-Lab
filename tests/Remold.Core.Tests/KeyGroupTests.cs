@@ -155,6 +155,62 @@ public sealed class KeyGroupTests
     }
 
     [Fact]
+    public void A_state_shortcut_is_canonical_and_differs_from_its_groups_key_and_its_siblings()
+    {
+        var project = Project();
+        project.KeyGroups.Add(Group("F6", new("one"), new("two"), new("three")));
+        var states = project.KeyGroups.Single().States;
+
+        states[0].Shortcut = "f8";
+        Assert.Contains(AuthoredProjectValidator.Errors(project),
+            error => error.Contains("invalid shortcut", StringComparison.Ordinal));
+
+        states[0].Shortcut = "F6";
+        Assert.Contains(AuthoredProjectValidator.Errors(project),
+            error => error.Contains("its group's own key", StringComparison.Ordinal));
+
+        states[0].Shortcut = "F8";
+        states[2].Shortcut = "F8";
+        Assert.Contains(AuthoredProjectValidator.Errors(project),
+            error => error.Contains("shares shortcut 'F8' with state 0", StringComparison.Ordinal));
+
+        states[2].Shortcut = "F9";
+        Assert.Empty(AuthoredProjectValidator.Errors(project));
+    }
+
+    [Fact]
+    public void A_state_shortcut_may_match_another_groups_key_or_shortcut()
+    {
+        var project = Project();
+        project.KeyGroups.Add(Group("F6", new("one"), new("two")));
+        project.KeyGroups.Add(new KeyGroup
+        {
+            Id = "key-2", Key = "F7", States =
+            {
+                new KeyGroupState { Id = "a", Shortcut = "F6" },
+                new KeyGroupState { Id = "b", Shortcut = "F8" },
+            },
+        });
+        project.KeyGroups[0].States[1].Shortcut = "F8";
+
+        Assert.Empty(AuthoredProjectValidator.Errors(project));
+    }
+
+    [Fact]
+    public void A_state_without_a_shortcut_saves_no_shortcut_field_and_one_with_it_round_trips()
+    {
+        var project = Project();
+        project.KeyGroups.Add(Group("F6", new("one"), new("two")));
+        Assert.DoesNotContain("\"shortcut\"", AuthoredProjectSerializer.Serialize(project));
+
+        project.KeyGroups.Single().States[1].Shortcut = "CTRL F8";
+        var reopened = AuthoredProjectSerializer.Deserialize(AuthoredProjectSerializer.Serialize(project));
+
+        Assert.Null(reopened.KeyGroups.Single().States[0].Shortcut);
+        Assert.Equal("CTRL F8", reopened.KeyGroups.Single().States[1].Shortcut);
+    }
+
+    [Fact]
     public void Placement_order_is_not_part_ownership()
     {
         var project = Project();

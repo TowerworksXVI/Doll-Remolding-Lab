@@ -37,6 +37,24 @@
         </Animation>
       </Style.Animations>
     </Style>
+    <!-- the divider: the whole gap takes the drag, and a thin line shows it on hover and while dragging -->
+    <Style Selector="GridSplitter.pane">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="Transparent">
+            <Border Name="PART_Line" Width="2" CornerRadius="1" Margin="0,6" HorizontalAlignment="Center"
+                    Background="Transparent" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="GridSplitter.pane:pointerover /template/ Border#PART_Line">
+      <Setter Property="Background" Value="{StaticResource HudSubtextBrush}" />
+    </Style>
+    <Style Selector="GridSplitter.pane:pressed /template/ Border#PART_Line">
+      <Setter Property="Background" Value="{StaticResource HudAccentBrush}" />
+    </Style>
   </UserControl.Styles>
 
   <!-- AllowDrop must sit on the pane: without it the AddHandler drop handlers never fire anywhere inside.
@@ -53,9 +71,16 @@
     </Grid>
 
     <!-- tree (left) + inspector (right) -->
-    <Grid Grid.Row="2" ColumnDefinitions="350,*">
+    <!-- The divider drags. The tree's width is the one number in this split, remembered across launches (see the
+         code-behind); both minimums hold during a drag and when a remembered width meets a smaller window. -->
+    <Grid Grid.Row="2" Name="Split">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="350" MinWidth="220" />
+        <ColumnDefinition Width="10" />
+        <ColumnDefinition Width="*" MinWidth="360" />
+      </Grid.ColumnDefinitions>
 
-      <Border Grid.Column="0" Background="{StaticResource HudPanelBrush}" Margin="0,0,10,0"
+      <Border Grid.Column="0" Background="{StaticResource HudPanelBrush}"
               BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
         <!-- The pane's global states STACK above the tree rather than sharing one Panel with it: more than
              one of them can stand at once (a picked subject the install cannot name has both a tree and an
@@ -76,44 +101,62 @@
             <TextBlock Text="No parts, edits, or textures match." Margin="14" TextWrapping="Wrap"
                        Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding NoMatches}" />
           </StackPanel>
+          <!-- no sideways scrolling: a row is measured against the pane's width, which is what lets its mesh name
+               trim rather than run off the edge -->
           <TreeView Grid.Row="1" ItemsSource="{Binding Nodes}" SelectedItem="{Binding SelectedNode}"
-                    Background="Transparent" Padding="6" IsVisible="{Binding HasNodes}">
+                    Background="Transparent" Padding="6" IsVisible="{Binding HasNodes}"
+                    ScrollViewer.HorizontalScrollBarVisibility="Disabled">
             <TreeView.DataTemplates>
               <TreeDataTemplate DataType="ep:EditNodeVm" ItemsSource="{Binding Children}">
-                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <!-- Left-aligned, so a row is as wide as its content until the pane is narrower. Then a DockPanel's
+                     measuring order decides who gives up room: the marks are measured first and never trim, the
+                     name comes next, and the detail, the fill, takes what is left. So the detail trims first and
+                     the name only once the detail is gone. -->
+                <DockPanel HorizontalAlignment="Left" VerticalAlignment="Center">
                   <!-- ✎ content edit / ∅ hide edit / ◇ part / ⌇ skeleton: a type marker, not a status badge -->
-                   <TextBlock Text="{Binding Glyph}" IsVisible="{Binding HasGlyph}"
-                              Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
-                  <TextBlock Text="⚠" IsVisible="{Binding HasReturnWarning}"
+                  <TextBlock DockPanel.Dock="Left" Text="{Binding Glyph}" IsVisible="{Binding HasGlyph}"
+                             Margin="0,0,6,0" Foreground="{StaticResource HudSubtextBrush}"
+                             VerticalAlignment="Center" />
+                  <TextBlock DockPanel.Dock="Left" Text="⚠" IsVisible="{Binding HasReturnWarning}" Margin="0,0,6,0"
                              Foreground="{StaticResource HudAmberBrush}" VerticalAlignment="Center"
                              ToolTip.Tip="{Binding ReturnWarning}" />
-                  <TextBlock Text="{Binding Title}" Foreground="{StaticResource HudTextBrush}"
-                             VerticalAlignment="Center" />
+                  <!-- docked right in this order, so the busy dot ends the row and the badge sits before it -->
+                  <TextBlock DockPanel.Dock="Right" Classes="pulse" Text="◌" IsVisible="{Binding IsBusy}"
+                             Margin="6,0,0,0" ToolTip.Tip="Working…" />
+                  <!-- the badge rolls up so a collapsed branch shows one; the sentence stays where the fix is -->
+                  <TextBlock DockPanel.Dock="Right" Text="⚠" IsVisible="{Binding HasProblemBadge}" Margin="6,0,0,0"
+                             Foreground="{StaticResource HudAmberBrush}"
+                             VerticalAlignment="Center" ToolTip.Tip="{Binding ProblemBadgeTip}" />
+                  <!-- the name and the edited mark after it. The mark is measured first, so a trimmed name
+                       never takes it off the row. -->
+                  <DockPanel DockPanel.Dock="Left">
+                    <!-- ✎ rolls up onto a part with any content edit and its subject, and stops there: an edit
+                         row already leads with ✎ as its type marker -->
+                    <TextBlock DockPanel.Dock="Right" Text="✎" IsVisible="{Binding ShowsEditRollup}"
+                               Margin="6,0,0,0" Foreground="{StaticResource HudAccentBrush}"
+                               VerticalAlignment="Center" ToolTip.Tip="Edited" />
+                    <TextBlock Text="{Binding Title}" Foreground="{StaticResource HudTextBrush}"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                               ToolTip.Tip="{Binding Title}" />
+                  </DockPanel>
                   <!-- the dim detail: the part's mesh, or what kind of edit this is. It trims at the pane's
                        width, so the hover carries the whole line. -->
-                  <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}"
+                  <TextBlock Text="{Binding Detail}" IsVisible="{Binding HasDetail}" Margin="6,0,0,0"
                              Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
                              TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
                              ToolTip.Tip="{Binding Detail}" />
-                  <!-- the badge rolls up so a collapsed branch shows one; the sentence stays where the fix is -->
-                  <TextBlock Text="⚠" IsVisible="{Binding HasProblemBadge}"
-                             Foreground="{StaticResource HudAmberBrush}"
-                             VerticalAlignment="Center" ToolTip.Tip="{Binding ProblemBadgeTip}" />
-                  <!-- ✎ rolls up onto a part with any content edit and its subject, and stops there: an edit
-                       row already leads with ✎ as its type marker -->
-                  <TextBlock Text="✎" IsVisible="{Binding ShowsEditRollup}"
-                             Foreground="{StaticResource HudAccentBrush}"
-                             VerticalAlignment="Center" ToolTip.Tip="Edited" />
-                  <TextBlock Classes="pulse" Text="◌" IsVisible="{Binding IsBusy}" ToolTip.Tip="Working…" />
-                </StackPanel>
+                </DockPanel>
               </TreeDataTemplate>
             </TreeView.DataTemplates>
           </TreeView>
         </Grid>
       </Border>
 
+      <GridSplitter Grid.Column="1" Name="Divider" Classes="pane" ResizeDirection="Columns"
+                    Cursor="SizeWestEast" />
+
       <!-- inspector -->
-      <Border Grid.Column="1" Background="{StaticResource HudPanelBrush}" Padding="16"
+      <Border Grid.Column="2" Background="{StaticResource HudPanelBrush}" Padding="16"
               BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
         <Panel>
           <TextBlock Text="Select a part to see its edits, or an edit to work on it."
@@ -184,7 +227,7 @@
 
               <!-- content edit: its verbs. A mesh the gate refuses disables the two opens; the reason is
                    their hover line — one surface answers, per the text guide. -->
-              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding SelectedNode.IsContentEdit}">
+              <WrapPanel ItemSpacing="8" LineSpacing="8" IsVisible="{Binding SelectedNode.IsContentEdit}">
                 <Button Content="Open in Blender" Command="{Binding OpenInBlenderCommand}"
                         CommandParameter="{Binding SelectedNode}"
                         IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
@@ -207,7 +250,7 @@
                 <Button Content="Delete" Command="{Binding DeleteEditCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True" ToolTip.Tip="Deletes this edit from the mod." />
-              </StackPanel>
+              </WrapPanel>
 
               <!-- hide edit: no cards, no mesh. The name and where it's used are the shared surface above;
                    this block carries the one paragraph saying what hiding does and its own Delete, since
@@ -255,7 +298,7 @@
                 <!-- every part carries the two Blender opens from the original. A send chooses its edit;
                      opening itself authors nothing. A mesh the gate refuses disables the two opens; the
                      reason is their hover line. -->
-                <StackPanel Orientation="Horizontal" Spacing="8">
+                <WrapPanel ItemSpacing="8" LineSpacing="8">
                   <Button Content="Open in Blender" IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
                           Command="{Binding OpenInBlenderCommand}"
                           CommandParameter="{Binding SelectedNode}"
@@ -274,27 +317,29 @@
                           Command="{Binding HidePartCommand}" CommandParameter="{Binding SelectedNode}"
                           ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding SelectedNode.HidePartHint}" />
-                </StackPanel>
+                </WrapPanel>
 
               </StackPanel>
 
               <!-- shared: a part-level refusal, kept where the fix is — the install's own, or the
-                   mesh-edit gate's reason on a part whose opens are its whole action row. Directly under
-                   that row, because it is what the two greyed buttons above it are greyed BY: below the
-                   card list it sat a full scroll away from them. -->
+                   mesh-edit gate's reason on a part whose opens are its whole action row — and the note on a
+                   part the game starts shrunk. Directly under that row, because it is what the two greyed
+                   buttons above it are greyed BY: below the card list it sat a full scroll away from them.
+                   The text takes the star column so it wraps inside the box rather than running past it. -->
               <Border IsVisible="{Binding SelectedNode.HasPartRefusal}"
                       BorderBrush="{StaticResource HudAmberBrush}"
                       BorderThickness="1" CornerRadius="3" Padding="8,5">
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                  <TextBlock Text="⚠" Foreground="{StaticResource HudAmberBrush}" />
-                  <TextBlock Text="{Binding SelectedNode.PartRefusal}"
+                <Grid ColumnDefinitions="Auto,*">
+                  <TextBlock Grid.Column="0" Text="⚠" Margin="0,0,6,0" VerticalAlignment="Top"
+                             Foreground="{StaticResource HudAmberBrush}" />
+                  <TextBlock Grid.Column="1" Text="{Binding SelectedNode.PartRefusal}"
                              Foreground="{StaticResource HudAmberBrush}"
                              FontSize="12" TextWrapping="Wrap" />
-                </StackPanel>
+                </Grid>
               </Border>
 
               <!-- subject: the four verbs that act on everything under it. -->
-              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding SelectedNode.IsSubject}">
+              <WrapPanel ItemSpacing="8" LineSpacing="8" IsVisible="{Binding SelectedNode.IsSubject}">
                 <Button Content="Open all parts in Blender" Command="{Binding OpenSubjectInBlenderCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
@@ -311,7 +356,7 @@
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.RemoveSubjectHint}" />
-              </StackPanel>
+              </WrapPanel>
 
               <!-- a part with no edits: the same cards, showing the game's own maps. One label for the set,
                    rather than the same word on every card — and it teaches the one gesture they take, since
@@ -533,37 +578,58 @@
                           </DataTemplate>
                         </ItemsControl.ItemTemplate>
                       </ItemsControl>
-                      <!-- the material's shading values: numbers its shader reads, copied from another
-                           material or typed in, never painted. One quiet line per material. -->
-                      <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding HasShading}">
-                        <TextBlock Text="Shading" FontSize="11" VerticalAlignment="Center"
-                                   Foreground="{StaticResource HudSubtextBrush}" />
-                        <TextBlock Text="✎" IsVisible="{Binding Shading.IsEdited}"
-                                   Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
-                        <TextBlock Text="{Binding Shading.Summary}" FontSize="11" VerticalAlignment="Center"
-                                   IsVisible="{Binding Shading.HasSummary}"
-                                   Foreground="{StaticResource HudSubtextBrush}" />
-                        <!-- the same busy gate the cards above them and the row's own verbs take: these
-                             three write through this edit, and their hovers say why they are off -->
-                        <Button Content="Copy from material…" Padding="10,2" FontSize="11"
-                                IsEnabled="{Binding !Shading.IsBusy}"
-                                ToolTip.ShowOnDisabled="True"
-                                ToolTip.Tip="{Binding Shading.CopyFromMaterialHint}"
-                                Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).CopyShadingFromMaterialCommand}"
-                                CommandParameter="{Binding Shading}" />
-                        <Button Content="Edit values…" Padding="10,2" FontSize="11"
-                                IsEnabled="{Binding !Shading.IsBusy}"
-                                ToolTip.ShowOnDisabled="True"
-                                ToolTip.Tip="{Binding Shading.EditValuesHint}"
-                                Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).EditShadingValuesCommand}"
-                                CommandParameter="{Binding Shading}" />
-                        <Button Content="Revert" Padding="10,2" FontSize="11"
-                                IsVisible="{Binding Shading.ShowsRevert}"
-                                IsEnabled="{Binding Shading.CanRevert}"
-                                ToolTip.ShowOnDisabled="True"
-                                ToolTip.Tip="{Binding Shading.RevertHint}"
-                                Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).RevertShadingCommand}"
-                                CommandParameter="{Binding Shading}" />
+                      <StackPanel Spacing="5" IsVisible="{Binding HasShading}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                          <TextBlock Text="Shading" FontSize="11" VerticalAlignment="Center"
+                                     Foreground="{StaticResource HudSubtextBrush}" />
+                          <TextBlock Text="✎" IsVisible="{Binding Shading.IsEdited}"
+                                     Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
+                          <TextBlock Text="{Binding Shading.Summary}" FontSize="11" VerticalAlignment="Center"
+                                     IsVisible="{Binding Shading.HasSummary}"
+                                     Foreground="{StaticResource HudSubtextBrush}" />
+                        </StackPanel>
+                        <ItemsControl ItemsSource="{Binding Shading.Effects}" IsVisible="{Binding Shading.HasEffects}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="ep:EditShadingEffectRowVm">
+                              <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Border Width="20" IsVisible="{Binding IsChild}" />
+                                <CheckBox Content="{Binding Label}" FontSize="11" MinHeight="26"
+                                          IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                          IsEnabled="{Binding IsAvailable}"
+                                          Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).ToggleShadingEffectCommand}"
+                                          CommandParameter="{Binding}" />
+                                <TextBlock Text="✎" IsVisible="{Binding IsEdited}" FontSize="11"
+                                           Foreground="{StaticResource HudAccentBrush}"
+                                           VerticalAlignment="Center" ToolTip.Tip="Edited values" />
+                              </StackPanel>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="{Binding Shading.EffectsNote}" IsVisible="{Binding Shading.HasEffectsNote}"
+                                   FontSize="11" Foreground="{StaticResource HudSubtextBrush}"
+                                   TextWrapping="Wrap" />
+                        <WrapPanel>
+                          <Button Content="Advanced editor…" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                                  IsEnabled="{Binding !Shading.IsBusy}"
+                                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.EditValuesHint}"
+                                  Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).EditShadingValuesCommand}"
+                                  CommandParameter="{Binding Shading}" />
+                          <Button Content="Copy from material…" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                                  IsEnabled="{Binding !Shading.IsBusy}"
+                                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.CopyFromMaterialHint}"
+                                  Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).CopyShadingFromMaterialCommand}"
+                                  CommandParameter="{Binding Shading}" />
+                          <Button Content="Disable all effects" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                                  IsEnabled="{Binding Shading.CanDisableAllEffects}"
+                                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.DisableAllEffectsHint}"
+                                  Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).DisableAllShadingEffectsCommand}"
+                                  CommandParameter="{Binding Shading}" />
+                          <Button Content="Revert" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                                  IsVisible="{Binding Shading.ShowsRevert}" IsEnabled="{Binding Shading.CanRevert}"
+                                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.RevertHint}"
+                                  Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).RevertShadingCommand}"
+                                  CommandParameter="{Binding Shading}" />
+                        </WrapPanel>
                       </StackPanel>
                     </StackPanel>
                   </DataTemplate>

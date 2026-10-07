@@ -615,6 +615,109 @@ class SessionPresentationTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("  ") for line in lines[1:]))
 
 
+class _FakeCollection(dict):
+    """A collection as the attribution walk reads it: a name, children found by name and iterated in
+    order, and custom properties read with get."""
+
+    def __init__(self, name, children=(), marker=None):
+        super().__init__()
+        self.name = name
+        if marker is not None:
+            self[rb.PART_MARKER] = marker
+        self.children = _FakeChildren(children)
+
+
+class _FakeChildren(list):
+    def get(self, name):
+        return next((c for c in self if c.name == name), None)
+
+
+class _FakeLayerCollection:
+    def __init__(self, hide_viewport):
+        self.hide_viewport = hide_viewport
+
+
+class HiddenPartTests(unittest.TestCase):
+    """Parts the game starts shrunk open centred at full size. In a session that names no part they sit
+    under `Mod/Shrunk Parts`, still parts; and a send whose mesh weights both a hidden part's bones and
+    other bones says they do not line up in the game."""
+
+    SESSION = {"part": None, "parts": [
+        {"name": "body1", "label": "body1", "hiddenBones": ["0000abcd"]},
+        {"name": "chest2", "label": "chest2", "hidden": True, "hiddenBones": ["0000abcd"],
+         "stockMixes": True},
+        {"name": "wrench", "label": "wrench", "hidden": True, "hiddenBones": ["0000abcd"]},
+    ]}
+
+    def test_a_mixed_send_warns_once_per_part_unless_the_stock_part_already_mixes(self):
+        lines = rb.gf2_hidden_mix_lines(self.SESSION, [
+            ("body1", {"0000abcd", "11112222"}),     # the body weights the wrench's bone: warns
+            ("chest2", {"0000abcd", "11112222"}),    # the game's own chest already does this: silent
+            ("wrench", {"0000abcd"}),                # the wrench on its own bone alone: silent
+        ])
+        self.assertEqual(lines, [rb.gf2_hidden_mix_line("body1")])
+        self.assertEqual(lines[0], "'body1' has weights on a shrunk part's bones and on other bones. "
+                                   "In the game the two sets move apart.")
+        self.assertLess(len(rb.gf2_hidden_mix_line("P3_body_fight")), 110)
+
+    def test_a_session_that_names_no_hidden_bones_warns_about_nothing(self):
+        self.assertEqual(rb.gf2_hidden_mix_lines({"parts": [{"name": "body1"}]},
+                                                 [("body1", {"0000abcd", "11112222"})]), [])
+        self.assertEqual(rb.gf2_hidden_mix_lines({}, [("body1", {"0000abcd"})]), [])
+
+    def test_the_weight_walk_runs_only_for_a_session_naming_hidden_bones(self):
+        self.assertTrue(rb.gf2_session_has_hidden_bones(self.SESSION))
+        self.assertFalse(rb.gf2_session_has_hidden_bones({"parts": [{"name": "body1"},
+                                                                    {"name": "cloth1", "hiddenBones": []}]}))
+        self.assertFalse(rb.gf2_session_has_hidden_bones({}))
+        self.assertFalse(rb.gf2_session_has_hidden_bones(None))
+
+    def test_bone_hashes_come_off_the_group_names_the_session_armature_carries(self):
+        self.assertEqual(rb.gf2_bone_hashes(["Bip001 R Hand_0000ABCD", "wrench_11112222.001", "Group"]),
+                         {"0000abcd", "11112222"})
+
+    def test_only_a_session_naming_no_part_gathers_its_hidden_parts(self):
+        self.assertEqual(rb.gf2_hidden_part_names(self.SESSION), {"chest2", "wrench"})
+        self.assertTrue(rb.gf2_groups_hidden_parts(self.SESSION))
+        self.assertFalse(rb.gf2_groups_hidden_parts(dict(self.SESSION, part="wrench")))
+        self.assertFalse(rb.gf2_groups_hidden_parts({"part": None, "parts": [{"name": "body1"}]}))
+
+    def test_a_part_under_hidden_parts_is_a_part_and_the_collection_itself_is_not(self):
+        wrench = _FakeCollection("wrench", marker="wrench")
+        hidden = _FakeCollection(rb.SHRUNK_PARTS_COLLECTION, [wrench])
+        body = _FakeCollection("body1", marker="body1")
+        folder = _FakeCollection("scratch")
+        mod = _FakeCollection(rb.MOD_COLLECTION, [body, hidden, folder])
+        scene = types.SimpleNamespace(collection=_FakeCollection("Scene Collection", [mod]))
+        with mock.patch.object(rb, "bpy", types.SimpleNamespace(context=types.SimpleNamespace(scene=scene)),
+                               create=True):
+            self.assertEqual([c.name for c in rb.gf2_part_collections()], ["body1", "wrench"])
+            self.assertIs(rb._shrunk_parts_root(), hidden)
+
+    def test_a_hidden_reference_beside_a_named_part_starts_hidden_and_is_not_gathered(self):
+        # a with-references open of the body: the wrench is a reference the app starts hidden, and a
+        # session that names a part gathers nothing under Shrunk Parts
+        session = {"part": "body1", "parts": [
+            {"name": "body1", "writable": True, "label": "body1"},
+            {"name": "wrench", "writable": False, "label": "wrench", "hidden": True, "viewportVisible": False},
+        ]}
+        self.assertFalse(rb.gf2_part_viewport_visible(session, "wrench"))
+        self.assertTrue(rb.gf2_part_viewport_visible(session, "body1"))
+        self.assertFalse(rb.gf2_groups_hidden_parts(session))
+
+    def test_showing_the_collection_for_a_send_puts_it_back_as_it_was(self):
+        hidden = _FakeCollection(rb.SHRUNK_PARTS_COLLECTION)
+        layer = _FakeLayerCollection(hide_viewport=True)
+        with mock.patch.object(rb, "_layer_collection_for", lambda coll: layer if coll is hidden else None):
+            was = rb._set_collection_hidden(hidden, False)
+            self.assertFalse(layer.hide_viewport)
+            rb._restore_collection_hidden(hidden, was)
+            self.assertTrue(layer.hide_viewport)
+            # a scene with no such collection changes nothing and restores nothing
+            self.assertIsNone(rb._set_collection_hidden(None, False))
+            rb._restore_collection_hidden(None, None)
+
+
 class ClaimedMeshTests(unittest.TestCase):
     """A re-opened edited part comes back under the modder's own mesh name, not the name the app
     declared — the claim is what still lands it in a part collection instead of Reference."""
@@ -940,14 +1043,20 @@ class TransformWarningTests(unittest.TestCase):
                                                    True))
 
 
-def _full_pass(cheap, shipping=("mesh",), unsolvable=(), session=None):
+def _full_pass(cheap, shipping=("mesh",), unsolvable=(), session=None, off_skeleton=(), solved=None):
     """Run gf2_run_checks with the scene reads it makes stubbed out, so the composition of the full
-    pass is testable without Blender: what the cheap pass returned, what ships, the session, and what
-    the weight solve found are the only inputs it has."""
+    pass is testable without Blender: what the cheap pass returned, what ships, the session, the
+    off-skeleton walk and what the weight solve found are the only inputs it has. `solved` collects
+    the meshes the solve was handed."""
+    def _solve(meshes, arm, unskinned=()):
+        if solved is not None:
+            solved.extend(meshes)
+        return list(unsolvable)
     with mock.patch.object(rb, "gf2_cheap_checks", lambda m, a: list(cheap)), \
             mock.patch.object(rb, "gf2_shipping_meshes", lambda: list(shipping)), \
             mock.patch.object(rb, "load_session", lambda: session or {}), \
-            mock.patch.object(rb, "_unsolvable_weights_by_object", lambda m, a, u=(): list(unsolvable)):
+            mock.patch.object(rb, "gf2_off_skeleton_issues", lambda m, a, u=(): list(off_skeleton)), \
+            mock.patch.object(rb, "_unsolvable_weights_by_object", _solve):
         return rb.gf2_run_checks(["mesh"], None)
 
 
@@ -995,6 +1104,78 @@ class FullPassTests(unittest.TestCase):
             got = rb.gf2_run_checks([], None)
         self.assertEqual(calls, [])
         self.assertEqual(got, [("HARD", "empty")])
+
+    def test_an_off_skeleton_blocker_joins_the_leading_hards_ahead_of_the_unweighted_one(self):
+        got = _full_pass([("HARD", "stray"), ("SOFT", "scale")], unsolvable=[("cloth1", 2)],
+                         shipping=(types.SimpleNamespace(name="body1"), types.SimpleNamespace(name="cloth1")),
+                         off_skeleton=[("body1", "off skeleton")])
+        self.assertEqual(got, [("HARD", "stray"), ("HARD", "off skeleton"), ("HARD", got[2][1]),
+                               ("SOFT", "scale")])
+        self.assertIn("'cloth1'", got[2][1])
+
+    def test_a_mesh_blocked_for_off_skeleton_weight_is_not_counted_as_unweighted(self):
+        """Its vertices carry weight, so the unweighted blocker would misname the fix."""
+        body, cloth = types.SimpleNamespace(name="body1"), types.SimpleNamespace(name="cloth1")
+        solved = []
+        _full_pass([], shipping=(body, cloth), off_skeleton=[("body1", "off skeleton")], solved=solved)
+        self.assertEqual(solved, [cloth])
+
+
+class OffSkeletonTests(unittest.TestCase):
+    """Which vertex groups a weight cannot reach the game through, and how the blocks read."""
+
+    SESSION = ["Root", "hip_11112222", "spine_33334444"]
+
+    def test_a_game_rig_counts_only_its_hash_named_bones(self):
+        self.assertEqual(rb.gf2_game_bone_names(self.SESSION), {"hip_11112222", "spine_33334444"})
+
+    def test_a_rig_with_no_game_bones_counts_every_bone(self):
+        self.assertEqual(rb.gf2_game_bone_names(["root", "arm"]), {"root", "arm"})
+
+    def test_a_duplicate_suffixed_game_bone_is_still_a_game_bone(self):
+        self.assertIn("hip_11112222.001", rb.gf2_game_bone_names(["hip_11112222.001"]))
+
+    def test_session_game_bones_are_skin(self):
+        self.assertEqual(rb.gf2_off_skeleton_groups(["hip_11112222", "spine_33334444"], self.SESSION, []),
+                         set())
+
+    def test_a_session_bone_with_no_game_identity_is_off_skeleton(self):
+        self.assertEqual(rb.gf2_off_skeleton_groups(["Root"], self.SESSION, []), {"Root"})
+
+    def test_another_rigs_game_bone_is_off_skeleton_with_or_without_its_armature(self):
+        self.assertEqual(rb.gf2_off_skeleton_groups(["skirt_55556666"], self.SESSION, []),
+                         {"skirt_55556666"})
+        self.assertEqual(rb.gf2_off_skeleton_groups(["skirt_55556666"], self.SESSION, ["skirt_55556666"]),
+                         {"skirt_55556666"})
+
+    def test_a_foreign_rigs_bone_is_off_skeleton_while_its_armature_is_in_the_file(self):
+        self.assertEqual(rb.gf2_off_skeleton_groups(["Spine", "Mask"], self.SESSION, ["Hips", "Spine"]),
+                         {"Spine"})
+
+    def test_a_group_naming_no_bone_is_outside_the_skin(self):
+        self.assertEqual(rb.gf2_off_skeleton_groups(["Mask"], self.SESSION, ["Hips"]), set())
+
+    def test_the_off_skeleton_block_names_the_mesh_the_counts_and_an_example(self):
+        line = rb.gf2_off_skeleton_line("Pasted", 12, {"skirt_55556666", "Hips"})
+        self.assertTrue(line.startswith("12 vertices in 'Pasted' are weighted to 2 bones this item does "
+                                        "not have, such as 'Hips'."), line)
+        self.assertTrue(line.endswith("Weight-paint those vertices to the bones of the armature in Mod."), line)
+        self.assertNotIn("n't", line)
+
+    def test_the_off_skeleton_block_is_singular_for_one_vertex_and_one_bone(self):
+        self.assertTrue(rb.gf2_off_skeleton_line("Pasted", 1, {"Hips"})
+                        .startswith("1 vertex in 'Pasted' is weighted to 1 bone this item"))
+
+    def test_the_binding_block_names_the_other_armature_and_the_fix(self):
+        line = rb.gf2_binding_line("Pasted", ["Pasted_Arm"])
+        self.assertIn("'Pasted' is deformed by 'Pasted_Arm' instead of the armature in Mod/Armature", line)
+        self.assertIn("Ctrl+P, Armature Deform", line)
+        self.assertIn("delete its Armature modifier for 'Pasted_Arm'", line)
+
+    def test_the_binding_block_for_an_undeformed_mesh_says_the_weights_are_lost(self):
+        line = rb.gf2_binding_line("Pasted", [])
+        self.assertIn("'Pasted' is not deformed by the armature in Mod/Armature, so Send would lose its "
+                      "weights", line)
 
 
 class _AlphaSocket:

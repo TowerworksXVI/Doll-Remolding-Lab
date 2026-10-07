@@ -78,6 +78,7 @@ internal static class BuildCompletionCache
             {
                 Add(part.MeshBundle);
                 Add(part.RendererBundle);
+                Add(part.Pose?.Bundle);
                 foreach (var tier in part.SiblingTiers ?? Array.Empty<RecipeTierSlot>())
                 {
                     Add(tier.MeshBundle);

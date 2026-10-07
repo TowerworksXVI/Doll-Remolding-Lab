@@ -249,6 +249,7 @@ public class PosedSiblingBoneTests : IDisposable
             "pool (vesna_body): c_vesna01_body_lod0, c_vesna01_mate_lod0 (anchor c_vesna01_body_lod0)");
         ModBuilderTests.AssertNoDuplicateSections(ini);
         ModBuilderTests.AssertEveryReferencedFileShips(ini, r.OutDir);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
         Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {Ib("sm.bundle", "c_vesna01_mate_lod0")}\nmatch_priority = 0\n", ini);
 
         // 3. the union carries the painted bone, and the compiled donor actually rides its slot
@@ -259,9 +260,7 @@ public class PosedSiblingBoneTests : IDisposable
         // past the target's own table: the slot exists only because the mate joined the pool
         Assert.True(slot >= BodyBones.Length);
         // the donor put two of its six vertices fully on that bone; both arrive, at their full weight.
-        // Counting rather than merely finding one is what separates this from a partial drop: an
-        // unresolved influence is zeroed and the survivors renormalized, which would still leave SOME
-        // vertex on the slot while silently deforming the rest.
+        // Counting rather than merely finding one is what shows every vertex painted there reached the slot.
         var riders = RidersOf(r.OutDir, "vesna_body", slot);
         Assert.Equal(2, riders.Verts);
         Assert.Equal(2.0, riders.Weight, 5);
@@ -283,6 +282,29 @@ public class PosedSiblingBoneTests : IDisposable
     }
 
     [Fact]
+    public void The_same_weight_refuses_with_its_reason_when_the_sibling_cannot_be_placed()
+    {
+        // Weight on a bone only the mate moves is carried into the body's space by the two parts' placements.
+        // With the mate's placement unreadable there is nothing to carry it by, and the build says so rather
+        // than taking the two to share a space.
+        var env = MakeEnv(matePoses: true) with
+        {
+            PlacementOf = (_, part, _) => part.SlotName.Contains("mate", StringComparison.Ordinal)
+                ? (null, "its skeleton can't be read")
+                : (System.Numerics.Matrix4x4.Identity, null),
+        };
+        var p = NewProject("PosedSiblingUnplaced");
+        WriteDonorGlb(BodyBones.Append(SiblingBone).ToArray());
+
+        var ex = Assert.Throws<Remold.Core.Project.AuthoredRefusalException>(
+            () => ReleasedBuild.Build(p, env, _out, zip: false));
+
+        Assert.Contains("the new mesh is weighted to bones only", ex.Message);
+        Assert.Contains("Remove those weights in Blender", ex.Message);
+        Assert.Contains(BuildLogDiagnostics.From(ex), d => d.Contains("its skeleton can't be read"));
+    }
+
+    [Fact]
     public void The_same_weight_refuses_when_the_sibling_only_tables_that_bone()
     {
         // The control for the test above: strip the mate's POSING of the bone and nothing else. The mate
@@ -298,6 +320,22 @@ public class PosedSiblingBoneTests : IDisposable
         Assert.Equal("the new mesh uses 1 bone(s) that no part of this item moves. They are named by "
             + "'c_vesna01_mate_lod0' but never moved. Re-weight the mesh onto the bones this item moves",
             ex.Message);
+    }
+
+    [Fact]
+    public void Weight_on_a_joint_with_no_bone_identity_refuses_naming_the_edit()
+    {
+        // A joint whose name carries no bone hash reads as hash 0, which the pool's bone gates skip: no part
+        // can own it. The compile then finds the weight on no bone of the union, and the build refuses
+        // under the edit's name rather than moving those vertices somewhere they were not painted.
+        var env = MakeEnv(matePoses: true);
+        var p = NewProject("UnnamedJoint");
+        WriteDonorGlb(BodyBones.Append(0u).ToArray());
+
+        var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
+
+        Assert.Equal("the mesh edit on 'c_vesna01_body_lod0' has 2 vertices weighted to 1 bone this item "
+            + "doesn't have. Open the edit in Blender, run Check Mesh, and send it again", ex.Message);
     }
 
     [Fact]

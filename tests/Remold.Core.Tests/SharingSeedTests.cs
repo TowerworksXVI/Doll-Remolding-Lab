@@ -678,7 +678,7 @@ public class SharingSeedTests : IDisposable
                     // the whole file is keyed to it
                     if (path == ".CatalogVersion") break;
                     strings++;
-                    Assert.Matches("^[0-9a-fA-F]*$", value.GetValue<string>());
+                    Assert.Matches("^(?:[0-9a-fA-F]*|[0-9a-fA-F]{8}_v0(?:[0-9a-fA-F]{8}|x)_v1(?:[0-9a-fA-F]{8}|x)_v2(?:[0-9a-fA-F]{8}|x))$", value.GetValue<string>());
                     break;
             }
         }

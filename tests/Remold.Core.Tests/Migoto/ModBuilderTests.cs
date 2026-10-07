@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -465,7 +465,7 @@ public class ModBuilderTests : IDisposable
         Assert.False(File.Exists(stale + ".len"), "and its recorded length with it");
         // what remains is this codec's own entry, published by the build that swept
         var kept = Assert.Single(Directory.GetFiles(caches.TextureDir, "*.dds"));
-        Assert.Contains("bc7-mips", Path.GetFileName(kept));
+        Assert.Contains("dds-mips", Path.GetFileName(kept));
     }
 
     [Fact]
@@ -760,18 +760,18 @@ public class ModBuilderTests : IDisposable
         var w1 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), MapSlot.From("n.dds")),
             albedoOnly, "Body", w1);
-        Assert.Contains("No original normal on 'Body' could be matched to a texture slot", Assert.Single(w1));
+        Assert.Contains("Couldn't apply the edited normal map on 'Body'", Assert.Single(w1));
 
         var normalOnly = new[] { new StockMapTag("aabbccdd", StockMapKind.Normal) };
         var w2 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), MapSlot.From("n.dds")),
             normalOnly, "Body", w2);
-        Assert.Contains("No original base color on 'Body' could be matched to a texture slot", Assert.Single(w2));
+        Assert.Contains("Couldn't apply the edited base color map on 'Body'", Assert.Single(w2));
 
         // RMO is its own kind, and warns on its own
         var w3 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(rmo: MapSlot.From("r.dds")), albedoOnly, "Body", w3);
-        Assert.Contains("No original RMO on 'Body' could be matched to a texture slot", Assert.Single(w3));
+        Assert.Contains("Couldn't apply the edited RMO map on 'Body'", Assert.Single(w3));
 
         // nothing bound of a kind is nothing to warn about
         var none = new List<string>();
@@ -779,25 +779,23 @@ public class ModBuilderTests : IDisposable
         Assert.Empty(none);
     }
 
-    /// <summary>The warning says which of the two it is. A map the modder authored is work that will not
-    /// show; a flat map the build put on an untouched slot only fails to blank it, and calling that "the
-    /// donor RMO" tells the modder they lost something they never made.</summary>
     [Fact]
-    public void The_unbindable_warning_separates_an_authored_map_from_a_defaulted_neutral()
+    public void A_missing_original_map_warns_for_an_edited_image_but_not_for_a_flat_default()
     {
         var albedoOnly = new[] { new StockMapTag("aabbccdd", StockMapKind.Albedo) };
 
         var authored = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), rmo: MapSlot.From("r.dds")),
             albedoOnly, "Body", authored);
-        Assert.Contains("the edited RMO won't show in game", Assert.Single(authored));
+        Assert.Contains("Couldn't apply the edited RMO map", Assert.Single(authored));
 
         var defaulted = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), rmo: MapSlot.Neutral),
             albedoOnly, "Body", defaulted);
-        var line = Assert.Single(defaulted);
-        Assert.Contains("the blank RMO won't show in game", line);
-        Assert.DoesNotContain("edited RMO", line);
+        Assert.Empty(defaulted);
+        ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), normal: MapSlot.Neutral),
+            albedoOnly, "Hair", defaulted);
+        Assert.Empty(defaulted);
     }
 
     [Fact]
@@ -830,7 +828,7 @@ public class ModBuilderTests : IDisposable
 
         // and the kind-level warning stays quiet, because the kind DID keep a tag — the whole point
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds")), tags, "vesna_body", warnings);
-        Assert.DoesNotContain(warnings, w => w.Contains("No original base color on 'Body' could be matched to a texture slot"));
+        Assert.DoesNotContain(warnings, w => w.Contains("Couldn't apply the edited base color map"));
     }
 
     [Fact]
@@ -864,8 +862,8 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\n{DrawGuard(ini, h0)}handling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\n{DrawGuard(ini, h1)}handling = skip", ini);
         Assert.DoesNotContain("[Constants]", ini);   // no retexture → no pass flags needed
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -929,9 +927,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {hm}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\n{DrawGuard(ini, h0)}handling = skip", ini);
+        Assert.Contains($"hash = {hm}\nmatch_priority = 0\n{DrawGuard(ini, hm)}handling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\n{DrawGuard(ini, h1)}handling = skip", ini);
         AssertNoDuplicateSections(ini);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -952,9 +950,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {hm}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\n{DrawGuard(ini, h0)}handling = skip", ini);
+        Assert.Contains($"hash = {hm}\nmatch_priority = 0\n{DrawGuard(ini, hm)}handling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\n{DrawGuard(ini, h1)}handling = skip", ini);
         AssertNoDuplicateSections(ini);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -980,7 +978,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain("$zz_pass", ini);
         Assert.DoesNotContain("match_first_index", ini);
         Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\n"
-            + $"hash = {_stockTexHash}\nmatch_priority = 0\nthis = Resource_Rtx0\n", ini);
+            + $"hash = {_stockTexHash}\nmatch_priority = 0\n{DrawGuard(ini, _stockTexHash)}this = Resource_Rtx0\n", ini);
         // the DDS is named for its SOURCE (one encode serves every stock texture it replaces)
         Assert.True(File.Exists(Path.Combine(r.OutDir, "rtx_skin_a.dds")));
 
@@ -1210,7 +1208,7 @@ public class ModBuilderTests : IDisposable
         // the first submesh binds that one resource and the second, wanting the same, rebinds nothing
         string list = ini[ini.IndexOf("[CommandListDraw_swap]", StringComparison.Ordinal)..];
         Assert.Equal(1, CountOf(list, "if $zz_slot_a == 0\nps-t0 = Resource_Tex0\nendif\n"));
-        Assert.Equal(2, CountOf(list, "drawindexed = "));
+        Assert.Equal(2, CountOf(list, "drawindexed"));
     }
 
     [Fact]
@@ -1261,6 +1259,21 @@ public class ModBuilderTests : IDisposable
     /// into the pool.</summary>
     private static readonly uint[] Belt1Bones = { 0x00000403, 0x00000404 };
     private static readonly uint[] Belt2Bones = { 0x00000405, 0x00000406 };
+
+    /// <summary>The skeleton's top bone, which no synthetic mesh carries.</summary>
+    private const uint SkeletonTop = 0x00000100;
+
+    /// <summary>The synthetic install with each pool mesh's renderer root chain stated, as a game install
+    /// reads it off the renderer: the body rooted at its first bone under the skeleton's top, the mate and
+    /// the cloth each rooted at their own first bone under the body's. A Replace whose pool takes rows from
+    /// another part then draws each copy from its own pose.</summary>
+    private static BuildEnv Rooted(BuildEnv env) => env with
+    {
+        RootChainFor = mesh => mesh.Contains("_body", StringComparison.Ordinal) ? new[] { BodyBones[0], SkeletonTop }
+            : mesh.Contains("_mate", StringComparison.Ordinal) ? new[] { MateBones[0], BodyBones[0], SkeletonTop }
+            : mesh.Contains("_cloth", StringComparison.Ordinal) ? new[] { ClothBones[0], BodyBones[0], SkeletonTop }
+            : null,
+    };
 
     /// <summary>The accessory part's bone table (see <c>narrowAccessory</c>): the body's FIRST bone and
     /// nothing else. One influence per vertex means it rides that bone at weight 1 on all of them, which
@@ -1368,7 +1381,12 @@ public class ModBuilderTests : IDisposable
     /// mechanism — fully readable and donor-ridden, and the game's own dorm or lobby logic decides
     /// whether it draws.
     /// <paramref name="bodySharedMaterial"/> adds a second material to the body which binds the body's
-    /// base colour, so that texture cannot identify either material's draw.
+    /// base colour, so that texture cannot identify either material's draw; <paramref name="bodyOtherOwnAlbedo"/>
+    /// gives that second material a base colour of its own instead. <paramref name="bodyRepeatLastSubmesh"/>
+    /// adds a submesh over the body lod0's last range again, so two of its materials draw the same faces.
+    /// <paramref name="bodyTierMaterialsUnread"/> leaves the body's lower tier without a material list, as a
+    /// tier the install could not read is. <paramref name="sharedBodyOwnAlbedo"/> gives the second outfit's
+    /// body and cape materials of their own, with a base colour no part of the first outfit binds.
     /// <paramref name="wardrobe"/> adds two options of ONE wardrobe slot whose meshes share an index
     /// buffer, stream-1 bytes and base color — nothing at the draw parts them — each married to a
     /// companion mesh of its own; <see cref="WardrobeWorld"/>'s knobs shape the companions and extra
@@ -1390,7 +1408,11 @@ public class ModBuilderTests : IDisposable
         SubjectSkeleton? skeleton = null, bool bodyBlendOnly = false,
         bool bodySharedMaterialOwnBlend = false, bool poolMateFirst = false, int mateTierBlendShapes = 0,
         bool sharedGenericProperties = false, string midTierLod = "lodm1", int midTierVerts = 28,
-        int midTierPosSeed = 11, string mateTierLod = "lod1")
+        int midTierPosSeed = 11, string mateTierLod = "lod1", bool sameTokenOutfit = false, uint[]? twinPartBones = null,
+        bool twinPartBare = false, bool bodyAliasPart = false, bool twinPartUvOnly = false, bool bodyZTier = false,
+        bool mateSharesBodyLod1 = false, bool sharedBodyOutfit = false, int[]? bodySubmeshes = null,
+        int[]? bodyTierSubmeshes = null, bool bodyTierMaterialsReversed = false, bool bodyOtherOwnAlbedo = false,
+        bool bodyRepeatLastSubmesh = false, bool bodyTierMaterialsUnread = false, bool sharedBodyOwnAlbedo = false)
     {
         string b0 = Path.Combine(_root, "s0.bundle");
         string b1 = Path.Combine(_root, "s1.bundle");
@@ -1398,9 +1420,11 @@ public class ModBuilderTests : IDisposable
         string bn = Path.Combine(_root, "sn.bundle");
         SyntheticBundle.BuildOneSkinnedMesh(b0, $"c_vesna01_body_lod0{meshTail}", Cloud(32, 5), WrappedTris(32), BodyBones,
             blendShapes: bodyBlendShapes, skinWidth: bodySkinWidth, tabledOnlyBones: bodyTabledOnly,
-            extraSkinChannel: bodySharedSkinStream);
+            extraSkinChannel: bodySharedSkinStream, submeshIndexCounts: bodySubmeshes,
+            repeatLastSubmesh: bodyRepeatLastSubmesh);
         SyntheticBundle.BuildOneSkinnedMesh(b1, $"c_vesna01_body_lod1{meshTail}", Cloud(24, 9), WrappedTris(24),
-            bodyTierBones ?? BodyBones, tabledOnlyBones: bodyTierTabledOnly);
+            bodyTierBones ?? BodyBones, tabledOnlyBones: bodyTierTabledOnly,
+            submeshIndexCounts: bodyTierSubmeshes);
         SyntheticBundle.BuildOneTexture(bt, "tex_body_d", 8, 8, 200, 100, 50, 255, colorSpace: 1);
         SyntheticBundle.BuildOneTexture(bn, "tex_body_n", 8, 8, 128, 128, 255, 255, colorSpace: 0);
         string br = Path.Combine(_root, "sr.bundle");
@@ -1415,13 +1439,21 @@ public class ModBuilderTests : IDisposable
         };
         _stockTexHash = SyntheticBundle.StockTexHash(bytes["bundleT"], "tex_body_d");
 
-        if (twinPartOwnAlbedo || clothOwnAlbedo || mateOwnAlbedo || wardrobe is { Mixed: true })
+        if (twinPartOwnAlbedo || clothOwnAlbedo || mateOwnAlbedo || sharedBodyOwnAlbedo
+            || wardrobe is { Mixed: true })
         {
             // a second stock base color, so a part can bind one no other part of the roster does
             string balt = Path.Combine(_root, "salt.bundle");
             SyntheticBundle.BuildOneTexture(balt, "tex_alt_d", 8, 8, 20, 210, 90, 255, colorSpace: 1);
             bytes["bundleAlt"] = File.ReadAllBytes(balt);
             _altTexHash = SyntheticBundle.StockTexHash(bytes["bundleAlt"], "tex_alt_d");
+        }
+
+        if (bodyOtherOwnAlbedo)
+        {
+            string bother = Path.Combine(_root, "sother.bundle");
+            SyntheticBundle.BuildOneTexture(bother, "tex_other_d", 8, 8, 70, 30, 160, 255, colorSpace: 1);
+            bytes["bundleOther"] = File.ReadAllBytes(bother);
         }
 
         if (anchorBlend || bodySharedMaterialOwnBlend)
@@ -1469,7 +1501,11 @@ public class ModBuilderTests : IDisposable
         {
             var sharedMaps = bodyBlendOnly
                 ? new List<SubjectMap>()
-                : new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") };
+                : new List<SubjectMap>
+                {
+                    bodyOtherOwnAlbedo ? new("_BaseMap", "tex_other_d", "bundleOther")
+                        : new("_BaseMap", "tex_body_d", "bundleT"),
+                };
             if (bodySharedMaterialOwnBlend)
                 sharedMaps.Add(new SubjectMap("_BlendTex", "tex_other_blend", "bundleBlendOther"));
             materials.Add(new SubjectMaterial("m_body_other", 2, "cab-body-other", sharedMaps));
@@ -1486,7 +1522,26 @@ public class ModBuilderTests : IDisposable
             bodyTiers.Add(new RecipeTierSlot(midName, "addr_body_mid"));
             addresses["addr_body_mid"] = "bundleMid";
         }
-        bodyTiers.Add(new RecipeTierSlot($"c_vesna01_body_lod1{meshTail}", "addr_body_l1"));
+        // A lower tier with sections of its own lists its materials as the prefab does, by identity, and
+        // the game may order them differently from lod0's.
+        // Stated as the exact install below states the materials (bundle0 where the fixture names none).
+        var bodyTierMaterials = bodyTierSubmeshes is null || bodyTierMaterialsUnread ? null
+            : materials.Select(material => new TierMaterialRef(material.Bundle ?? "bundle0", material.PathId,
+                true)).ToList();
+        if (bodyTierMaterialsReversed) bodyTierMaterials?.Reverse();
+        bodyTiers.Add(new RecipeTierSlot($"c_vesna01_body_lod1{meshTail}", "addr_body_l1",
+            Materials: bodyTierMaterials));
+        if (bodyZTier)
+        {
+            // a further tier of the body on its lod1's index buffer, bones and UVs — the same draw selector
+            // as the lod1 with different geometry
+            string bz = Path.Combine(_root, "sz.bundle");
+            SyntheticBundle.BuildOneSkinnedMesh(bz, "c_vesna01_body_lod2", Cloud(24, 37), WrappedTris(24),
+                bodyTierBones ?? BodyBones, tabledOnlyBones: bodyTierTabledOnly);
+            bytes["bundleZ"] = File.ReadAllBytes(bz);
+            bodyTiers.Add(new RecipeTierSlot("c_vesna01_body_lod2", "addr_body_z"));
+            addresses["addr_body_z"] = "bundleZ";
+        }
         var parts = new List<SubjectPart>
         {
             new("body", $"c_vesna01_body_lod0{meshTail}", "addr_body", materials,
@@ -1500,8 +1555,18 @@ public class ModBuilderTests : IDisposable
             // its own gives it different GEOMETRY on one index buffer, which nothing but the bound
             // textures separates.
             string b2 = Path.Combine(_root, "s2.bundle");
-            SyntheticBundle.BuildOneSkinnedMesh(b2, "c_vesna01_body2_lod0", Cloud(32, twinPartPosSeed),
-                WrappedTris(32), TwinBones, uvSeed: twinPartUvSeed);
+            // twinPartBare ships the twin with its position stream ALONE — the same index buffer, but a
+            // draw binding neither a stream-1 nor a stream-2 buffer
+            if (twinPartBare)
+                SyntheticBundle.BuildOneMesh(b2, "c_vesna01_body2_lod0", Cloud(32, twinPartPosSeed), WrappedTris(32));
+            // twinPartUvOnly ships it with the body's exact colour/UV stream and no skin stream: the same
+            // index buffer and the same stream-1 bytes, binding nothing at stream 2
+            else if (twinPartUvOnly)
+                SyntheticBundle.BuildOneMesh(b2, "c_vesna01_body2_lod0", Cloud(32, twinPartPosSeed), WrappedTris(32),
+                    uvStream: true);
+            else
+                SyntheticBundle.BuildOneSkinnedMesh(b2, "c_vesna01_body2_lod0", Cloud(32, twinPartPosSeed),
+                    WrappedTris(32), twinPartBones ?? TwinBones, uvSeed: twinPartUvSeed);
             bytes["bundle2"] = File.ReadAllBytes(b2);
             var twinMaps = new List<SubjectMap>();
             // one texture is a base colour to one material and a shading curve to another: this part wears
@@ -1514,6 +1579,10 @@ public class ModBuilderTests : IDisposable
                 CastsShadows: !twinPartShadowOff, Visibility: twinPartVisibility));
             addresses["addr_body2"] = "bundle2";
         }
+        // a second part naming the body's own mesh: one mesh reached through two parts
+        if (bodyAliasPart)
+            parts.Add(new SubjectPart("bodyalias", $"c_vesna01_body_lod0{meshTail}", "addr_body", materials,
+                SiblingTiers: bodyTiers.ToArray()));
         if (clothWearer)
         {
             // bones the donor never rides keep it out of the pool; the material wears the SAME stock
@@ -1600,6 +1669,8 @@ public class ModBuilderTests : IDisposable
             SyntheticBundle.BuildOneSkinnedMesh(bm, "c_vesna01_mate_lod0", Cloud(20, 17), WrappedTris(20), MateBones);
             bytes["bundleM"] = File.ReadAllBytes(bm);
             var mateTiers = new List<RecipeTierSlot>();
+            // the mate lists the body's own lod1 as a tier of its own: one mesh reached through two parts
+            if (mateSharesBodyLod1) mateTiers.Add(new RecipeTierSlot($"c_vesna01_body_lod1{meshTail}", "addr_body_l1"));
             if (mateTierTwin)
             {
                 // the body lod1's vertex count, so the two tiers hand the swap one index buffer
@@ -1727,6 +1798,57 @@ public class ModBuilderTests : IDisposable
         var model = new SubjectModel("Vesna", "VesnaSSR01", SubjectSource.Prefab, parts.ToArray(),
             Skeleton: skeleton, Problems: Array.Empty<string>());
 
+        // A SECOND outfit of the SAME character carrying the first outfit's slot name over a mesh of its
+        // own: a roster can reuse another outfit's slot name without reusing its mesh. Same character,
+        // same part token, same mesh name, different geometry in a bundle of its own.
+        SubjectModel? sameTokenModel = null;
+        if (sameTokenOutfit)
+        {
+            string bsame = Path.Combine(_root, "ssametoken.bundle");
+            SyntheticBundle.BuildOneSkinnedMesh(bsame, $"c_vesna01_body_lod0{meshTail}",
+                Cloud(20, 21), WrappedTris(20), BodyBones);
+            bytes["bundleSameToken"] = File.ReadAllBytes(bsame);
+            addresses["addr_body_same"] = "bundleSameToken";
+            sameTokenModel = new SubjectModel("Vesna", "VesnaAlt", SubjectSource.Prefab, new[]
+            {
+                new SubjectPart("body", $"c_vesna01_body_lod0{meshTail}", "addr_body_same",
+                    new[]
+                    {
+                        new SubjectMaterial("m_body", 1, "cab-body-same",
+                            new List<SubjectMap> { new("_BaseMap", "tex_body_d", "bundleT") }),
+                    }),
+            }, Skeleton: skeleton, Problems: Array.Empty<string>());
+        }
+
+        // A SECOND outfit wearing the first outfit's body lod0 itself — the same address, so the same mesh
+        // and the same draw — beside a cape of its own that no other outfit draws, which is what lets a
+        // measured sharing index witness it on screen.
+        if (sharedBodyOutfit)
+        {
+            string bcape = Path.Combine(_root, "scape.bundle");
+            SyntheticBundle.BuildOneSkinnedMesh(bcape, "c_vesna01_cape_lod0", Cloud(20, 31), WrappedTris(20),
+                BodyBones);
+            bytes["bundleCape"] = File.ReadAllBytes(bcape);
+            addresses["addr_cape"] = "bundleCape";
+            sameTokenModel = new SubjectModel("Vesna", "VesnaAlt", SubjectSource.Prefab, new[]
+            {
+                new SubjectPart("body", $"c_vesna01_body_lod0{meshTail}", "addr_body", sharedBodyOwnAlbedo
+                    ? new[]
+                    {
+                        new SubjectMaterial("m_body_alt", 1, "cab-body-alt",
+                            new List<SubjectMap> { new("_BaseMap", "tex_alt_d", "bundleAlt") }),
+                    }
+                    : materials),
+                new SubjectPart("cape", "c_vesna01_cape_lod0", "addr_cape", sharedBodyOwnAlbedo
+                    ? new[]
+                    {
+                        new SubjectMaterial("m_cape_alt", 1, "cab-cape-alt",
+                            new List<SubjectMap> { new("_BaseMap", "tex_alt_d", "bundleAlt") }),
+                    }
+                    : materials),
+            }, Skeleton: skeleton, Problems: Array.Empty<string>());
+        }
+
         // A SECOND outfit, the one a cross-outfit graft's geometry came from. Two parts, each with its own
         // base colour and its own toon ramp, so a build that carried one part's ramp onto the other would
         // show. Its meshes are never read — only the material model is, which is all the ramp join needs.
@@ -1771,6 +1893,7 @@ public class ModBuilderTests : IDisposable
 
         return new BuildEnv(
             (c, s) => c == "Vesna" && s == "VesnaSSR01" ? model
+                : c == "Vesna" && s == "VesnaAlt" ? sameTokenModel
                 : c == "Paloma" && s == "PalomaAA01" ? donorModel : null,
             a => addresses.GetValueOrDefault(a),
             id => bytes.GetValueOrDefault(id),
@@ -1778,12 +1901,11 @@ public class ModBuilderTests : IDisposable
             AppVersion: "test-1.0").Exact();
     }
 
-    /// <summary>Two different parts whose picked materials share one effect overlay. Each part also has a
-    /// sibling material wearing the same base colour, leaving the shared blend map as the picked material's
-    /// only discriminator within that part.</summary>
-    private BuildEnv MakeSharedBlendRampPicksEnv()
+    /// <summary>Two different parts whose materials wear the same base colour and each shade with a toon ramp
+    /// of their own.</summary>
+    private BuildEnv MakeTwoRampPicksEnv()
     {
-        var env = MakeSkinnedEnv(anchorRamp: true, anchorBlend: true, clothWearer: true);
+        var env = MakeSkinnedEnv(anchorRamp: true, clothWearer: true);
         string clothRampPath = Path.Combine(_root, "scloth_ramp.bundle");
         SyntheticBundle.Build(clothRampPath, null, new SyntheticBundle.TextureSpec("tex_cloth_ramp",
             ModBuilder.RampWidth, ModBuilder.RampHeight,
@@ -1792,36 +1914,17 @@ public class ModBuilderTests : IDisposable
         byte[] clothRampBytes = File.ReadAllBytes(clothRampPath);
 
         var model = Assert.IsType<SubjectModel>(env.ResolveSubject("Vesna", "VesnaSSR01"));
-        var body = model.Parts.Single(part => part.Token == "body");
         var cloth = model.Parts.Single(part => part.Token == "cloth");
-        var bodyMaterial = Assert.Single(body.Materials);
         var clothMaterial = Assert.Single(cloth.Materials);
-        var bodyBase = bodyMaterial.Maps.Single(map => MaterialResolver.IsBaseColor(map.Slot));
-        var sharedBlend = bodyMaterial.Maps.Single(map => MaterialResolver.IsBlend(map.Slot));
-        var clothBase = clothMaterial.Maps.Single(map => MaterialResolver.IsBaseColor(map.Slot));
         var clothRamp = new SubjectMap("_RampMap", "tex_cloth_ramp", "bundleClothRamp");
         var shaped = model with
         {
-            Parts = model.Parts.Select(part => part.Token switch
-            {
-                "body" => part with
+            Parts = model.Parts.Select(part => part.Token == "cloth"
+                ? part with
                 {
-                    Materials = new[]
-                    {
-                        bodyMaterial,
-                        new SubjectMaterial("m_body_other", 0, "cab-body-other", new[] { bodyBase }),
-                    },
-                },
-                "cloth" => part with
-                {
-                    Materials = new[]
-                    {
-                        clothMaterial with { Maps = new[] { clothBase, sharedBlend, clothRamp } },
-                        new SubjectMaterial("m_cloth_other", 0, "cab-cloth-other", new[] { clothBase }),
-                    },
-                },
-                _ => part,
-            }).ToArray(),
+                    Materials = new[] { clothMaterial with { Maps = clothMaterial.Maps.Append(clothRamp).ToArray() } },
+                }
+                : part).ToArray(),
         };
         var resolve = env.ResolveSubject;
         var deobfuscate = env.Deobfuscate;
@@ -1867,7 +1970,7 @@ public class ModBuilderTests : IDisposable
     /// two submeshes over one vertex pool. <paramref name="rotate"/> bakes a scene-rest rotation into
     /// the geometry — the shape a workspace glb has over a prefab body's uprighting.</summary>
     private void WriteDonorGlb(string file = "donor.glb", uint[]? bones = null,
-        System.Numerics.Matrix4x4? rotate = null)
+        System.Numerics.Matrix4x4? rotate = null, System.Numerics.Vector3? centre = null)
     {
         var boneSet = bones ?? BodyBones;
         const int verts = 6;
@@ -1893,6 +1996,7 @@ public class ModBuilderTests : IDisposable
             Submeshes = new List<int[]> { new[] { 0, 1, 2 }, new[] { 3, 4, 5 } },
         };
         if (rotate is { } g) mesh = RestBake.Apply(mesh, g);
+        if (centre is { } c) mesh = RestBake.Shift(mesh, c);
         var skin = new MeshSkin
         {
             BoneHashes = boneSet,
@@ -2325,12 +2429,12 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        // the material is sighted by its own base colour, and the ramp says which register holds one
-        Assert.Contains($"filter_index = {MigotoEmitter.RetexTag(_stockTexHash)}", ini);
+        // the material's own draw at each tier says which material is drawing, and the ramp says which
+        // register holds one; no other map of the material is tagged
+        Assert.DoesNotContain($"filter_index = {MigotoEmitter.RetexTag(_stockTexHash)}", ini);
         Assert.Contains($"filter_index = {MigotoEmitter.FilterRamp}", ini);
-        Assert.Contains("$zz_srm = 0\n", ini);
-        Assert.Contains("$zz_slot_rm = -1\n", ini);
-        Assert.Contains("if $zz_srm == 1\n", ini);
+        Assert.Contains("if first_index == 0\nif index_count == 96\n$zz_slot_rm = -1\n", ini);
+        Assert.Contains("if first_index == 0\nif index_count == 72\n$zz_slot_rm = -1\n", ini);
         // one section per rendered tier of the part, and the picked bytes ship verbatim
         Assert.Equal(2, CountOf(ini, "[TextureOverride_RetexScope_"));
         var shipped = Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
@@ -2485,6 +2589,7 @@ public class ModBuilderTests : IDisposable
             StringComparison.Ordinal)).ToList();
         Assert.Equal(2, patchOutputs.Count);
         Assert.Single(patchOutputs.Select(output => output.Artifact.FunctionalIdentity).Distinct());
+        Assert.All(patchOutputs, output => Assert.Null(output.Artifact.File));
 
         var result = ModBuilder.Build(AuthoredBuildExecution.Create(project, plan), env, _out,
             zip: false);
@@ -2498,8 +2603,9 @@ public class ModBuilderTests : IDisposable
             Assert.Equal(2, CountOf(draw, $"$zz_material_ps_{suffix}_s0 = ps"));
             Assert.Contains($"Resource_MaterialSource_{suffix}_s0", ini);
         }
-        Assert.Equal(2, Directory.GetFiles(result.OutDir, "material_patch_*.hlsl",
+        Assert.Equal(2, Directory.GetFiles(result.OutDir, "material_pass_*.hlsl",
             SearchOption.AllDirectories).Length);
+        Assert.Empty(Directory.GetFiles(result.OutDir, "material_patch_*.hlsl", SearchOption.AllDirectories));
 
         void Author(TargetPart target)
         {
@@ -2509,6 +2615,531 @@ public class ModBuilderTests : IDisposable
                 MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
             session.ChooseMaterialValue(edit, slot, "0");
         }
+    }
+
+    [Fact]
+    public void Effect_disables_share_numeric_patch_gates_and_restore_draw_resources()
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv());
+        var legacy = NewProject("Material effects");
+        WriteDonorGlb();
+        AddReplaceTarget(legacy);
+        var resolver = new LegacyProjectResolver(env);
+        var adaptation = LegacyProjectAdapter.Adapt(legacy, resolver.ResolvePart);
+        Assert.True(adaptation.Report.CanSave);
+        var session = new AuthoredEditSession(adaptation.Project);
+        session.SetRootDir(_proj);
+        var target = Slot("c_vesna01_body_lod0");
+        string edit = session.Snapshot().EditDefinitions.Single().Id;
+        string valueSlot = session.EnsureMaterialValueSlot(target, 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, valueSlot, "0");
+        string dormantValue = session.EnsureMaterialValueSlot(target, 0,
+            "_DetailAlbedoIntensity", resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, dormantValue, "0.75");
+        string dormantSource = session.EnsureMaterialValueSlot(target, 0,
+            "_DetailNormalIntensity", resolver.ResolvePart);
+        string sourceEdit = session.DuplicateEdit(edit);
+        session.ChooseMaterialValue(sourceEdit, dormantSource, "0.6");
+        session.ChooseSourceSlot(edit, dormantSource, dormantSource, sourceEdit);
+        string unusedValue = session.EnsureMaterialValueSlot(target, 0,
+            "_DetailRMIntensity", resolver.ResolvePart);
+        session.ChooseMaterialValue(sourceEdit, unusedValue, "0.9");
+        var project = session.Snapshot();
+        project.EditDefinitions.Single(candidate => candidate.Id == edit).DisabledMaterialEffects = new()
+        {
+            new DisabledMaterialEffect(0, "detail"), new DisabledMaterialEffect(0, "outline"),
+        };
+        const string colorHash = "0123456789abcdef", outlineHash = "123456789abcdef0";
+        var programs = new[]
+        {
+            new MaterialEffectOperation("detail", new[] { colorHash },
+                new[] { new MaterialEffectBufferPatch(2, 592, new[]
+                { new MaterialPatchWrite("_DetailAlbedoIntensity", 568, 0) }) },
+                new[] { new MaterialEffectTexture(4, 1, 0, 0, 1) }),
+            new MaterialEffectOperation("outline", new[] { outlineHash }, Array.Empty<MaterialEffectBufferPatch>(),
+                Array.Empty<MaterialEffectTexture>(), true),
+        };
+        var backend = new ProductionAuthoredBuildBackend(resolver.ResolvePart, _ =>
+            new MaterialRenderEvidence("material-family", new[] { colorHash }, 4_900_001,
+                MaterialValueCatalog.UnityPerMaterial592, new[]
+                {
+                    new BuildMaterialValueField(MaterialValueSemantics.UseGiFlatten, 2, 492,
+                        "the reflected field matches the material buffer"),
+                }, "exact material program"), effectEvidence: _ => programs);
+        var plan = AuthoredBuildPlanner.Plan(project, backend);
+        Assert.True(plan.CanBuild, string.Join("; ", plan.Conflicts.Concat(plan.Diagnostics)));
+        Assert.Equal(2, plan.RuntimeEmissions.Count(emission => emission.Emission.Kind == BuildEmissionKind.MaterialEffect));
+
+        var result = ModBuilder.Build(AuthoredBuildExecution.Create(project, plan), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.Equal(1, CountOf(ini, "[ShaderOverride_MaterialPass_" + colorHash + "]"));
+        // the value edit's family is exactly the colour program, so its class keeps the family value;
+        // the outline program's class derives its own
+        Assert.Contains("hash = " + colorHash + "\nfilter_index = 4900001", ini);
+        int outlineFilter = DerivedMaterialEvidence.FamilyFilterValue(new[] { outlineHash });
+        Assert.Contains("hash = " + outlineHash + "\nfilter_index = " + outlineFilter, ini);
+        string draw = IniSection(ini, "[CommandListDraw_vesna_body]");
+        string color = outlineFilter < 4_900_001 ? "vesna_body_s0_c1" : "vesna_body_s0_c0";
+        string outline = outlineFilter < 4_900_001 ? "vesna_body_s0_c0" : "vesna_body_s0_c1";
+        Assert.Contains($"if $zz_material_ps_{outline} != {outlineFilter}", draw);
+        Assert.Contains($"run = CustomShader_MaterialPatch_{color}\n", draw);
+        Assert.Contains($"Resource_MaterialDraw_{color} = copy Resource_MaterialTarget_{color}\n", draw);
+        Assert.Contains($"Resource_MaterialTextureSave_{color}_4 = ref ps-t4", draw);
+        Assert.Contains($"ps-t4 = ref Resource_MaterialTextureSave_{color}_4", draw);
+        Assert.Contains($"ps-cb2 = Resource_MaterialSource_{color}", draw);
+        Assert.True(draw.IndexOf($"ps-t4 = Resource_MaterialTexture_{color}_4", StringComparison.Ordinal)
+            < draw.IndexOf("drawindexed", StringComparison.Ordinal));
+        Assert.True(draw.IndexOf("drawindexed", StringComparison.Ordinal)
+            < draw.IndexOf($"ps-t4 = ref Resource_MaterialTextureSave_{color}_4", StringComparison.Ordinal));
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, File.ReadAllBytes(Path.Combine(result.OutDir,
+            "effect_neutral_1001.dds"))[^4..]);
+        Assert.Contains("    if (e == 35u) { v.z = 0x00000000u; }\n",
+            File.ReadAllText(Path.Combine(result.OutDir, "generated", $"material_pass_{color}.hlsl")));
+        Assert.DoesNotContain("cs-u0", ini);
+
+        var repair = RepairData.Read(result.OutDir);
+        var intent = Assert.Single(repair.Changes).Intent!;
+        Assert.Equal(new[] { "detail", "outline" },
+            intent.DisabledMaterialEffects!.Select(effect => effect.EffectId));
+        Assert.DoesNotContain(intent.Bindings, binding => binding.Semantic?.StartsWith("effect:") == true);
+        var retainedValue = Assert.Single(intent.Bindings, binding => binding.SlotId == dormantValue);
+        Assert.Equal("inactive", retainedValue.EffectiveKind);
+        Assert.Empty(retainedValue.EmissionIds);
+        Assert.Equal("0.75", repair.IntentAssets!.Single(asset =>
+            asset.Id == retainedValue.RequestedProjectAssetId).Value!.Value);
+        var retainedSource = Assert.Single(intent.Bindings, binding => binding.SlotId == dormantSource);
+        Assert.Equal("source_slot", retainedSource.RequestedKind);
+        Assert.Equal(dormantSource, retainedSource.RequestedSourceSlot!.SlotId);
+        Assert.Equal(sourceEdit, retainedSource.RequestedSourceSlot.EditDefinitionId);
+        var sourceIdentity = Assert.Single(intent.RetainedMaterialSources!);
+        Assert.Equal(dormantSource, sourceIdentity.AuthoredSlot!.Id);
+        Assert.Equal("_DetailNormalIntensity", sourceIdentity.AuthoredSlot.Semantic);
+        Assert.Equal(target.RendererSlot, sourceIdentity.AuthoredSlot.Part.RendererSlot);
+        Assert.Equal(project.TargetSlots.Single(slot => slot.Id == dormantSource).Material!.PathId,
+            sourceIdentity.AuthoredSlot.Material!.PathId);
+        Assert.Equal("0.6", repair.IntentAssets!.Single(asset =>
+            asset.Id == sourceIdentity.AuthoredBinding!.ProjectAssetId).Value!.Value);
+        Assert.DoesNotContain(repair.IntentAssets!, asset => asset.Value?.Value == "0.9");
+    }
+
+    // ---- shading changed on a part this mod does NOT replace ------------------------------------------
+    // The changes apply at the game's own draw of the material, at every tier, in the section the part's
+    // mesh owns.
+
+    /// <summary>A project holding one content edit on the body and no mesh replacement, made the way the Edit
+    /// page makes it.</summary>
+    private (AuthoredEditSession Session, string Edit, LegacyProjectResolver Resolver) StockShadingProject(
+        BuildEnv env)
+    {
+        var resolver = new LegacyProjectResolver(env);
+        var target = Slot("c_vesna01_body_lod0");
+        var session = new AuthoredEditSession(new AuthoredProject
+        {
+            RootDir = _proj, TransportRoot = Path.Combine(_proj, "round-trips"),
+        });
+        session.SetWorkspaceIndex(new AuthoredWorkspaceIndex
+        {
+            Selection = new List<SelectionEntry> { new() { Character = target.Subject, Outfit = target.Outfit } },
+        });
+        session.EnsurePartSlots(target, resolver.ResolvePart);
+        return (session, session.CreateEdit(target), resolver);
+    }
+
+    private static MaterialRenderEvidence ColorProgramEvidence() => new("proved-material-family",
+        new[] { "45dbffd6cb513d80" }, 4978303, MaterialValueCatalog.UnityPerMaterial544,
+        new[]
+        {
+            new BuildMaterialValueField(MaterialValueSemantics.UseGiFlatten, 2, 492,
+                "the reflected field matches the active material layout"),
+        },
+        "the active shader family proves the material field and carrier layout");
+
+    private static AuthoredBuildPlan PlanFor(AuthoredProject project, LegacyProjectResolver resolver,
+        Func<TargetSlot, IReadOnlyList<MaterialEffectOperation>?>? effects = null)
+    {
+        var plan = AuthoredBuildPlanner.Plan(project, new ProductionAuthoredBuildBackend(resolver.ResolvePart,
+            _ => ColorProgramEvidence(), effectEvidence: effects));
+        Assert.True(plan.CanBuild, string.Join("; ", plan.Conflicts.Concat(plan.Bindings
+            .Where(binding => binding.Decision.BlocksBuild).Select(binding => binding.Decision.Reason))));
+        return plan;
+    }
+
+    [Fact]
+    public void A_shading_value_on_an_unreplaced_part_applies_at_its_own_draws()
+    {
+        var env = MakeSkinnedEnv();
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.Contains("[ShaderOverride_MaterialPass_45dbffd6cb513d80]\nhash = 45dbffd6cb513d80\n"
+            + "filter_index = 4978303\n", ini);
+        string lod0 = IniSection(ini, "[TextureOverride_RetexScope_sd_vesna_body_lod0_m0]");
+        Assert.Contains($"hash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\n", lod0);
+        Assert.Contains("if first_index == 0\nif index_count == 96\n", lod0);
+        Assert.Contains("ps-cb2 = Resource_MaterialDraw_sd_vesna_body_lod0_m0_s0\n", lod0);
+        Assert.Contains("if $zz_bcb_sd_vesna_body_lod0_m0_s0 == 1\n"
+            + "post ps-cb2 = Resource_MaterialSource_sd_vesna_body_lod0_m0_s0\nendif\n", lod0);
+        string lod1 = IniSection(ini, "[TextureOverride_RetexScope_sd_vesna_body_lod1_m0]");
+        Assert.Contains($"hash = {SkinnedIb("s1.bundle", "c_vesna01_body_lod1")}\n", lod1);
+        Assert.Contains("if first_index == 0\nif index_count == 72\n", lod1);
+        Assert.True(File.Exists(Path.Combine(r.OutDir, "generated", "material_pass_sd_vesna_body_lod0_m0_s0.hlsl")));
+        Assert.Empty(Directory.GetFiles(r.OutDir, "material_patch_*.hlsl", SearchOption.AllDirectories));
+        Assert.Empty(r.Warnings);
+
+        // the repair record carries the edit, and the sidecar every mesh it acts at
+        var repair = RepairData.Read(r.OutDir);
+        var record = Assert.Single(repair.StockMaterials!);
+        Assert.Equal("c_vesna01_body_lod0", record.Mesh);
+        Assert.Equal(edit, record.Intent!.EditDefinitionId);
+        Assert.Contains(record.Intent.Bindings, binding => binding.SlotId == slot);
+        Assert.Equal("Vesna", Assert.Single(repair.Subjects).Character);
+        using var sidecar = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
+        var hashes = sidecar.RootElement.GetProperty("override_hashes").EnumerateArray()
+            .Select(hash => hash.GetString()).ToList();
+        Assert.Contains(SkinnedIb("s0.bundle", "c_vesna01_body_lod0"), hashes);
+        Assert.Contains(SkinnedIb("s1.bundle", "c_vesna01_body_lod1"), hashes);
+    }
+
+    /// <summary>A shading value on the second of two materials that share every map: the lod0 draw is its own
+    /// section of the mesh, and the lower tier, which lists the two in the other order, is read by material
+    /// identity.</summary>
+    [Fact]
+    public void A_shading_value_on_one_of_two_sibling_materials_applies_at_that_materials_draw_only()
+    {
+        var env = MakeSkinnedEnv(bodySharedMaterial: true, bodySubmeshes: new[] { 48, 48 },
+            bodyTierSubmeshes: new[] { 24, 48 }, bodyTierMaterialsReversed: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 1,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string lod0 = IniSection(ini, "[TextureOverride_RetexScope_sd_vesna_body_lod0_m1]");
+        Assert.Contains("if first_index == 48\nif index_count == 48\n", lod0);
+        Assert.DoesNotContain("if first_index == 0\n", lod0);
+        string lod1 = IniSection(ini, "[TextureOverride_RetexScope_sd_vesna_body_lod1_m1]");
+        Assert.Contains("if first_index == 0\nif index_count == 24\n", lod1);
+        Assert.DoesNotContain("if first_index == 24\n", lod1);
+        Assert.Empty(r.Warnings);
+    }
+
+    /// <summary>A part whose two materials draw over the same faces cannot keep a shading change to one of
+    /// them, so the plan blocks the edit with the reason rather than changing both.</summary>
+    [Fact]
+    public void A_shading_value_on_a_material_drawn_over_a_siblings_faces_blocks_the_plan()
+    {
+        var env = MakeSkinnedEnv(bodySharedMaterial: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 1,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+
+        var plan = AuthoredBuildPlanner.Plan(session.Snapshot(), new ProductionAuthoredBuildBackend(
+            resolver.ResolvePart, _ => ColorProgramEvidence()));
+
+        Assert.False(plan.CanBuild);
+        var blocked = Assert.Single(plan.Bindings, binding => binding.Decision.BlocksBuild);
+        Assert.Equal(slot, blocked.AuthoredSlot.Id);
+        Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, blocked.Decision.Reason);
+    }
+
+    /// <summary>Effect disables on an unreplaced part: the outline pass's draw of the material is skipped, and
+    /// the detail layer's neutral texture and buffer patch run at the colour pass's draw.</summary>
+    [Fact]
+    public void Effect_disables_on_an_unreplaced_part_act_at_its_own_draws()
+    {
+        var env = MakeSkinnedEnv();
+        var (session, edit, resolver) = StockShadingProject(env);
+        var project = session.Snapshot();
+        project.EditDefinitions.Single(candidate => candidate.Id == edit).DisabledMaterialEffects = new()
+        {
+            new DisabledMaterialEffect(0, "detail"), new DisabledMaterialEffect(0, "outline"),
+        };
+        const string colorHash = "0123456789abcdef", outlineHash = "123456789abcdef0";
+        var programs = new[]
+        {
+            new MaterialEffectOperation("detail", new[] { colorHash },
+                new[] { new MaterialEffectBufferPatch(2, 592, new[]
+                { new MaterialPatchWrite("_DetailAlbedoIntensity", 568, 0) }) },
+                new[] { new MaterialEffectTexture(4, 1, 0, 0, 1) }),
+            new MaterialEffectOperation("outline", new[] { outlineHash }, Array.Empty<MaterialEffectBufferPatch>(),
+                Array.Empty<MaterialEffectTexture>(), true),
+        };
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project,
+            PlanFor(project, resolver, _ => programs)), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string lod0 = IniSection(ini, "[TextureOverride_RetexScope_sd_vesna_body_lod0_m0]");
+        int outlineFilter = DerivedMaterialEvidence.FamilyFilterValue(new[] { outlineHash });
+        Assert.Contains($"== {outlineFilter}\nhandling = skip\nendif\n", lod0);
+        Assert.Contains("\nps-t4 = Resource_MaterialTexture_", lod0);
+        Assert.Contains("\n$zz_bt4 = 1\n", lod0);
+        Assert.Contains("\nps-cb2 = Resource_MaterialDraw_", lod0);
+        Assert.NotEmpty(Directory.GetFiles(r.OutDir, "material_pass_*.hlsl", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(r.OutDir, "effect_*.hlsl", SearchOption.AllDirectories));
+        var record = Assert.Single(RepairData.Read(r.OutDir).StockMaterials!);
+        Assert.Equal(new[] { "detail", "outline" },
+            record.Intent!.DisabledMaterialEffects!.Select(effect => effect.EffectId));
+    }
+
+    /// <summary>A shading change placed in one position of a key group applies only in that position, and a
+    /// change answering several positions stands on the content flag the mod declares for it.</summary>
+    [Fact]
+    public void A_keyed_shading_change_applies_under_its_position_and_its_content_flag_ships()
+    {
+        var env = MakeSkinnedEnv(clothWearer: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        var target = Slot("c_vesna01_body_lod0");
+        var cloth = Slot("c_vesna01_cloth_lod0");
+        session.EnsurePartSlots(cloth, resolver.ResolvePart);
+        string slot = session.EnsureMaterialValueSlot(target, 0, MaterialValueSemantics.UseGiFlatten,
+            resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+        var group = project.Keyed(target, "F7");
+        // the third position repeats the first's answer for the body and hides the cloth, so the two differ
+        group.States.Add(new KeyGroupState
+        {
+            Id = "state-0003", ActiveEditIds = new List<string> { edit, project.Hide(cloth) },
+        });
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        var shown = Regex.Match(ini, @"if (\$zz_shw_\w+) == 1\nrun = CustomShader_MaterialPatch_sd_vesna_body_lod0_m0_s0\n");
+        Assert.True(shown.Success, "the patch does not stand on a content flag");
+        Assert.Contains($"global {shown.Groups[1].Value} = 0\n", ini);
+        Assert.Contains($"global ${ModKeys.VariableFor("F7")} = 0\n", ini);
+    }
+
+    /// <summary>A shading change on the second of two materials of a part another mesh draws on under the same
+    /// key. The twin guard names the part by its first material's base colour, which is bound at that
+    /// material's draw only, so the probe runs at every draw of the mesh and the change reads the verdict it
+    /// left at its own material's draw.</summary>
+    [Fact]
+    public void A_twin_guarded_shading_change_on_a_second_material_reads_the_verdict_every_draw_writes()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true,
+            bodySharedMaterial: true, bodyOtherOwnAlbedo: true, bodySubmeshes: new[] { 48, 48 },
+            bodyTierSubmeshes: new[] { 24, 48 });
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 1,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
+        string section = SectionOn(ini, shared);
+        int probe = section.IndexOf($"if $zz_t == {MigotoEmitter.RetexTag(_stockTexHash)}\n${v} = ",
+            StringComparison.Ordinal);
+        int range = section.IndexOf("if first_index == 48\nif index_count == 48\n", StringComparison.Ordinal);
+        Assert.True(probe >= 0 && range > probe, "the twin probe does not run ahead of the material's draw");
+        Assert.DoesNotContain("$zz_t = ps-t", section[range..]);
+        Assert.Contains($"if ${v} == ", section[range..]);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+    }
+
+    /// <summary>A shading change on a part another mesh draws on under the same key, where nothing at the draw
+    /// tells the two apart, refuses rather than changing both.</summary>
+    [Fact]
+    public void A_shading_change_on_a_twin_nothing_at_the_draw_tells_apart_is_refused()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartSharedAlbedo: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var ex = Assert.Throws<AuthoredRefusalException>(() => ModBuilder.Build(
+            AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out, zip: false));
+        Assert.Contains("'body' and 'body2' can't be told apart in game", ex.Message);
+    }
+
+    /// <summary>A shading change on a part hidden in every position the change is placed in never draws, so
+    /// the mod builds with the hide alone.</summary>
+    [Fact]
+    public void A_shading_change_a_hide_covers_everywhere_builds_the_hide_alone()
+    {
+        var env = MakeSkinnedEnv();
+        var (session, edit, resolver) = StockShadingProject(env);
+        var target = Slot("c_vesna01_body_lod0");
+        string slot = session.EnsureMaterialValueSlot(target, 0, MaterialValueSemantics.UseGiFlatten,
+            resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+        project.Always.Add(project.Hide(target));
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Equal(2, CountOf(ini, "handling = skip\n"));
+        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        Assert.DoesNotContain("MaterialPatch", ini);
+        Assert.Empty(Directory.GetFiles(r.OutDir, "material_pass_*.hlsl", SearchOption.AllDirectories));
+    }
+
+    /// <summary>The sharing index says another outfit wears the body, with the same material. Nothing at the
+    /// draw tells the two outfits apart, so the change waits on this outfit's presence and says it reaches
+    /// the other.</summary>
+    [Fact]
+    public void A_shading_change_on_a_mesh_another_outfit_wears_with_the_same_material_waits_on_the_latch()
+    {
+        var env = SharedBodyEnv(ownAlbedo: false);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string section = SectionOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"));
+        Assert.Contains("if $zz_gate_", section);
+        Assert.DoesNotContain("$zz_mt", section);
+        Assert.Contains(r.Infos, info => info == "'body' is on a mesh shared with Member B. While VesnaSSR01 is "
+            + "on screen, this shading change applies to theirs too.");
+    }
+
+    /// <summary>Another outfit wears the body with a material of its own. The change's material binds a base
+    /// colour that outfit never wears, so the change applies only where that texture is bound: it stays off
+    /// the other outfit whether or not this one is on screen, and nothing is said about it reaching them.</summary>
+    [Fact]
+    public void A_shading_change_on_a_mesh_another_outfit_wears_with_another_material_stays_on_its_material()
+    {
+        var env = SharedBodyEnv(ownAlbedo: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        int tag = MigotoEmitter.RetexTag(_stockTexHash);
+        Assert.Contains($"hash = {_stockTexHash}\nfilter_index = {tag}\nmatch_priority = 100\n", ini);
+        string section = SectionOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"));
+        Assert.Contains($"$zz_mt = ps-t0\nif $zz_mt == {tag}\n$zz_mat = 1\nendif\n", section);
+        int seen = section.IndexOf("if $zz_mat == 1\n", StringComparison.Ordinal);
+        Assert.True(seen >= 0 && section.IndexOf("run = CustomShader_MaterialPatch_", StringComparison.Ordinal) > seen,
+            "the patch does not wait on the material's own texture");
+        Assert.DoesNotContain("if $zz_gate_", section);
+        Assert.DoesNotContain(r.Infos, info => info.Contains("Member B"));
+    }
+
+    /// <summary>The same for a toon ramp picked on the body: it binds only where its material's own base colour
+    /// is bound, so the other outfit's material keeps its own ramp.</summary>
+    [Fact]
+    public void A_ramp_picked_on_a_mesh_another_outfit_wears_with_another_material_stays_on_its_material()
+    {
+        var env = SharedBodyEnv(ownAlbedo: true, anchorRamp: true);
+        var p = NewProject("StockRampSharedBody");
+        PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
+
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string section = SectionOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"));
+        int seen = section.IndexOf("if $zz_mat == 1\n", StringComparison.Ordinal);
+        Assert.True(seen >= 0 && section.IndexOf("$zz_slot_rm = -1", StringComparison.Ordinal) > seen,
+            "the ramp does not wait on the material's own texture");
+        Assert.DoesNotContain("if $zz_gate_", section);
+        Assert.DoesNotContain(r.Infos, info => info.Contains("Member B"));
+    }
+
+    /// <summary>The sharing world of <see cref="MakeSkinnedEnv"/>'s second outfit: both outfits wear the body
+    /// lod0, and the second's cape is its own. With <paramref name="ownAlbedo"/> the second outfit's body
+    /// binds a base colour of its own; without, both bind the body's.</summary>
+    private BuildEnv SharedBodyEnv(bool ownAlbedo, bool anchorRamp = false)
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv(sharedBodyOutfit: true, sharedBodyOwnAlbedo: ownAlbedo,
+            anchorRamp: anchorRamp));
+        string body = SkinnedKey("s0.bundle", "c_vesna01_body_lod0");
+        string lod1 = SkinnedKey("s1.bundle", "c_vesna01_body_lod1");
+        string cape = SkinnedKey("scape.bundle", "c_vesna01_cape_lod0");
+        var textures = ownAlbedo
+            ? new Dictionary<string, int[]> { [_stockTexHash] = new[] { 0 }, [_altTexHash] = new[] { 1 } }
+            : new Dictionary<string, int[]> { [_stockTexHash] = new[] { 0, 1 } };
+        return env with
+        {
+            Sharing = SharingIndex.FromMeasurements("12345", new[]
+                {
+                    new SharingIndex.Wearer("Vesna", "Vesna", "VesnaSSR01", "Member A"),
+                    new SharingIndex.Wearer("Vesna", "Vesna", "VesnaAlt", "Member B"),
+                }, textures,
+                new Dictionary<string, int[]> { [body] = new[] { 0, 1 }, [lod1] = new[] { 0 }, [cape] = new[] { 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { lod1 }, [1] = new[] { cape } }),
+        };
+    }
+
+    /// <summary>Two materials drawn over the very same faces are one draw, so a change on either refuses at
+    /// Build rather than changing both.</summary>
+    [Fact]
+    public void A_shading_change_on_a_material_drawn_over_another_materials_very_range_is_refused()
+    {
+        var env = MakeSkinnedEnv(bodySharedMaterial: true, bodyRepeatLastSubmesh: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 0,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var ex = Assert.Throws<AuthoredRefusalException>(() => ModBuilder.Build(
+            AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out, zip: false));
+        Assert.Contains(ProductionAuthoredBuildBackend.SharedDrawCause, ex.Message);
+    }
+
+    /// <summary>A lower level whose material list the install could not read: the change skips that level and
+    /// the warning says the app couldn't read it, never that the part doesn't use the material there.</summary>
+    [Fact]
+    public void A_level_whose_materials_cannot_be_read_is_named_as_unread()
+    {
+        var env = MakeSkinnedEnv(bodySharedMaterial: true, bodySubmeshes: new[] { 48, 48 },
+            bodyTierSubmeshes: new[] { 24, 48 }, bodyTierMaterialsUnread: true);
+        var (session, edit, resolver) = StockShadingProject(env);
+        string slot = session.EnsureMaterialValueSlot(Slot("c_vesna01_body_lod0"), 1,
+            MaterialValueSemantics.UseGiFlatten, resolver.ResolvePart);
+        session.ChooseMaterialValue(edit, slot, "0");
+        var project = session.Snapshot();
+
+        var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
+            zip: false);
+
+        Assert.Contains(r.Warnings, warning => warning.StartsWith(
+            "Couldn't read which materials 'body' uses at ", StringComparison.Ordinal)
+            && warning.EndsWith(" Rescan, then build again.", StringComparison.Ordinal));
+        Assert.DoesNotContain(r.Warnings, warning => warning.Contains(" doesn't use "));
     }
 
     // ---- what a plan's gate says, read by every emission that answers to one ------------------------
@@ -2568,7 +3199,9 @@ public class ModBuilderTests : IDisposable
         Assert.Contains("if $zz_key_f7 == 1\nhandling = skip\nendif\n", hide);
         // the scoped probe and bind fold into that same section rather than minting a second one
         Assert.Contains("= Resource_Rtx0", hide);
-        Assert.DoesNotContain("[TextureOverride_RetexScope_", ini);
+        // the cloth draws the same original map, so the edit reaches it too, in a section of its own
+        Assert.Single(Regex.Matches(ini, @"\[TextureOverride_RetexScope_"));
+        Assert.Contains("= Resource_Rtx0", IniSection(ini, "[TextureOverride_RetexScope_vesna_cloth_lod0]"));
         Assert.DoesNotContain("$zz_hid_", ini);
     }
 
@@ -2756,14 +3389,16 @@ public class ModBuilderTests : IDisposable
         // ONE pipeline for the two positions, not one per position
         Assert.Single(Regex.Matches(ini, Regex.Escape("[TextureOverride_Cap_vesna_mate]")));
         Assert.Single(Regex.Matches(ini, Regex.Escape("[CommandListDraw_vesna_mate]")));
-        Assert.Single(Regex.Matches(ini, Regex.Escape("[CustomShaderSkin_vesna_mate]")));
+        Assert.Single(Regex.Matches(ini, Regex.Escape("[CustomShaderPosePalette_vesna_mate_vesna_mate]")));
         // and one payload: the compiled streams ship under one name each
         Assert.Single(Directory.GetFiles(r.OutDir, "combined_ib_*.buf"));
         Assert.Single(Directory.GetFiles(r.OutDir, "combined_bind_*.buf"));
         // the suppression and the draw chain beside it both read the flag
         string cap = IniSection(ini, "[TextureOverride_Cap_vesna_mate]");
         Assert.Contains($"if {flag} == 1\nhandling = skip\nendif\n", cap);
-        Assert.Contains($"if {flag} == 1\nif $zz_done_vesna_mate == 0\n", cap);
+        Assert.Contains($"if {flag} == 1\nrun = CustomShaderPoseBlock_vesna_mate_vesna_mate\n", cap);
+        Assert.StartsWith("run = CustomShaderGather_vesna_mate\nrun = CustomShaderPosePalette_vesna_mate_vesna_mate\nrun = CustomShaderPoseSkin_vesna_mate_p0\n",
+            PoseRouteEmissionTests.PoseBlock(ini, "vesna_mate_vesna_mate"));
         Assert.Contains("run = CommandListDraw_vesna_mate\n", cap);
         // and neither names a position: the flag IS the or-of-positions, and one of them named beside
         // it would gate the draw down to that one
@@ -3394,13 +4029,21 @@ public class ModBuilderTests : IDisposable
     /// emitted block also stands under the mod key at the position holding the mod on, so this change's
     /// gate names one variable at two values and no press can open it — refused by name rather than shipped
     /// as a section that never draws. Pinned with two images, and with one, because the emission that used
-    /// to ship differed between them and neither was reachable.</summary>
+    /// to ship differed between them and neither was reachable — and with the texture measured as shared,
+    /// which sends the change down the draw-scoped route instead of the game-wide one.</summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void A_change_at_the_mod_keys_off_position_refuses_by_name(bool twoImages)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public void A_change_at_the_mod_keys_off_position_refuses_by_name(bool twoImages, bool scoped)
     {
         var env = WithExactIdentities(MakeSkinnedEnv(clothWearer: true));
+        if (scoped)
+            env = env with
+            {
+                Sharing = Measured(new Dictionary<string, int[]>(), new Dictionary<int, string[]>(),
+                    new Dictionary<string, int[]> { [_stockTexHash] = new[] { 0, 1 } }),
+            };
         var p = NewProject("ModKeyOffPosition");
         p.Info.ToggleKey = "F7";
         if (twoImages)
@@ -3592,109 +4235,117 @@ public class ModBuilderTests : IDisposable
         Subject = "Vesna", Outfit = "VesnaSSR01", RendererSlot = renderer,
     };
 
-    /// <summary>A pick the runtime has no way to aim: the material's only ordinary map is one a
-    /// neighbour draws too, so a bind gated on sighting it would shade the neighbour as well. The plan
-    /// judges the capability and refuses by name, which is where a build finds out it cannot ship a
-    /// requested file.</summary>
+    /// <summary>A part listing more materials than its mesh has sections draws the last section once more
+    /// per extra material, over the same range: no draw is one material's, so the plan refuses the pick by
+    /// name rather than shading the sibling too.</summary>
     [Fact]
-    public void A_pick_whose_only_identifier_is_shared_by_a_neighbor_is_refused()
+    public void A_pick_on_a_material_drawn_over_the_same_faces_as_a_sibling_is_refused()
     {
-        var env = MakeSkinnedEnv(anchorRamp: true, clothWearer: true, bodySharedMaterial: true);
-        var p = NewProject("StockRampSharedMaterialMap");
-        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_cloth_lod0", hidden: true);
+        var env = MakeSkinnedEnv(anchorRamp: true, bodySharedMaterial: true);
+        var p = NewProject("StockRampSharedDraw");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("shares every one of its textures",
+        Assert.Contains(ProductionAuthoredBuildBackend.SharedDrawCause,
             string.Join("; ", BuildLogDiagnostics.From(ex)));
         Assert.Empty(Directory.GetFileSystemEntries(_out));
     }
 
+    /// <summary>Two sibling materials binding the very same maps — the shape no texture can tell apart —
+    /// each draw a section of the mesh of their own. The pick binds at its own material's range at every
+    /// tier, and the lower tier, which lists its materials in the other order, is read by material
+    /// identity rather than by position.</summary>
     [Fact]
-    public void A_pick_uses_the_next_ordinary_map_when_the_base_colour_is_shared_by_a_neighbor()
+    public void Sibling_materials_sharing_every_map_are_each_targeted_by_their_own_draw_range()
     {
-        var env = MakeSkinnedEnv(anchorNormal: true, anchorRamp: true, bodySharedMaterial: true);
-        var p = NewProject("StockRampUniqueNormal");
-        PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
-
-        var r = ReleasedBuild.Build(p, env, _out, zip: false);
-
-        Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
-        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.DoesNotContain($"[TextureOverride_StockRampTag_{_stockTexHash}]", ini);
-        Assert.Contains("if $zz_srm == 1", ini);
-        Assert.Empty(r.Warnings);
-    }
-
-    /// <summary>Two sibling materials bind identical base/normal/RMO sets, so the old recognizer refused
-    /// the target. Their effect overlays differ, and the target material's overlay now identifies its draw
-    /// through both the production plan and the released builder.</summary>
-    [Fact]
-    public void Siblings_with_identical_base_normal_and_rmo_sets_are_targetable_when_their_blend_maps_differ()
-    {
-        var env = MakeSkinnedEnv(anchorRamp: true, anchorBlend: true,
-            bodySharedMaterial: true, bodySharedMaterialOwnBlend: true);
-        var p = NewProject("StockRampUniqueBlend");
+        var env = MakeSkinnedEnv(anchorRamp: true, bodySharedMaterial: true,
+            bodySubmeshes: new[] { 48, 48 }, bodyTierSubmeshes: new[] { 24, 48 },
+            bodyTierMaterialsReversed: true);
+        var p = NewProject("StockRampSiblingRanges");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_StockRampTag_{_blendTexHash}]", ini);
-        Assert.DoesNotContain($"[TextureOverride_StockRampTag_{_stockTexHash}]", ini);
+        AssertNoDuplicateSections(ini);
+        string lod0 = IniSection(ini, "[TextureOverride_RetexScope_vesna_body_lod0_ramp]");
+        string lod1 = IniSection(ini, "[TextureOverride_RetexScope_vesna_body_lod1_ramp]");
+        Assert.Contains($"hash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\n", lod0);
+        Assert.Contains("if first_index == 0\nif index_count == 48\n", lod0);
+        Assert.DoesNotContain("if first_index == 48\n", lod0);
+        // m_body is the lod1's SECOND material: its range starts where the first one's ends
+        Assert.Contains("if first_index == 24\nif index_count == 48\n", lod1);
+        Assert.DoesNotContain("if first_index == 0\n", lod1);
+        Assert.DoesNotContain("StockRampTag", ini);
         Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
         Assert.Empty(r.Warnings);
     }
 
-    /// <summary>Adding a fourth recognizer does not perturb a material that has no effect overlay: its
-    /// base-color recognition section remains the exact bytes the released builder emitted before.</summary>
+    /// <summary>A lower tier that lists no material the pick names draws that material nowhere: the pick
+    /// binds at the tiers that do, and the build says where it does not show.</summary>
     [Fact]
-    public void A_material_without_a_blend_map_keeps_its_base_identifier_bytes()
+    public void A_tier_that_does_not_draw_the_picked_material_is_named_in_a_warning()
     {
-        var env = MakeSkinnedEnv(anchorRamp: true);
-        var p = NewProject("StockRampNoBlendRecognition");
+        var env = MakeSkinnedEnv(anchorRamp: true, bodySharedMaterial: true,
+            bodySubmeshes: new[] { 48, 48 }, bodyTierSubmeshes: new[] { 24, 48 });
+        var model = Assert.IsType<SubjectModel>(env.ResolveSubject("Vesna", "VesnaSSR01"));
+        var body = model.Parts.Single(part => part.Token == "body");
+        // the lower tier binds the sibling twice and m_body nowhere
+        var other = TierMaterialMap.IdentitiesOf(body.Materials)[1];
+        Assert.True(other.Resolved);
+        var shaped = model with
+        {
+            Parts = model.Parts.Select(part => part.Token != "body" ? part : part with
+            {
+                SiblingTiers = part.SiblingTiers!.Select(tier => tier with
+                {
+                    Materials = new[] { other, other },
+                }).ToArray(),
+            }).ToArray(),
+        };
+        var resolve = env.ResolveSubject;
+        env = env with
+        {
+            ResolveSubject = (character, stem) => character == "Vesna" && stem == "VesnaSSR01"
+                ? shaped : resolve(character, stem),
+        };
+        var p = NewProject("StockRampTierWithout");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        byte[] ini = File.ReadAllBytes(Path.Combine(r.OutDir, "mod.ini"));
-        byte[] expected = Encoding.UTF8.GetBytes($"[TextureOverride_StockRampTag_{_stockTexHash}]\n"
-            + $"hash = {_stockTexHash}\nfilter_index = {MigotoEmitter.RetexTag(_stockTexHash)}\n"
-            + "match_priority = 100\n");
-        int start = Encoding.UTF8.GetString(ini).IndexOf(
-            $"[TextureOverride_StockRampTag_{_stockTexHash}]", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        Assert.Equal(expected, ini.AsSpan(start, expected.Length).ToArray());
-        Assert.Equal(1, CountOf(Encoding.UTF8.GetString(ini), "[TextureOverride_StockRampTag_"));
-        Assert.Empty(r.Warnings);
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Equal(1, CountOf(ini, "[TextureOverride_RetexScope_"));
+        Assert.Contains("'body' doesn't use 'm_body' at the furthest detail level. "
+            + "The change to 'm_body' doesn't show there.", r.Warnings);
     }
 
-    /// <summary>A material need not bind base color, normal or RMO in order to receive a picked ramp. When
-    /// its effect overlay is the only bound recognizer, that overlay identifies the material's draws.</summary>
+    /// <summary>A material need not bind base color, normal or RMO in order to receive a picked ramp: its
+    /// own draw range says which material is drawing, whatever it binds.</summary>
     [Fact]
-    public void A_blend_map_as_the_only_bound_recognizer_targets_the_material()
+    public void A_material_binding_no_base_colour_still_takes_a_picked_ramp()
     {
         var env = MakeSkinnedEnv(anchorRamp: true, anchorBlend: true, bodyBlendOnly: true);
-        var p = NewProject("StockRampBlendOnlyRecognition");
+        var p = NewProject("StockRampBlendOnly");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_StockRampTag_{_blendTexHash}]", ini);
-        Assert.DoesNotContain($"[TextureOverride_StockRampTag_{_stockTexHash}]", ini);
+        Assert.DoesNotContain("StockRampTag", ini);
+        Assert.Contains("if first_index == 0\nif index_count == 96\n", ini);
         Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
         Assert.Empty(r.Warnings);
     }
 
-    /// <summary>Two stock-ramp material probes may reuse one tag: it carries the same hash-derived value,
-    /// while each bind remains anchored at its own part's index buffer.</summary>
+    /// <summary>Two picks on different parts each bind in their own part's section, whatever textures the
+    /// two materials share.</summary>
     [Fact]
-    public void Two_picks_on_different_parts_reuse_one_shared_blend_material_tag()
+    public void Two_picks_on_different_parts_each_bind_in_their_own_parts_section()
     {
-        var env = MakeSharedBlendRampPicksEnv();
-        var p = NewProject("StockRampSharedBlendAcrossParts");
+        var env = MakeTwoRampPicksEnv();
+        var p = NewProject("StockRampTwoParts");
         PickStockRamp(p, WriteRampDds("body_picked_ramp.dds", seed: 3));
         p.SetStockRamp("Vesna", "VesnaSSR01", "c_vesna01_cloth_lod0", "m_cloth",
             WriteRampDds("cloth_picked_ramp.dds", seed: 7));
@@ -3703,7 +4354,6 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.Equal(2, Directory.GetFiles(r.OutDir, "stockramp_*.dds").Length);
-        Assert.Equal(1, CountOf(ini, $"[TextureOverride_StockRampTag_{_blendTexHash}]"));
         Assert.Contains($"[TextureOverride_RetexScope_vesna_body_lod0_ramp]\nhash = "
             + $"{SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\n", ini);
         Assert.Contains($"[TextureOverride_RetexScope_vesna_cloth_lod0_ramp]\nhash = "
@@ -3711,51 +4361,30 @@ public class ModBuilderTests : IDisposable
         Assert.Empty(r.Warnings);
     }
 
-    /// <summary>A blend hash cannot recognize a material when the catalog names no register at which the
-    /// runtime sweep could sight a blend map.</summary>
+    /// <summary>The effect overlay played no part in finding the material, so a catalog naming no register
+    /// for one takes nothing away from a pick.</summary>
     [Fact]
-    public void A_blend_only_recognizer_is_refused_when_the_catalog_names_no_blend_register()
+    public void A_pick_needs_no_effect_map_register_in_the_slot_catalog()
     {
         var env = MakeSkinnedEnv(anchorRamp: true, anchorBlend: true, bodyBlendOnly: true) with
         {
             ShaderSlotCatalogFile = CatalogWithoutBlend(),
         };
-        var p = NewProject("StockRampBlendOnlyWithoutCatalogRange");
+        var p = NewProject("StockRampWithoutBlendRange");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
-        var ex = Assert.Throws<AuthoredRefusalException>(()
-            => ReleasedBuild.Build(p, env, _out, zip: false));
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.Contains("no other map on that material can be recognized in game", ex.Message);
-        Assert.DoesNotContain(Directory.GetDirectories(_out),
-            directory => !Path.GetFileName(directory).StartsWith('.'));
+        Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
     }
 
-    /// <summary>The recognizer walks input kinds, not the material's serialized texture order: base colour
-    /// stays ahead of a distinct blend map, and the plan names the same resource in its proof.</summary>
+    /// <summary>The plan proves a pick by its material's own draw on the part and by the exact ramp that
+    /// says which register to take over; no other map of the material is part of the proof.</summary>
     [Fact]
-    public void A_unique_base_colour_is_preferred_over_a_distinct_blend_map()
+    public void The_plan_proves_a_pick_by_its_materials_own_draw()
     {
         var env = MakeSkinnedEnv(anchorRamp: true, anchorBlend: true);
-        var originalResolve = env.ResolveSubject;
-        var model = Assert.IsType<SubjectModel>(originalResolve("Vesna", "VesnaSSR01"));
-        var blendFirst = model with
-        {
-            Parts = model.Parts.Select(part => part.Token != "body" ? part : part with
-            {
-                Materials = part.Materials.Select(material => material with
-                {
-                    Maps = material.Maps.OrderBy(map => MaterialResolver.IsBlend(map.Slot) ? 0 : 1)
-                        .ToArray(),
-                }).ToArray(),
-            }).ToArray(),
-        };
-        env = env with
-        {
-            ResolveSubject = (character, stem) => character == "Vesna" && stem == "VesnaSSR01"
-                ? blendFirst : originalResolve(character, stem),
-        };
-        var p = NewProject("StockRampBaseBeforeBlend");
+        var p = NewProject("StockRampProof");
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
         var execution = Authored(p, env, _ => { });
         var ramp = Assert.Single(execution.Plan.Bindings, binding =>
@@ -3764,11 +4393,11 @@ public class ModBuilderTests : IDisposable
 
         var r = ModBuilder.Build(execution, env, _out, zip: false);
 
-        Assert.Contains(":bundleT:", ramp.Decision.TargetingProof!.Detail);
+        Assert.Equal(BuildTargetingProof.StockDrawRange, ramp.Decision.TargetingProof!.Kind);
+        Assert.Contains(":bundleRamp:", ramp.Decision.TargetingProof.Detail);
+        Assert.DoesNotContain(":bundleT:", ramp.Decision.TargetingProof.Detail);
         Assert.DoesNotContain(":bundleBlend:", ramp.Decision.TargetingProof.Detail);
-        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_StockRampTag_{_stockTexHash}]", ini);
-        Assert.DoesNotContain($"[TextureOverride_StockRampTag_{_blendTexHash}]", ini);
+        Assert.DoesNotContain("StockRampTag", File.ReadAllText(Path.Combine(r.OutDir, "mod.ini")));
         Assert.Empty(r.Warnings);
     }
 
@@ -3858,7 +4487,7 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
-        Assert.Contains("if $zz_srm == 1\n", File.ReadAllText(Path.Combine(r.OutDir, "mod.ini")));
+        Assert.Contains("if first_index == 0\nif index_count == 96\n", File.ReadAllText(Path.Combine(r.OutDir, "mod.ini")));
     }
 
     /// <summary>The same pick made the way the APP makes one: a project authored as schema 2 from its first
@@ -3873,7 +4502,7 @@ public class ModBuilderTests : IDisposable
         var resolver = new LegacyProjectResolver(env);
         string ramp = WriteRampDds("picked_ramp.dds");
         var target = Slot("c_vesna01_body_lod0");
-        var session = new AuthoredEditSession(new AuthoredProject { RootDir = _proj });
+        var session = new AuthoredEditSession(new AuthoredProject { RootDir = _proj, TransportRoot = Path.Combine(_proj, "round-trips") });
         session.SetWorkspaceIndex(new AuthoredWorkspaceIndex
         {
             Selection = new List<SelectionEntry>
@@ -3900,7 +4529,7 @@ public class ModBuilderTests : IDisposable
         Assert.Equal(File.ReadAllBytes(Path.Combine(_proj, ramp)), File.ReadAllBytes(shipped));
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.Contains($"filter_index = {MigotoEmitter.FilterRamp}", ini);
-        Assert.Contains("if $zz_srm == 1\n", ini);
+        Assert.Contains("if first_index == 0\nif index_count == 96\n", ini);
         Assert.Empty(r.Warnings);
     }
 
@@ -3918,7 +4547,7 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"if $zz_srm == 1\nif ${ModKeys.VariableFor("F7")} == 0\n", ini);
+        Assert.Contains($"if ${ModKeys.VariableFor("F7")} == 0\nif $zz_slot_rm == ", ini);
         Assert.Contains($"global ${ModKeys.VariableFor("F7")} = 0\n", ini);
     }
 
@@ -3927,7 +4556,7 @@ public class ModBuilderTests : IDisposable
     [Fact]
     public void A_pick_on_a_part_that_already_changes_binds_under_that_changes_key()
     {
-        // the NORMAL is retextured, so the material's base colour is still free to identify its draws
+        // the part's own normal is retextured by the change the pick rides
         var env = MakeSkinnedEnv(anchorRamp: true, anchorNormal: true);
         var p = NewProject("StockRampSharedKey");
         AddEditedTexture(p, file: "normal.dds", bundle: "bundleN", objectName: "tex_body_n");
@@ -3941,7 +4570,7 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"if $zz_srm == 1\nif ${ModKeys.VariableFor("F7")} == 0\n", ini);
+        Assert.Contains($"if ${ModKeys.VariableFor("F7")} == 0\nif $zz_slot_rm == ", ini);
         Assert.DoesNotContain(ModKeys.VariableFor("F8"), ini);
     }
 
@@ -4014,9 +4643,11 @@ public class ModBuilderTests : IDisposable
         var hashes = doc.RootElement.GetProperty("override_hashes").EnumerateArray()
             .Select(x => x.GetString()!).ToList();
 
-        // every hash the emitted sections act on is published, so another mod on any of them is predicted
+        // every hash the emitted sections act on is published — a slot tag section included, since a mod
+        // tagging the same buffer claims it too — so another mod on any of them is predicted
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        var acted = ini.Split('\n').Select(l => l.Trim())
+        var acted = Regex.Split(ini, @"(?m)(?=^\[)")
+            .SelectMany(section => section.Split('\n')).Select(l => l.Trim())
             .Where(l => l.StartsWith("hash = ", StringComparison.Ordinal))
             .Select(l => l["hash = ".Length..]).Distinct().ToList();
         Assert.NotEmpty(acted);
@@ -4068,11 +4699,10 @@ public class ModBuilderTests : IDisposable
     }
 
     /// <summary>A replacement on ANOTHER part of the subject slot-tags the base colour the two parts share,
-    /// with its kind value — which a pick's probe would read as something else entirely. The pick takes the
-    /// next ordinary map of its material instead, and refuses when there is none left: it cannot be aimed,
-    /// and a mod that ships it would carry a bind that never fires.</summary>
+    /// with its kind value. The pick reads no map of its material to find its draw, so the tag changes
+    /// nothing for it: it binds at its own part's draws beside the replacement.</summary>
     [Fact]
-    public void A_pick_whose_base_colour_a_replacement_already_tags_is_refused()
+    public void A_pick_binds_beside_a_replacement_that_tags_its_materials_base_colour()
     {
         var env = MakeSkinnedEnv(anchorRamp: true, twinPart: true, twinPartSharedAlbedo: true);
         var p = NewProject("StockRampClaimed");
@@ -4085,10 +4715,12 @@ public class ModBuilderTests : IDisposable
         });
         PickStockRamp(p, WriteRampDds("picked_ramp.dds"));
 
-        var ex = Assert.Throws<AuthoredRefusalException>(()
-            => ReleasedBuild.Build(p, env, _out, zip: false));
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.Contains("no other map on that material can be recognized in game", ex.Message);
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.Single(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
+        Assert.Contains("if first_index == 0\nif index_count == 96\n$zz_slot_rm = -1\n", ini);
     }
 
     /// <summary>The donor route owns the ramp on a part the mod REPLACES: the replacement already binds its
@@ -4111,7 +4743,7 @@ public class ModBuilderTests : IDisposable
         Assert.Contains(adaptation.Report.Items, item => item.Code == "ramp.replaced"
             && !item.BlocksSave);
         Assert.Empty(Directory.GetFiles(r.OutDir, "stockramp_*.dds"));
-        Assert.DoesNotContain("zz_srm", File.ReadAllText(Path.Combine(r.OutDir, "mod.ini")));
+        Assert.DoesNotContain("zz_slot_rm", File.ReadAllText(Path.Combine(r.OutDir, "mod.ini")));
     }
 
     /// <summary>A ramp's own hash is what says which register holds a ramp at the draw. Where something
@@ -4198,8 +4830,16 @@ public class ModBuilderTests : IDisposable
             EditVerbs.Replace, "F7", hideWhenOff: true, startsOff: true);
 
         var built = ReleasedBuild.Build(project, env, _out, zip: false);
-        string actual = OutputSnapshot(built.OutDir);
-        string golden = Path.Combine(ProjectGoldenDir(), "legacy_build_v1.json");
+        AssertOutputMatchesGolden(built.OutDir, "legacy_build_v1.json");
+    }
+
+    /// <summary>A built folder's <see cref="OutputSnapshot"/> against the committed golden of that name.
+    /// REMOLD_REGOLD=1 rewrites the golden from this build, and the run then fails so it is compared
+    /// again without it.</summary>
+    internal static void AssertOutputMatchesGolden(string outDir, string goldenName)
+    {
+        string actual = OutputSnapshot(outDir);
+        string golden = Path.Combine(ProjectGoldenDir(), goldenName);
         bool regold = Environment.GetEnvironmentVariable("REMOLD_REGOLD") == "1";
         if (regold) File.WriteAllText(golden, actual, new UTF8Encoding(false));
 
@@ -4292,7 +4932,7 @@ public class ModBuilderTests : IDisposable
         // the first submesh binds that one resource and the second, wanting the same, rebinds nothing
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
         Assert.Equal(1, CountOf(list, "if $zz_slot_a == 0\nps-t0 = Resource_Tex0\nendif\n"));
-        Assert.Equal(2, CountOf(list, "drawindexed = "));
+        Assert.Equal(2, CountOf(list, "drawindexed"));
     }
 
     [Fact]
@@ -4328,7 +4968,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain(r.Warnings, w => w.Contains("No original normal on ") && w.Contains("could be matched to a texture slot"));
 
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
-        var chunks = list.Split("drawindexed = ");
+        var chunks = list.Split("drawindexed");
         string second = chunks[1][(chunks[1].IndexOf('\n') + 1)..];
         // submesh 0 binds both authored maps and the neutral its unauthored RMO defaults to; submesh 1
         // puts all three slots back to the anchor's own
@@ -4349,8 +4989,8 @@ public class ModBuilderTests : IDisposable
     {
         // The shape of a repaint donor: one authored albedo, nothing else. Its submesh draws on donor UVs,
         // so its normal and RMO take the flat maps rather than the anchor's relief read through foreign
-        // UVs — and the untouched submesh next to it keeps every real map. The anchor has no RMO to
-        // slot-tag, so the neutral RMO has nowhere to bind and the author is told.
+        // UVs — and the untouched submesh next to it keeps every real map. With no original RMO on
+        // the anchor, there is no RMO detail to remove and no missing edit to report.
         var env = MakeSkinnedEnv(anchorNormal: true);
         var p = NewProject("Flat");
         WriteDonorGlb();
@@ -4373,7 +5013,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
-        var chunks = list.Split("drawindexed = ");
+        var chunks = list.Split("drawindexed");
         string second = chunks[1][(chunks[1].IndexOf('\n') + 1)..];
         Assert.Contains("if $zz_slot_a == 0\nps-t0 = Resource_Tex0\nendif\n", chunks[0]);
         Assert.Contains("if $zz_slot_n == 0\nps-t0 = Resource_NeutralN\nendif\n", chunks[0]);
@@ -4382,11 +5022,7 @@ public class ModBuilderTests : IDisposable
         Assert.Contains("if $zz_slot_n == 0\nps-t0 = Resource_SaveT0\nendif\n", second);
         Assert.Contains("if $zz_slot_r == 0\nps-t0 = Resource_SaveT0\nendif\n", second);
 
-        // a neutral needs its kind's slot tag exactly as an authored map does: the anchor has albedo and
-        // normal tagged, so only the RMO warns
-        Assert.Contains(r.Warnings, w => w.Contains("No original RMO on ") && w.Contains("could be matched to a texture slot"));
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("No original normal on ") && w.Contains("could be matched to a texture slot"));
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("No original base color on ") && w.Contains("could be matched to a texture slot"));
+        Assert.Empty(r.Warnings);
     }
 
     /// <summary>Blanking a normal slot is one gesture across two homes: the neutral a modder plugs in Blender
@@ -4463,7 +5099,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain(r.Warnings, w => w.Contains("No original RMO on ") && w.Contains("could be matched to a texture slot"));
 
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
-        var chunks = list.Split("drawindexed = ");
+        var chunks = list.Split("drawindexed");
         string second = chunks[1][(chunks[1].IndexOf('\n') + 1)..];
         Assert.Contains("if $zz_slot_r == 0\nps-t0 = Resource_Tex0\nendif\n", chunks[0]);
         Assert.Contains("if $zz_slot_r == 0\nps-t0 = Resource_SaveT0\nendif\n", second);
@@ -4489,7 +5125,7 @@ public class ModBuilderTests : IDisposable
                 new()
                 {
                     Submesh = 0, Albedo = "s0_base.png",
-                    NormalOrigin = SlotOrigin.VanillaOwn, RmoOrigin = SlotOrigin.VanillaOwn,
+                    NormalOrigin = SlotOrigin.Untouched, RmoOrigin = SlotOrigin.Untouched,
                 },
             },
         });
@@ -4498,7 +5134,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
-        var chunks = list.Split("drawindexed = ");
+        var chunks = list.Split("drawindexed");
         Assert.Contains("if $zz_slot_a == 0\nps-t0 = Resource_Tex0\nendif\n", chunks[0]);
         // no flat map is asked for, declared or shipped: the anchor's own normal and RMO keep drawing
         Assert.DoesNotContain("Resource_NeutralN", ini);
@@ -4529,9 +5165,9 @@ public class ModBuilderTests : IDisposable
                 new()
                 {
                     Submesh = 0,
-                    AlbedoOrigin = SlotOrigin.VanillaOwn,
+                    AlbedoOrigin = SlotOrigin.Untouched,
                     NormalOrigin = SlotOrigin.ExplicitNeutral,
-                    RmoOrigin = SlotOrigin.VanillaOwn,
+                    RmoOrigin = SlotOrigin.Untouched,
                 },
             },
         });
@@ -4544,7 +5180,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         string list = ini[ini.IndexOf("[CommandListDraw_", StringComparison.Ordinal)..];
-        var chunks = list.Split("drawindexed = ");
+        var chunks = list.Split("drawindexed");
         Assert.Contains("if $zz_slot_n == 0\nps-t0 = Resource_NeutralN\nendif\n", chunks[0]);
         Assert.DoesNotContain("Resource_NeutralRMO", ini);
         Assert.DoesNotContain("$zz_slot_a == 0\nps-t0 = ", chunks[0]);
@@ -4683,6 +5319,47 @@ public class ModBuilderTests : IDisposable
             new ModBuilder.DumpIdentity("c_CommanderMale_dorm_hair_lod0", "210b832c")));
     }
 
+    /// <summary>Two outfits of one character can carry the same part token over DIFFERENT meshes: a roster
+    /// can reuse another outfit's slot name without reusing its mesh. Both edits ship in one mod: the
+    /// emitted name follows the mesh, so each Replace gets its own dump, its own capture section and its own
+    /// pipeline instead of the second one colliding with the first on a shared name.</summary>
+    [Fact]
+    public void Two_outfits_of_one_character_replace_a_same_named_part_over_different_meshes()
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv(sameTokenOutfit: true));
+        var p = NewProject("SameTokenTwoOutfits");
+        p.Selection.Add(new SelectionEntry { Character = "Vesna", Outfit = "VesnaAlt" });
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+        p.Targets.Add(new ProjectTarget
+        {
+            AssetType = "Mesh", Bundle = "bundleSameToken", ObjectName = "c_vesna01_body_lod0",
+            SubjectCharacter = "Vesna", SubjectOutfit = "VesnaAlt", ReplaceFile = "donor.glb",
+        });
+
+        var r = ModBuilder.Build(Authored(p, env, _ => { }), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string ssr01 = SkinnedKey("s0.bundle", "c_vesna01_body_lod0");
+        string alt = SkinnedKey("ssametoken.bundle", "c_vesna01_body_lod0");
+        Assert.NotEqual(ssr01, alt);
+        // one capture section per mesh, each named after the mesh it captures rather than the shared token —
+        // and by its bare ib, since the two meshes share no index buffer and need no slot predicate
+        var caps = System.Text.RegularExpressions.Regex
+            .Matches(ini, @"\[TextureOverride_Cap_(vesna_body[a-z0-9_]*)\]")
+            .Select(m => m.Groups[1].Value).ToList();
+        string ssr01Ib = DrawSelector.Parse(ssr01).Hash, altIb = DrawSelector.Parse(alt).Hash;
+        Assert.NotEqual(ssr01Ib, altIb);
+        Assert.Equal(new[] { $"vesna_body_{ssr01Ib}", $"vesna_body_{ssr01Ib}_lod1", $"vesna_body_{altIb}" }
+            .OrderBy(n => n, StringComparer.Ordinal), caps.OrderBy(n => n, StringComparer.Ordinal));
+        // and one pipeline each, so neither subject's replacement is dropped
+        Assert.Equal(2, System.Text.RegularExpressions.Regex
+            .Matches(ini, @"\[CommandListDraw_vesna_body[a-z0-9_]*\]").Count);
+        Assert.Contains($"[CommandListDraw_vesna_body_{ssr01Ib}]", ini);
+        Assert.Contains($"[CommandListDraw_vesna_body_{altIb}]", ini);
+    }
+
     [Fact]
     public void Replacement_property_maps_on_one_anchor_resource_refuse_unattributable_probes()
     {
@@ -4743,13 +5420,29 @@ public class ModBuilderTests : IDisposable
 
         var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string section = "";
+        var bodyLines = new List<string>();
         string? hash = null, first = null, count = null;
         void Commit()
         {
             if (hash is null) return;
-            string key = $"{hash}|{first ?? "*"}|{count ?? "*"}";
-            if (owner.TryGetValue(key, out var held))
+            // Commandless tags classify resources but cannot change a draw.
+            if (bodyLines.Any(l => l.StartsWith("filter_index = ")) && bodyLines.All(l =>
+                    l.Length == 0 || l.StartsWith(';') || l.StartsWith("hash = ")
+                    || l.StartsWith("filter_index = ") || l.StartsWith("match_"))) return;
+            string guard = bodyLines.FirstOrDefault(l => Regex.IsMatch(l, @"^if (?:ib|vb[0-9]) == ")) ?? "";
+            string key = $"{hash}|{first ?? "*"}|{count ?? "*"}|{guard}";
+            static bool Disjoint(string a, string b)
             {
+                var bindings = Regex.Matches(a, @"(ib|vb[0-9]+) == (\d+)")
+                    .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value);
+                return Regex.Matches(b, @"(ib|vb[0-9]+) == (\d+)").Any(m =>
+                    bindings.TryGetValue(m.Groups[1].Value, out var value) && value != m.Groups[2].Value);
+            }
+            string tuple = $"{hash}|{first ?? "*"}|{count ?? "*"}|";
+            foreach (var previous in owner.Where(p => p.Key.StartsWith(tuple, StringComparison.OrdinalIgnoreCase)
+                         && !Disjoint(guard, p.Key[tuple.Length..])))
+            {
+                string held = previous.Value;
                 // Only section-name companions the emitter itself mints may share one draw tuple.
                 static string Stem(string s) => s.Trim('[', ']');
                 static bool Companion(string candidate, string owner)
@@ -4770,11 +5463,12 @@ public class ModBuilderTests : IDisposable
                     Assert.Fail($"hash {hash} (first_index {first ?? "any"}, index_count {count ?? "any"}) "
                         + $"is claimed by both {held} and {section}");
             }
-            else owner[key] = section;
+            owner.TryAdd(key, section);
         }
         foreach (var l in lines)
         {
-            if (IsSection(l)) { Commit(); section = l; hash = first = count = null; continue; }
+            if (IsSection(l)) { Commit(); section = l; hash = first = count = null; bodyLines.Clear(); continue; }
+            bodyLines.Add(l);
             if (l.StartsWith("hash = ", StringComparison.Ordinal)) hash = l["hash = ".Length..];
             else if (l.StartsWith("match_first_index = ", StringComparison.Ordinal)) first = l["match_first_index = ".Length..];
             else if (l.StartsWith("match_index_count = ", StringComparison.Ordinal)) count = l["match_index_count = ".Length..];
@@ -4804,6 +5498,8 @@ public class ModBuilderTests : IDisposable
     {
         var missing = ini.Split('\n').Select(l => l.Trim())
             .Where(l => l.StartsWith("cs = ", StringComparison.Ordinal)
+                     || l.StartsWith("vs = ", StringComparison.Ordinal)
+                     || l.StartsWith("ps = ", StringComparison.Ordinal)
                      || l.StartsWith("filename = ", StringComparison.Ordinal))
             .Select(l => l[(l.IndexOf('=') + 2)..])
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -4879,7 +5575,7 @@ public class ModBuilderTests : IDisposable
         // riding its bones is told which part it landed on. Pins ModBuilder's `CastsShadows: p.CastsShadows`
         // pass-through — without it every part reads as casting and body2 pools as normal.
         //
-        // The control is Twins_whose_vb1_differs_build_with_vb1_keyed_sections: the SAME fixture with the
+        // The control is Twins_whose_vb1_differs_build_with_ib_and_bound_vb1_predicates: the SAME fixture with the
         // flag left alone builds clean, so the flag alone decided this refusal. The uvSeed keeps the two
         // signature-separable, so no twin refusal fires ahead of it, and no scheme is wired, so the
         // presence rule that precedes this one admits body2.
@@ -4895,10 +5591,10 @@ public class ModBuilderTests : IDisposable
     }
 
     [Fact]
-    public void Twins_whose_vb1_differs_build_with_vb1_keyed_sections()
+    public void Twins_whose_vb1_differs_build_with_ib_and_bound_vb1_predicates()
     {
-        // Same triangle list, different geometry AND different stream-1 bytes: the signature key falls
-        // back to each mesh's vb1 hash, so both capture separately and the shared ib appears nowhere.
+        // Same triangle list, different geometry AND different stream-1 bytes: each mesh's sections keep the
+        // shared ib as their match and test the one slot that tells the two apart — vb1 — and nothing more.
         var env = MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7);
         var p = NewProject("SwapTwinVb1");
         WriteDonorGlb(bones: BodyBones.Concat(TwinBones).ToArray());
@@ -4908,10 +5604,284 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         string sharedIb = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string bodyVb1 = SkinnedVb1("s0.bundle", "c_vesna01_body_lod0");
         Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), sharedIb);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedVb1("s0.bundle", "c_vesna01_body_lod0")}\nmatch_priority = 0\n", ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body2]\nhash = {SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\n", ini);
-        Assert.DoesNotContain($"hash = {sharedIb}", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {sharedIb}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body2]\nhash = {sharedIb}\nmatch_priority = 0\n", ini);
+        foreach (var (section, bundle) in new[] { ("[TextureOverride_Cap_vesna_body]", "s0.bundle"),
+                     ("[TextureOverride_Cap_vesna_body2]", "s2.bundle") })
+        {
+            string body = SectionBody(ini, section);
+            string guard = Regex.Match(body, @"(?m)^if .*$").Value;
+            Assert.Equal($"if vb1 == {MigotoEmitter.RetexTag(SkinnedVb1(bundle, section.Contains("body2") ? "c_vesna01_body2_lod0" : "c_vesna01_body_lod0"))}",
+                guard.TrimEnd('\r'));
+        }
+        // the ib is the section's own match, never a predicate term, so no tag section is minted for it
+        Assert.DoesNotContain("ib ==", ini);
+        Assert.DoesNotContain($"[TextureOverride_DrawTag_{sharedIb}]", ini);
+
+        // the sidecar publishes every hash the sections act on — the ib each matches and the slot each
+        // tests — so a twin mod released before the predicates, which recorded its vb1 hash as its key,
+        // still meets this build in the install conflict read
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
+        var published = doc.RootElement.GetProperty("override_hashes").EnumerateArray()
+            .Select(x => x.GetString()!).ToList();
+        Assert.Contains(sharedIb, published);
+        Assert.Contains(bodyVb1, published);
+        Assert.Equal(new[] { "older-twin-mod" }, ModInstall.Overlapping(published,
+            new[] { ("older-twin-mod", (IReadOnlyList<string>)new[] { bodyVb1 }) }));
+    }
+
+    [Theory]
+    [InlineData("hide")]
+    [InlineData("replace")]
+    [InlineData("maps")]
+    public void Equal_topology_and_uvs_with_different_skin_bytes_have_separate_build_owners(string edit)
+    {
+        var twinBones = TwinBones.Concat(new uint[] { 717171 }).ToArray();
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21,
+            twinPartSharedAlbedo: true, twinPartBones: twinBones);
+        string a = SkinnedKey("s0.bundle", "c_vesna01_body_lod0");
+        string b = SkinnedKey("s2.bundle", "c_vesna01_body2_lod0");
+        Assert.Equal(DrawSelector.Parse(a).Hash, DrawSelector.Parse(b).Hash);
+        Assert.Equal(DrawSelector.Parse(a).Vb1, DrawSelector.Parse(b).Vb1);
+        Assert.NotEqual(DrawSelector.Parse(a).Vb2, DrawSelector.Parse(b).Vb2);
+        var p = NewProject("SkinOwners");
+        if (edit == "replace")
+        {
+            WriteDonorGlb(bones: BodyBones.Concat(twinBones).ToArray());
+            AddReplaceTarget(p);
+        }
+        else if (edit == "hide")
+        {
+            p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+            p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+        }
+        else
+        {
+            env = env with { Sharing = Measured(new(), new(),
+                new() { [_stockTexHash] = new[] { 0, 1 } }) };
+            AddEditedTexture(p);
+        }
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+        string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        Assert.DoesNotContain("global $zz_tw_", ini);
+        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("also hides"));
+        foreach (string key in new[] { a, b })
+            Assert.Contains($"vb2 == {MigotoEmitter.RetexTag(DrawSelector.Parse(key).Vb2!)}", ini);
+        if (edit == "replace")
+        {
+            Assert.Contains("Resource_vesna_body_Posed = ref vb0", ini);
+            Assert.Contains("Resource_vesna_body2_Posed = ref vb0", ini);
+        }
+        if (edit == "maps") Assert.Contains("Resource_Rtx", ini);
+    }
+
+    /// <summary>A mesh nothing else shares keeps the plain ib section it always had: no slot predicate, no
+    /// tag section, and a sidecar naming the ib alone. The predicate is bought only where a same-ib sibling
+    /// exists — so a draw binding fewer streams than the mesh carries still fires a bare section.</summary>
+    [Fact]
+    public void A_mesh_nothing_shares_keeps_its_bare_ib_section_and_mints_no_draw_tag()
+    {
+        var env = MakeSkinnedEnv();
+        var p = NewProject("BareUnique");
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string ib = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {ib}\nmatch_priority = 0\n", ini);
+        Assert.Equal("", DrawGuard(ini, ib));
+        Assert.DoesNotContain("\nif vb", ini);
+        Assert.DoesNotContain("[TextureOverride_DrawTag_", ini);
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
+        var published = doc.RootElement.GetProperty("override_hashes").EnumerateArray()
+            .Select(x => x.GetString()!).ToList();
+        Assert.Contains(ib, published);
+        Assert.DoesNotContain(SkinnedVb1("s0.bundle", "c_vesna01_body_lod0"), published);
+    }
+
+    /// <summary>Of two same-ib meshes where one binds only its position stream, the fuller mesh's section
+    /// tests the one slot the barer mesh lacks and so fires on its own draws alone; the barer mesh's section
+    /// constrains nothing and still fires on both, which its hide discloses. The barer mesh is the ambiguous
+    /// one, never the fuller — a mesh that keyed uniquely on its vb1 before keeps building clean.</summary>
+    [Fact]
+    public void A_fuller_mesh_stays_unique_beside_a_bare_sibling_on_its_ib_and_the_bare_one_is_the_twin()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartBare: true);
+        var p = NewProject("BareSibling");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
+        string ib = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        var bare = BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, "s2.bundle")), "c_vesna01_body2_lod0");
+        Assert.Equal(ib, bare.Ib.ToString("x8"));
+        Assert.Null(bare.Vb1);
+        Assert.Null(bare.Vb2);
+        var body = DrawSelector.Parse(SkinnedKey("s0.bundle", "c_vesna01_body_lod0"));
+        // the fuller mesh needs one slot the bare one lacks — the first, vb1 — and no more
+        Assert.Equal($"if vb1 == {MigotoEmitter.RetexTag(body.Vb1!)}\n", DrawGuard(ini, ib));
+        Assert.DoesNotContain("vb2 ==", ini);
+        // the bare mesh's own section is bare, and its hide says what else that section reaches
+        Assert.Equal(2, Regex.Matches(ini, $"\nhash = {ib}\n").Count);
+        Assert.Contains(result.Warnings, w => w.Contains("Hiding 'c_vesna01_body2_lod0' also hides 'c_vesna01_body_lod0'"));
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("Hiding 'c_vesna01_body_lod0' also hides"));
+    }
+
+    /// <summary>The roster shapes the predicate too: another outfit's mesh on the same ib is excluded by the
+    /// slot where it differs, and only that slot — and the roster is asked by that emitted key, so the other
+    /// outfit is not a wearer of this mesh and no presence latch is minted for it.</summary>
+    [Theory]
+    [InlineData("vb1")]
+    [InlineData("vb2")]
+    public void A_same_ib_mesh_worn_elsewhere_is_excluded_by_the_one_slot_that_differs(string slot)
+    {
+        var env = MakeSkinnedEnv();
+        string ib = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        var body = DrawSelector.Parse(SkinnedKey("s0.bundle", "c_vesna01_body_lod0"));
+        var elsewhere = slot == "vb1" ? body with { Vb1 = "0badf00d" } : body with { Vb2 = "0badf00d" };
+        env = env with
+        {
+            Sharing = SharingIndex.FromMeasurements("12345",
+                new[] { new SharingIndex.Wearer("Vesna", null, "VesnaSSR01", null),
+                    new SharingIndex.Wearer("Karst", null, "KarstDorm", null) },
+                new Dictionary<string, int[]>(),
+                new Dictionary<string, int[]> { [body.Key] = new[] { 0 }, [elsewhere.Key] = new[] { 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { body.Key } }),
+        };
+        var p = NewProject("RosterSlot" + slot);
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+
+        var r = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string expected = slot == "vb1" ? body.Vb1! : body.Vb2!;
+        Assert.Equal($"if {slot} == {MigotoEmitter.RetexTag(expected)}\n", DrawGuard(ini, ib));
+        Assert.DoesNotContain(slot == "vb1" ? "vb2 ==" : "vb1 ==", ini);
+        Assert.DoesNotContain("zz_seen", ini);
+    }
+
+    /// <summary>A mesh two parts reach is one mesh in the signature index, carrying both parts' tokens: a
+    /// same-ib sibling is separated from it once, by the one slot that differs, and the two parts naming it
+    /// are never each other's twins.</summary>
+    [Fact]
+    public void A_mesh_two_parts_reach_is_indexed_once()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7, bodyAliasPart: true);
+        var p = NewProject("AliasPart");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
+        string ib = SkinnedIb("s2.bundle", "c_vesna01_body2_lod0");
+        Assert.Equal(SkinnedIb("s0.bundle", "c_vesna01_body_lod0"), ib);
+        Assert.Single(Regex.Matches(ini, $"\nhash = {ib}\n"));
+        Assert.Equal($"if vb1 == {MigotoEmitter.RetexTag(SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0"))}\n",
+            DrawGuard(ini, ib));
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("also hides"));
+    }
+
+    /// <summary>Two Replaces, one on a mesh and one on a same-ib mesh binding the same colour/UV stream but
+    /// no skin stream: the barer mesh's section fires at the fuller mesh's draws too, so the two replacements
+    /// would meet on one draw. The build refuses them as one shared mesh, judging the barer section against
+    /// the fuller mesh's full selector even though the fuller mesh's own section no longer names the stream
+    /// the two share — before any later refusal about the barer mesh's own ambiguity.</summary>
+    [Fact]
+    public void Replaces_on_a_fuller_and_a_barer_same_ib_mesh_are_refused_as_one_shared_mesh()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartUvOnly: true);
+        var body = DrawSelector.Parse(SkinnedKey("s0.bundle", "c_vesna01_body_lod0"));
+        var body2 = BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, "s2.bundle")), "c_vesna01_body2_lod0");
+        Assert.Equal(body.Hash, body2.Ib.ToString("x8"));
+        Assert.Equal(body.Vb1, body2.Vb1!.Value.ToString("x8"));
+        Assert.Null(body2.Vb2);
+        var p = NewProject("BarerTwinReplaces");
+        WriteDonorGlb();
+        AddReplaceTarget(p);
+        p.Targets.Add(new ProjectTarget
+        {
+            AssetType = "Mesh", Bundle = "bundle2", ObjectName = "c_vesna01_body2_lod0",
+            SubjectCharacter = "Vesna", SubjectOutfit = "VesnaSSR01", ReplaceFile = "donor.glb",
+        });
+
+        var ex = Assert.ThrowsAny<Exception>(() => ReleasedBuild.Build(p, env, _out, zip: false));
+
+        Assert.Contains("replace one mesh they share", ex.Message);
+    }
+
+    /// <summary>A tier two parts reach is one index entry carrying both tokens: the body's own further tier
+    /// on the same draw selector is never its twin, whichever of the two parts is listed last.</summary>
+    [Fact]
+    public void A_tier_two_parts_share_is_never_the_twin_of_one_parts_own_further_tier()
+    {
+        var env = MakeSkinnedEnv(poolMate: true, mateSharesBodyLod1: true, bodyZTier: true);
+        string lod1 = SkinnedKey("s1.bundle", "c_vesna01_body_lod1");
+        string lod2 = BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, "sz.bundle")), "c_vesna01_body_lod2").Selector.Key;
+        Assert.Equal(lod1, lod2);
+        var p = NewProject("SharedTierOwnTier");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_mate_lod0", true);
+
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("also hides"));
+    }
+
+    /// <summary>An edit on a mesh another outfit of the same character also wears: when the roster says the
+    /// two are on screen together — a support team's members — the build warns, since no presence gate can
+    /// separate them. A doll's own alternate can meet it on another player's copy, so it is disclosed the way
+    /// any other wearer is — an info, named by the outfit, behind the presence latch. A Dorm outfit is always
+    /// shown alone and is disclosed on neither side.</summary>
+    [Theory]
+    [InlineData(true, false, false, "warning")]
+    [InlineData(false, false, false, "info")]
+    [InlineData(true, true, false, "none")]
+    [InlineData(false, true, false, "none")]
+    [InlineData(true, false, true, "none")]
+    public void A_shared_mesh_discloses_the_same_characters_other_outfit_by_how_the_two_meet(bool together,
+        bool otherIsDorm, bool selfIsDorm, string disclosure)
+    {
+        var env = MakeSkinnedEnv();
+        string body = SkinnedKey("s0.bundle", "c_vesna01_body_lod0");
+        string lod1 = SkinnedKey("s1.bundle", "c_vesna01_body_lod1");
+        var wearers = new[]
+        {
+            new SharingIndex.Wearer("Vesna", "Vesna", "VesnaSSR01", "Member A")
+            {
+                AppearsWithSiblings = together,
+                Kind = selfIsDorm ? Remold.Core.Model.OutfitKind.Dorm : Remold.Core.Model.OutfitKind.Other,
+            },
+            new SharingIndex.Wearer("Vesna", "Vesna", "VesnaSSR02", "Member B")
+            {
+                AppearsWithSiblings = together,
+                Kind = otherIsDorm ? Remold.Core.Model.OutfitKind.Dorm : Remold.Core.Model.OutfitKind.Other,
+            },
+        };
+        // the edited outfit's lod1 is its own, so a presence latch can be minted for the info route
+        env = env with
+        {
+            Sharing = SharingIndex.FromMeasurements("12345", wearers, new Dictionary<string, int[]>(),
+                new Dictionary<string, int[]> { [body] = new[] { 0, 1 }, [lod1] = new[] { 0 } },
+                new Dictionary<int, string[]> { [0] = new[] { body, lod1 } }),
+        };
+        var p = NewProject($"SiblingDisclosure_{together}_{otherIsDorm}_{selfIsDorm}");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        string warning = "'c_vesna01_body_lod0' is also drawn by Member B, on screen together with Member A. "
+            + "The hide applies to them too.";
+        string info = "'c_vesna01_body_lod0' is also drawn by Member B. The hide applies while VesnaSSR01 is on screen.";
+        Assert.Equal(disclosure == "warning", result.Warnings.Contains(warning));
+        Assert.Equal(disclosure == "info", result.Infos.Contains(info));
+        Assert.DoesNotContain(result.Infos, i => i.Contains("also drawn by Vesna."));
     }
 
     // ---- twins the bound textures tell apart -----------------------------------------------------
@@ -4920,7 +5890,7 @@ public class ModBuilderTests : IDisposable
     /// that ends it.</summary>
     private static string SectionOn(string ini, string hash)
     {
-        int at = ini.IndexOf($"\nhash = {hash}\nmatch_priority = 0\n", StringComparison.Ordinal);
+        int at = ini.IndexOf($"\nhash = {hash}\nmatch_priority = 0\n{DrawGuard(ini, hash)}", StringComparison.Ordinal);
         Assert.True(at >= 0, $"no section carries hash {hash}");
         int start = ini.LastIndexOf('[', at);
         int end = ini.IndexOf("\n\n", at, StringComparison.Ordinal);
@@ -4980,7 +5950,7 @@ public class ModBuilderTests : IDisposable
         string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
         Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), shared);
         int own = MigotoEmitter.RetexTag(_stockTexHash), mate = MigotoEmitter.RetexTag(_altTexHash);
-        string v = $"zz_tw_{shared}";
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
         // the verdict is declared once and never reset, so a pass binding no base color acts on the
         // last identification rather than standing down
         Assert.Contains($"global ${v} = 0\n", ini);
@@ -4994,10 +5964,9 @@ public class ModBuilderTests : IDisposable
         Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {own}\n${v} = 1\nendif\n"
             + $"if $zz_t == {mate}\n${v} = 2\nendif\n", cap);
         // the capture AND the suppression sit inside the guard, and nothing else skips on this hash
-        Assert.Contains($"if ${v} == 1\nResource_vesna_body_Posed = ref vb0\n"
-            + "Resource_vesna_body_CB = copy vs-cb1\nhandling = skip\n", cap);
+        Assert.Contains($"if ${v} == 1\nResource_vesna_body_Posed = ref vb0\nhandling = skip\n", cap);
         Assert.Equal(1, CountOf(cap, "handling = skip"));
-        Assert.EndsWith("run = CommandListDraw_vesna_body\nendif", cap);
+        Assert.EndsWith("run = CommandListDraw_vesna_body\nendif" + GuardClose(ini, shared), cap);
         Assert.Contains(r.Diagnostics, d => d.Contains("'body' shares a draw signature with 'body2'")
             && d.Contains("act while its own textures answer for it"));
         AssertTwinVerdictIsProbedWhereItIsTested(ini);
@@ -5024,7 +5993,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
-        string v = $"zz_tw_{shared}";
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
         // the slot tag stands, and it is the only section on that hash
         Assert.Contains($"[TextureOverride_SlotTag_{_stockTexHash}]\nhash = {_stockTexHash}\n"
             + "filter_index = 3301\nmatch_priority = 100\n", ini);
@@ -5071,7 +6040,7 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("sm.bundle", "c_vesna01_mate_lod0");
         Assert.Equal(SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0"), shared);
-        string v = $"zz_tw_{shared}";
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
         // roster order numbers the siblings, so the cloth answers 1 and the pooled mate 2
         int cloth = MigotoEmitter.RetexTag(_altTexHash), mate = MigotoEmitter.RetexTag(_stockTexHash);
         string cap = SectionOn(ini, shared);
@@ -5100,7 +6069,7 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string tierIb = SkinnedIb("s1.bundle", "c_vesna01_body_lod1");
         Assert.Equal(SkinnedIb("smt.bundle", "c_vesna01_mate_lod1"), tierIb);
-        string v = $"zz_tw_{tierIb}";
+        string v = $"zz_tw_{SelectorKey(ini, tierIb)}";
         Assert.DoesNotContain(r.Warnings, w => w.Contains("keeps its original mesh"));
         Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
         Assert.Contains($"global ${v} = 0\n", ini);
@@ -5138,7 +6107,7 @@ public class ModBuilderTests : IDisposable
         // the OUTFIT sighting rides ahead of the guard (either sibling's draw proves the outfit is on
         // screen); the MESH latch sights INSIDE it — it witnesses the same event as the capture it
         // gates, and a sibling's draw captures nothing, so it must not read as presence
-        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {shared}\nmatch_priority = 0\n"
+        Assert.Contains($"[TextureOverride_Cap_vesna_mate]\nhash = {shared}\nmatch_priority = 0\n{DrawGuard(ini, shared)}"
             + "$zz_seen_vesnassr01 = 1\n$zz_t = ps-t0\n", ini);
         Assert.Contains("Resource_vesna_mate_Posed = ref vb0\n"
             + "Resource_vesna_mate_CB = copy vs-cb1\n$zz_seen_src_vesna_mate = 1\n",
@@ -5161,7 +6130,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("s2.bundle", "c_vesna01_body2_lod0");
-        string v = $"zz_tw_{shared}";
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
         int body = MigotoEmitter.RetexTag(_stockTexHash), hidden = MigotoEmitter.RetexTag(_altTexHash);
         Assert.Contains($"global $zz_t = 0\nglobal ${v} = 0\n", ini);
         AssertStickyVerdictsSurviveTheFrame(ini);
@@ -5171,7 +6140,7 @@ public class ModBuilderTests : IDisposable
         Assert.Contains($"$zz_t = ps-t0\nif $zz_t == {body}\n${v} = 1\nendif\n"
             + $"if $zz_t == {hidden}\n${v} = 2\nendif\n", hide);
         // one verdict opens on the variable itself: no scratch, declared or written
-        Assert.EndsWith($"if ${v} == 2\nhandling = skip\nendif", hide);
+        Assert.EndsWith($"if ${v} == 2\nhandling = skip\nendif" + GuardClose(ini, shared), hide);
         Assert.DoesNotContain("zz_twok", ini);
         AssertTwinVerdictIsProbedWhereItIsTested(ini);
     }
@@ -5192,19 +6161,144 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
         Assert.Equal(SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"), shared);
-        string v = $"zz_tw_{shared}";
-        Assert.Contains($"global ${v} = 0\nglobal $zz_twok = 0\n", ini);
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
+        Assert.Contains($"global ${v} = 0\n", ini);
+        Assert.DoesNotContain("zz_twok", ini);
         AssertStickyVerdictsSurviveTheFrame(ini);
-        // both verdicts fold into the scratch, and the skip opens on it once
+        // each hide skips on its own mesh's verdict
         string hide = SectionOn(ini, shared);
-        Assert.EndsWith($"$zz_twok = 0\nif ${v} == 1\n$zz_twok = 1\nendif\n"
-            + $"if ${v} == 2\n$zz_twok = 1\nendif\nif $zz_twok == 1\nhandling = skip\nendif", hide);
-        // the shared signature and the body's own lod1: one skip each, and nothing else skips
-        Assert.Equal(2, CountOf(ini, "handling = skip"));
+        Assert.EndsWith($"if ${v} == 1\nhandling = skip\nendif\n"
+            + $"if ${v} == 2\nhandling = skip\nendif" + GuardClose(ini, shared), hide);
+        // the shared signature's two and the body's own lod1: nothing else skips
+        Assert.Equal(3, CountOf(ini, "handling = skip"));
         Assert.Contains(r.Diagnostics, d => d.Contains("'body' shares a draw signature with 'body2'"));
         Assert.Contains(r.Diagnostics, d => d.Contains("'body2' shares a draw signature with 'body'"));
         AssertTwinVerdictIsProbedWhereItIsTested(ini);
     }
+
+    /// <summary>Each twin hidden in its own position of one key group. One section carries both hides, and
+    /// each skip waits for its own mesh's verdict, so a position hides only the mesh it names rather than
+    /// both, and neither position is lost to the other.</summary>
+    [Fact]
+    public void Twins_hidden_in_different_positions_each_skip_only_at_their_own_draws()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21, twinPartOwnAlbedo: true);
+        var p = NewProject("TwinsTwoPositions");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var r = ModBuilder.Build(Authored(p, env, project => HiddenInTurn(project, "F7",
+            Slot("c_vesna01_body_lod0"), Slot("c_vesna01_body2_lod0"))), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
+        var skips = SkipGuards(SectionOn(ini, shared)).Select(Gating).ToList();
+        Assert.Equal(2, skips.Count);
+        Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 1", $"if ${v} == 1" }));
+        Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 2", $"if ${v} == 2" }));
+        Assert.DoesNotContain("zz_twok", ini);
+        AssertTwinVerdictIsProbedWhereItIsTested(ini);
+    }
+
+    /// <summary>The same two positions on twins nothing tells apart. Neither skip can wait for a verdict,
+    /// so each hides both meshes, as the build's warnings say — and the second position still hides
+    /// rather than being dropped for the first.</summary>
+    [Fact]
+    public void Twins_nothing_tells_apart_hide_in_every_position_either_asks_for()
+    {
+        var env = MakeSkinnedEnv(twinPart: true, twinPartPosSeed: 21);
+        var p = NewProject("TwinsTwoPositionsUnguarded");
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body2_lod0", true);
+
+        var r = ModBuilder.Build(Authored(p, env, project => HiddenInTurn(project, "F7",
+            Slot("c_vesna01_body_lod0"), Slot("c_vesna01_body2_lod0"))), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        string shared = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        var skips = SkipGuards(SectionOn(ini, shared)).Select(Gating).ToList();
+        Assert.Equal(2, skips.Count);
+        Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 1" }));
+        Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 2" }));
+        Assert.DoesNotContain("zz_tw_", ini);
+        Assert.Equal(2, r.Warnings.Count(w => w.Contains(" also hides ")));
+    }
+
+    /// <summary>Two outfits wearing one mesh, each hiding it on a key of its own. The hide section is one,
+    /// and each outfit's positions stand on that outfit's own presence latch: one outfit's key never takes
+    /// the mesh off the other outfit, and neither outfit's key is lost to the other's.</summary>
+    [Fact]
+    public void Two_outfits_hiding_one_shared_mesh_on_different_keys_each_keep_their_own_schedule()
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv(sharedBodyOutfit: true));
+        string body = SkinnedKey("s0.bundle", "c_vesna01_body_lod0");
+        string lod1 = SkinnedKey("s1.bundle", "c_vesna01_body_lod1");
+        string cape = SkinnedKey("scape.bundle", "c_vesna01_cape_lod0");
+        env = env with
+        {
+            Sharing = SharingIndex.FromMeasurements("12345", new[]
+                {
+                    new SharingIndex.Wearer("Vesna", "Vesna", "VesnaSSR01", "Member A"),
+                    new SharingIndex.Wearer("Vesna", "Vesna", "VesnaAlt", "Member B"),
+                }, new Dictionary<string, int[]>(),
+                new Dictionary<string, int[]> { [body] = new[] { 0, 1 }, [lod1] = new[] { 0 }, [cape] = new[] { 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { lod1 }, [1] = new[] { cape } }),
+        };
+        var p = NewProject("SharedMeshTwoKeys");
+        p.Selection.Add(new SelectionEntry { Character = "Vesna", Outfit = "VesnaAlt" });
+        p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_body_lod0", true);
+        p.SetHidden("Vesna", "VesnaAlt", "c_vesna01_body_lod0", true);
+
+        var r = ModBuilder.Build(Authored(p, env, project =>
+        {
+            HiddenInTurn(project, "F7", Slot("c_vesna01_body_lod0"));
+            HiddenInTurn(project, "F8", new TargetPart
+            {
+                Subject = "Vesna", Outfit = "VesnaAlt", RendererSlot = "c_vesna01_body_lod0",
+            });
+        }), env, _out, zip: false);
+
+        string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        AssertNoDuplicateSections(ini);
+        var skips = SkipGuards(SectionOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0")))
+            .Select(Gating).ToList();
+        Assert.Equal(2, skips.Count);
+        var first = Assert.Single(skips, g => g.Contains("if $zz_key_f7 == 1"));
+        var second = Assert.Single(skips, g => g.Contains("if $zz_key_f8 == 1"));
+        string firstLatch = Assert.Single(first, l => l.StartsWith("if $zz_gate_", StringComparison.Ordinal));
+        string secondLatch = Assert.Single(second, l => l.StartsWith("if $zz_gate_", StringComparison.Ordinal));
+        Assert.NotEqual(firstLatch, secondLatch);
+    }
+
+    /// <summary>One group on <paramref name="key"/> whose first position is the game's own and whose next
+    /// positions each hide one of <paramref name="targets"/>, in order. Each hide leaves the always-on list
+    /// for the position that asks for it.</summary>
+    private static void HiddenInTurn(AuthoredProject project, string key, params TargetPart[] targets)
+    {
+        var group = new KeyGroup
+        {
+            Id = $"key-{project.KeyGroups.Count + 1:D4}",
+            Key = key,
+            States = new List<KeyGroupState> { new() { Id = "state-0001" } },
+        };
+        foreach (var target in targets)
+        {
+            string hide = project.EditDefinitions.Single(edit =>
+                edit.Kind == EditDefinitionKind.Hide && edit.Target.SameAs(target)).Id;
+            project.Always.Remove(hide);
+            AddState(group, hide);
+        }
+        project.KeyGroups.Add(group);
+    }
+
+    /// <summary>The key, latch and twin-verdict tests of one skip's guard, in nesting order — the lines
+    /// that say WHEN it skips, without the draw selection that says where.</summary>
+    private static string[] Gating(string[] guard) => guard.Where(line =>
+        line.StartsWith("if $zz_key_", StringComparison.Ordinal)
+        || line.StartsWith("if $zz_gate_", StringComparison.Ordinal)
+        || line.StartsWith("if $zz_tw_", StringComparison.Ordinal)).ToArray();
 
     [Fact]
     public void A_plain_retexture_no_guard_probes_is_emitted_without_a_tag()
@@ -5219,7 +6313,7 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\nhash = {_stockTexHash}\nmatch_priority = 0\n"
+        Assert.Contains($"[TextureOverride_Retex_vesna_body_a_{_stockTexHash}]\nhash = {_stockTexHash}\nmatch_priority = 0\n{DrawGuard(ini, _stockTexHash)}"
             + "if $zz_key_f9 == 0\nthis = Resource_Rtx0\nendif\n", ini);
         Assert.DoesNotContain("filter_index", ini);
         Assert.DoesNotContain("match_priority = 100", ini);
@@ -5254,7 +6348,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain("zz_tw_", ini);
         Assert.DoesNotContain("TwinTag", ini);
         Assert.Contains($"[TextureOverride_Hide_0]\nhash = "
-            + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\nhandling = skip\n", ini);
+            + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"))}handling = skip\n", ini);
         Assert.Contains("Hiding 'c_vesna01_body2_lod0' also hides 'c_vesna01_body_lod0' because their "
             + "draws cannot be told apart.", r.Warnings);
     }
@@ -5283,7 +6377,7 @@ public class ModBuilderTests : IDisposable
         Assert.Equal(1, CountOf(ini, $"hash = {_stockTexHash}\n"));
         BuildWatermarkTests.AssertStamped(r);
         // and the guard still probes for the value that one tag carries
-        string v = $"zz_tw_{SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}";
+        string v = $"zz_tw_{SelectorKey(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"))}";
         Assert.Contains($"if $zz_t == {MigotoEmitter.RetexTag(_stockTexHash)}\n${v} = 1\n", ini);
         AssertTwinVerdictIsProbedWhereItIsTested(ini);
         AssertStickyVerdictsSurviveTheFrame(ini);
@@ -5331,7 +6425,7 @@ public class ModBuilderTests : IDisposable
         // through to the timeline and the refusal names the wrong data.
         //
         // The control is A_shadow_off_sibling-style: the same fixture with no marker at all builds (see
-        // Twins_whose_vb1_differs_build_with_vb1_keyed_sections), so the marker alone decided this.
+        // Twins_whose_vb1_differs_build_with_ib_and_bound_vb1_predicates), so the marker alone decided this.
         var env = WithTimelineHides(
             MakeSkinnedEnv(twinPart: true, twinPartUvSeed: 7,
                 twinPartVisibility: Remold.Core.Model.VisibilityOverride.CoatList),
@@ -5404,21 +6498,20 @@ public class ModBuilderTests : IDisposable
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
         Assert.Equal(SkinnedIb("sd2.bundle", "c_vesna01_dress2_lod0"), shared);
-        string v = $"zz_tw_{shared}";
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
         // each option's companion mints a section of its own and writes that option's ordinal
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}]\n"
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}${v} = 1\n", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}]\n"
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}${v} = 2\n", ini);
         // the guarded section reads the verdict and probes no slot for it
         string cap = SectionOn(ini, shared);
         Assert.DoesNotContain("ps-t0\n", cap);
-        Assert.StartsWith($"[TextureOverride_Cap_vesna_dress1]\nhash = {shared}\nmatch_priority = 0\nif ${v} == 1\n"
+        Assert.StartsWith($"[TextureOverride_Cap_vesna_dress1]\nhash = {shared}\nmatch_priority = 0\n{DrawGuard(ini, shared)}if ${v} == 1\n"
             + "Resource_vesna_dress1_Posed = ref vb0\n", cap);
         Assert.Equal(1, CountOf(cap, "handling = skip"));
-        Assert.Contains($"if ${v} == 1\nResource_vesna_dress1_Posed = ref vb0\n"
-            + "Resource_vesna_dress1_CB = copy vs-cb1\nhandling = skip\n", cap);
-        Assert.EndsWith("run = CommandListDraw_vesna_dress1\nendif", cap);
+        Assert.Contains($"if ${v} == 1\nResource_vesna_dress1_Posed = ref vb0\nhandling = skip\n", cap);
+        Assert.EndsWith("run = CommandListDraw_vesna_dress1\nendif" + GuardClose(ini, shared), cap);
         // declared once, and never cleared: the option holds between wardrobe changes
         Assert.Contains($"global ${v} = 0\n", ini);
         AssertStickyVerdictsSurviveTheFrame(ini);
@@ -5478,8 +6571,8 @@ public class ModBuilderTests : IDisposable
         string lod0 = SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0");
         string tier = SkinnedIb("t_sb2.bundle", "c_vesna01_belt2_lod1");
         Assert.NotEqual(lod0, tier);                            // the tier really is its own draw
-        Assert.Contains($"[TextureOverride_TwinWit_{lod0}]", ini);
-        Assert.DoesNotContain($"[TextureOverride_TwinWit_{tier}]", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, lod0)}]", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{SelectorKey(ini, tier)}]", ini);
     }
 
     [Fact]
@@ -5495,7 +6588,7 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("t_sb2.bundle", "c_vesna01_belt2_lod1")}]", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("t_sb2.bundle", "c_vesna01_belt2_lod1"))}]", ini);
     }
 
     [Fact]
@@ -5585,13 +6678,13 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        string v = $"zz_tw_{SelectorKey(ini, SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0"))}";
         string belt1 = SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0");
-        Assert.Contains($"[TextureOverride_Cap_vesna_belt1]\nhash = {belt1}\nmatch_priority = 0\n${v} = 1\n"
+        Assert.Contains($"[TextureOverride_Cap_vesna_belt1]\nhash = {belt1}\nmatch_priority = 0\n{DrawGuard(ini, belt1)}${v} = 1\n"
             + "Resource_vesna_belt1_Posed = ref vb0\n", ini);
-        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{SelectorKey(ini, belt1)}]", ini);
         // the unpooled option's companion still mints one
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}]", ini);
     }
 
     [Fact]
@@ -5608,13 +6701,13 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         string shared = SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0");
-        string v = $"zz_tw_{shared}";
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]\n"
-            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
+        string v = $"zz_tw_{SelectorKey(ini, shared)}";
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}]\n"
+            + $"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}${v} = 1\n", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}]\n"
+            + $"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}${v} = 2\n", ini);
         string hide = SectionOn(ini, shared);
-        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\nif ${v} == 1\nhandling = skip\nendif", hide);
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\n{DrawGuard(ini, shared)}if ${v} == 1\nhandling = skip\nendif" + GuardClose(ini, shared), hide);
         // no probe: an overlay build whose verdicts all arrive from sightings reads no slot at all
         Assert.DoesNotContain("zz_t = ps-t", ini);
         Assert.DoesNotContain("global $zz_t = 0", ini);
@@ -5638,10 +6731,10 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
+        string v = $"zz_tw_{SelectorKey(ini, SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0"))}";
         string belt2 = SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0");
-        Assert.Contains($"[TextureOverride_Hide_0]\nhash = {belt2}\nmatch_priority = 0\n${v} = 2\nhandling = skip\n", ini);
-        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt2}]", ini);
+        Assert.Contains($"[TextureOverride_Hide_0]\nhash = {belt2}\nmatch_priority = 0\n{DrawGuard(ini, belt2)}${v} = 2\nhandling = skip\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{SelectorKey(ini, belt2)}]", ini);
     }
 
     [Fact]
@@ -5666,9 +6759,9 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        Assert.Contains($"[TextureOverride_Witness_vesnassr01_0]\nhash = {belt1}\nmatch_priority = 0\n"
-            + $"$zz_seen_vesnassr01 = 1\n$zz_tw_{shared} = 1\n", ini);
-        Assert.DoesNotContain($"[TextureOverride_TwinWit_{belt1}]", ini);
+        Assert.Contains($"[TextureOverride_Witness_vesnassr01_0]\nhash = {belt1}\nmatch_priority = 0\n{DrawGuard(ini, belt1)}"
+            + $"$zz_seen_vesnassr01 = 1\n$zz_tw_{SelectorKey(ini, shared)} = 1\n", ini);
+        Assert.DoesNotContain($"[TextureOverride_TwinWit_{SelectorKey(ini, belt1)}]", ini);
     }
 
     [Fact]
@@ -5703,9 +6796,9 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
-        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n${v} = 1\n", ini);
-        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n${v} = 2\n", ini);
+        string v = $"zz_tw_{SelectorKey(ini, SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0"))}";
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}${v} = 1\n", ini);
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}${v} = 2\n", ini);
         // one hash under two names, and no line on it at all
         string scarf = SkinnedIb("ss1.bundle", "c_vesna01_scarf1_lod0");
         Assert.Equal(SkinnedIb("ss2.bundle", "c_vesna01_scarf2_lod0"), scarf);
@@ -5726,9 +6819,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        string v = $"zz_tw_{SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0")}";
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}]", ini);
-        Assert.Contains($"[TextureOverride_TwinWit_{SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}]", ini);
+        string v = $"zz_tw_{SelectorKey(ini, SkinnedIb("sd1.bundle", "c_vesna01_dress1_lod0"))}";
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}]", ini);
+        Assert.Contains($"[TextureOverride_TwinWit_{SelectorKey(ini, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}]", ini);
         Assert.Contains($"global ${v} = 0\n", ini);
         Assert.DoesNotContain("Helena", ini);
     }
@@ -5766,8 +6859,8 @@ public class ModBuilderTests : IDisposable
         string ini1 = File.ReadAllText(Path.Combine(r1.OutDir, "mod.ini"));
         string hide1 = SectionOn(ini1, shared);
         // the slot sweep the texture route reads, then the skip on the verdict it wrote
-        Assert.StartsWith($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\n$zz_t = ps-t", hide1);
-        Assert.EndsWith($"if $zz_tw_{shared} == 1\nhandling = skip\nendif", hide1);
+        Assert.StartsWith($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\n{DrawGuard(ini1, shared)}$zz_t = ps-t", hide1);
+        Assert.EndsWith($"if $zz_tw_{SelectorKey(ini1, shared)} == 1\nhandling = skip\nendif" + GuardClose(ini1, shared), hide1);
         Assert.DoesNotContain("TextureOverride_TwinWit_", ini1);
 
         var p2 = NewProject("WardrobeMixedWitnessOnly");
@@ -5776,12 +6869,12 @@ public class ModBuilderTests : IDisposable
             WithWardrobeScheme(MakeSkinnedEnv(wardrobe: new() { Mixed = true })), _out, zip: false);
 
         string ini2 = File.ReadAllText(Path.Combine(r2.OutDir, "mod.ini"));
-        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\nif $zz_tw_{shared} == 2\n"
-            + "handling = skip\nendif", SectionOn(ini2, shared));
-        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n"
-            + $"$zz_tw_{shared} = 1\n", ini2);
-        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n"
-            + $"$zz_tw_{shared} = 2\n", ini2);
+        Assert.Equal($"[TextureOverride_Hide_0]\nhash = {shared}\nmatch_priority = 0\n{DrawGuard(ini2, shared)}if $zz_tw_{SelectorKey(ini2, shared)} == 2\n"
+            + "handling = skip\nendif" + GuardClose(ini2, shared), SectionOn(ini2, shared));
+        Assert.Contains($"hash = {SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0")}\nmatch_priority = 0\n{DrawGuard(ini2, SkinnedIb("sb1.bundle", "c_vesna01_belt1_lod0"))}"
+            + $"$zz_tw_{SelectorKey(ini2, shared)} = 1\n", ini2);
+        Assert.Contains($"hash = {SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini2, SkinnedIb("sb2.bundle", "c_vesna01_belt2_lod0"))}"
+            + $"$zz_tw_{SelectorKey(ini2, shared)} = 2\n", ini2);
         Assert.DoesNotContain("zz_t = ps-t", ini2);
     }
 
@@ -5838,9 +6931,10 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         AssertEveryReferencedFileShips(ini, r.OutDir);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\nmatch_priority = 0\n", ini);
-        Assert.Contains("CustomShaderRecover_vesna_body_vesna_body", ini);
-        Assert.Contains("CustomShaderConvert_vesna_body", ini);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
+        Assert.Contains($"[TextureOverride_Cap_vesna_body]\nhash = {SkinnedIb("s0.bundle", "c_vesna01_body_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"))}", ini);
+        // its own pool and its own anchor: the per-copy pose passes recover and skin it
+        Assert.Contains("CustomShaderPosePalette_vesna_body_vesna_body", ini);
         Assert.DoesNotContain("Rigid", ini);
         Assert.Empty(Directory.GetFiles(r.OutDir, "rigid_*"));
     }
@@ -5863,8 +6957,8 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         AssertEveryReferencedFileShips(ini, r.OutDir);
-        Assert.Contains("CustomShaderRecover_vesna_body_vesna_body", ini);
-        Assert.Contains("CustomShaderConvert_vesna_body", ini);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
+        Assert.Contains("CustomShaderPosePalette_vesna_body_vesna_body", ini);
         Assert.DoesNotContain("Rigid", ini);
         Assert.Empty(Directory.GetFiles(r.OutDir, "rigid_*"));
     }
@@ -5887,9 +6981,10 @@ public class ModBuilderTests : IDisposable
             + "it stores one influence per vertex, so only a mesh edit on that part itself can use it");
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.DoesNotContain("vesna_acc", ini);
-        // every union bone recovered from the body's own draw
-        var owner = File.ReadAllBytes(Path.Combine(r.OutDir, "owner_part_vesna_body.buf"));
-        Assert.All(Enumerable.Range(0, owner.Length / 4), i => Assert.Equal(0u, BitConverter.ToUInt32(owner, i * 4)));
+        // every union bone recovered from the body's own draw: the shape only such a pool takes
+        Assert.Contains("CustomShaderPosePalette_vesna_body_vesna_body", ini);
+        string union = File.ReadAllText(Path.Combine(r.OutDir, "union_vesna_body.json"));
+        Assert.Equal(1, union.Split("\"part\":").Length - 1);
     }
 
     [Fact]
@@ -5911,7 +7006,11 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         AssertEveryReferencedFileShips(ini, r.OutDir);
-        Assert.Contains("CustomShaderConvert_vesna_acc", ini);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
+        // the body poses nothing the accessory's own draw does not, so it ships no capture and the
+        // accessory recovers and skins itself in the per-copy pose passes
+        Assert.DoesNotContain("Resource_vesna_body_Posed = ref vb0", ini);
+        Assert.Contains("CustomShaderPosePalette_vesna_acc_vesna_acc", ini);
         Assert.DoesNotContain("Rigid", ini);
     }
 
@@ -6151,6 +7250,36 @@ public class ModBuilderTests : IDisposable
         byte[] unbaked = File.ReadAllBytes(Directory.GetFiles(r2.OutDir, "combined_bind_*.buf").Single());
 
         Assert.Equal(plain, unbaked);
+
+        // A part the game starts hidden opens centred after its uprighting: the build takes the centre back
+        // off first and the rest after it, landing on the same bytes. The centre is one whose shift undoes
+        // exactly on these floats, which the premise checks.
+        var centre = new System.Numerics.Vector3(0.5f, -0.25f, 1f);
+        var upright = RestBake.Apply(ImportedDonor("donor.glb"), g);
+        Assert.Equal(upright.Channels["Vertex"],
+            RestBake.Unshift(RestBake.Shift(upright, centre), centre).Channels["Vertex"]);
+        var p3 = NewProject("SwapCentred");
+        WriteDonorGlb(rotate: g, centre: centre);
+        AddReplaceTarget(p3, bakedRest: RestBake.ToList(g));
+        var r3 = ReleasedBuild.Build(p3, MakeSkinnedEnv(), _out, zip: false, adapted: project =>
+        {
+            var asset = project.ProjectAssets.Single(a => a.Kind == ProjectAssetKind.Geometry);
+            asset.Shift = Remold.Core.Workbench.HiddenPart.ToList(centre);
+            asset.HiddenCentred = true;
+        });
+        Assert.Equal(plain, File.ReadAllBytes(Directory.GetFiles(r3.OutDir, "combined_bind_*.buf").Single()));
+        // and the repair record states the centre and the relation, for an import to put back
+        string repair = File.ReadAllText(Path.Combine(r3.OutDir, "repair.json"));
+        Assert.Contains("\"shift\"", repair);
+        Assert.Contains("\"hidden_centred\": true", repair);
+        Assert.DoesNotContain("\"shift\"", File.ReadAllText(Path.Combine(r2.OutDir, "repair.json")));
+    }
+
+    /// <summary>The unrotated donor the fixture writes, as a build reads it.</summary>
+    private UnityMesh ImportedDonor(string file)
+    {
+        WriteDonorGlb(file);
+        return MeshGltf.ImportPayload(Path.Combine(_proj, file), lenient: true).Mesh;
     }
 
     [Fact]
@@ -6188,10 +7317,50 @@ public class ModBuilderTests : IDisposable
     private string SkinnedIb(string bundleFile, string mesh) =>
         BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, bundleFile)), mesh).Ib.ToString("x8");
 
+    private string SkinnedKey(string bundleFile, string mesh) =>
+        BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, bundleFile)), mesh).Selector.Key;
+
+    internal string FixtureSelector(string hash)
+    {
+        var reader = new Remold.Core.Bundles.BundleReader();
+        foreach (string path in Directory.GetFiles(_root, "*.bundle"))
+        {
+            var bytes = File.ReadAllBytes(path);
+            foreach (var mesh in reader.ListAssets(bytes, Remold.Core.Bundles.BundleReader.ClassMesh))
+            {
+                var selector = BufferHash.Compute(bytes, mesh.Name, mesh.PathId, reader).Selector;
+                if (selector.Hash == hash) return selector.Key;
+            }
+        }
+        return hash;
+    }
+
+    /// <summary>The slot predicate line the lowering put at the top of the section keyed on
+    /// <paramref name="hash"/>, newline included — empty when that mesh keys on its bare ib.</summary>
+    internal static string DrawGuard(string ini, string hash)
+    {
+        string body = Regex.Split(ini, @"(?m)(?=^\[)")
+            .FirstOrDefault(s => s.Contains($"hash = {hash}\n", StringComparison.Ordinal)
+                && Regex.IsMatch(s, @"\nif (?:ib|vb[0-9]) == ")) ?? "";
+        var match = Regex.Match(body, @"(?m)^if (?:ib|vb[0-9]) == [^\r\n]+\r?$");
+        return match.Success ? match.Value.TrimEnd('\r') + "\n" : "";
+    }
+
+    /// <summary>The <c>endif</c> closing <see cref="DrawGuard"/>'s predicate at the end of the section keyed
+    /// on <paramref name="hash"/> — empty when that mesh keys on its bare ib and has none.</summary>
+    internal static string GuardClose(string ini, string hash) =>
+        DrawGuard(ini, hash).Length > 0 ? "\nendif" : "";
+
+    internal static string SelectorKey(string ini, string hash)
+    {
+        var match = Regex.Match(ini, Regex.Escape(hash) + @"_v0(?:[0-9a-f]{8}|x)_v1(?:[0-9a-f]{8}|x)_v2(?:[0-9a-f]{8}|x)");
+        return match.Success ? match.Value : hash;
+    }
+
     private string SkinnedVb1(string bundleFile, string mesh) =>
         BufferHash.Compute(File.ReadAllBytes(Path.Combine(_root, bundleFile)), mesh).Vb1!.Value.ToString("x8");
 
-    private static SharingIndex Measured(Dictionary<string, int[]> mesh, Dictionary<int, string[]> witnesses,
+    private SharingIndex Measured(Dictionary<string, int[]> mesh, Dictionary<int, string[]> witnesses,
         Dictionary<string, int[]>? tex = null) =>
         SharingIndex.FromMeasurements("12345",
             new[]
@@ -6199,7 +7368,31 @@ public class ModBuilderTests : IDisposable
                 new SharingIndex.Wearer("Vesna", null, "VesnaSSR01", null),
                 new SharingIndex.Wearer("Karst", null, "KarstDorm", null),
             },
-            tex ?? new Dictionary<string, int[]>(), mesh, witnesses);
+            tex ?? new Dictionary<string, int[]>(),
+            mesh.ToDictionary(p => FixtureSelector(p.Key), p => p.Value),
+            witnesses.ToDictionary(p => p.Key, p => p.Value.Select(FixtureSelector).ToArray()));
+
+    [Fact]
+    public void A_shared_animation_source_does_not_describe_the_private_replacement_as_shared()
+    {
+        var env = MakeSkinnedEnv(poolMate: true);
+        string body = SkinnedIb("s0.bundle", "c_vesna01_body_lod0");
+        string mate = SkinnedIb("sm.bundle", "c_vesna01_mate_lod0");
+        env = env with
+        {
+            Sharing = Measured(new Dictionary<string, int[]> { [mate] = new[] { 0, 1 } },
+                new Dictionary<int, string[]> { [0] = new[] { body } }),
+        };
+        var p = NewProject("PrivateReplacement");
+        WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
+        AddReplaceTarget(p);
+
+        var result = ReleasedBuild.Build(p, env, _out, zip: false);
+
+        Assert.Contains(result.Diagnostics, d => d.Contains("pool (") && d.Contains("mate"));
+        Assert.DoesNotContain(result.Infos, i => i.Contains("shares meshes"));
+        Assert.Contains("$zz_gate_vesnassr01", File.ReadAllText(Path.Combine(result.OutDir, "mod.ini")));
+    }
 
     [Fact]
     public void A_witness_that_is_the_pipelines_own_mesh_records_inside_that_capture_section()
@@ -6222,9 +7415,10 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
+        Assert.Contains(r.Infos, i => i.Contains("shares meshes with Karst"));
         AssertNoDuplicateSections(ini);
         Assert.DoesNotContain("[TextureOverride_Witness_", ini);
-        Assert.Contains($"[TextureOverride_Cap_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n"
+        Assert.Contains($"[TextureOverride_Cap_vesna_body_lod1]\nhash = {lod1}\nmatch_priority = 0\n{DrawGuard(ini, lod1)}"
             + "Resource_vesna_body_lod1_Posed = ref vb0\n$zz_seen_vesnassr01 = 1\n", ini);
         // and the latch still gates the suppression it was built for
         Assert.Contains("if $zz_gate_vesnassr01 == 1\nhandling = skip\n", ini);
@@ -6258,7 +7452,7 @@ public class ModBuilderTests : IDisposable
         cap = cap[..cap.IndexOf("\n\n", StringComparison.Ordinal)];
         Assert.Contains("Resource_RtxSave0 = ref ps-t0\n", cap);
         Assert.Contains($"if $zz_rt == {MigotoEmitter.RetexTag(_stockTexHash)}\n$zz_rslot = 0\nendif\n", cap);
-        Assert.Contains("if $zz_rslot == 0\nps-t0 = Resource_Rtx0\nendif\n", cap);
+        Assert.Contains("if $zz_rslot == 0\nps-t0 = Resource_Rtx0\n$zz_bt0 = 1\nendif\n", cap);
         Assert.Contains("post ps-t0 = Resource_RtxSave0\n", cap);
         // the tag section the probe reads back still stands on its own
         Assert.Contains($"[TextureOverride_RetexTag_{_stockTexHash}]", ini);
@@ -6466,7 +7660,9 @@ public class ModBuilderTests : IDisposable
 
     /// <summary>How many sections the ini opens on one ib hash.</summary>
     private static int SectionsOn(string ini, string ibHash) =>
-        ini.Split('\n').Count(l => l.Trim() == $"hash = {ibHash}");
+        System.Text.RegularExpressions.Regex.Split(ini, @"(?m)(?=^\[)")
+            .Count(s => s.Split('\n').Any(l => l.Trim() == $"hash = {ibHash}")
+                && !s.Contains("[TextureOverride_DrawTag_", StringComparison.Ordinal));
 
     [Fact]
     public void Two_replaces_on_one_outfit_ride_one_capture_per_shared_pool_part()
@@ -6474,7 +7670,7 @@ public class ModBuilderTests : IDisposable
         // Several Replaces on ONE outfit is the shape the app is for, and their pools span the same parts
         // by construction. The second pipeline re-reaches the first's hashes on the very same meshes, so
         // it rides those capture sections — a hash claimed twice by one mesh is not a collision.
-        var env = MakeSkinnedEnv(poolMate: true);
+        var env = Rooted(MakeSkinnedEnv(poolMate: true));
         var p = NewProject("TwoOnOne");
         WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
         AddReplaceTarget(p);
@@ -6484,14 +7680,26 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
-        // both Replaces recover, skin and draw under their own per-frame flag
-        Assert.Contains("if $zz_done_vesna_body == 0\n", ini);
-        Assert.Contains("if $zz_done_vesna_mate == 0\n", ini);
+        AssertEveryReferencedFileShips(ini, r.OutDir);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
+        // both Replaces draw each copy from its own pose, each taking the other one's part as a source
+        Assert.Contains("if $zz_drew_vesna_mate == 1\n", ini);
+        Assert.Contains("run = CustomShaderPosePalette_vesna_mate_vesna_body\n", ini);
+        Assert.Contains("if $zz_drew_vesna_body == 1\n", ini);
+        Assert.Contains("run = CustomShaderPosePalette_vesna_body_vesna_mate\n", ini);
         Assert.Contains("run = CommandListDraw_vesna_body\n", ini);
         Assert.Contains("run = CommandListDraw_vesna_mate\n", ini);
-        // one capture per pooled part, merged across the two pipelines rather than emitted per pipeline
+        Assert.DoesNotContain("zz_done_", ini);
+        Assert.Contains(r.Diagnostics, d => d.StartsWith("vesna_body: copies of the replaced part each keep their own pose", StringComparison.Ordinal));
+        Assert.Contains(r.Diagnostics, d => d.StartsWith("vesna_mate: copies of the replaced part each keep their own pose", StringComparison.Ordinal));
+        // one capture per pooled part, merged across the two pipelines rather than emitted per pipeline: the
+        // part's own passes and its ring slot for the other Replace ride the same section
         Assert.Equal(1, SectionsOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0")));
         Assert.Equal(1, SectionsOn(ini, SkinnedIb("sm.bundle", "c_vesna01_mate_lod0")));
+        Assert.Contains("run = CustomShaderRingBlock_vesna_body\n", SectionBody(ini, "[TextureOverride_Cap_vesna_body]"));
+        Assert.Contains("run = CustomShaderRingBlock_vesna_mate\n", SectionBody(ini, "[TextureOverride_Cap_vesna_mate]"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(ini, @"^\[CustomShaderRingBlock_vesna_body\]$",
+            System.Text.RegularExpressions.RegexOptions.Multiline));
     }
 
     [Fact]
@@ -6499,7 +7707,7 @@ public class ModBuilderTests : IDisposable
     {
         // The tier walk claims on the pool part's terms, so it rides the same way: both pipelines reach
         // both parts' lod1 tiers, and the second finds each hash held by the mesh it is claiming for.
-        var env = MakeSkinnedEnv(poolMate: true, mateTier: true);
+        var env = Rooted(MakeSkinnedEnv(poolMate: true, mateTier: true));
         var p = NewProject("TwoOnOneTiers");
         WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
         AddReplaceTarget(p);
@@ -6509,10 +7717,21 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
+        AssertEveryReferencedFileShips(ini, r.OutDir);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
         Assert.Equal(1, SectionsOn(ini, SkinnedIb("s1.bundle", "c_vesna01_body_lod1")));
         Assert.Equal(1, SectionsOn(ini, SkinnedIb("smo.bundle", "c_vesna01_mate_lod1")));
-        Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
-        Assert.Contains("[TextureOverride_Cap_vesna_mate_lod1]", ini);
+        // each tier's one section runs its own Replace's passes at that detail level, and the ring slot the
+        // other Replace reads it through
+        string bodyTier = SectionBody(ini, "[TextureOverride_Cap_vesna_body_lod1]");
+        Assert.Contains("run = CustomShaderPoseBlock_vesna_body_lod1_vesna_body\n", bodyTier);
+        Assert.Contains("run = CustomShaderPoseAnchorMat_vesna_body\n", PoseRouteEmissionTests.PoseBlock(ini, "vesna_body_lod1_vesna_body"));
+        Assert.Contains("run = CustomShaderRingBlock_vesna_body_lod1\n", bodyTier);
+        string mateTier = SectionBody(ini, "[TextureOverride_Cap_vesna_mate_lod1]");
+        Assert.Contains("run = CustomShaderPoseBlock_vesna_mate_lod1_vesna_mate\n", mateTier);
+        Assert.Contains("run = CustomShaderPoseAnchorMat_vesna_mate\n", PoseRouteEmissionTests.PoseBlock(ini, "vesna_mate_lod1_vesna_mate"));
+        Assert.Contains("run = CustomShaderRingBlock_vesna_mate_lod1\n", mateTier);
+        Assert.DoesNotContain("zz_done_", ini);
     }
 
     [Fact]
@@ -6542,7 +7761,7 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         // The draw section remains because routing/suppression ownership is independent of recovery.
-        Assert.Contains($"[TextureOverride_Cap_vesna_cloth]\nhash = {SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0")}\nmatch_priority = 0\n", ini);
+        Assert.Contains($"[TextureOverride_Cap_vesna_cloth]\nhash = {SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("sc.bundle", "c_vesna01_cloth_lod0"))}", ini);
         var clothSection = SectionBody(ini, "[TextureOverride_Cap_vesna_cloth]");
         Assert.DoesNotContain("Resource_vesna_cloth_Posed", clothSection);
         Assert.DoesNotContain("Resource_vesna_cloth_CB", clothSection);
@@ -6734,10 +7953,10 @@ public class ModBuilderTests : IDisposable
     {
         var sharedTierBones = MateBones.Append(ClothBones[0]).ToArray();
         var targetTierBones = BodyBones.Append(ClothBones[0]).ToArray();
-        var env = MakeSkinnedEnv(clothWearer: true, poolMate: true, mateTierTwin: true,
+        var env = Rooted(MakeSkinnedEnv(clothWearer: true, poolMate: true, mateTierTwin: true,
             bodyTierBones: targetTierBones,
             mateTierBones: sharedTierBones, mateOwnAlbedo: true, poolMateFirst: true,
-            mateTierBlendShapes: 1);
+            mateTierBlendShapes: 1));
         var p = NewProject("TierMateFirstSharedCapture");
         WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
         AddReplaceTarget(p);
@@ -6755,6 +7974,11 @@ public class ModBuilderTests : IDisposable
         Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
         var map = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_body_lod1_map_vesna_body.buf"));
         AssertSentinelAtCompactBone(map, targetTierBones, ClothBones[0]);
+        // with the parts it takes rows from placed, the replacement draws each copy from its own pose
+        Assert.Contains(r.Diagnostics, d => d.StartsWith("vesna_body: copies of the replaced part each keep their own pose",
+            StringComparison.Ordinal));
+        AssertEveryReferencedFileShips(ini, r.OutDir);
+        HlslCheck.EveryShaderCompilesClean(ini, r.OutDir);
     }
 
     /// <summary>Assert the semantic row by its bone identity in the expected compact source order. A length
@@ -6788,7 +8012,7 @@ public class ModBuilderTests : IDisposable
             string l = raw.Trim();
             if (l.StartsWith("if ", StringComparison.Ordinal)) open.Add(l);
             else if (l == "endif" && open.Count > 0) open.RemoveAt(open.Count - 1);
-            else if (l == "handling = skip") found.Add(open.ToArray());
+            else if (l == "handling = skip") found.Add(open.Where(g => !g.StartsWith("if ib == ", StringComparison.Ordinal)).ToArray());
         }
         return found;
     }
@@ -6799,7 +8023,7 @@ public class ModBuilderTests : IDisposable
         // Each pipeline suppresses only the part IT replaces. The other pipeline pools that part for
         // recovery, and a pooling pipeline that also suppressed it would put the mate's key on the body's
         // skip: turning the mate off would leave the body's vanilla draw skipped by nobody's replacement.
-        var env = MakeSkinnedEnv(poolMate: true);
+        var env = Rooted(MakeSkinnedEnv(poolMate: true));
         var p = NewProject("TwoOnOneKeyed");
         WriteDonorGlb(bones: BodyBones.Concat(MateBones).ToArray());
         AddReplaceTarget(p);
@@ -6824,6 +8048,13 @@ public class ModBuilderTests : IDisposable
             Assert.Contains("if $zz_key_f7 == 0", g);
             Assert.DoesNotContain("if $zz_key_f6 == 0", g);
         });
+        // each part's ring slot is written only while the OTHER part's Replace, the one reading it, is on
+        Assert.Contains("if $zz_key_f6 == 0\nrun = CustomShaderRingBlock_vesna_mate\n$zz_drew_vesna_mate = 1\n",
+            SectionBody(ini, "[TextureOverride_Cap_vesna_mate]"));
+        Assert.Contains("if $zz_key_f7 == 0\nrun = CustomShaderRingBlock_vesna_body\n$zz_drew_vesna_body = 1\n",
+            SectionBody(ini, "[TextureOverride_Cap_vesna_body]"));
+        // and the frame number advances while either is on
+        Assert.Contains("if ($zz_key_f6 == 0) || ($zz_key_f7 == 0)\nrun = CustomShaderPoseFrame\n", ini);
     }
 
     [Fact]
@@ -6872,7 +8103,7 @@ public class ModBuilderTests : IDisposable
             Assert.Contains("if $zz_key_f6 == 0", g);
             Assert.DoesNotContain("if $zz_key_f7 == 0", g);
         });
-        Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f7 == 0\nif $zz_done_", body);
+        Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f7 == 0\nrun = CustomShaderPoseBlock_vesna_body_", body);
     }
 
     [Fact]
@@ -7087,9 +8318,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
-        Assert.Contains($"hash = {h0}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {hm}\nmatch_priority = 0\nhandling = skip", ini);
-        Assert.Contains($"hash = {h1}\nmatch_priority = 0\nhandling = skip", ini);
+        Assert.Contains($"hash = {h0}\nmatch_priority = 0\n{DrawGuard(ini, h0)}handling = skip", ini);
+        Assert.Contains($"hash = {hm}\nmatch_priority = 0\n{DrawGuard(ini, hm)}handling = skip", ini);
+        Assert.Contains($"hash = {h1}\nmatch_priority = 0\n{DrawGuard(ini, h1)}handling = skip", ini);
         AssertNoDuplicateSections(ini);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -7118,7 +8349,7 @@ public class ModBuilderTests : IDisposable
             SkinnedIb("s1.bundle", "c_vesna01_body_lod1"),
         };
         Assert.Equal(3, tierHashes.Distinct().Count());
-        Assert.All(tierHashes, hash => Assert.Contains($"hash = {hash}\nmatch_priority = 0\n", ini));
+        Assert.All(tierHashes, hash => Assert.Contains($"hash = {hash}\nmatch_priority = 0\n{DrawGuard(ini, hash)}", ini));
     }
 
     [Fact]
@@ -7179,7 +8410,7 @@ public class ModBuilderTests : IDisposable
         string shared = SkinnedIb("smid.bundle", "c_vesna01_body_lodm0");
         Assert.Equal(shared, SkinnedIb("smt.bundle", "c_vesna01_mate_lodm0"));
         Assert.Equal(1, SectionsOn(ini, shared));
-        Assert.Contains($"global $zz_tw_{shared} = 0", ini);
+        Assert.Contains($"global $zz_tw_{SelectorKey(ini, shared)} = 0", ini);
         Assert.Contains(r.Diagnostics, d => d.Contains("shares a draw signature with 'mate'")
             && d.Contains("act while its own textures answer for it"));
         AssertTwinVerdictIsProbedWhereItIsTested(ini);

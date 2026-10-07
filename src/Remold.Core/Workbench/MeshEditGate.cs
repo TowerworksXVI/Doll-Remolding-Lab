@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using Remold.Core.Bundles;
 using Remold.Core.Migoto;
 
 namespace Remold.Core.Workbench;
@@ -17,9 +18,9 @@ namespace Remold.Core.Workbench;
 public sealed class MeshEditGate
 {
     private readonly Func<string, byte[]?> _tryDeobfuscate;
-    private readonly ConcurrentDictionary<(string Bundle, string Mesh, long PathId),
+    private readonly ConcurrentDictionary<(string Bundle, string Mesh, MeshSelector Which),
         StreamDump.SkinRefusal?> _answers = new();
-    private readonly ConcurrentDictionary<(string Bundle, string Mesh, long PathId),
+    private readonly ConcurrentDictionary<(string Bundle, string Mesh, MeshSelector Which),
         bool> _collapsed = new();
 
     /// <param name="tryDeobfuscate">non-throwing logical-bundle → plain bytes (null when
@@ -31,11 +32,11 @@ public sealed class MeshEditGate
 
     /// <summary>Why this mesh's geometry can't be replaced, or null when it can — the
     /// <see cref="PartSkinGate.Blocked"/> answer, settled once per mesh per install.</summary>
-    public StreamDump.SkinRefusal? Blocked(string bundle, string meshName, long pathId = 0)
+    public StreamDump.SkinRefusal? Blocked(string bundle, string meshName, MeshSelector which = default)
     {
-        var key = (bundle, meshName, pathId);
+        var key = (bundle, meshName, which);
         if (_answers.TryGetValue(key, out var settled)) return settled;
-        if (!PartSkinGate.TryBlocked(_tryDeobfuscate, bundle, meshName, pathId, out var answer))
+        if (!PartSkinGate.TryBlocked(_tryDeobfuscate, bundle, meshName, which, out var answer))
             return null;
         _answers[key] = answer;
         return answer;
@@ -48,9 +49,9 @@ public sealed class MeshEditGate
     /// here — including while the bundle cannot be read RIGHT NOW, since a refusal once read is a fact
     /// about the mesh. The not-memoized-while-unreadable contract otherwise holds.</summary>
     public (StreamDump.SkinRefusal? Refusal, bool CollapsedBillboard) BlenderEditAnswers(
-        string bundle, string meshName, long pathId = 0)
+        string bundle, string meshName, MeshSelector which = default)
     {
-        var key = (bundle, meshName, pathId);
+        var key = (bundle, meshName, which);
         if (_answers.TryGetValue(key, out var settledRefusal))
         {
             // a settled refusal answers the whole question — no consumer reads the billboard half past
@@ -59,7 +60,7 @@ public sealed class MeshEditGate
             if (_collapsed.TryGetValue(key, out var settledCollapsed))
                 return (settledRefusal, settledCollapsed);
         }
-        if (!PartSkinGate.TryBlenderEditAnswers(_tryDeobfuscate, bundle, meshName, pathId,
+        if (!PartSkinGate.TryBlenderEditAnswers(_tryDeobfuscate, bundle, meshName, which,
                 out var refusal, out var collapsed))
             return (_answers.TryGetValue(key, out var prior) ? prior : null, false);
         _answers[key] = refusal;

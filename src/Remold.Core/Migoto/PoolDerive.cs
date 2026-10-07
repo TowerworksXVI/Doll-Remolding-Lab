@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
-using Remold.Core.Skeleton;
 
 namespace Remold.Core.Migoto;
 
@@ -544,10 +543,11 @@ public static class PoolDerive
         // The REPLACED part hosts the draw whenever it can feed recovery at all. The anchor's draw is the
         // one the donor renders in — shader, blend state, stock maps, toon ramp — and only the part the
         // author edited carries the material they picked; a sibling anchor repaints the replacement in a
-        // foreign material with nothing on screen saying so (the Leva legs drawn as stocking glass,
-        // 2026-08-30). Bone counts rank nothing here: anchor-preferred ownership
-        // (PoolMath.PreferAnchorOwnership) re-owns every soundly recovered row to whichever part anchors,
-        // so the count a ranking would read is an artifact of the pick, not a reason for it. POSING one
+        // foreign material with nothing on screen saying so (a replaced pair of legs drawn as stocking
+        // glass). Bone counts rank nothing here: anchor-preferred ownership
+        // (PoolMath.PreferAnchorOwnership) re-owns every soundly recovered row to whichever part anchors
+        // (the emitter then moves a used row the anchor can hold only at every vertex to a part that holds
+        // it slim), so the count a ranking would read is an artifact of the pick, not a reason for it. POSING one
         // donor-used bone is the eligibility floor — recovery converts every foreign row through the
         // anchor's own captured constants, and a target with no recoverable row of its own would refuse
         // at emission as an anchor without draw-space constants.
@@ -600,13 +600,12 @@ public static class PoolDerive
     /// pool, can't carry its tier bones either.</para>
     ///
     /// <para>A weighted row with no eligible carrier is classified in <see cref="Result.TierBoneVerdicts"/>
-    /// for the emitter to discard. Throws <see cref="InvalidDataException"/> only when covering would take
-    /// the pool past <paramref name="maxParts"/>.</para>
+    /// for the emitter to discard. Throws <see cref="InvalidDataException"/> only when the derived pool
+    /// doesn't match the roster it was derived over.</para>
     /// </summary>
     public static Result CoverTierBones(Result derived, IReadOnlyList<PartBones> rosterParts,
-        Func<string, PartTiers> tiersOf, int maxParts, string replacedPart,
-        IReadOnlyList<PartBones> readableRoster,
-        IReadOnlyDictionary<uint, string>? bonePaths = null)
+        Func<string, PartTiers> tiersOf, string replacedPart,
+        IReadOnlyList<PartBones> readableRoster)
     {
         var pooled = new HashSet<string>(derived.Pool, StringComparer.OrdinalIgnoreCase);
         var chosen = new SortedSet<int>(Enumerable.Range(0, rosterParts.Count)
@@ -654,7 +653,7 @@ public static class PoolDerive
                     askers.Add((rosterParts[i], t));
                 }
 
-            // outstanding bones, first asker first, so the refusals name the tier that needed one
+            // outstanding bones, first asker first, so a carrier is weighed at the tier that first needed one
             var missingRows = new List<(PartBones Part, uint Bone, string Tier)>();
             foreach (var askers in tiers)
                 foreach (var (tierPart, tier) in askers)
@@ -702,29 +701,6 @@ public static class PoolDerive
                             classification, owners));
                 }
                 break;
-            }
-            if (chosen.Count >= maxParts)
-            {
-                var refusalRow = missing.First(m => CanCover(rosterParts[best], m.Bone, m.Tier));
-                string bone = bonePaths is not null
-                    && bonePaths.TryGetValue(refusalRow.Bone, out var fullPath)
-                    && BoneTable.MatchingLeaf(refusalRow.Bone, fullPath) is { } leaf
-                        ? $"bone '{leaf}'"
-                        : "1 bone this install's files do not name";
-                string? suffix = bonePaths is not null
-                    && bonePaths.TryGetValue(refusalRow.Bone, out var diagnosticPath)
-                        ? BoneTable.MatchingSuffix(refusalRow.Bone, diagnosticPath)
-                        : null;
-                string diagnosticBone = suffix is not null
-                    ? $"'{suffix}' (0x{refusalRow.Bone:x8})"
-                    : $"no matching chain suffix (0x{refusalRow.Bone:x8})";
-                throw BuildLogDiagnostics.Attach(new InvalidDataException(
-                    $"This mesh edit can't be built because the item needs more than {maxParts} "
-                    + $"part{(maxParts == 1 ? "" : "s")} at this detail level. "
-                    + $"LOD '{refusalRow.Tier}' uses {bone} from '{rosterParts[best].Mesh}'. "
-                    + "Remove this mesh edit"),
-                    $"Pool-cap refusal: tier '{refusalRow.Tier}' uses {diagnosticBone} "
-                    + $"from '{rosterParts[best].Mesh}'.");
             }
             chosen.Add(best);
         }

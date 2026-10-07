@@ -56,7 +56,7 @@ public sealed class TextureIngressTests
         var canonical = Png(Path.Combine(root, "textures", "body.png"), new Rgba32(1, 1, 1, 1));
         var editor = Png(Path.Combine(root, ".editor", "picture-body", "session", "return.png"),
             new Rgba32(1, 1, 1, 1));
-        var ingress = Path.Combine(root, ProjectAssetIngress.DirectoryName, "picture-body", "session", "return.png");
+        var ingress = Path.Combine(root, ProjectAssetIngress.LegacyDirectoryName, "picture-body", "session", "return.png");
         Png(ingress, new Rgba32(2, 2, 2, 2));
         File.WriteAllText(Path.Combine(root, "textures", "~asset.interrupted.body.png"), "partial");
 
@@ -67,7 +67,7 @@ public sealed class TextureIngressTests
         Assert.DoesNotContain(Directory.GetFiles(copy.RootDir!, "*", SearchOption.AllDirectories),
             p => p.Contains(".editor", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(Directory.GetFiles(copy.RootDir!, "*", SearchOption.AllDirectories),
-            p => p.Contains(ProjectAssetIngress.DirectoryName, StringComparison.OrdinalIgnoreCase));
+            p => p.Contains(ProjectAssetIngress.LegacyDirectoryName, StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(Directory.GetFiles(copy.RootDir!, "*", SearchOption.AllDirectories),
             p => Path.GetFileName(p).StartsWith("~asset.", StringComparison.OrdinalIgnoreCase));
     }

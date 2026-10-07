@@ -66,12 +66,14 @@ public static class SubjectFingerprint
 
 /// <summary>
 /// The RESOLUTION grain of the reuse test: which logical bundle each part-tier address resolved to when the
-/// row was measured. A mesh owner is catalog-wide and can move between logical bundles without changing
-/// the subject's dependency closure or the content of any bundle the old row read.
+/// row was measured, and which object of it the address loads. A mesh owner is catalog-wide and can move
+/// between logical bundles without changing the subject's dependency closure or the content of any bundle
+/// the old row read; and the catalog can point an address at another same-named copy inside a bundle whose
+/// content never moved.
 ///
 /// <para><b>Shape.</b> One fixed-width pair per resolved address, sorted and concatenated: a key over the
-/// catalog's own address key, then a key over the logical owner bundle. Neither game-derived string lands
-/// in a persisted row.</para>
+/// catalog's own address key, then a key over the logical owner bundle and the address's load key. Neither
+/// game-derived string lands in a persisted row.</para>
 ///
 /// <para>Only addresses the measurement actually resolves participate. A renderer that already carries an
 /// embedded bundle and path id bypasses <see cref="CatalogIndex.ResolveAddress"/>; its prefab and bundle
@@ -83,29 +85,31 @@ internal static class PartAddressResolutions
     private const int PairLength = KeyLength * 2;
 
     private static string AddressKey(string catalogAddressKey) => NameKey.Of(catalogAddressKey);
-    private static string OwnerKey(string owner) => NameKey.Of(owner.ToLowerInvariant());
+    private static string ResolutionKey(string owner, string? loadKey) =>
+        NameKey.Of(owner.ToLowerInvariant() + "\n" + (loadKey ?? ""));
 
     /// <summary>The record for the successful address resolutions used to measure one outfit.</summary>
-    internal static string Of(IEnumerable<(string Address, string Owner)> resolutions)
+    internal static string Of(IEnumerable<(string Address, string Owner, string? LoadKey)> resolutions)
     {
         var pairs = resolutions
-            .Select(r => AddressKey(CatalogIndex.KeyForAddress(r.Address)) + OwnerKey(r.Owner))
+            .Select(r => AddressKey(CatalogIndex.KeyForAddress(r.Address)) + ResolutionKey(r.Owner, r.LoadKey))
             .Distinct(StringComparer.Ordinal)
             .ToList();
         pairs.Sort(StringComparer.Ordinal);
         return string.Concat(pairs);
     }
 
-    /// <summary>Address key to logical-owner key over the current catalog; no bundle is opened.</summary>
+    /// <summary>Address key to resolution key (owner and load key) over the current catalog; no bundle is
+    /// opened.</summary>
     internal static IReadOnlyDictionary<string, string> CurrentKeys(CatalogIndex catalog)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var row in catalog.AddressOwners)
-            map[AddressKey(row.Key)] = OwnerKey(row.Value);
+            map[AddressKey(row.Key)] = ResolutionKey(row.Value, catalog.AddressLoadKeys.GetValueOrDefault(row.Key));
         return map;
     }
 
-    /// <summary>Whether every recorded address still resolves to the same logical owner.</summary>
+    /// <summary>Whether every recorded address still resolves to the same logical owner and load key.</summary>
     internal static bool StillCurrent(IReadOnlyDictionary<string, string> currentKeys, string resolutions)
     {
         if (resolutions.Length % PairLength != 0) return false;

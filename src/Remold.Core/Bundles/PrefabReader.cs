@@ -21,6 +21,10 @@ public sealed record PrefabMaterialRef(long PathId, string? Cab);
 /// <see cref="PrefabMaterialRef"/>. Character outfit prefabs ship none.</summary>
 public sealed record PrefabMeshRef(long PathId, string? Cab);
 
+/// <summary>The saved rest pose (an Avatar) a rig's Animator names, resolved like
+/// <see cref="PrefabMaterialRef"/>.</summary>
+public sealed record PrefabAvatarRef(long PathId, string? Cab);
+
 /// <summary>Which renderer class draws a slot. The distinction is the slot's, not the mesh's: it says
 /// where the mesh reference was read from, and nothing about what the mesh contains.</summary>
 public enum SlotRenderer
@@ -41,10 +45,16 @@ public enum SlotRenderer
 /// not is drawn only when it is in frame, and issues nothing at all otherwise. False requires a MEASURED
 /// Off — a renderer whose field can't be read reads as casting.</param>
 public sealed record PrefabSlot(string Name, long PathId, IReadOnlyList<PrefabMaterialRef> Materials,
-    PrefabMeshRef? Mesh, SlotRenderer Renderer = SlotRenderer.Skinned, bool CastsShadows = true)
+    PrefabMeshRef? Mesh, SlotRenderer Renderer = SlotRenderer.Skinned, bool CastsShadows = true,
+    bool InRoot = true)
 {
     /// <summary>True when the renderer ships a serialized mesh (an smr-body or static slot).</summary>
     public bool HasMesh => Mesh is not null;
+
+    // InRoot: whether the renderer's GameObject sits under the parsed root's own Transform. Always true
+    // for a one-root bundle, where the root owns every renderer in the file; in a bundle shipping several
+    // container roots it is false for a sibling root's renderer, which the ownership rule's root-name
+    // clause must not claim. Prefix ownership is independent of the renderer's root.
 }
 
 /// <summary>A parsed assembly prefab: root GameObject, mesh recipe, renderer slots with their CAB-exact
@@ -96,6 +106,14 @@ public static class PrefabReader
             ?? throw new InvalidDataException("bundle has no AssetBundle object. Not a shipped bundle");
         var container = am.GetBaseField(inst, abInfo)["m_Container"];
 
+        // The container's GameObject roots, in container order. Most bundles ship ONE; a bundle shipping
+        // several (a support team's three members, a weapon beside its ammunition, a prefab beside a
+        // prop-less variant of itself) holds every root's renderers in one file. The slot list stays
+        // file-wide — a sibling root can carry this subject's own-prefixed slots — but each slot records
+        // whether it sits under the parsed root's Transform (PrefabSlot.InRoot), which is what keeps a
+        // root-name claim from taking a sibling root's renderers. A single root owns the whole file, so
+        // the subtree walk — a read per Transform — is paid only where the file has something to tell apart.
+        var roots = new List<(AssetFileInfo Info, AssetTypeValueField Field, string Name)>();
         foreach (var entry in BundleReader.UnwrapArray(container))
         {
             var asset = BundleReader.FindPtr(
@@ -103,24 +121,96 @@ public static class PrefabReader
             if (asset is null || asset["m_FileID"].AsInt != 0) continue;
             var goInfo = inst.file.GetAssetInfo(asset["m_PathID"].AsLong);
             if (goInfo is null || goInfo.TypeId != BundleReader.ClassGameObject) continue;
-
+            if (roots.Any(r => r.Info.PathId == goInfo.PathId)) continue;
             var goField = am.GetBaseField(inst, goInfo);
-            var name = goField["m_Name"].AsString;
+            roots.Add((goInfo, goField, goField["m_Name"].AsString));
+        }
+
+        foreach (var (goInfo, goField, name) in roots)
+        {
             if (rootName is not null && !string.Equals(name, rootName, StringComparison.Ordinal)) continue;
 
-            var parsed = ReadRoot(am, inst, name, goField, externals);
+            HashSet<long>? subtree = null;
+            if (roots.Count > 1)
+            {
+                subtree = SubtreeGameObjects(am, inst, goInfo.PathId, name, out var why);
+                if (subtree is null)
+                {
+                    // A root whose renderers cannot be told from its siblings' is not one this reader
+                    // can read as a prefab. Asked for by name, that is a loud refusal; met while trying a
+                    // bundle's roots in turn, it is a root that is not an assembly prefab, and the next
+                    // root gets its turn. Never a root that silently owns nothing.
+                    if (rootName is not null) throw new InvalidDataException(why);
+                    declinedRoot = true;
+                    continue;
+                }
+            }
+            var parsed = ReadRoot(am, inst, name, goField, externals, subtree);
             if (parsed is not null) return parsed;
             declinedRoot = true;
         }
         return null;
     }
 
+    /// <summary>The path ids of every GameObject under <paramref name="rootGameObject"/>'s Transform,
+    /// the root itself included: one Transform read per Transform in the file, father chains followed
+    /// upward with the answers memoized. A Transform whose chain never reaches the root — another
+    /// container root's, or an orphan — is outside.
+    /// <para>Null, with <paramref name="why"/> set, when the subtree cannot be told: a Transform could not
+    /// be read, or the root has no Transform at all — a UI root sits on a RectTransform, a different
+    /// class, and a bundle in a subject's closure routinely ships several of those. The caller decides
+    /// what that means: a root nobody asked for by name is simply not an assembly prefab, while a root
+    /// pinned by a curated route is one this reader cannot read and says so loudly.</para></summary>
+    private static HashSet<long>? SubtreeGameObjects(AssetsManager am, AssetsFileInstance inst, long rootGameObject,
+        string rootName, out string? why)
+    {
+        why = null;
+        var byTransform = new Dictionary<long, (long GameObject, long Father)>();
+        foreach (var info in inst.file.AssetInfos)
+        {
+            if (info.TypeId != BundleReader.ClassTransform) continue;
+            try
+            {
+                var bf = am.GetBaseField(inst, info);
+                byTransform[info.PathId] = (bf["m_GameObject"]["m_PathID"].AsLong, bf["m_Father"]["m_PathID"].AsLong);
+            }
+            catch (Exception e)
+            {
+                why = $"Transform {info.PathId} in a bundle shipping several container roots couldn't be read, "
+                    + $"so which renderers belong to '{rootName}' can't be told: {e.Message}";
+                return null;
+            }
+        }
+        long rootTransform = byTransform.FirstOrDefault(kv => kv.Value.GameObject == rootGameObject).Key;
+        if (rootTransform == 0)
+        {
+            why = $"Container root '{rootName}' has no Transform in a bundle shipping several container roots, "
+                + "so which renderers belong to it can't be told.";
+            return null;
+        }
+        var inside = new Dictionary<long, bool>();
+        bool Inside(long transform, int depth)
+        {
+            if (transform == rootTransform) return true;
+            if (transform == 0 || depth > byTransform.Count) return false;   // an orphan chain, or a cycle
+            if (inside.TryGetValue(transform, out var known)) return known;
+            bool answer = byTransform.TryGetValue(transform, out var t) && Inside(t.Father, depth + 1);
+            return inside[transform] = answer;
+        }
+        var result = new HashSet<long> { rootGameObject };
+        foreach (var (transform, (go, _)) in byTransform)
+            if (Inside(transform, 0)) result.Add(go);
+        return result;
+    }
+
     /// <summary>Parse one container root: its recipe MB, the ReplaceableModel marker, and every renderer
     /// slot in the file — skinned and static alike (one root's slots per bundle; SlotPath names tie them
     /// together regardless of hierarchy). A recipe-less root is accepted iff a slot carries a serialized
     /// mesh.</summary>
+    /// <param name="subtree">The GameObjects under this root's Transform, or null when the root owns the
+    /// whole file (the one-root bundle). A renderer whose GameObject is outside is another root's slot.</param>
     private static CharacterPrefab? ReadRoot(AssetsManager am, AssetsFileInstance inst, string rootName,
-        AssetTypeValueField goField, IReadOnlyList<string> externals)
+        AssetTypeValueField goField, IReadOnlyList<string> externals, HashSet<long>? subtree)
     {
         List<PrefabRecipeEntry>? recipe = null;
         bool replaceable = false;
@@ -249,6 +339,9 @@ public static class PrefabReader
                 slotGoPathId = goPtr["m_PathID"].AsLong;
                 try { slotName = am.GetBaseField(inst, slotGo)["m_Name"].AsString; } catch { }
             }
+            // under this root's Transform, or another container root's renderer (see Read); a slot whose
+            // GameObject did not resolve keeps the one-root answer rather than being judged on nothing
+            bool inRoot = subtree is null || slotGoPathId == 0 || subtree.Contains(slotGoPathId);
 
             var mats = new List<PrefabMaterialRef>();
             foreach (var m in BundleReader.UnwrapArray(rend["m_Materials"]))
@@ -281,7 +374,7 @@ public static class PrefabReader
             // this feeds must ride a measured Off and never an unread one.
             var castField = rend["m_CastShadows"];
             bool castsShadows = castField.IsDummy || castField.AsInt != 0;
-            slots.Add(new PrefabSlot(slotName, info.PathId, mats, meshRef, renderer, castsShadows));
+            slots.Add(new PrefabSlot(slotName, info.PathId, mats, meshRef, renderer, castsShadows, inRoot));
         }
 
         // accept a recipe root, or a recipe-less root whose slots carry serialized meshes (smr-body, prop)

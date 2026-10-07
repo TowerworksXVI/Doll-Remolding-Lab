@@ -463,6 +463,35 @@ public class BlenderSessionTests
             AuthoredEditFixtures.Body, carriesReferences: false));
     }
 
+    /// <summary>A part the game starts shrunk opens centred at the origin, inside the body. One the session
+    /// cannot write (a reference beside another part, a part the mesh-edit gate holds in an open-all) starts
+    /// hidden in the viewport, and the session file says so; a writable one, and the part a session names,
+    /// start shown.</summary>
+    [Fact]
+    public void A_hidden_part_the_session_cannot_write_starts_hidden_in_the_viewport()
+    {
+        Assert.False(MainWindowViewModel.SessionHiddenPartVisible(hidden: true, writable: false, named: false));
+        Assert.True(MainWindowViewModel.SessionHiddenPartVisible(hidden: true, writable: true, named: false));
+        Assert.True(MainWindowViewModel.SessionHiddenPartVisible(hidden: true, writable: false, named: true));
+        Assert.True(MainWindowViewModel.SessionHiddenPartVisible(hidden: false, writable: false, named: false));
+
+        using var g = new TempGame();
+        var glb = g.At("combined.glb");
+        BlenderBridge.WriteSession(glb, "body1_lod0", new[]
+        {
+            MainWindowViewModel.SessionPartForBlender("body1_lod0", false, true, false, null, null, "Edit 1",
+                viewportVisible: null, label: "body1"),
+            MainWindowViewModel.SessionPartForBlender("prop1_lod0", false, false, false, null, null, null,
+                MainWindowViewModel.SessionHiddenPartVisible(hidden: true, writable: false, named: false)
+                    ? null : false, label: "prop1", hidden: true),
+        });
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(BlenderBridge.SessionPath(glb)));
+        var prop = doc.RootElement.GetProperty("parts").EnumerateArray()
+            .Single(p => p.GetProperty("name").GetString() == "prop1_lod0");
+        Assert.False(prop.GetProperty("viewportVisible").GetBoolean());
+        Assert.True(prop.GetProperty("hidden").GetBoolean());
+    }
+
     [Fact]
     public void MalformedAppTargetMetadataNeverFallsBackToTheReturnFilename()
     {
@@ -765,6 +794,63 @@ public class BlenderSessionTests
         Assert.True(model.LogicalNodes.Single(n => n.Name == "hips").WorldMatrix.Translation.Length() < 1e-5f);
     }
 
+    /// <summary>In an open-all session the lead part (the body) decides where every joint its build rule
+    /// covers stands, as a Build on the body poses it: a bone it lists but doesn't weight stands where the
+    /// rule puts it, not at its stale bind, and a bone only another part lists stands where the body's rule
+    /// puts it.</summary>
+    [Fact]
+    public void ACombinedSession_StandsTheJointsTheBodysRuleCovers_WhereTheRulePutsThem()
+    {
+        using var g = new TempGame();
+        const uint HB = 0x0B0B_0B0B, HS = 0x5A5A_5A5A, HC = 0x0C0C_0C0C;
+        // the body weights HB and lists HS stale; the cloth weights HC and lists HS apart from the body
+        var body = new MeshGltf.RiggedPart(Triangle("body_lod0"), new MeshSkin
+        {
+            BoneHashes = new[] { HB, HS },
+            BindPoses = new List<Matrix4x4> { Matrix4x4.CreateTranslation(0, -1, 0), Matrix4x4.CreateTranslation(0, -2, 0) },
+        });
+        var cloth = new MeshGltf.RiggedPart(Triangle("cloth_lod0"), new MeshSkin
+        {
+            BoneHashes = new[] { HC, HS },
+            BindPoses = new List<Matrix4x4> { Matrix4x4.CreateTranslation(0, -3, 0), Matrix4x4.CreateTranslation(0, -2.5f, 0) },
+        });
+        var bodyRule = new Dictionary<uint, Matrix4x4>
+        {
+            [HB] = Matrix4x4.CreateTranslation(0, -1, 0),
+            [HS] = Matrix4x4.CreateTranslation(0, -2.2f, 0),
+            [HC] = Matrix4x4.CreateTranslation(0, -3.3f, 0),
+        };
+        string Resolve(uint h) => $"bone_{h:x8}";
+
+        var ruled = g.At("ruled.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { cloth, body }, Resolve, ruled, lead: 1,
+            leadRests: AssetExporter.LeadRests(bodyRule, uprighting: null));
+        Assert.Equal(1f, JointY(ruled, HB), 5);
+        Assert.Equal(2.2f, JointY(ruled, HS), 5);
+        Assert.Equal(3.3f, JointY(ruled, HC), 5);
+
+        // without the rule, the lead's own table stands its joints, and the cloth's own bind the rest
+        var plain = g.At("plain.glb");
+        MeshGltf.ExportCombinedRiggedGlb(new[] { cloth, body }, Resolve, plain, lead: 1);
+        Assert.Equal(2f, JointY(plain, HS), 5);
+        Assert.Equal(3f, JointY(plain, HC), 5);
+
+        static float JointY(string glb, uint hash) => SharpGLTF.Schema2.ModelRoot.Load(glb)
+            .LogicalNodes.Single(n => n.Name.EndsWith($"{hash:x8}", StringComparison.Ordinal)).WorldMatrix.Translation.Y;
+    }
+
+    /// <summary>The body is the lead of a combined session, whatever wardrobe slot its token carries.</summary>
+    [Theory]
+    [InlineData("body", true)]
+    [InlineData("P1_body", true)]
+    [InlineData("body1", true)]
+    [InlineData("P3_body2", true)]
+    [InlineData("cloth", false)]
+    [InlineData("P1_cloth", false)]
+    [InlineData("bodysuit", false)]
+    public void TheBodyToken_IsRecognisedWithOrWithoutAWardrobeSlot(string token, bool isBody) =>
+        Assert.Equal(isBody, AssetExporter.IsBodyToken(token));
+
     /// <summary>The two routes' answer for one part, side by side. A part that opens alone and the same part
     /// opened inside its outfit have to land in the same space, or an edit made in one session shows displaced
     /// in the other.</summary>
@@ -840,7 +926,7 @@ public class BlenderSessionTests
 
         var lone = g.At(Path.Combine("meshes", "weapon_lod0.glb"));
         var combined = g.At(Path.Combine("meshes", "_combined.glb"));
-        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+        var spec = new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
         {
             ("weapon", weaponLogical, "weapon_lod0", lone, null, 0L, null),   // GlbOut ⇒ the lone route's file
             ("body1", bodyLogical, "body1_lod0", null, null, 0L, null),
@@ -895,7 +981,7 @@ public class BlenderSessionTests
         var vfs = TestVfs.Create(g.Root, Array.Empty<(string, string)>(), null,
             (clothLogical, clothPhys), (bodyLogical, bodyPhys));
         // no combinedOut: the body row carries no GlbOut either, so it is read for its SKELETON alone
-        List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)> Spec(string glbOut) => new()
+        List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)> Spec(string glbOut) => new()
         {
             ("cloth1", clothLogical, "cloth1_lod0", glbOut, null, 0L, null),
             ("body1", bodyLogical, "body1_lod0", null, null, 0L, null),
@@ -956,8 +1042,8 @@ public class BlenderSessionTests
         var sessionSidecar = File.ReadAllBytes(PreviewMaps.SidecarPath(combined));
 
         // mapB on the slot it WAS exported on: cloth1's own, and nothing ships
-        Assert.Equal(MapOrigin.Vanilla,
-            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0")[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Untouched,
+            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0")[0].BaseColor.Answer);
 
         // after the two objects swapped part collections, body1 carries the material cloth1 arrived with
         MeshGltf.ExportCombinedRiggedGlb(
@@ -966,7 +1052,7 @@ public class BlenderSessionTests
 
         // the same image, the same record, a slot it never sat on: the modder's own work now
         var maps = MeshGltf.ReadSubmeshMaps(combined, "body1_lod0");
-        Assert.Equal(MapOrigin.Authored, maps[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, maps[0].BaseColor.Answer);
         var row = Assert.Single(BlenderMaterialReturn.Normalize(maps, g.At("body-return")));
         Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
         AssertSamePixels(mapB, row.Albedo!);
@@ -997,9 +1083,9 @@ public class BlenderSessionTests
 
         Assert.All(MeshGltf.ReadSubmeshMaps(resplit), m =>
         {
-            Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin);
-            Assert.Equal(Path.GetFullPath(map), m.BaseColor.StockPng);
-            Assert.Equal(MapOrigin.Vanilla, m.Rmo.Origin);
+            Assert.Equal(MapAnswer.Untouched, m.BaseColor.Answer);
+            Assert.Equal(Path.GetFullPath(map), m.BaseColor.Sent?.Png);
+            Assert.Equal(MapAnswer.Untouched, m.Rmo.Answer);
         });
         // the alpha source an authored RMO is rebuilt over survives the re-split
         Assert.Equal(Path.GetFullPath(rmo), PreviewMaps.ReadSubmeshRmoSources(resplit, "body1_lod0")[0]);
@@ -1024,7 +1110,7 @@ public class BlenderSessionTests
 
         // what the part now opens on is the modder's file, at its own pixels
         var embedded = MeshGltf.ReadSubmeshMaps(resplit)[0].BaseColor;
-        Assert.Equal(MapOrigin.Authored, embedded.Origin);
+        Assert.Equal(MapAnswer.Authored, embedded.Answer);
         Assert.Equal(FirstPixel(File.ReadAllBytes(authored)), FirstPixel(embedded.AuthoredPng!));
         Assert.NotEqual(FirstPixel(File.ReadAllBytes(stock)), FirstPixel(embedded.AuthoredPng!));
     }
@@ -1050,7 +1136,7 @@ public class BlenderSessionTests
         // …and it settles nothing: the classifying read never sees it
         Assert.DoesNotContain(PreviewMaps.ReadSidecar(resplit).Values,
             e => e.Source == Path.GetFullPath(authored));
-        Assert.Equal(MapOrigin.Authored, MeshGltf.ReadSubmeshMaps(resplit)[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, MeshGltf.ReadSubmeshMaps(resplit)[0].BaseColor.Answer);
     }
 
     /// <summary>The stock map an authored one replaced must not be re-embedded on that slot. It would come
@@ -1095,9 +1181,9 @@ public class BlenderSessionTests
             authoredMaps: new (string?, string?, string?)[] { (authored, null, null) });
 
         var back = MeshGltf.ReadSubmeshMaps(resplit)[0];
-        Assert.Equal(MapOrigin.Authored, back.BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, back.Rmo.Origin);
-        Assert.Equal(Path.GetFullPath(stockRmo), back.Rmo.StockPng);
+        Assert.Equal(MapAnswer.Authored, back.BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, back.Rmo.Answer);
+        Assert.Equal(Path.GetFullPath(stockRmo), back.Rmo.Sent?.Png);
         // the mask source rides the record either way, so an authored RMO next time still finds its alpha
         Assert.Equal(Path.GetFullPath(stockRmo), PreviewMaps.ReadSubmeshRmoSources(resplit, "body1_lod0")[0]);
     }
@@ -1139,8 +1225,8 @@ public class BlenderSessionTests
         AssertSamePixels(clothMap, row.Albedo!);
 
         // the control: cloth1 carries the same image and it is cloth1's own, so nothing ships
-        Assert.Empty(BlenderMaterialReturn.Normalize(
-            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0", clothWorkspace), g.At("cloth-return")));
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(combined, "cloth1_lod0", clothWorkspace), g.At("cloth-return")), r => r.Asks);
     }
 
     /// <summary>An open that could read every map says nothing extra; one that couldn't NAMES them, once, on
@@ -1183,7 +1269,7 @@ public class BlenderSessionTests
         MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", clothMap) }, h => Paths[h], returned);
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
-        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
+        Assert.Equal(MapAnswer.Authored, incoming[0].BaseColor.Answer);
         var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("body-return")));
         Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
         AssertSamePixels(clothMap, row.Albedo!);
@@ -1199,8 +1285,8 @@ public class BlenderSessionTests
         var workspace = g.At("body1_lod0.glb");
         MeshGltf.ExportCombinedRiggedGlb(new[] { RiggedPart("body1_lod0", bodyMap) }, h => Paths[h], workspace);
 
-        Assert.Empty(BlenderMaterialReturn.Normalize(
-            MeshGltf.ReadSubmeshMaps(workspace, "body1_lod0", workspace), g.At("body-return")));
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(
+            MeshGltf.ReadSubmeshMaps(workspace, "body1_lod0", workspace), g.At("body-return")), r => r.Asks);
     }
 
     // ---------------------------------------------------------------- the link INSIDE one part
@@ -1226,9 +1312,9 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
 
-        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, incoming[1].BaseColor.Origin);   // material 2 is still on its own
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(MapAnswer.Authored, incoming[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, incoming[1].BaseColor.Answer);   // material 2 is still on its own
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
         Assert.Equal(0, row.Submesh);
         Assert.Equal(SlotOrigin.Authored, row.AlbedoAsk);
         AssertSamePixels(mapB, row.Albedo!);
@@ -1251,9 +1337,9 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
 
-        Assert.Equal(MapOrigin.Vanilla, incoming[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Authored, incoming[1].BaseColor.Origin);
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(MapAnswer.Untouched, incoming[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Authored, incoming[1].BaseColor.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
         Assert.Equal(1, row.Submesh);
         AssertSamePixels(mapA, row.Albedo!);
     }
@@ -1277,8 +1363,8 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
 
-        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
-        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.All(incoming, m => Assert.Equal(MapAnswer.Untouched, m.BaseColor.Answer));
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
     }
 
     /// <summary>…and the link survives the same re-encode: the returned picture is material 2's whatever
@@ -1299,9 +1385,9 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
 
-        Assert.Equal(MapOrigin.Authored, incoming[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, incoming[1].BaseColor.Origin);
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.Equal(MapAnswer.Authored, incoming[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, incoming[1].BaseColor.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
         Assert.Equal(0, row.Submesh);
         AssertSamePixels(mapB, row.Albedo!);
     }
@@ -1325,7 +1411,7 @@ public class BlenderSessionTests
             h => Paths[h], returned);
         // the link applied: the file the intake writes, and the part re-opened over it
         var linked = Assert.Single(BlenderMaterialReturn.Normalize(
-            MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace), g.At("return-maps")));
+            MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace), g.At("return-maps")), r => r.Asks);
         var reopened = g.At("body1_lod0.reopened.glb");
         MeshGltf.ReexportPartGlb(returned, "body1_lod0", reopened, recordGlb: workspace,
             authoredMaps: new (string?, string?, string?)[] { (linked.Albedo, null, null), default });
@@ -1333,9 +1419,9 @@ public class BlenderSessionTests
         // the second send, with nothing touched in Blender
         var second = MeshGltf.ReadSubmeshMaps(reopened, "body1_lod0", reopened);
 
-        Assert.Equal(MapOrigin.Authored, second[0].BaseColor.Origin);
-        Assert.Equal(MapOrigin.Vanilla, second[1].BaseColor.Origin);
-        var row = Assert.Single(BlenderMaterialReturn.Normalize(second, g.At("second-maps")));
+        Assert.Equal(MapAnswer.Authored, second[0].BaseColor.Answer);
+        Assert.Equal(MapAnswer.Untouched, second[1].BaseColor.Answer);
+        var row = Assert.Single(BlenderMaterialReturn.Normalize(second, g.At("second-maps")), r => r.Asks);
         Assert.Equal(0, row.Submesh);
         AssertSamePixels(mapB, row.Albedo!);
     }
@@ -1359,8 +1445,8 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0", workspace);
 
-        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
-        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.All(incoming, m => Assert.Equal(MapAnswer.Untouched, m.BaseColor.Answer));
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
     }
 
     /// <summary>A mesh renamed in Blender comes back under a name the record's slot rows do not carry, so the
@@ -1382,8 +1468,8 @@ public class BlenderSessionTests
 
         var incoming = MeshGltf.ReadSubmeshMaps(returned, "body1_lod0.001", workspace);
 
-        Assert.All(incoming, m => Assert.Equal(MapOrigin.Vanilla, m.BaseColor.Origin));
-        Assert.Empty(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")));
+        Assert.All(incoming, m => Assert.Equal(MapAnswer.Untouched, m.BaseColor.Answer));
+        Assert.DoesNotContain(BlenderMaterialReturn.Normalize(incoming, g.At("return-maps")), r => r.Asks);
     }
 
     /// <summary>The record's per-slot rows are all-or-nothing per MESH: a mesh it names at all carries a row
@@ -1518,7 +1604,7 @@ public class BlenderSessionTests
         File.WriteAllBytes(PreviewMaps.SidecarPath(ws), sidecar);
 
         Assert.Equal("body1_lod0.001", MeshGltf.MeshNames(ws)[0]);
-        Assert.Equal(MapOrigin.Authored, MeshGltf.ReadSubmeshMaps(ws, null)[0].Rmo.Origin);
+        Assert.Equal(MapAnswer.Authored, MeshGltf.ReadSubmeshMaps(ws, null)[0].Rmo.Answer);
         Assert.Empty(PreviewMaps.ReadSubmeshRmoSources(ws, null));              // the returned name matches no row
         Assert.Equal(Path.GetFullPath(stockRmo), PreviewMaps.ReadSubmeshRmoSources(ws, "body1_lod0")[0]);
     }
@@ -1562,7 +1648,7 @@ public class BlenderSessionTests
         }, h => Paths[h], combined);
         Assert.Equal("body1_lod0", MeshGltf.MeshNames(combined)[0]);
 
-        Assert.Equal(MapOrigin.None, MeshGltf.ReadSubmeshMaps(combined)[0].Rmo.Origin);
+        Assert.Equal(MapAnswer.None, MeshGltf.ReadSubmeshMaps(combined)[0].Rmo.Answer);
         Assert.Empty(PreviewMaps.ReadSubmeshRmoSources(combined));
     }
 
@@ -1582,10 +1668,10 @@ public class BlenderSessionTests
         File.Delete(PreviewMaps.SidecarPath(combined));               // the publish couldn't move it
 
         var maps = MeshGltf.ReadSubmeshMaps(combined, "body1_lod0");
-        Assert.Equal(MapOrigin.Authored, maps[0].Rmo.Origin);         // no record: the stock map reads authored
+        Assert.Equal(MapAnswer.Authored, maps[0].Rmo.Answer);         // no record: the stock map reads authored
         Assert.Empty(PreviewMaps.ReadSubmeshRmoSources(combined, "body1_lod0"));
 
-        var none = new ResolvedMap(MapOrigin.None);
+        var none = new ResolvedMap(MapAnswer.None);
         var returned = maps.Concat(new[] { new IncomingMaps(none, none) }).ToList();
         var asked = new List<int>();
         var row = Assert.Single(BlenderMaterialReturn.Normalize(returned, g.At("textures"),

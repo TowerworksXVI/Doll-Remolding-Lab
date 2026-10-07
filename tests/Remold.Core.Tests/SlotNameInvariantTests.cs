@@ -105,7 +105,7 @@ public class SlotNameInvariantTests
         Directory.CreateDirectory(Path.GetDirectoryName(glb)!);
 
         var done = AssetExporter.BuildRiggedGlbs(g.Root, vfs, Prop, "Crate",
-            new List<(string, string, string, string?, IReadOnlyList<float>?, long, string?)>
+            new List<(string, string, string, string?, IReadOnlyList<float>?, Remold.Core.Bundles.MeshSelector, string?)>
             {
                 ("Shellcase", Logical, slot, glb, null, pathId, null),
             },

@@ -52,15 +52,16 @@ def _mesh(name, coll=None):
 
 
 def _armature(name="Armature", coll=None, bone="root"):
-    """A one-bone skeleton object. `bone` names the bone, so a donor rig's bones are distinguishable
-    from the session armature's in what a fill writes and what a glb ships."""
+    """A skeleton object. `bone` names its bone, or its bones when a sequence, so a donor rig's bones
+    are distinguishable from the session armature's in what a fill writes and what a glb ships."""
     arm = bpy.data.armatures.new(name)
     ob = bpy.data.objects.new(name, arm)
     (coll or bpy.context.scene.collection).objects.link(ob)
     bpy.context.view_layer.objects.active = ob
     bpy.ops.object.mode_set(mode="EDIT")
-    b = arm.edit_bones.new(bone)
-    b.head, b.tail = (0, 0, 0), (0, 0, 1)
+    for i, bone_name in enumerate([bone] if isinstance(bone, str) else bone):
+        b = arm.edit_bones.new(bone_name)
+        b.head, b.tail = (0, 0, i), (0, 0, i + 1)
     bpy.ops.object.mode_set(mode="OBJECT")
     return ob
 
@@ -82,9 +83,12 @@ def _bind(obj, arm):
 
 
 def _part_mesh(name, coll):
-    """A fully weighted mesh in a part collection: what the weight checks consider unremarkable, so
-    an attribution fixture reports attribution problems and nothing else."""
-    return _weight_all(_mesh(name, coll))
+    """A fully weighted mesh in a part collection, bound to the session armature when the scene has
+    one, as an imported part arrives: what the weight and binding checks consider unremarkable, so an
+    attribution fixture reports attribution problems and nothing else."""
+    mo = _weight_all(_mesh(name, coll))
+    arm = rb._session_armature()
+    return _bind(mo, arm) if arm is not None else mo
 
 
 def _add_uv_sets(obj, count=3):
@@ -115,14 +119,14 @@ def _collection(name, parent, part=False):
     return coll
 
 
-def _layout(part_names=(PART_A,), armature=False, reference=True):
-    """Build the import layout by hand: Mod/<part> per name, Reference, optionally Mod/Armature.
-    Returns (mod, reference or None, {part name: collection}, armature or None)."""
+def _layout(part_names=(PART_A,), armature=False, reference=True, bones="root"):
+    """Build the import layout by hand: Mod/<part> per name, Reference, optionally Mod/Armature
+    carrying `bones`. Returns (mod, reference or None, {part name: collection}, armature or None)."""
     root = bpy.context.scene.collection
     mod = _collection(rb.MOD_COLLECTION, root)
     ref = _collection(rb.REFERENCE_COLLECTION, root) if reference else None
     parts = {n: _collection(n, mod, part=True) for n in part_names}
-    arm = _armature(coll=_collection(rb.ARMATURE_COLLECTION, mod)) if armature else None
+    arm = _armature(coll=_collection(rb.ARMATURE_COLLECTION, mod), bone=bones) if armature else None
     return mod, ref, parts, arm
 
 
@@ -1005,15 +1009,33 @@ def test_object_linked_into_both_trees_ships():
     assert sent == [PART_A], f"an object in both trees must ship: {sent}"
 
 
+def _imported_slots(mo):
+    """Two material slots recorded in the baseline, as an imported part arrives with them."""
+    for name in ("skin_mat", "cloth_mat"):
+        mo.data.materials.append(bpy.data.materials.new(name))
+    rb._snapshot_baseline([mo], None)
+
+
 def test_material_slot_change_is_soft():
     _reset()
     _mod, _ref, parts, _arm = _layout([PART_A], armature=True)
     mo = _part_mesh(PART_A, parts[PART_A])
-    rb._snapshot_baseline([mo], None)
-    mo.data.materials.append(bpy.data.materials.new("added_mat"))
+    _imported_slots(mo)
+    first, second = mo.data.materials[0], mo.data.materials[1]
+    mo.data.materials[0], mo.data.materials[1] = second, first      # reorder the imported slots
     soft = _severities(_check(), "SOFT")
     assert len(soft) == 1 and "material slots changed" in soft[0], f"want the slot warning, got {soft}"
     assert "face range" in soft[0], f"the warning must say what a reorder does: {soft[0]}"
+
+
+def test_a_slot_appended_after_the_imported_ones_is_not_warned():
+    """An appended slot is a new submesh the app takes; only the imported slots have face ranges."""
+    _reset()
+    _mod, _ref, parts, _arm = _layout([PART_A], armature=True)
+    mo = _part_mesh(PART_A, parts[PART_A])
+    _imported_slots(mo)
+    mo.data.materials.append(bpy.data.materials.new("added_mat"))
+    assert _check() == [], _check()
 
 
 # ---------------------------------------------------------------- checks scope to what ships
@@ -1320,6 +1342,37 @@ def test_a_donor_rig_in_reference_neither_ships_nor_is_consulted():
     assert "donor_root" not in nodes, f"the donor rig's bones shipped: {nodes}"
 
 
+def test_the_fill_reaches_a_piece_bone_heat_cannot_heat_on_its_own():
+    """A game mesh is cut into pieces along its seams. Bone heat heats a vertex only when its nearest bone
+    is in view, and fails for every bone when one piece gets no heat. Here the bone sits inside a closed
+    box and a small triangle floats above the lid, cut off from a second triangle only by a seam: alone,
+    bone heat weights nothing. The fill welds its throwaway copy across the seam, so the triangle takes
+    heat from the piece that reaches a box corner, and the part's own mesh keeps its split vertices."""
+    _reset()
+    arm = bpy.data.armatures.new("Armature")
+    ao = bpy.data.objects.new("Armature", arm)
+    bpy.context.scene.collection.objects.link(ao)
+    bpy.context.view_layer.objects.active = ao
+    bpy.ops.object.mode_set(mode="EDIT")
+    b = arm.edit_bones.new("spine_33334444")
+    b.head, b.tail = (0, 0, -0.5), (0, 0, 0.5)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    box = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+    box_faces = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    floating = [(0, 0, 1.5), (0.5, 0, 1.5), (0, 0.5, 1.5)]            # 8-10, above the lid
+    bridge = [(0, 0, 1.5), (1, 1, 1), (0.5, 0.5, 1.8)]                 # 11-13: seam copy, corner copy, tip
+    me = bpy.data.meshes.new(PART_A)
+    me.from_pydata(box + floating + bridge, [], box_faces + [(8, 9, 10), (11, 12, 13)])
+    me.update()
+    mo = _bind(bpy.data.objects.new(PART_A, me), ao)
+    bpy.context.scene.collection.objects.link(mo)
+
+    filled, still = rb.gf2_fill_missing_weights([mo], ao)
+
+    assert (filled, still) == (14, 0), f"the fill solved {filled} and left {still}"
+    assert len(mo.data.vertices) == 14 and len(mo.data.polygons) == 8, "the fill changed the part's own mesh"
+
+
 def test_the_fill_uses_the_mod_armature_not_a_reference_rig():
     """Bone-heat runs off the session armature, so an unweighted vertex comes back weighted to the
     skeleton the app will compile against."""
@@ -1343,6 +1396,110 @@ def test_send_refuses_an_empty_mod():
         assert rb.MOD_COLLECTION in str(e), f"unhelpful refusal: {e}"
         return
     raise AssertionError("a send with an empty Mod must refuse, not write a geometry-less glb")
+
+
+# ---------------------------------------------------------------- a pasted mesh's skin
+
+GAME_BONES = ("hip_11112222", "spine_33334444")
+
+
+def _refusal(stem="part"):
+    """Run gf2_send expecting it to refuse. Returns (refusal message, files the send wrote)."""
+    out = tempfile.mkdtemp(prefix="gf2send_")
+    try:
+        rb.gf2_send(out, stem + ".glb")
+    except RuntimeError as e:
+        return str(e), os.listdir(out)
+    raise AssertionError("the send wrote a glb it must refuse")
+
+
+def _skin_joint_names(doc):
+    return sorted(doc["nodes"][j]["name"] for s in doc.get("skins", []) for j in s["joints"])
+
+
+def test_a_pasted_mesh_still_bound_to_its_own_rig_blocks_and_send_refuses():
+    """The glTF export drops the skin of a mesh whose armature is not exported."""
+    _reset()
+    _mod, ref, parts, _arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    pasted_rig = _armature("Pasted_Rig", coll=ref, bone=GAME_BONES)
+    _bind(_weight_all(_mesh(PART_A, parts[PART_A]), group="hip_11112222"), pasted_rig)
+    hard = _severities(_check(), "HARD")
+    assert hard == [rb.gf2_binding_line(PART_A, ["Pasted_Rig"])], hard
+    msg, written = _refusal()
+    assert "'Pasted_Rig'" in msg and written == [], (msg, written)
+
+
+def test_a_mesh_with_a_second_armature_modifier_for_another_rig_blocks():
+    """An armature parent or modifier naming another rig changes what the export writes, so the session
+    armature deforming the mesh as well is not enough."""
+    _reset()
+    _mod, ref, parts, arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    pasted_rig = _armature("Pasted_Rig", coll=ref, bone=GAME_BONES)
+    mo = _bind(_weight_all(_mesh(PART_A, parts[PART_A]), group="hip_11112222"), arm)
+    mo.modifiers.new(name="Armature.001", type="ARMATURE").object = pasted_rig
+    assert _severities(_check(), "HARD") == [rb.gf2_binding_line(PART_A, ["Pasted_Rig"])], _check()
+
+
+def test_a_weighted_mesh_bound_to_no_armature_blocks():
+    _reset()
+    _mod, _ref, parts, _arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    _weight_all(_mesh(PART_A, parts[PART_A]), group="hip_11112222")
+    assert _severities(_check(), "HARD") == [rb.gf2_binding_line(PART_A, [])], _check()
+
+
+def test_another_rigs_game_bones_block_and_send_refuses():
+    """A mesh from another outfit, re-bound to the session armature with its own vertex groups: the
+    export would move the weight on the other outfit's bone onto a bone the game does not have, and
+    rescale the split vertex onto the shared bone."""
+    _reset()
+    _mod, ref, parts, arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    _armature("Pasted_Rig", coll=ref, bone=("hip_11112222", "skirt_55556666"))
+    mo = _bind(_mesh(PART_A, parts[PART_A]), arm)
+    hip, skirt = mo.vertex_groups.new(name="hip_11112222"), mo.vertex_groups.new(name="skirt_55556666")
+    hip.add([0], 1.0, "REPLACE")
+    skirt.add([1], 1.0, "REPLACE")
+    hip.add([2], 0.5, "REPLACE")
+    skirt.add([2], 0.5, "REPLACE")
+    hard = _severities(_check(), "HARD")
+    assert hard == [rb.gf2_off_skeleton_line(PART_A, 2, {"skirt_55556666"})], hard
+    msg, written = _refusal()
+    assert "'skirt_55556666'" in msg and written == [], (msg, written)
+
+
+def test_a_foreign_rigs_bones_block_and_are_not_reported_as_unweighted():
+    _reset()
+    _mod, ref, parts, arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    _armature("Foreign_Rig", coll=ref, bone=("Hips", "Spine"))
+    _bind(_weight_all(_mesh(PART_A, parts[PART_A]), group="Spine"), arm)
+    hard = _severities(_check(), "HARD")
+    assert hard == [rb.gf2_off_skeleton_line(PART_A, 3, {"Spine"})], hard
+
+
+def test_weight_on_a_session_bone_with_no_game_identity_blocks():
+    _reset()
+    _mod, _ref, parts, arm = _layout([PART_A], armature=True, bones=GAME_BONES + ("Root",))
+    _bind(_weight_all(_mesh(PART_A, parts[PART_A]), group="Root"), arm)
+    hard = _severities(_check(), "HARD")
+    assert hard == [rb.gf2_off_skeleton_line(PART_A, 3, {"Root"})], hard
+
+
+def test_a_vertex_weighted_only_to_a_mask_group_is_filled_from_the_skeleton():
+    """A group naming no bone is outside the skin. A vertex weighted only there would export onto a
+    bone the game does not have, so the send fills it from the session armature like an unweighted
+    vertex, and the sent skin names the game bones alone."""
+    _reset()
+    _mod, _ref, parts, arm = _layout([PART_A], armature=True, bones=GAME_BONES)
+    mo = _bind(_mesh(PART_A, parts[PART_A]), arm)
+    mo.vertex_groups.new(name="Mask").add([0], 1.0, "REPLACE")
+    mo.vertex_groups.new(name="hip_11112222").add([1, 2], 1.0, "REPLACE")
+    assert _check() == [], _check()
+    out, sent = _send()
+    assert sent == [PART_A], sent
+    joints = _skin_joint_names(_sent_doc(out, "part"))
+    assert joints == sorted(GAME_BONES), joints
+    skin = {g.index for g in mo.vertex_groups if g.name in GAME_BONES}
+    assert sum(g.weight for g in mo.data.vertices[0].groups if g.group in skin) > 0, \
+        "the mask-only vertex was not filled from the skeleton"
 
 
 # ---------------------------------------------------------------- the operators themselves
@@ -1487,6 +1644,7 @@ class _FakeOp:
         self._overwrite = None
         self._emptied = None
         self._targets = None
+        self._mix = None
 
     def report(self, level, message):
         self.reports.append((set(level), message))
@@ -2152,6 +2310,188 @@ def test_headless_send_to_honours_the_session_description():
         assert sidecar["hiddenParts"] == [], \
             "a context part must not read as an emptied one"
         assert sidecar["editIds"] == {PART_B: {"new": "Edit 1"}}, sidecar
+
+
+# ---------------------------------------------------------------- parts the game starts shrunk
+
+def _hidden_session(src, part=None):
+    """A session over PART_A (shown) and PART_B (a part the game starts shrunk), naming `part`."""
+    with open(rb.session_path(src), "w", encoding="utf-8") as f:
+        json.dump({"revision": 1, "part": part, "parts": [
+            {"name": PART_A, "writable": True, "defaultEditName": "Edit 1", "edits": [],
+             "label": "body1", "hiddenBones": ["0000abcd"]},
+            {"name": PART_B, "writable": True, "defaultEditName": "Edit 1", "edits": [],
+             "label": "cloth1", "hidden": True, "hiddenBones": ["0000abcd"]},
+        ]}, f)
+    return src
+
+
+def test_a_session_naming_no_part_gathers_hidden_parts_hidden_under_mod():
+    """A session that names no part puts the part the game starts shrunk under Mod/Shrunk Parts, hidden in
+    the viewport at the collection level so it does not stand inside the body. It is still a part: the
+    checks read the scene as clean, and it is not selected until the modder shows it."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _hidden_session(_build_source_glb([PART_A, PART_B], os.path.join(d, "_combined.glb")))
+        _reset()
+        meshes, _arms = rb.gf2_import(src)
+
+    hidden_root = rb._shrunk_parts_root()
+    assert hidden_root is not None, "the import made no Shrunk Parts collection"
+    assert hidden_root.children.get(PART_B) is not None, "the hidden part is not under Shrunk Parts"
+    assert rb._mod_root().children.get(PART_A) is not None, "the shown part left Mod"
+    assert rb._layer_collection_for(hidden_root).hide_viewport, "Shrunk Parts starts shown"
+    assert {c.name for c in rb.gf2_part_collections()} == {PART_A, PART_B}
+    assert _check() == [], f"a fresh import is not clean: {_check()}"
+    hidden_mesh = next(mo for mo in meshes if mo.name == PART_B)
+    assert not hidden_mesh.select_get(), "a part under the hidden collection was selected"
+
+
+def test_a_send_ships_a_hidden_part_and_leaves_its_collection_as_it_was():
+    """Nothing under a hidden collection can be selected, so the send shows Shrunk Parts while it exports
+    and hides it again after; the part ships all the same."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _hidden_session(_build_source_glb([PART_A, PART_B], os.path.join(d, "_combined.glb")))
+        _reset()
+        rb.gf2_import(src)
+        out = os.path.join(d, "sent")
+        rb.gf2_send(out, src)
+        sent = _sent_mesh_names(out, "_combined")
+    assert sent == sorted([PART_A, PART_B]), f"the send carries {sent}"
+    assert rb._layer_collection_for(rb._shrunk_parts_root()).hide_viewport, \
+        "the send left Shrunk Parts shown"
+
+
+def test_an_excluded_hidden_parts_collection_blocks_the_send():
+    """Excluding Shrunk Parts takes its parts out of the view layer, and that stays the hard block an
+    excluded part collection is."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _hidden_session(_build_source_glb([PART_A, PART_B], os.path.join(d, "_combined.glb")))
+        _reset()
+        rb.gf2_import(src)
+    rb._layer_collection_for(rb._shrunk_parts_root()).exclude = True
+    hard = _severities(_check(), "HARD")
+    assert any(rb.SHRUNK_PARTS_COLLECTION in m and "excluded" in m for m in hard), hard
+
+
+def test_a_session_naming_a_hidden_part_opens_it_where_it_can_be_seen():
+    """A session that names one part opens that part in its own collection under Mod, hidden by the game
+    or not: gathering it away would leave the modder looking at nothing."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _hidden_session(_build_source_glb([PART_A, PART_B], os.path.join(d, "_combined.glb")),
+                              part=PART_B)
+        _reset()
+        rb.gf2_import(src)
+    assert rb._shrunk_parts_root() is None, "a one-part session made a Shrunk Parts collection"
+    assert rb._mod_root().children.get(PART_B) is not None, "the named part is not under Mod"
+
+
+def test_a_hidden_reference_part_starts_hidden_in_the_reference_collection():
+    """In a session that opens one part with the outfit around it, a part the game starts shrunk is a
+    reference the app starts hidden: it stays in Reference, hidden per object, and nothing gathers it
+    under Shrunk Parts."""
+    with tempfile.TemporaryDirectory() as d:
+        src = _build_source_glb([PART_A, PART_B], os.path.join(d, "_combined.glb"))
+        with open(rb.session_path(src), "w", encoding="utf-8") as f:
+            json.dump({"revision": 1, "part": PART_A, "parts": [
+                {"name": PART_A, "writable": True, "defaultEditName": "Edit 1", "edits": [], "label": "body1"},
+                {"name": PART_B, "writable": False, "label": "cloth1", "hidden": True,
+                 "viewportVisible": False},
+            ]}, f)
+        _reset()
+        meshes, _arms = rb.gf2_import(src)
+
+    by = {m.name: m for m in meshes}
+    assert by[PART_B].hide_get(), "the hidden reference part imported shown"
+    assert not by[PART_A].hide_get(), "the named part imported hidden"
+    assert rb._reference_root().objects.get(PART_B) is not None, "the hidden reference left Reference"
+    assert rb._shrunk_parts_root() is None, "a one-part session made a Shrunk Parts collection"
+
+
+def _mixed_weights(obj):
+    """Half the vertices on a bone only the hidden part moves, half on a body bone."""
+    hidden = obj.vertex_groups.new(name="wrench_0000abcd")
+    other = obj.vertex_groups.new(name="hip_11112222")
+    hidden.add([0], 1.0, "REPLACE")
+    other.add([1, 2], 1.0, "REPLACE")
+    return obj
+
+
+def test_a_send_weighting_a_hidden_parts_bones_and_others_warns_and_still_sends():
+    """A part weighted both to bones only a part the game starts shrunk moves and to other bones does not
+    line up in the game, and the send says so in its warnings popup, in one line under the length cap.
+    The send lands all the same. A part whose game original already weights both says nothing."""
+    for stock_mixes, want in ((False, True), (True, False)):
+        _reset()
+        _mod, _ref, parts, _arm = _layout([PART_A])
+        _mixed_weights(_mesh(PART_A, parts[PART_A]))
+        rb._store_session({"part": None, "parts": [
+            {"name": PART_A, "label": "P3_body_fight", "hiddenBones": ["0000abcd"],
+             "stockMixes": stock_mixes}]})
+        popups = []
+        original_popup = rb._popup
+        rb._popup = lambda title, lines, icon: popups.append((title, list(lines)))
+        try:
+            out, sent = _send()
+        finally:
+            rb._popup = original_popup
+        assert sent == [PART_A], f"the send carries {sent}"
+        warned = [line for title, lines in popups if title == "Sent With Warnings" for line in lines
+                  if "shrunk part's bones" in line]
+        if not want:
+            assert warned == [], f"a part whose original mixes warned: {warned}"
+            continue
+        assert warned == ["⚠ " + rb.gf2_hidden_mix_line("P3_body_fight")], popups
+        assert len(rb.gf2_hidden_mix_line("P3_body_fight")) < 110, "the warning is too long to read"
+
+
+def _mixed_scene(out):
+    """PART_A bound to the session armature, half its vertices on a bone only a shrunk part moves and
+    half on a body bone, in a session that names that bone and says the game's own part does not mix."""
+    _reset()
+    _mod, _ref, parts, arm = _layout([PART_A], armature=True, bones=("wrench_0000abcd", "hip_11112222"))
+    _mixed_weights(_bind(_mesh(PART_A, parts[PART_A]), arm))
+    _register(out)
+    rb._store_session({"part": None, "parts": [
+        {"name": PART_A, "label": "P3_body_fight", "hiddenBones": ["0000abcd"], "stockMixes": False}]})
+
+
+def test_check_mesh_lists_weight_across_a_shrunk_part_as_a_warning():
+    """Check Mesh reports the mixed weights as a warning like the other warnings, and nothing blocks."""
+    _mixed_scene(tempfile.mkdtemp(prefix="gf2op_"))
+    issues = _check()
+    line = rb.gf2_hidden_mix_line("P3_body_fight")
+    assert ("SOFT", line) in issues, issues
+    assert not _severities(issues, "HARD"), issues
+
+
+def test_the_send_dialog_lists_weight_across_a_shrunk_part_with_the_other_warnings():
+    """The replace confirmation lists the mixed-weight warning where it lists the others."""
+    _mixed_scene(tempfile.mkdtemp(prefix="gf2op_"))
+    op = _FakeOp()
+    assert _send_operator()._gate(op, bpy.context) is None, op.reports
+    line = rb.gf2_hidden_mix_line("P3_body_fight")
+    assert line in op._soft and op._mix == [line], (op._soft, op._mix)
+    op._scope = rb._send_scope_lines()
+    _send_operator().draw(op, bpy.context)
+    assert "⚠ " + line in op.layout.lines, op.layout.lines
+
+
+def test_a_send_counts_weight_across_a_shrunk_part_and_says_it_with_the_sent_line():
+    """After the send, the mixed-weight warning is counted in the status report and shown in the same
+    popup as the line naming the file sent, not in a popup of its own."""
+    out = tempfile.mkdtemp(prefix="gf2op_")
+    _mixed_scene(out)
+    op = _FakeOp()
+    # the gate runs first, as invoke runs it; the send then reuses what it read
+    assert _send_operator()._gate(op, bpy.context) is None, op.reports
+    with _captured_popups() as seen:
+        assert _send_operator().execute(op, bpy.context) == {'FINISHED'}, op.reports
+    line = "⚠ " + rb.gf2_hidden_mix_line("P3_body_fight")
+    carrying = [(title, lines) for title, lines in seen if line in lines]
+    assert len(carrying) == 1, f"the warning showed in {len(carrying)} popups: {seen}"
+    title, lines = carrying[0]
+    assert title == "Sent With Warnings" and any(ln.startswith("Sent: ") for ln in lines), seen
+    assert ({'WARNING'}, "Sent with 1 warning(s). See the console.") in op.reports, op.reports
 
 
 # ---------------------------------------------------------------- runner

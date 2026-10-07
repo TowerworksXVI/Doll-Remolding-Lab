@@ -118,7 +118,7 @@ public class SlotProbeEmissionTests : IDisposable
         }
         // a kind no slot holds stays -1, so its binds fall through and the geometry draws anyway
         Assert.Contains("$zz_slot_a = -1\n", section);
-        Assert.Contains("drawindexed = ", section);
+        Assert.Contains("drawindexed", section);
 
         // the touched slots are saved and restored around the draw
         for (int s = 0; s <= 6; s++)
@@ -135,7 +135,7 @@ public class SlotProbeEmissionTests : IDisposable
         // which authored nothing — has to restore what the first stomped or it draws in its neighbour's maps.
         var (ini, _, _) = Emit(Tags, donorTexed: true);
         string section = ini[ini.IndexOf("[CommandListDraw_swap]", StringComparison.Ordinal)..];
-        var chunks = section.Split("drawindexed = ");
+        var chunks = section.Split("drawindexed");
         string secondDrawBinds = chunks[1][(chunks[1].IndexOf('\n') + 1)..];
 
         Assert.Contains("if $zz_slot_a == 0\nps-t0 = Resource_SaveT0\nendif\n", secondDrawBinds);
@@ -164,7 +164,7 @@ public class SlotProbeEmissionTests : IDisposable
         Assert.DoesNotContain("$zz_slot_", ini.Substring(ini.IndexOf("[CommandListDraw_swap]", StringComparison.Ordinal)));
         Assert.DoesNotContain("Resource_SaveT", ini);
         Assert.DoesNotContain("[TextureOverride_SlotTag_", ini);
-        Assert.Contains("drawindexed = ", ini);
+        Assert.Contains("drawindexed", ini);
     }
 
     [Fact]
@@ -243,7 +243,7 @@ public class SlotProbeEmissionTests : IDisposable
         // build reaches here, so the row is the emitter's own account and belongs in the log.
         Assert.Contains(diagnostics, d => d.Contains("submesh 99") && d.Contains("out of range"));
         Assert.DoesNotContain(warnings, w => w.Contains("out of range"));
-        Assert.Contains("drawindexed = ", ini);
+        Assert.Contains("drawindexed", ini);
     }
 
     [Fact]

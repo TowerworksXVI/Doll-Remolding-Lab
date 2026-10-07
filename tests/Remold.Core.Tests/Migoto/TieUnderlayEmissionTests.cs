@@ -85,8 +85,7 @@ public class TieUnderlayEmissionTests : IDisposable
                       + "run = CustomShaderConvert_swap\n"
                       + "if $zz_gate_src_alpha == 0\nrun = CustomShaderTie_alpha_swap\nendif\n"
                       + "run = CustomShaderSkin_swap\n", ini);
-        Assert.Contains(result.Diagnostics, d => d.Contains("0x00000065") && d.Contains("rides its ancestor")
-            && d.Contains("0x00000066") && d.Contains("'alpha'"));
+        Assert.Contains(result.Diagnostics, d => d.Contains("bone 'arm' rides its ancestor 'spine'") && d.Contains("'alpha'"));
     }
 
     [Fact]
@@ -108,7 +107,7 @@ public class TieUnderlayEmissionTests : IDisposable
         Assert.Contains("if $zz_gate_src_alpha == 0\nrun = CustomShaderTie_alpha_swap\nendif\n",
             File.ReadAllText(Path.Combine(outDir, "mod.ini")));
         Assert.Contains(result.Diagnostics,
-            d => d.Contains("0x00000065") && d.Contains("no anchor-owned skeleton ancestor"));
+            d => d.Contains("bone 'hand' has no anchor-owned skeleton ancestor"));
     }
 
     [Fact]

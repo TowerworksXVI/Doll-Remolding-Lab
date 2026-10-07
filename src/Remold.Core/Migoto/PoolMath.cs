@@ -581,7 +581,17 @@ public static class PoolMath
         var owner = (int[])union.Owner.Clone();
         for (int li = 0; li < anchorMap.Length; li++)
             if (!anchorWeak[li]) owner[anchorMap[li]] = anchorIdx;
+        return WithOwner(union, owner);
+    }
 
+    /// <summary>The union with <paramref name="owner"/> as its per-bone ownership and every scatter map
+    /// rebuilt from it: a part writes exactly the union rows it owns. Union hashes and full maps are
+    /// unchanged — ownership never moves a bone's union slot, so compiled donor indices are unaffected.</summary>
+    public static UnionResult WithOwner(UnionResult union, int[] owner)
+    {
+        if (owner.Length != union.UnionHashes.Length)
+            throw new ArgumentException(
+                $"ownership covers {owner.Length} bones but the union has {union.UnionHashes.Length}");
         var scatterMaps = new uint[union.FullMaps.Length][];
         for (int pi = 0; pi < union.FullMaps.Length; pi++)
         {
@@ -591,19 +601,20 @@ public static class PoolMath
                 sm[li] = owner[fm[li]] == pi ? fm[li] : Sentinel;
             scatterMaps[pi] = sm;
         }
-        return union with { ScatterMaps = scatterMaps, Owner = owner };
+        return union with { ScatterMaps = scatterMaps, Owner = (int[])owner.Clone() };
     }
 
     /// <summary>
     /// Build the union bone order across the pool (first-seen in part order) plus the per-part full and
-    /// scatter maps and per-bone ownership. A repeated bone hash must carry a byte-consistent bindpose
-    /// (asserted within 1e-5) since the union keeps one bindpose per bone — parts authored in bind spaces
-    /// one rigid rotation apart are restated in the anchor's space before they get here (see
-    /// <see cref="Mesh.BindSpace"/>), so what this refuses is a delta that is no rigid space difference at
-    /// all. Ownership = the pool part with the most summed weight on the bone (order-independent) — the
+    /// scatter maps and per-bone ownership. Parts are free to bind one bone differently: the union is an
+    /// ORDER, and the bind each bone is stated under is settled apart from it (see
+    /// <see cref="Mesh.BindReference"/>), with every mesh's recovered rows converted onto that one
+    /// statement. Ownership = the pool part with the most summed weight on the bone (order-independent) — the
     /// same per-bone quantity <see cref="StreamDump.WeightedBoneHashes"/> reads off a bundle's mesh field
     /// and <see cref="MigotoEmitter.SummedWeights"/> off a dumped skin stream. The emitter then layers
-    /// <see cref="PreferAnchorOwnership"/> on top once the anchor's conditioning verdict exists. This
+    /// <see cref="PreferAnchorOwnership"/> on top once the anchor's conditioning verdict exists, and after it
+    /// moves each bone the replacement uses away from an owner that cannot hold it with a slim selection,
+    /// to the part that can (see <see cref="WithOwner"/>). This
     /// first-seen ordering is the single
     /// union-order authority — the emitted indices line up with any consumer given the SAME parts in the
     /// SAME order (it reproduces <see cref="SwapCompile.BuildUnionOrder"/>).
@@ -612,7 +623,6 @@ public static class PoolMath
     {
         var unionIndex = new Dictionary<uint, int>();
         var unionHashes = new List<uint>();
-        var bindOf = new Dictionary<uint, double[]>();
         var fullMaps = new List<uint[]>();
 
         foreach (var part in parts)
@@ -627,21 +637,8 @@ public static class PoolMath
                     slot = unionHashes.Count;
                     unionIndex[h] = slot;
                     unionHashes.Add(h);
-                    bindOf[h] = part.Binds[h];
                 }
-                else
-                {
-                    var a = bindOf[h];
-                    var b = part.Binds[h];
-                    double d0 = 0.0;
-                    for (int i = 0; i < a.Length; i++) d0 = Math.Max(d0, Math.Abs(a[i] - b[i]));
-                    if (d0 > Mesh.BindSpace.MaxBindDisagreement)
-                        throw new InvalidOperationException(
-                            $"bone {h} has inconsistent bind poses across pool parts (max diff {d0:g4}); " +
-                            "no measured or corroborated rigid rotation relates the two spaces, so the " +
-                            "part can't be converted into the anchor's space");
-                }
-                fm[li] = (uint)unionIndex[h];
+                fm[li] = (uint)slot;
             }
             fullMaps.Add(fm);
         }
