@@ -56,25 +56,8 @@ internal static class PosedPoolSim
     /// shared solved one — the same choice the ini makes.</summary>
     public static Dictionary<uint, Matrix4x4> Recover(string outDir, string sfx, string name, string dumpDir)
     {
-        var (hashes, binds) = ReadBinds(dumpDir);
-        var s0 = File.ReadAllBytes(Path.Combine(dumpDir, "stream0.buf"));
-        var s2 = File.ReadAllBytes(Path.Combine(dumpDir, "stream2.buf"));
-        int n = s0.Length / 40;
-        var posed = new Vector3[n];
-        for (int v = 0; v < n; v++)
-        {
-            var p = new Vector3(BitConverter.ToSingle(s0, v * 40), BitConverter.ToSingle(s0, v * 40 + 4),
-                BitConverter.ToSingle(s0, v * 40 + 8));
-            var acc = Vector3.Zero;
-            for (int k = 0; k < 4; k++)
-            {
-                float w = BitConverter.ToSingle(s2, v * 32 + k * 4);
-                if (w <= 0) continue;
-                int bi = (int)BitConverter.ToUInt32(s2, v * 32 + 16 + k * 4);
-                acc += w * Vector3.Transform(p, binds[bi] * WorldOf(hashes[bi]));
-            }
-            posed[v] = acc;
-        }
+        var posed = Pose(dumpDir);
+        int n = posed.Length;
 
         string converted = Path.Combine(outDir, $"{name}_cpinv_{sfx}.buf");
         var cp = Floats(File.Exists(converted) ? converted : Path.Combine(outDir, $"{name}_cpinv.buf"));
@@ -104,6 +87,59 @@ internal static class PosedPoolSim
                 m[2, 0], m[2, 1], m[2, 2], 0, m[3, 0], m[3, 1], m[3, 2], 1);
         }
         return rows;
+    }
+
+    /// <summary>The dump's vertices as the game would pose them under <see cref="WorldOf"/>: each skinned with
+    /// the mesh's own bind poses.</summary>
+    public static Vector3[] Pose(string dumpDir)
+    {
+        var (hashes, binds) = ReadBinds(dumpDir);
+        var s0 = File.ReadAllBytes(Path.Combine(dumpDir, "stream0.buf"));
+        var s2 = File.ReadAllBytes(Path.Combine(dumpDir, "stream2.buf"));
+        int n = s0.Length / 40;
+        var posed = new Vector3[n];
+        for (int v = 0; v < n; v++)
+        {
+            var p = new Vector3(BitConverter.ToSingle(s0, v * 40), BitConverter.ToSingle(s0, v * 40 + 4),
+                BitConverter.ToSingle(s0, v * 40 + 8));
+            var acc = Vector3.Zero;
+            for (int k = 0; k < 4; k++)
+            {
+                float w = BitConverter.ToSingle(s2, v * 32 + k * 4);
+                if (w <= 0) continue;
+                int bi = (int)BitConverter.ToUInt32(s2, v * 32 + 16 + k * 4);
+                acc += w * Vector3.Transform(p, binds[bi] * WorldOf(hashes[bi]));
+            }
+            posed[v] = acc;
+        }
+        return posed;
+    }
+
+    /// <summary>How far each of a single-part pool's own vertices lands from where the game posed it when it
+    /// is skinned again from the rows the shipped operator recovers: what a replacement that keeps a vertex
+    /// where the part had it, weighted as it was, would show. The pool has one part, so a bone's palette
+    /// slot is its place in the part's bone table.</summary>
+    public static float[] OwnVertexMiss(string outDir, string sfx, string name, string dumpDir)
+    {
+        var rows = Recover(outDir, sfx, name, dumpDir);
+        var posed = Pose(dumpDir);
+        var s0 = File.ReadAllBytes(Path.Combine(dumpDir, "stream0.buf"));
+        var s2 = File.ReadAllBytes(Path.Combine(dumpDir, "stream2.buf"));
+        var miss = new float[posed.Length];
+        for (int v = 0; v < posed.Length; v++)
+        {
+            var p = new Vector3(BitConverter.ToSingle(s0, v * 40), BitConverter.ToSingle(s0, v * 40 + 4),
+                BitConverter.ToSingle(s0, v * 40 + 8));
+            var acc = Vector3.Zero;
+            for (int k = 0; k < 4; k++)
+            {
+                float w = BitConverter.ToSingle(s2, v * 32 + k * 4);
+                if (w <= 0) continue;
+                acc += w * Vector3.Transform(p, rows[BitConverter.ToUInt32(s2, v * 32 + 16 + k * 4)]);
+            }
+            miss[v] = Vector3.Distance(acc, posed[v]);
+        }
+        return miss;
     }
 
     /// <summary>Largest element of <c>row − expected</c>.</summary>

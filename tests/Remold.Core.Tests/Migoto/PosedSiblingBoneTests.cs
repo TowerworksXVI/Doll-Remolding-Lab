@@ -299,8 +299,8 @@ public class PosedSiblingBoneTests : IDisposable
         var ex = Assert.Throws<Remold.Core.Project.AuthoredRefusalException>(
             () => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("the new mesh is weighted to bones only", ex.Message);
-        Assert.Contains("Remove those weights in Blender", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildUnplacedBonesSource(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
         Assert.Contains(BuildLogDiagnostics.From(ex), d => d.Contains("its skeleton can't be read"));
     }
 
@@ -334,8 +334,7 @@ public class PosedSiblingBoneTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Equal("the mesh edit on 'c_vesna01_body_lod0' has 2 vertices weighted to 1 bone this item "
-            + "doesn't have. Open the edit in Blender, run Check Mesh, and send it again", ex.Message);
+        Assert.Equal(CoreStrings.OffSkeletonEditVerticesBone("c_vesna01_body_lod0", 2, 1), ex.Message);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using Remold.App;
 using Remold.App.ViewModels;
 using Remold.Core.Project;
 using Remold.Core.Tests.Support;
@@ -117,9 +118,9 @@ public class CloseFlowSaveTests
     [Fact]
     public void TheCloseConfirmNamesTheWorkThatIsActuallyRunning()
     {
-        Assert.StartsWith("The Blender file is still being prepared.",
+        Assert.StartsWith(Strings.CloseWhilePreparingBlender,
             MainWindowViewModel.CloseWithWorkBody(buildingRig: true, buildingMod: false));
-        Assert.StartsWith("A mod is still building.",
+        Assert.StartsWith(Strings.CloseWhileBuilding,
             MainWindowViewModel.CloseWithWorkBody(buildingRig: false, buildingMod: true));
     }
 

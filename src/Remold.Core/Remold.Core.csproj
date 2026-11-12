@@ -5,9 +5,14 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <!-- Kept in step with Remold.App: the two ship as one product. -->
-    <Version>0.5.0</Version>
-    <AssemblyVersion>0.5.0.0</AssemblyVersion>
-    <FileVersion>0.5.0.0</FileVersion>
+    <Version>0.5.1</Version>
+    <AssemblyVersion>0.5.1.0</AssemblyVersion>
+    <FileVersion>0.5.1.0</FileVersion>
+    <NeutralLanguage>en</NeutralLanguage>
+    <!-- The string catalog resx sits beside its generated accessor of the same name, and by default the
+         SDK would name the resource after that class. Folder-based names keep the base name the
+         accessor reads (Remold.Core.Text.CoreStrings) fixed by where the resx lives. -->
+    <EmbeddedResourceUseDependentUponConvention>false</EmbeddedResourceUseDependentUponConvention>
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Remold.Core.Tests" />

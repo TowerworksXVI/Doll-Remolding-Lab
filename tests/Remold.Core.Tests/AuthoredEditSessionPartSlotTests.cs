@@ -59,9 +59,9 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         string group = session.CreateKeyGroup("F7", "edit-long");
 
         var refused = Assert.Throws<AuthoredRefusalException>(() => session.CreateEdit(hair));
-        Assert.Equal(AuthoredEditSession.NowhereToRecord("an edit"), refused.Message);
+        Assert.Equal(CoreStrings.SessionNowhereToRecordEdit, refused.Message);
         refused = Assert.Throws<AuthoredRefusalException>(() => session.CreateHideEdit(hair));
-        Assert.Equal(AuthoredEditSession.NowhereToRecord("a hide"), refused.Message);
+        Assert.Equal(CoreStrings.SessionNowhereToRecordHide, refused.Message);
 
         session.EnsurePartSlots(hair, Resolve);
 
@@ -168,7 +168,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         var error = Assert.Throws<AuthoredRefusalException>(() =>
             session.EnsurePartSlots(AuthoredEditFixtures.Part("c_vesna_nothing_lod0"), Resolve));
 
-        Assert.Equal(AuthoredEditSession.PartNotInstalled, error.Message);
+        Assert.Equal(CoreStrings.SessionPartNotInstalled, error.Message);
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
     }
 
@@ -183,7 +183,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         var error = Assert.Throws<AuthoredRefusalException>(() =>
             session.EnsurePartSlots(AuthoredEditFixtures.Cape, Resolve));
 
-        Assert.Equal("Couldn't find this part's mesh in the current game files.", error.Message);
+        Assert.Equal(CoreStrings.SessionPartMeshNotFound, error.Message);
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
     }
 
@@ -258,7 +258,7 @@ public sealed class AuthoredEditSessionPartSlotTests : IDisposable
         Assert.Contains("not an authorable shading value",
             Assert.Throws<ArgumentException>(() =>
                 session.EnsureMaterialValueSlot(hair, 0, "_OnHitColor", Resolve)).Message);
-        Assert.Contains("no material 7",
+        Assert.Equal(CoreStrings.SessionNoMaterial(7),
             Assert.Throws<AuthoredRefusalException>(() =>
                 session.EnsureMaterialValueSlot(hair, 7, "_UseGIFlatten", Resolve)).Message);
     }

@@ -52,31 +52,30 @@ public sealed partial class AuthoredEditSession
             if (effect.Enabled) continue;
             if (effectOperations?.Any(operation => string.Equals(operation.EffectId, effect.EffectId,
                     StringComparison.Ordinal)) != true)
-                throw new AuthoredRefusalException(
-                    $"{definition.Label} cannot be disabled on this material.");
+                throw new AuthoredRefusalException(CoreStrings.EffectCannotBeDisabled(definition.Label));
         }
         bool needsResolved = prepared.Any(item => item.Value is not null)
             || effectEdits.Any(effect => !effect.Enabled) || sourceRampPart is not null;
         var resolved = needsResolved ? resolvePart(Clone(target)) : null;
         if (needsResolved && resolved is null)
-            throw new AuthoredRefusalException(PartNotInstalled);
+            throw new AuthoredRefusalException(CoreStrings.SessionPartNotInstalled);
         LegacyResolvedPart? sourceResolved = null;
         if (sourceRampPart is not null)
         {
             ArgumentOutOfRangeException.ThrowIfNegative(sourceRampMaterialSlotIndex);
             sourceResolved = resolvePart(Clone(sourceRampPart))
-                ?? throw new AuthoredRefusalException(SourcePartNotInstalled);
+                ?? throw new AuthoredRefusalException(CoreStrings.SessionSourcePartNotInstalled);
         }
         ChangeWithValueFiles((project, writes) =>
         {
             var edit = RequiredEdit(project, editDefinitionId);
             if (edit.Kind != EditDefinitionKind.Content || !edit.Target.SameAs(target))
-                throw new AuthoredRefusalException("This shading answer belongs to another edit.");
+                throw new AuthoredRefusalException(CoreStrings.SessionShadingAnswerElsewhere);
             if (effectEdits.Any(effect => !effect.Enabled))
             {
                 if (!(resolved!.Materials ?? Array.Empty<LegacyResolvedMaterial>())
                     .Any(material => material.MaterialSlotIndex == materialSlotIndex))
-                    throw new AuthoredRefusalException($"This part has no material {materialSlotIndex}.");
+                    throw new AuthoredRefusalException(CoreStrings.SessionNoMaterial(materialSlotIndex));
                 EnsurePartSlots(project, target, resolved);
             }
             foreach (var (field, canonical) in prepared)
@@ -158,8 +157,7 @@ public sealed partial class AuthoredEditSession
             && slot.MaterialSlotIndex == materialSlotIndex).OrderBy(slot => slot.Id, StringComparer.Ordinal)
             .ToList();
         if (slots.Count == 0)
-            throw new AuthoredRefusalException(
-                $"Material {materialSlotIndex} draws without a toon ramp, so one cannot be copied here.");
+            throw new AuthoredRefusalException(CoreStrings.SessionNoRampToCopy(materialSlotIndex));
         return slots[0].Id;
     }
 }

@@ -166,23 +166,21 @@ public class ModInstallTests : IDisposable
     [Fact]
     public void The_confirm_body_names_the_folders_and_says_what_goes_wrong()
     {
-        Assert.Equal("alpha already changes some of the same files. "
-            + "Two mods changing the same thing may not show correctly in game.",
+        Assert.Equal(CoreStrings.InstallConflictBody_One("alpha"),
             ModInstall.ConflictBody(new[] { "alpha" }));
-        Assert.Equal("alpha and beta already change some of the same files. "
-            + "Two mods changing the same thing may not show correctly in game.",
+        Assert.Equal(CoreStrings.InstallConflictBody_Other("alpha and beta"),
             ModInstall.ConflictBody(new[] { "alpha", "beta" }));
     }
 
     [Fact]
     public void The_prior_version_confirm_says_it_is_the_same_mod_and_when_the_old_one_goes()
     {
-        Assert.Equal("Replace the installed mine_v1_0?", ModInstall.PriorVersionTitle(new[] { "mine_v1_0" }));
-        Assert.Equal("This is an older version of the same mod. It is removed after the new one installs.",
+        Assert.Equal(CoreStrings.InstallReplacePriorTitle("mine_v1_0"), ModInstall.PriorVersionTitle(new[] { "mine_v1_0" }));
+        Assert.Equal(CoreStrings.InstallReplacePriorBody_One,
             ModInstall.PriorVersionBody(new[] { "mine_v1_0" }));
-        Assert.Equal("Replace the installed mine_v1_0 and mine_v1_1?",
+        Assert.Equal(CoreStrings.InstallReplacePriorTitle("mine_v1_0 and mine_v1_1"),
             ModInstall.PriorVersionTitle(new[] { "mine_v1_0", "mine_v1_1" }));
-        Assert.Equal("These are older versions of the same mod. They are removed after the new one installs.",
+        Assert.Equal(CoreStrings.InstallReplacePriorBody_Other,
             ModInstall.PriorVersionBody(new[] { "mine_v1_0", "mine_v1_1" }));
     }
 

@@ -73,7 +73,16 @@ public sealed class FriendlyNames
     /// <see cref="OutfitKind.Other"/> is an internal catch-all enum name, not a category, so it is dropped
     /// and the bare label stands alone.</summary>
     public static string KindAndLabel(Outfit o) =>
-        o.Kind == OutfitKind.Other ? Label(o) : $"{o.Kind}  ·  {Label(o)}";
+        o.Kind == OutfitKind.Other ? Label(o) : $"{KindWord(o.Kind)}  ·  {Label(o)}";
+
+    private static string KindWord(OutfitKind kind) => kind switch
+    {
+        OutfitKind.Base => CoreStrings.OutfitKindBase,
+        OutfitKind.Alt => CoreStrings.OutfitKindAlt,
+        OutfitKind.Dorm => CoreStrings.OutfitKindDorm,
+        OutfitKind.Summon => CoreStrings.OutfitKindSummon,
+        _ => kind.ToString(),
+    };
 
     // ---- reverse (caller holds only the internal key) ----
 

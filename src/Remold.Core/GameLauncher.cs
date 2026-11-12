@@ -90,8 +90,7 @@ public static class GameLauncher
         // Steam-shaped but no appmanifest names this folder: launch the exe (Steam will still relaunch it
         // once, but a direct launch is the honest fallback) and say so rather than fail.
         return new LaunchPlan(LaunchKind.DirectExe, exe,
-            "Launched the game directly. This is a Steam install but no appmanifest names its folder, so the " +
-            "double-launch fix could not apply.", exe);
+            CoreStrings.LaunchedDirectlyNoAppManifest, exe);
     }
 
     // ---- Steam layout / appid ---------------------------------------------

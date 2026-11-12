@@ -27,7 +27,7 @@ public sealed class TextPromptWindow : Window
         box.AttachedToVisualTree += (_, _) => { box.Focus(); box.SelectAll(); };
 
         var ok = new Button { Content = confirmLabel, IsDefault = true, Padding = new Thickness(16, 6) };
-        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6) };
+        var cancel = new Button { Content = Strings.Cancel, IsCancel = true, Padding = new Thickness(16, 6) };
         ok.Click += (_, _) => Close(string.IsNullOrWhiteSpace(box.Text) ? null : box.Text!.Trim());
         cancel.Click += (_, _) => Close(null);
 
@@ -54,6 +54,7 @@ public sealed class TextPromptWindow : Window
     /// <paramref name="watermark"/> and <paramref name="confirmLabel"/> so a reused prompt doesn't mislabel
     /// its field or its accept button.</summary>
     public static Task<string?> Show(Window owner, string title, string prompt, string initial = "",
-        string watermark = "Mod name", string confirmLabel = "Create") =>
-        new TextPromptWindow(title, prompt, initial, watermark, confirmLabel).ShowDialog<string?>(owner);
+        string? watermark = null, string? confirmLabel = null) =>
+        new TextPromptWindow(title, prompt, initial, watermark ?? Strings.ModNameWatermark,
+            confirmLabel ?? Strings.PromptCreate).ShowDialog<string?>(owner);
 }

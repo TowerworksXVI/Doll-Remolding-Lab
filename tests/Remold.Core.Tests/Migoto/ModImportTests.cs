@@ -1147,7 +1147,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.NotAModFolder, inspection.Refusal!.Cause);
-        Assert.Equal("'bare' is not a mod folder.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportNotAModFolder("bare"), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1161,8 +1161,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: false, _temp);
 
         Assert.Equal(ImportRefusalCause.ScanRunning, inspection.Refusal!.Cause);
-        Assert.Equal("Cannot import a mod while the game files are being read. "
-            + "Try again when the scan finishes.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportScanRunning, inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1198,7 +1197,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(outer, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.MoreThanOneMod, inspection.Refusal!.Cause);
-        Assert.Equal("'two-folders' contains more than one mod. Import one at a time.",
+        Assert.Equal(CoreStrings.ImportMoreThanOneMod("two-folders"),
             inspection.Refusal.Message);
     }
 
@@ -1211,8 +1210,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.BuiltBeforeRepairData, inspection.Refusal!.Cause);
-        Assert.Equal("'old' is not editable. It was built by version 0.3.2, and only its author can "
-            + "rebuild it.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportBuiltBeforeRepairData("old", "0.3.2"), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1226,7 +1224,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.BuiltWithoutRepairData, inspection.Refusal!.Cause);
-        Assert.Equal("'withheld' is not editable.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportBuiltWithoutRepairData("withheld"), inspection.Refusal.Message);
     }
 
     [Theory]
@@ -1240,7 +1238,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.NoRepairData, inspection.Refusal!.Cause);
-        Assert.Equal("'silent' is not editable, and it does not say which version built it.",
+        Assert.Equal(CoreStrings.ImportNoRepairData("silent"),
             inspection.Refusal.Message);
     }
 
@@ -1254,8 +1252,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.PreReleaseBuild, inspection.Refusal!.Cause);
-        Assert.Equal("'prerelease' is not editable. It was built by a pre-release version, and only its "
-            + "author can rebuild it.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportPreReleaseBuild("prerelease"), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1268,8 +1265,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(dir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.NewerApp, inspection.Refusal!.Cause);
-        Assert.Equal("'newer' was built by a newer version of Doll Remolding Lab. "
-            + "Update the app to import it.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportNewerApp("newer"), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1300,7 +1296,8 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(built.OutDir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.MissingFile, inspection.Refusal!.Cause);
-        Assert.Contains($"is missing the file '{Path.GetFileName(gone)}'.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportMissingFile(Path.GetFileName(built.OutDir), Path.GetFileName(gone)),
+            inspection.Refusal.Message);
     }
 
     // ---- zips ---------------------------------------------------------------------------------------
@@ -1367,7 +1364,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(zip, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.MoreThanOneMod, inspection.Refusal!.Cause);
-        Assert.Equal("'two.zip' contains more than one mod. Import one at a time.",
+        Assert.Equal(CoreStrings.ImportMoreThanOneMod("two.zip"),
             inspection.Refusal.Message);
     }
 
@@ -1379,7 +1376,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(zip, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.NoModInZip, inspection.Refusal!.Cause);
-        Assert.Equal("'empty.zip' does not contain a mod.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportNoModInZip("empty.zip"), inspection.Refusal.Message);
         Assert.Empty(Directory.GetDirectories(_temp));
     }
 
@@ -1539,8 +1536,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(built.OutDir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.UnreadableRepairData, inspection.Refusal!.Cause);
-        Assert.Contains(@"the file name '..\outside.buf' points outside the mod",
-            inspection.Refusal.Message);
+        Assert.Contains(CoreStrings.ImportReasonEscapingFile(@"..\outside.buf"), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -1559,8 +1555,8 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(built.OutDir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.UnreadableRest, inspection.Refusal!.Cause);
-        Assert.Equal($"Couldn't import '{Path.GetFileName(built.OutDir)}': the rest pose recorded for "
-            + "'c_alpha01_body_lod0' can't be read.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportFailed(Path.GetFileName(built.OutDir),
+            CoreStrings.ImportReasonUnreadableRest("c_alpha01_body_lod0")), inspection.Refusal.Message);
     }
 
     [Fact]
@@ -2184,8 +2180,7 @@ public class ModImportTests : IDisposable
         var inspection = ModImport.Inspect(built.OutDir, gameFilesRead: true, _temp);
 
         Assert.Equal(ImportRefusalCause.PreReleaseBuild, inspection.Refusal!.Cause);
-        Assert.Equal($"'{Path.GetFileName(built.OutDir)}' is not editable. It was built by a pre-release "
-            + "version, and only its author can rebuild it.", inspection.Refusal.Message);
+        Assert.Equal(CoreStrings.ImportPreReleaseBuild(Path.GetFileName(built.OutDir)), inspection.Refusal.Message);
     }
 
     // ---- the mod's own key --------------------------------------------------------------------------

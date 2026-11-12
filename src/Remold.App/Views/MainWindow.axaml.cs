@@ -37,6 +37,11 @@ public partial class MainWindow : Window
         home.AddHandler(DragDrop.DragEnterEvent, OnHomeDragOver);
         home.AddHandler(DragDrop.DragOverEvent, OnHomeDragOver);
         home.AddHandler(DragDrop.DropEvent, OnHomeDrop);
+        // After the window is up, so a mod that no longer opens has a window for its notice.
+        Opened += async (_, _) =>
+        {
+            if (DataContext is MainWindowViewModel vm) await vm.OpenRestartTargetAsync();
+        };
     }
 
     /// <summary>The copy cursor only over the home screen, and only for one dropped folder or file: a drop
@@ -87,13 +92,13 @@ public partial class MainWindow : Window
         if (!await vm.ConfirmLeaveProjectAsync()) return;
         var picked = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Import mod from zip",
+            Title = Strings.ImportZipPickerTitle,
             AllowMultiple = false,
             SuggestedStartLocation = await LibraryStartAsync(),
             FileTypeFilter = new[]
             {
-                new FilePickerFileType("Zip files") { Patterns = new[] { "*.zip" } },
-                new FilePickerFileType("All files") { Patterns = new[] { "*" } },
+                new FilePickerFileType(Strings.ZipFilesFilter) { Patterns = new[] { "*.zip" } },
+                new FilePickerFileType(Strings.AllFilesFilter) { Patterns = new[] { "*" } },
             },
         });
         var path = picked.FirstOrDefault()?.TryGetLocalPath();
@@ -107,7 +112,7 @@ public partial class MainWindow : Window
         if (!await vm.ConfirmLeaveProjectAsync()) return;
         var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "Import mod folder",
+            Title = Strings.ImportFolderPickerTitle,
             AllowMultiple = false,
             SuggestedStartLocation = await LibraryStartAsync(),
         });
@@ -161,8 +166,8 @@ public partial class MainWindow : Window
     private async void OnSaveModAs(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
-        var name = await TextPromptWindow.Show(this, "Save mod as", "New mod name:", vm.PackageName,
-            confirmLabel: "Save");
+        var name = await TextPromptWindow.Show(this, Strings.SaveAsTitle, Strings.SaveAsPrompt, vm.PackageName,
+            confirmLabel: Strings.SaveButton);
         if (name is not null) await vm.SaveModAs(name);
     }
 
@@ -181,7 +186,7 @@ public partial class MainWindow : Window
         if (!await vm.ConfirmLeaveProjectAsync()) return;
         var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "Open mod project folder",
+            Title = Strings.OpenModPickerTitle,
             AllowMultiple = false,
             SuggestedStartLocation = await LibraryStartAsync(),
         });
@@ -194,7 +199,15 @@ public partial class MainWindow : Window
     {
         if (DataContext is not MainWindowViewModel vm) return;
         var result = await SettingsWindow.Show(this, vm.BuildSettingsInput());
-        if (result is not null) vm.ApplySettings(result);
+        if (result is null || !vm.ApplySettings(result)) return;
+        // A yes closes as Quit does, asking about work in flight and saving the mod first; Program starts
+        // the app again once this process has let go of the single-instance handle.
+        if (!await vm.OfferLanguageRestartAsync(result.Language, Environment.ProcessPath,
+                prompt => ConfirmWindow.Show(this, prompt.Title, prompt.Body, prompt.Restart, prompt.Later))) return;
+        App.RestartRequested = true;
+        App.RestartReopen = vm.ReopenAfterRestart();
+        _closeConfirmed = true;
+        Close();
     }
 
     /// <summary>Help → About — the app/schema versions and where the app's data lives.</summary>
@@ -211,7 +224,7 @@ public partial class MainWindow : Window
         if (DataContext is not MainWindowViewModel vm) return;
         var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "Locate the GIRLS' FRONTLINE 2 EXILIUM install folder",
+            Title = Strings.SettingsLocateGame,
             AllowMultiple = false,
         });
         var path = picked.FirstOrDefault()?.TryGetLocalPath();
@@ -230,26 +243,13 @@ public partial class MainWindow : Window
             return;
         if (_closeConfirmed)
             return;
-        // Work in flight: ask before abandoning it, then run the normal save-first close. Precedes the dirty
-        // gate — the work often produces the changes that gate would save.
-        if (vm.IsWorkInFlight)
-        {
-            e.Cancel = true;
-            Dispatcher.UIThread.Post(async () =>
-            {
-                if (!await vm.ConfirmCloseWithWorkAsync()) return;   // keep working — stay open
-                if (!await vm.ConfirmAppCloseAsync()) return;        // the save-first gate said no — stay open
-                _closeConfirmed = true;
-                Close();
-            });
-            return;
-        }
-        if (vm.CanCloseSilently)
+        // Work in flight is always asked about; otherwise a window with nothing to save closes at once.
+        if (!vm.IsWorkInFlight && vm.CanCloseSilently)
             return;
         e.Cancel = true;
         Dispatcher.UIThread.Post(async () =>
         {
-            if (await vm.ConfirmAppCloseAsync()) { _closeConfirmed = true; Close(); }
+            if (await vm.CloseFlowAsync()) { _closeConfirmed = true; Close(); }
         });
     }
 

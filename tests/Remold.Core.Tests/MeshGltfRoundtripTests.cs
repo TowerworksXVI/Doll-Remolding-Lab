@@ -117,9 +117,27 @@ public class MeshGltfRoundtripTests
         src.Dims.Remove("TexCoord1");
 
         var warnings = MeshGltf.TexCoordTransportWarnings(src, "coat");
+        Assert.Equal(new[] { CoreStrings.TexCoordUneditableMissing("coat", "UV2", 1) }, warnings);
+    }
+
+    [Fact]
+    public void Export_WithUvGap_NamesThreeOrMoreLaterSetsAsOneList()
+    {
+        var src = Patch(new List<int[]> { new[] { 0, 1, 2 } });
+        src.Channels.Remove("TexCoord1");
+        src.Dims.Remove("TexCoord1");
+        foreach (string channel in new[] { "TexCoord3", "TexCoord4" })
+        {
+            src.Channels[channel] = (float[])src.Channels["TexCoord2"].Clone();
+            src.Dims[channel] = src.Dims["TexCoord2"];
+        }
+
+        var warnings = MeshGltf.TexCoordTransportWarnings(src, "coat");
+
         Assert.Equal(new[]
         {
-            "coat: UV2 cannot be edited in Blender because UV1 is missing. The game values will be kept.",
+            CoreStrings.TexCoordUneditableMissing("coat",
+                CoreStrings.TexCoordListMany("UV2" + CoreStrings.ListSeparator + "UV3", "UV4"), 1),
         }, warnings);
 
         using var g = new TempGame();
@@ -163,8 +181,7 @@ public class MeshGltfRoundtripTests
 
         Assert.Equal(new[]
         {
-            "coat: UV1 and UV2 cannot be edited in Blender because UV1 has 1 value per vertex instead "
-            + "of at least two. The game values will be kept.",
+            CoreStrings.TexCoordUneditableNarrow_One("coat", CoreStrings.TexCoordListTwo("UV1", "UV2"), 1, 1),
         }, MeshGltf.TexCoordTransportWarnings(src, "coat"));
 
         using var g = new TempGame();
@@ -196,8 +213,8 @@ public class MeshGltfRoundtripTests
         var returned = MeshGltf.ParsedGlb.Open(legacyPath);
         Assert.Equal(new[]
         {
-            "Restored UV1 on patch from the part's game mesh because that UV layer was deleted in Blender.",
-            "Restored UV2 on patch from the part's game mesh because that UV layer was deleted in Blender.",
+            CoreStrings.TexCoordRestored(1, "patch"),
+            CoreStrings.TexCoordRestored(2, "patch"),
         }, MeshGltf.ReturnedTexCoordWarnings(returned, "patch",
             MeshGltf.TransportedTexCoordCount(fresh, "patch")));
         MeshGltf.ReexportPartGlb(legacyPath, "patch", normalizedPath, geometryBaseline: fresh);
@@ -226,8 +243,8 @@ public class MeshGltfRoundtripTests
         var returned = MeshGltf.ParsedGlb.Open(returnedPath);
         Assert.Equal(new[]
         {
-            "Ignored UV1 on patch because that UV layer is not supported by the part's game mesh.",
-            "Ignored UV2 on patch because that UV layer is not supported by the part's game mesh.",
+            CoreStrings.TexCoordIgnored(1, "patch"),
+            CoreStrings.TexCoordIgnored(2, "patch"),
         }, MeshGltf.ReturnedTexCoordWarnings(returned, "patch",
             MeshGltf.TransportedTexCoordCount(fresh, "patch")));
 
@@ -264,7 +281,7 @@ public class MeshGltfRoundtripTests
         var returned = MeshGltf.ParsedGlb.Open(returnedPath);
         Assert.Equal(new[]
         {
-            "Ignored UV0 on patch because that UV layer is not supported by the part's game mesh.",
+            CoreStrings.TexCoordIgnored(0, "patch"),
         }, MeshGltf.ReturnedTexCoordWarnings(returned, "patch",
             MeshGltf.TransportedTexCoordCount(fresh, "patch")));
 
@@ -295,7 +312,7 @@ public class MeshGltfRoundtripTests
         var returned = MeshGltf.ParsedGlb.Open(returnedPath);
         Assert.Equal(new[]
         {
-            "Restored UV0 on patch from the part's game mesh because that UV layer was deleted in Blender.",
+            CoreStrings.TexCoordRestored(0, "patch"),
         }, MeshGltf.ReturnedTexCoordWarnings(returned, "patch",
             MeshGltf.TransportedTexCoordCount(fresh, "patch")));
 

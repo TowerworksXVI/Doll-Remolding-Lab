@@ -1,4 +1,5 @@
-﻿using System;
+using Remold.Core.Text;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -103,7 +104,7 @@ public sealed partial class EditMapCardVm : ObservableObject
         MapLabel = Label(slot.Input, slot.ShaderProperty);
         MapInfo = slot.Input switch
         {
-            TargetInputKind.Rmo => RmoCardInfo,
+            TargetInputKind.Rmo => Strings.MapRmoCardInfo,
             TargetInputKind.Ramp => TextureMap.RampInfo,
             _ => null,
         };
@@ -118,11 +119,6 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// already says everything — Avalonia shows no tooltip for a null tip.</summary>
     public string? MapInfo { get; }
 
-    /// <summary>The RMO's channel legend, plus the half the tile cannot show. Carried verbatim from the
-    /// workbench card so both screens read alike.</summary>
-    public const string RmoChannels =
-        "R roughness · G metallic · B occlusion · A emissive mask (specular level on stocking parts)";
-    public const string RmoCardInfo = RmoChannels + ". The thumbnail shows RGB only.";
 
     /// <summary>Which of the three cards this is.</summary>
     public EditCardRole Role { get; }
@@ -147,11 +143,10 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// <summary>What a shared original map's consent question states, wherever it is asked. One sentence for
     /// one fact: an Open and a drop reach the same places, so they say so in the same words.</summary>
     public static string SharedConsequence(int uses) =>
-        $"This outfit draws this original map in {uses} places. The edit changes all of them.";
+        Strings.MapSharedConsequence(uses);
 
     public static string SharedConsentRequired(int uses) =>
-        $"This outfit now draws this original map in {uses} places. "
-        + "Use Open on the card to review and confirm the edit.";
+        Strings.MapSharedConsentRequired(uses);
 
     public static string? ReadRefusalFor(EditSubjectRead read) => read switch
     {
@@ -210,8 +205,8 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// <summary>Why this card's game texture cannot be edited from here, or null when it can: the texture reach
     /// gates first, then the texture's own format.</summary>
     public string? SharingRefusal => Slot.HasDrawableCarrier
-        ? RefusalFor(Sharing) ?? (Authorable ? null : FloatFormat)
-        : NoDrawableCarrier;
+        ? RefusalFor(Sharing) ?? (Authorable ? null : Strings.MapFloatFormat)
+        : Strings.MapNoDrawableCarrier;
 
     /// <summary>Whether the game texture behind this card can take an edit at all. A float-format map cannot:
     /// decoding it flattens it, and nothing could be encoded back. Read off the same header the size line is.
@@ -226,14 +221,11 @@ public sealed partial class EditMapCardVm : ObservableObject
     [NotifyPropertyChangedFor(nameof(OpenHint))]
     private bool _authorable = true;
 
-    public const string FloatFormat =
-        "This map is a float-format texture and cannot be edited here.";
-
     /// <summary>The one sentence a drop confirm adds when the picture's size differs from the map it
     /// replaces, or null when the sizes match or either is unknown.</summary>
     public static string? SizeNote((int Width, int Height)? dropped, (int Width, int Height)? current) =>
         dropped is { } d && current is { } c && (d.Width != c.Width || d.Height != c.Height)
-            ? $"{d.Width}×{d.Height}, the map is {c.Width}×{c.Height}. It still applies; UVs stretch it to fit."
+            ? Strings.MapSizeNote(d.Width, d.Height, c.Width, c.Height)
             : null;
 
     /// <summary>The size a card's dimension line shows, as numbers; null while it is loading or unknown.</summary>
@@ -244,12 +236,6 @@ public sealed partial class EditMapCardVm : ObservableObject
         return parts.Length == 2 && int.TryParse(parts[0], out int w) && int.TryParse(parts[1], out int h)
             ? (w, h) : null;
     }
-
-    /// <summary>The current install proves that this material position submits no draw. Its card remains in
-    /// the material inventory, but opening or dropping a picture there would record an answer nothing can
-    /// render.</summary>
-    public const string NoDrawableCarrier =
-        "Nothing on this part draws with this material, so a picture here would not be used.";
 
     /// <summary>A drop on this card adds the part's first edit, and the card shows that it takes one. False
     /// on every card where a drop does nothing: an edit's own cards say it with their buttons, a stand-in
@@ -263,7 +249,7 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// <para>It names the one file type a drop takes. The refusal said it and nothing else did, so the
     /// only place the constraint appeared was after a drop had already been refused.</para></summary>
     public string? DropHint => SharingRefusal
-        ?? (ShowsDropTarget ? "Drop a .png here to add an edit that replaces this map." : null);
+        ?? (ShowsDropTarget ? Strings.MapDropHint : null);
 
     /// <summary>The picture rows show on an edit's cards and on the ones a first edit starts from, where
     /// the UV guide is the live button and the rest say what is missing. A stand-in has nothing to run:
@@ -284,36 +270,12 @@ public sealed partial class EditMapCardVm : ObservableObject
 
     /// <summary>What Browse says, in the words its neighbour Open uses for the same two states.</summary>
     public string BrowseHint => SharingRefusal is { } refused ? refused
-        : IsBusy ? BlenderGate.Busy
-        : Role == EditCardRole.FirstEdit ? "Add an edit and replace this map with a .png"
-        : "Replace this map with a .png";
-
-    /// <summary>What an edit's own replacement slot says on the card: the picture here belongs to the
-    /// replacement, not to a game texture the card could name.</summary>
-    public const string ReplacementOrigin = "From the replacement mesh";
-
-    /// <summary>What a replacement output drawing the part's own map says — the value it keeps, and the
-    /// value a source answer resolves to. It pairs with the texture name under it, so the two lines answer
-    /// one question between them.</summary>
-    public const string InheritedOrigin = "From the original map";
-
-    /// <summary>What a stand-in card says it is: a replacement that recorded no maps of its own draws the
-    /// original part's, and this card shows one of those rather than anything the edit holds.</summary>
-    public const string StandInOrigin =
-        "The original map. The replacement mesh brought none of its own.";
-
-    /// <summary>Why no picture lands on a toon ramp, on a card that offers the pick list beside it.</summary>
-    public const string RampNotAnImage =
-        "A toon ramp is shading data, not an image. Choose one from the list instead.";
+        : IsBusy ? Strings.BlenderBusy
+        : Role == EditCardRole.FirstEdit ? Strings.MapBrowseFirstEditTip
+        : Strings.MapBrowseTip;
 
     /// <summary>Why this card refuses a picture, in the words the card's own surface can back up.</summary>
-    public string RampRefusal => RampNotAnImage;
-
-    /// <summary>Why a stand-in card refuses a picture: the edit it belongs to replaces the part's mesh, and
-    /// the build draws only the replacement's own maps, so a picture bound here would never be used.</summary>
-    public const string StandInNotDroppable =
-        "This edit replaces the part's mesh, so a picture here would not be used. Send its maps back from "
-        + "Blender instead.";
+    public string RampRefusal => Strings.MapRampNotAnImage;
 
     public bool IsRamp => Slot.Input == TargetInputKind.Ramp;
 
@@ -393,31 +355,25 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// replacement's own slot says the replacement, the original, or another of the edit's own maps,
     /// whichever the edit asks of it. Null on a game slot, whose texture name says it, and on a toon ramp,
     /// whose own state line does.</summary>
-    public string? OriginNote => !Slot.HasDrawableCarrier ? NoDrawableCarrier
-        : Role == EditCardRole.StandIn ? StandInOrigin
+    public string? OriginNote => !Slot.HasDrawableCarrier ? Strings.MapNoDrawableCarrier
+        : Role == EditCardRole.StandIn ? Strings.MapStandInOrigin
         : IsRamp || IsGameSlot ? null
-        : Binding == BindingKind.InheritedLiveCarrier || TakesTheGamesOwnValue ? InheritedOrigin
-        : Binding == BindingKind.SourceSlot ? SharedWithAnotherMap
-        : ReplacementOrigin;
-
-    /// <summary>What a source answer naming another edit's slot says: this position draws whatever that
-    /// one draws, so there is one file behind two places.</summary>
-    public const string SharedWithAnotherMap = "The same map as another submesh";
+        : Binding == BindingKind.InheritedLiveCarrier || TakesTheGamesOwnValue ? Strings.MapInheritedOrigin
+        : Binding == BindingKind.SourceSlot ? Strings.MapSharedWithAnotherMap
+        : Strings.MapReplacementOrigin;
 
     public bool HasOrigin => OriginNote is not null;
 
     /// <summary>The origin line marks something the mod owns, so it takes the ownership accent. The two
     /// that name the original are subtext beside the name they qualify.</summary>
-    public bool ShowsQuietOrigin => OriginNote is InheritedOrigin or StandInOrigin or NoDrawableCarrier;
+    public bool ShowsQuietOrigin => !Slot.HasDrawableCarrier || Role == EditCardRole.StandIn
+        || (!IsRamp && !IsGameSlot && (Binding == BindingKind.InheritedLiveCarrier || TakesTheGamesOwnValue));
 
     public bool ShowsOwnedOrigin => HasOrigin && !ShowsQuietOrigin;
 
     /// <summary>Nothing is bound here and nothing of the game's draws either: the build ships its own flat
     /// map. It names no file, so the line is what speaks for the card.</summary>
     public bool IsBlanked => Binding == BindingKind.Neutral;
-
-    /// <summary>The blanked line itself, the one word the shipped card marks it with.</summary>
-    public const string BlankedNote = "Blank";
 
     /// <summary>The emissive-mask answer this submesh's RMO was recorded with, or null where none is. Read
     /// out rather than asked here: the question belongs to the round trip that produced the map.</summary>
@@ -429,8 +385,8 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// punctuation.</summary>
     public string? RmoAlphaNote => RmoAlpha switch
     {
-        RmoAlphaAnswer.ShipAsAuthored => "emissive mask kept from this picture",
-        RmoAlphaAnswer.Rebuild => "emissive mask from this submesh's original map",
+        RmoAlphaAnswer.ShipAsAuthored => Strings.MapRmoAlphaKept,
+        RmoAlphaAnswer.Rebuild => Strings.MapRmoAlphaRebuilt,
         _ => null,
     };
 
@@ -440,10 +396,9 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// screen says so.</summary>
     public string? RmoAlphaTip => RmoAlpha switch
     {
-        RmoAlphaAnswer.ShipAsAuthored => "The emissive mask in this picture is the one used.",
+        RmoAlphaAnswer.ShipAsAuthored => Strings.MapRmoAlphaKeptTip,
         RmoAlphaAnswer.Rebuild =>
-            "The emissive mask comes from this submesh's own original map, not from the picture that "
-            + "replaced it.",
+            Strings.MapRmoAlphaRebuiltTip,
         _ => null,
     };
 
@@ -473,20 +428,13 @@ public sealed partial class EditMapCardVm : ObservableObject
     public bool CanOpen => !IsRamp && !IsBlanked && !IsBusy && SharingRefusal is null
         && Role != EditCardRole.StandIn;
 
-    public string OpenButtonLabel => "Open";
+    public string OpenButtonLabel => Strings.MapOpen;
 
     public string OpenHint => SharingRefusal is { } refused ? refused
-        : IsBlanked ? BlankedSlotNotEditable
-        : IsBusy ? BlenderGate.Busy
-        : Role == EditCardRole.FirstEdit ? FirstEditOpenHint
-        : "Edit this map in an image editor";
-
-    /// <summary>What Open says on a blanked slot: there is no image behind it to open.</summary>
-    public const string BlankedSlotNotEditable =
-        "There is no image here. The build uses a plain flat map instead.";
-
-    public const string FirstEditOpenHint =
-        "Open the original map in an image editor; saving adds an edit";
+        : IsBlanked ? Strings.MapBlankedNotEditable
+        : IsBusy ? Strings.BlenderBusy
+        : Role == EditCardRole.FirstEdit ? Strings.MapOpenFirstEditTip
+        : Strings.MapOpenTip;
 
     /// <summary>The guide draws the mesh that samples this map — the edit's own where the part carries a
     /// mesh edit, the game's otherwise — so it is live on game slots AND a replacement's own slots alike.
@@ -502,17 +450,12 @@ public sealed partial class EditMapCardVm : ObservableObject
     public string UvButtonLabel => UvGuide.TexCoordIndex(Slot.Input) is > 0 and { } texCoord
         ? $"UV{texCoord}" : "UV";
 
-    public string UvHint => !Slot.HasDrawableCarrier ? NoDrawableCarrier
+    public string UvHint => !Slot.HasDrawableCarrier ? Strings.MapNoDrawableCarrier
         : ReadRefusalFor(SubjectRead) is { } refused ? refused
-        : Role == EditCardRole.StandIn ? NoUvGuideOnStandIn
+        : Role == EditCardRole.StandIn ? Strings.MapNoUvOnStandIn
         : UvGuide.TexCoordIndex(Slot.Input) is > 0 and { } texCoord
-        ? $"Opens a UV guide for this map: a white wireframe of the second UV set (UV{texCoord}) it uses"
-        : "Opens a UV guide for this map: a white wireframe of its UV islands";
-
-    /// <summary>Why a stand-in card draws no guide: the islands would be the original mesh's, under paint
-    /// meant for the replacement that took its place.</summary>
-    public const string NoUvGuideOnStandIn =
-        "No UV guide here: the layout would be the original mesh's, not the replacement's.";
+        ? Strings.MapUvSecondSetTip(texCoord)
+        : Strings.MapUvTip;
 
     /// <summary>There is something to take back: the slot addresses the game and this edit asks it for
     /// something other than the game's own value.</summary>
@@ -521,30 +464,21 @@ public sealed partial class EditMapCardVm : ObservableObject
 
     /// <summary>The Revert tooltip, ordered the way the verb refuses: what it can never undo first, a wait
     /// after it, so a line promising "try again" is never shown for a click that will never work.</summary>
-    public string RevertHint => !IsGameSlot ? BelongsToTheReplacement
-        : Binding == BindingKind.TargetGameValue ? NothingToRevert
-        : IsBusy ? BlenderGate.Busy
-        : "Goes back to the original image";
-
-    /// <summary>What a Revert with nothing behind it says, everywhere one is drawn: the two on this card
-    /// and the shading row's under them.</summary>
-    public const string NothingToRevert = "Nothing to revert yet";
-
-    /// <summary>Why a replacement's own map has no way back of its own: what put it there is the mesh, and
-    /// that is where taking it back happens.</summary>
-    public const string BelongsToTheReplacement =
-        "This map came in with the replacement mesh. Use Revert mesh to go back to the original.";
+    public string RevertHint => !IsGameSlot ? Strings.MapBelongsToReplacement
+        : Binding == BindingKind.TargetGameValue ? Strings.NothingToRevert
+        : IsBusy ? Strings.BlenderBusy
+        : Strings.MapRevertTip;
 
     public bool CanChooseRamp => IsRamp && !IsBusy && SharingRefusal is null
         && Role != EditCardRole.StandIn;
 
-    public string ChooseRampButtonLabel => "Choose…";
+    public string ChooseRampButtonLabel => Strings.RampChoose;
 
     public string ChooseRampHint => SharingRefusal is { } refused ? refused
-        : IsBusy ? BlenderGate.Busy
+        : IsBusy ? Strings.BlenderBusy
         : Role == EditCardRole.FirstEdit
-            ? "Choose the toon ramp for this material; applying adds an edit"
-        : "Choose the toon ramp for this material";
+            ? Strings.RampChooseFirstEditTip
+        : Strings.RampChooseTip;
 
     /// <summary>Revert takes back a record: on a game slot anything past the game's own value, and on the
     /// replacement's own slot a pick, a carried ramp or the recorded keep-the-game's — those go back to
@@ -555,15 +489,10 @@ public sealed partial class EditMapCardVm : ObservableObject
 
     public string RevertRampHint =>
         (IsGameSlot ? Binding == BindingKind.TargetGameValue : !RampState.HasRecord)
-            ? NothingToRevert
-        : IsBusy ? BlenderGate.Busy
-        : IsGameSlot ? "Goes back to the original toon ramp"
-        : TakeBackRampChoice;
-
-    /// <summary>What reverting a replacement-slot ramp record does: the answer leaves, and the live carrier's
-    /// own ramp is what the part shades with.</summary>
-    public const string TakeBackRampChoice =
-        "Clears this toon ramp choice. The replacement uses the original part's toon ramp again.";
+            ? Strings.NothingToRevert
+        : IsBusy ? Strings.BlenderBusy
+        : IsGameSlot ? Strings.RampRevertTip
+        : Strings.RampTakeBackChoice;
 
     // ---- demand-driven async thumbnail: the workbench card's three mutually-exclusive states, behind a
     // monotonic request id so an out-of-order completion is rejected rather than landing a stale picture.
@@ -605,10 +534,7 @@ public sealed partial class EditMapCardVm : ObservableObject
 
     /// <summary>What the empty tile itself says. A missing file is not "no preview": the modder answered this
     /// slot, and what is wrong is the file rather than the picture.</summary>
-    public string ThumbNote => HasMissingFile ? MissingTile : NoPreviewTile;
-
-    public const string NoPreviewTile = "No preview";
-    public const string MissingTile = "Missing";
+    public string ThumbNote => HasMissingFile ? Strings.MapMissingTile : Strings.MapNoPreview;
 
     /// <summary>The cause and the way out under a missing file, in the words the geometry's own missing-file
     /// line uses. Null on every other card.</summary>
@@ -618,7 +544,7 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// because putting it back is the whole remedy — the card's own buttons say the rest, and which of them
     /// are there depends on what the card is.</summary>
     internal static string MapFileMissing(string file) =>
-        $"{file} isn't in the mod folder. Put the file back.";
+        Strings.MapFileMissing(file);
 
     /// <summary>The lazily-read "W×H" — "…" while loading.</summary>
     [ObservableProperty] private string _dimensions = "…";
@@ -701,12 +627,14 @@ public sealed partial class EditMapCardVm : ObservableObject
     public string FilterText => $"{MapLabel} {TextureName} {BoundFileName} {GameTextureName}";
 
     internal static string Label(TargetInputKind input, string? shaderProperty = null) =>
-        TextureMap.SlotLabel(input, shaderProperty);
+        TextureMap.DisplaySlotLabel(input, shaderProperty);
 
     /// <summary>The label as it reads mid-sentence: known-safe words are lowercased, while a label whose
-    /// first word is an all-caps name such as RMO or SMO keeps its casing.</summary>
+    /// first word is an all-caps name such as RMO or SMO keeps its casing. English only: in any other
+    /// language a label's case is the translation's, and it is shown as written.</summary>
     internal static string LabelInSentence(string label)
     {
+        if (Catalog.CurrentTag != Catalog.English) return label;
         string first = label.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
         return first.Any(char.IsLetter)
             && first.All(character => !char.IsLetter(character) || char.IsUpper(character))
@@ -723,7 +651,7 @@ public sealed partial class EditMapCardVm : ObservableObject
     /// names the map alone, which is all there is to say about it.</para></summary>
     internal static string MapInSentence(string label, string? materialName) =>
         string.IsNullOrEmpty(materialName) ? LabelInSentence(label)
-            : $"{LabelInSentence(label)} on {materialName}";
+            : Strings.MapOnMaterial(LabelInSentence(label), materialName);
 
     /// <summary>The same, for a caller holding the slot rather than the two parts.</summary>
     internal static string MapInSentence(EditSlotRef slot) =>
@@ -734,10 +662,10 @@ public sealed partial class EditMapCardVm : ObservableObject
     internal static string MapOnMaterial(EditSlotRef slot, string? label = null, bool sentenceStart = true)
     {
         string material = string.IsNullOrEmpty(slot.MaterialName)
-            ? $"material {slot.MaterialSlotIndex ?? slot.GameMaterialSlotIndex ?? slot.SubmeshIndex ?? 0}"
+            ? Strings.MaterialByPosition(slot.MaterialSlotIndex ?? slot.GameMaterialSlotIndex ?? slot.SubmeshIndex ?? 0)
             : slot.MaterialName;
         string map = label ?? Label(slot.Input);
-        return $"{(sentenceStart ? map : LabelInSentence(map))} on {material}";
+        return Strings.MapOnMaterial(sentenceStart ? map : LabelInSentence(map), material);
     }
 }
 
@@ -780,9 +708,6 @@ public sealed class EditMapGroupVm
     public string? Note { get; }
 
     public bool HasNote => Note is not null;
-
-    /// <summary>What a material position with nothing readable behind it says.</summary>
-    public const string NoMapsRead = "No maps could be read for this material.";
 
     /// <summary>The material's shading values row, or null where the position supports none — the row
     /// then does not show at all.</summary>
@@ -864,11 +789,12 @@ public sealed partial class EditShadingRowVm : ObservableObject
 
     public string Summary => string.Join(" · ", new[]
     {
-        AuthoredSlotIds.Count == 0 ? "" :
-            $"{AuthoredSlotIds.Count} value{(AuthoredSlotIds.Count == 1 ? "" : "s")} set",
-        DisabledEffectIds.Count == 0 ? "" :
-            $"{DisabledEffectIds.Count} effect{(DisabledEffectIds.Count == 1 ? "" : "s")} disabled",
-        CopiedFrom is { Length: > 0 } ? $"copied from '{CopiedFrom}'" : "",
+        AuthoredSlotIds.Count == 0 ? "" : Catalog.Plural(AuthoredSlotIds.Count,
+            Strings.ShadingValuesSet_One(AuthoredSlotIds.Count), Strings.ShadingValuesSet_Other(AuthoredSlotIds.Count)),
+        DisabledEffectIds.Count == 0 ? "" : Catalog.Plural(DisabledEffectIds.Count,
+            Strings.ShadingEffectsDisabled_One(DisabledEffectIds.Count),
+            Strings.ShadingEffectsDisabled_Other(DisabledEffectIds.Count)),
+        CopiedFrom is { Length: > 0 } ? Strings.ShadingCopiedFrom(CopiedFrom) : "",
     }.Where(value => value.Length > 0));
 
     public bool HasSummary => IsEdited;
@@ -898,21 +824,21 @@ public sealed partial class EditShadingRowVm : ObservableObject
     // Why the button is off when it is, else what the verb does — the page's rule, and the reason the
     // Revert below leads with what it can never do rather than with what it would do.
 
-    public string CopyFromMaterialHint => IsBusy ? BlenderGate.Busy
-        : "Copies another material's shading values onto this one.";
+    public string CopyFromMaterialHint => IsBusy ? Strings.BlenderBusy
+        : Strings.ShadingCopyFromTip;
 
-    public string EditValuesHint => IsBusy ? BlenderGate.Busy
-        : "Sets this material's shading values by hand.";
+    public string EditValuesHint => IsBusy ? Strings.BlenderBusy
+        : Strings.ShadingAdvancedTip;
 
-    public string DisableAllEffectsHint => IsBusy ? BlenderGate.Busy
-        : !HasEffects ? "This material has no removable effects."
-        : !Effects.Any(effect => effect.IsActive) ? "Every effect is already disabled."
-        : "Disables the effects on this material and keeps their saved values.";
+    public string DisableAllEffectsHint => IsBusy ? Strings.BlenderBusy
+        : !HasEffects ? Strings.ShadingNoRemovableEffects
+        : !Effects.Any(effect => effect.IsActive) ? Strings.ShadingAllDisabledTip
+        : Strings.ShadingDisableAllTip;
 
     /// <summary>Why it is off first, in the map card Revert's own words for the same state.</summary>
-    public string RevertHint => !IsEdited ? EditMapCardVm.NothingToRevert
-        : IsBusy ? BlenderGate.Busy
-        : "Returns this material's shading to the original.";
+    public string RevertHint => !IsEdited ? Strings.NothingToRevert
+        : IsBusy ? Strings.BlenderBusy
+        : Strings.ShadingRevertTip;
 }
 
 /// <summary>The user's enabled choice for one effect. Parent state controls availability without

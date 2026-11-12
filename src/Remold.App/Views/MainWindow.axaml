@@ -1,4 +1,4 @@
-<Window xmlns="https://github.com/avaloniaui"
+<Window xmlns="https://github.com/avaloniaui" xmlns:t="using:Remold.App"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Remold.App.ViewModels"
         xmlns:views="using:Remold.App.Views"
@@ -9,11 +9,7 @@
         MinWidth="920" MinHeight="480"
         Background="{StaticResource HudBgBrush}"
         Icon="/Assets/icon.ico"
-        Title="Doll Remolding Lab">
-
-  <Window.Resources>
-    <views:StringEqualsConverter x:Key="StrEq" />
-  </Window.Resources>
+        Title="{x:Static t:Strings.AppName}">
 
   <Window.Styles>
     <!-- Recent-mods rows (home screen). The default FluentTheme Button chrome highlighted inconsistently on
@@ -51,7 +47,7 @@
     <Border Grid.Row="0" Background="{StaticResource HudPanelBrush}"
             BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,0,0,1" Padding="16,10">
       <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto">
-        <TextBlock Grid.Column="0" Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="16"
+        <TextBlock Grid.Column="0" Text="{x:Static t:Strings.AppBanner}" FontWeight="Bold" FontSize="16"
                    Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
 
         <!-- Menu bar: the mod is a first-class object. Boxed + highlighted so it reads as a real
@@ -67,15 +63,15 @@
                 <Setter Property="Foreground" Value="{StaticResource HudTextBrush}" />
               </Style>
             </Menu.Styles>
-            <MenuItem Header="File">
+            <MenuItem Header="{x:Static t:Strings.MenuFile}">
               <!-- off while an import runs, for the same reason as the Home page's own buttons -->
-              <MenuItem Header="New mod…" Click="OnNewMod" IsEnabled="{Binding !IsImporting}" />
-              <MenuItem Header="Open mod…" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}" />
-              <MenuItem Header="Import mod from zip…" Click="OnImportModZip"
+              <MenuItem Header="{x:Static t:Strings.MenuNewMod}" Click="OnNewMod" IsEnabled="{Binding !IsImporting}" />
+              <MenuItem Header="{x:Static t:Strings.MenuOpenMod}" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}" />
+              <MenuItem Header="{x:Static t:Strings.MenuImportZip}" Click="OnImportModZip"
                         IsEnabled="{Binding !IsImporting}" />
-              <MenuItem Header="Import mod folder…" Click="OnImportModFolder"
+              <MenuItem Header="{x:Static t:Strings.MenuImportFolder}" Click="OnImportModFolder"
                         IsEnabled="{Binding !IsImporting}" />
-              <MenuItem Header="Open recent" Name="RecentMenu" ItemsSource="{Binding RecentMods}"
+              <MenuItem Header="{x:Static t:Strings.MenuOpenRecent}" Name="RecentMenu" ItemsSource="{Binding RecentMods}"
                         IsEnabled="{Binding HasRecentMods}">
                 <MenuItem.ItemTemplate>
                   <DataTemplate x:DataType="vm:RecentModVm">
@@ -96,29 +92,29 @@
                 </MenuItem.Styles>
               </MenuItem>
               <Separator />
-              <MenuItem Header="Save mod" Command="{Binding SaveModCommand}" IsEnabled="{Binding !ShowHome}" />
-              <MenuItem Header="Save mod as…" Click="OnSaveModAs" IsEnabled="{Binding !ShowHome}" />
-              <MenuItem Header="Close mod" Command="{Binding CloseModCommand}" IsEnabled="{Binding !ShowHome}" />
+              <MenuItem Header="{x:Static t:Strings.MenuSaveMod}" Command="{Binding SaveModCommand}" IsEnabled="{Binding !ShowHome}" />
+              <MenuItem Header="{x:Static t:Strings.MenuSaveModAs}" Click="OnSaveModAs" IsEnabled="{Binding !ShowHome}" />
+              <MenuItem Header="{x:Static t:Strings.MenuCloseMod}" Command="{Binding CloseModCommand}" IsEnabled="{Binding !ShowHome}" />
             </MenuItem>
-            <MenuItem Header="Tools">
+            <MenuItem Header="{x:Static t:Strings.MenuTools}">
               <!-- the tooltip is where the OTHER rescan lives: this one re-reads the install and keeps every
                    rebuilt cache, and the variant that drops them is a Settings row nobody would go looking
                    for from here -->
-              <MenuItem Header="Rescan game files" Command="{Binding ReloadRosterCommand}"
+              <MenuItem Header="{x:Static t:Strings.MenuRescan}" Command="{Binding ReloadRosterCommand}"
                         IsEnabled="{Binding !IsScanning}"
-                        ToolTip.Tip="Re-reads the game files and keeps the rebuilt caches. Settings · Force rescan clears the caches as well." />
-              <MenuItem Header="Locate game…" Click="OnLocateGame" />
-              <MenuItem Header="Settings…" Click="OnSettings" />
+                        ToolTip.Tip="{x:Static t:Strings.MenuRescanTip}" />
+              <MenuItem Header="{x:Static t:Strings.MenuLocateGame}" Click="OnLocateGame" />
+              <MenuItem Header="{x:Static t:Strings.MenuSettings}" Click="OnSettings" />
             </MenuItem>
-            <MenuItem Header="Help">
-              <MenuItem Header="About Doll Remolding Lab" Click="OnAbout" />
+            <MenuItem Header="{x:Static t:Strings.MenuHelp}">
+              <MenuItem Header="{x:Static t:Strings.AboutTitle}" Click="OnAbout" />
             </MenuItem>
           </Menu>
         </Border>
 
         <TextBlock Grid.Column="2" Margin="16,0,0,0" VerticalAlignment="Center"
                    Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding !ShowHome}">
-          <Run Text="Current mod:" />
+          <Run Text="{x:Static t:Strings.CurrentModLabel}" />
           <Run Text="{Binding ModTitleDisplay}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
         </TextBlock>
         <!-- the launch's own line, beside the button that causes it: the status bar's notice cell carries
@@ -138,16 +134,16 @@
                      FontSize="12" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </StackPanel>
         <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="8" IsVisible="{Binding !ShowHome}">
-          <Button Content="⌂ Home" Command="{Binding CloseModCommand}"
-                  ToolTip.Tip="Close this mod and return to the start screen" />
-          <Button Content="Save" Command="{Binding SaveModCommand}" />
+          <Button Content="{x:Static t:Strings.HomeButton}" Command="{Binding CloseModCommand}"
+                  ToolTip.Tip="{x:Static t:Strings.HomeButtonTip}" />
+          <Button Content="{x:Static t:Strings.SaveButton}" Command="{Binding SaveModCommand}" />
         </StackPanel>
         <!-- Settings and launching belong to the app, not to a mod, so they stand outside the per-mod
              buttons and show on the start screen too. Tools · Settings… opens the same dialog.
              Launch disabled says which half is missing (ShowOnDisabled). -->
-        <Button Grid.Column="5" Content="⚙ Settings" Margin="8,0,0,0" VerticalAlignment="Center"
+        <Button Grid.Column="5" Content="{x:Static t:Strings.SettingsButton}" Margin="8,0,0,0" VerticalAlignment="Center"
                 Click="OnSettings" />
-        <Button Grid.Column="6" Content="▶ Launch game" Margin="8,0,0,0" VerticalAlignment="Center"
+        <Button Grid.Column="6" Content="{x:Static t:Strings.LaunchButton}" Margin="8,0,0,0" VerticalAlignment="Center"
                 Command="{Binding LaunchGameCommand}" IsEnabled="{Binding CanLaunchGame}"
                 ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding LaunchButtonTip}" />
       </Grid>
@@ -159,11 +155,11 @@
       <!-- left rail -->
       <Border Grid.Column="0" Background="{StaticResource HudPanelBrush}"
               BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="0,0,1,0">
-        <ListBox ItemsSource="{Binding Steps}" SelectedItem="{Binding SelectedStep}"
+        <ListBox ItemsSource="{Binding Steps}" SelectedItem="{Binding SelectedStepItem}"
                  Background="Transparent" Margin="0,8" Padding="0">
           <ListBox.ItemTemplate>
-            <DataTemplate x:DataType="x:String">
-              <TextBlock Text="{Binding}" FontSize="14" Padding="10,8" />
+            <DataTemplate x:DataType="vm:WorkflowStepItem">
+              <TextBlock Text="{Binding Caption}" FontSize="14" Padding="10,8" />
             </DataTemplate>
           </ListBox.ItemTemplate>
         </ListBox>
@@ -174,15 +170,15 @@
 
         <!-- PICK -->
         <Grid RowDefinitions="Auto,*,Auto"
-              IsVisible="{Binding SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='① Pick'}">
+              IsVisible="{Binding IsPickStep}">
           <StackPanel Grid.Row="0" Margin="0,0,0,10" Spacing="3">
-            <TextBlock Text="Pick" FontSize="15"
+            <TextBlock Text="{x:Static t:Strings.PickTitle}" FontSize="15"
                        Foreground="{StaticResource HudTextBrush}" />
             <!-- Honest cue: unlock is PROGRESSIVE — each character's checkbox lights up as the scan confirms
                  that character, not all-at-once when the scan finishes. -->
             <TextBlock IsVisible="{Binding IsScanning}" Foreground="{StaticResource HudSubtextBrush}"
                        FontSize="12" TextWrapping="Wrap"
-                       Text="Reading game files. Characters become available as they're found." />
+                       Text="{x:Static t:Strings.PickReadingCharacters}" />
           </StackPanel>
 
           <!-- Three roster tabs over the same live roster (all TreeViews over CharacterVm): the playable
@@ -221,7 +217,7 @@
                                FontSize="11" VerticalAlignment="Center" IsVisible="{Binding HasTreeDetail}" />
                     <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
                                VerticalAlignment="Center" IsVisible="{Binding SubjectHasEdits}"
-                               ToolTip.Tip="Has edits in this mod." />
+                               ToolTip.Tip="{x:Static t:Strings.PickHasEdits}" />
                   </StackPanel>
                   <!-- multi-outfit character: a grouping header that ALSO carries a character-level checkbox
                        (F3, "grab an entire character at once"). Tri-state: checked = all outfits in,
@@ -230,12 +226,12 @@
                   <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowGroupHeader}"
                               Opacity="{Binding NameOpacity}" VerticalAlignment="Center">
                     <CheckBox IsThreeState="True" IsChecked="{Binding CharacterInMod}"
-                              ToolTip.Tip="Add or remove all of this character's outfits at once.">
+                              ToolTip.Tip="{x:Static t:Strings.PickCharacterCheckTip}">
                       <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource HudTextBrush}" FontWeight="SemiBold" />
                     </CheckBox>
                     <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
                                VerticalAlignment="Center" IsVisible="{Binding CharacterHasEdits}"
-                               ToolTip.Tip="Some of this character's outfits have edits in this mod." />
+                               ToolTip.Tip="{x:Static t:Strings.PickCharacterHasEdits}" />
                   </StackPanel>
                   <!-- loading: plain label, no checkbox (nothing to pick until the scan resolves the outfits) -->
                   <TextBlock Text="{Binding DisplayName}" IsVisible="{Binding IsLoading}" Opacity="{Binding NameOpacity}"
@@ -259,13 +255,13 @@
                                IsVisible="{Binding HasBadge}" />
                     <TextBlock Text="✎" Foreground="{StaticResource HudAccentBrush}" FontSize="12"
                                VerticalAlignment="Center" IsVisible="{Binding HasEdits}"
-                               ToolTip.Tip="Has edits in this mod." />
+                               ToolTip.Tip="{x:Static t:Strings.PickHasEdits}" />
                   </StackPanel>
                   <!-- loading: plain label + hint, no checkbox (we can't act on it until the scan reaches it) -->
                   <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding IsLoading}"
                               Margin="4,0,0,0" VerticalAlignment="Center">
                     <TextBlock Text="{Binding Label}" Foreground="{StaticResource HudAmberBrush}" />
-                    <TextBlock Text="Loading…" Foreground="{StaticResource HudSubtextBrush}"
+                    <TextBlock Text="{x:Static t:Strings.PickLoading}" Foreground="{StaticResource HudSubtextBrush}"
                                FontStyle="Italic" FontSize="11" VerticalAlignment="Center" />
                   </StackPanel>
                 </Panel>
@@ -277,12 +273,12 @@
                  gone. Double-click a subject to open it in Edit (checks it first). -->
             <TabItem Header="{Binding CharactersTabHeader}">
               <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
-                <TextBox Grid.Row="0" Watermark="Filter characters" Text="{Binding SearchText}"
+                <TextBox Grid.Row="0" Watermark="{x:Static t:Strings.PickFilterCharacters}" Text="{Binding SearchText}"
                          Margin="0,0,0,10" />
                 <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
                         BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
                   <Panel>
-                    <TextBlock Text="Reading game files…" Margin="14"
+                    <TextBlock Text="{x:Static t:Strings.PickReadingGameFiles}" Margin="14"
                                Foreground="{StaticResource HudSubtextBrush}"
                                IsVisible="{Binding IsLoading}" />
                     <!-- a search that matched nothing: the box says so instead of standing empty -->
@@ -299,12 +295,12 @@
                  their models, one row per enemy; picks feed the same queue/ledger as Characters. ===== -->
             <TabItem Header="{Binding EnemiesTabHeader}">
               <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
-                <TextBox Grid.Row="0" Watermark="Filter enemies" Text="{Binding EnemySearchText}"
+                <TextBox Grid.Row="0" Watermark="{x:Static t:Strings.PickFilterEnemies}" Text="{Binding EnemySearchText}"
                          Margin="0,0,0,10" />
                 <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
                         BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
                   <Panel>
-                    <TextBlock Text="Reading game files…" Margin="14"
+                    <TextBlock Text="{x:Static t:Strings.PickReadingGameFiles}" Margin="14"
                                Foreground="{StaticResource HudSubtextBrush}"
                                IsVisible="{Binding IsLoading}" />
                     <!-- a search that matched nothing, plus where a filtered duplicate door went: the tab
@@ -327,12 +323,12 @@
                  its type, so skins are their own subjects, not variants under a weapon. ===== -->
             <TabItem Header="{Binding WeaponsTabHeader}">
               <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
-                <TextBox Grid.Row="0" Watermark="Filter weapons" Text="{Binding WeaponSearchText}"
+                <TextBox Grid.Row="0" Watermark="{x:Static t:Strings.PickFilterWeapons}" Text="{Binding WeaponSearchText}"
                          Margin="0,0,0,10" />
                 <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
                         BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
                   <Panel>
-                    <TextBlock Text="Reading game files…" Margin="14"
+                    <TextBlock Text="{x:Static t:Strings.PickReadingGameFiles}" Margin="14"
                                Foreground="{StaticResource HudSubtextBrush}"
                                IsVisible="{Binding IsLoading}" />
                     <TextBlock Text="{Binding WeaponsNoMatch}" Margin="14" TextWrapping="Wrap"
@@ -349,12 +345,12 @@
                  install; picks feed the same queue/ledger as Characters. ===== -->
             <TabItem Header="{Binding SupportTeamsTabHeader}">
               <Grid RowDefinitions="Auto,*" Margin="0,8,0,0">
-                <TextBox Grid.Row="0" Watermark="Filter support teams" Text="{Binding SupportSearchText}"
+                <TextBox Grid.Row="0" Watermark="{x:Static t:Strings.PickFilterSupportTeams}" Text="{Binding SupportSearchText}"
                          Margin="0,0,0,10" />
                 <Border Grid.Row="1" Background="{StaticResource HudPanelBrush}"
                         BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
                   <Panel>
-                    <TextBlock Text="Reading game files…" Margin="14"
+                    <TextBlock Text="{x:Static t:Strings.PickReadingGameFiles}" Margin="14"
                                Foreground="{StaticResource HudSubtextBrush}"
                                IsVisible="{Binding IsLoading}" />
                     <TextBlock Text="{Binding SupportTeamsNoMatch}" Margin="14" TextWrapping="Wrap"
@@ -374,9 +370,9 @@
             <Border Grid.Column="0" Padding="10,8" CornerRadius="3" VerticalAlignment="Stretch"
                     Margin="0,0,12,0" Background="{StaticResource HudPanelAltBrush}">
               <TextBlock VerticalAlignment="Center" Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
-                         Text="Check the items to include in this mod. Double-click a row to open it in ② Edit." />
+                         Text="{x:Static t:Strings.PickHint}" />
             </Border>
-            <Button Grid.Column="1" Content="Next: Edit ▸" Command="{Binding GoToEditCommand}" Classes="primary"
+            <Button Grid.Column="1" Content="{x:Static t:Strings.PickNextEdit}" Command="{Binding GoToEditCommand}" Classes="primary"
                     FontSize="15" Padding="18,10" VerticalAlignment="Stretch" />
           </Grid>
         </Grid>
@@ -384,9 +380,9 @@
              project's own intent. -->
         <views:EditPageView DataContext="{Binding EditPage}"
               TreeWidth="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditTreeWidth, Mode=TwoWay}"
-              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='② Edit'}" />
+              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).IsEditStep}" />
         <views:BuildPageView DataContext="{Binding BuildPage}"
-              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SelectedStep, Converter={StaticResource StrEq}, ConverterParameter='③ Build'}" />
+              IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).IsBuildStep}" />
       </Panel>
     </Grid>
 
@@ -405,30 +401,30 @@
                  MaxHeight="{Binding #HomePane.Bounds.Height}">
 
         <StackPanel DockPanel.Dock="Top">
-          <TextBlock Text="DOLL REMOLDING LAB" FontWeight="Bold" FontSize="26"
+          <TextBlock Text="{x:Static t:Strings.AppBanner}" FontWeight="Bold" FontSize="26"
                      Foreground="{StaticResource HudAccentBrush}" HorizontalAlignment="Center" />
           <TextBlock Margin="0,6,0,28" HorizontalAlignment="Center" TextAlignment="Center"
                      Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
-                     Text="Start a new mod, reopen a recent one, or import a built mod." />
+                     Text="{x:Static t:Strings.HomeIntro}" />
 
           <!-- primary actions. Every one of them is off while an import runs: each starts a project, and a
                second start would mint a folder the import in flight is still writing into. -->
           <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-            <Button Content="＋  New mod" Click="OnNewMod" Classes="primary"
+            <Button Content="{x:Static t:Strings.HomeNewMod}" Click="OnNewMod" Classes="primary"
                     IsEnabled="{Binding !IsImporting}" FontSize="15" Padding="22,12" />
-            <Button Content="Open mod…" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}"
+            <Button Content="{x:Static t:Strings.MenuOpenMod}" Click="OnOpenMod" IsEnabled="{Binding !IsImporting}"
                     FontSize="15" Padding="22,12" />
           </StackPanel>
           <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,12,0,0"
                       HorizontalAlignment="Center">
-            <Button Content="Import mod from zip…" Click="OnImportModZip"
+            <Button Content="{x:Static t:Strings.MenuImportZip}" Click="OnImportModZip"
                     IsEnabled="{Binding !IsImporting}" FontSize="13" Padding="14,8" />
-            <Button Content="Import mod folder…" Click="OnImportModFolder"
+            <Button Content="{x:Static t:Strings.MenuImportFolder}" Click="OnImportModFolder"
                     IsEnabled="{Binding !IsImporting}" FontSize="13" Padding="14,8" />
           </StackPanel>
           <TextBlock Margin="0,10,0,0" HorizontalAlignment="Center" TextAlignment="Center"
                      Foreground="{StaticResource HudSubtextBrush}" TextWrapping="Wrap"
-                     Text="Drop a built mod folder or zip here to import it." />
+                     Text="{x:Static t:Strings.HomeDropHint}" />
         </StackPanel>
 
         <!-- background scan progress -->
@@ -443,7 +439,7 @@
                 BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="4"
                 Padding="16,12" IsVisible="{Binding HasRecentMods}">
           <DockPanel>
-            <TextBlock DockPanel.Dock="Top" Margin="0,0,0,8" Text="Recent mods"
+            <TextBlock DockPanel.Dock="Top" Margin="0,0,0,8" Text="{x:Static t:Strings.HomeRecentMods}"
                        Foreground="{StaticResource HudSubtextBrush}" FontWeight="SemiBold" FontSize="12" />
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
               <ItemsControl ItemsSource="{Binding RecentMods}">
@@ -528,7 +524,7 @@
           <TextBlock Text="{Binding NoticeStatus.Glyph}" Foreground="{Binding NoticeStatus.Color}" />
           <TextBlock Text="{Binding NoticeStatus.Text}" Foreground="{Binding NoticeStatus.Color}"
                      TextTrimming="CharacterEllipsis" MaxWidth="360" />
-          <Button Content="Rescan" Command="{Binding ReloadRosterCommand}"
+          <Button Content="{x:Static t:Strings.StatusRescan}" Command="{Binding ReloadRosterCommand}"
                   IsVisible="{Binding GameRescanOffered}" Padding="8,1" FontSize="11"
                   VerticalAlignment="Center" />
         </StackPanel>

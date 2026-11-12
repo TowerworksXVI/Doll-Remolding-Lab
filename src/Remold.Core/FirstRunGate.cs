@@ -7,9 +7,10 @@ using System.Text.Json;
 namespace Remold.Core;
 
 /// <summary>
-/// Records that the modder accepted a first-run pop-up, stamped with a hash of the EXACT text they saw,
-/// so any edit to the copy re-prompts with no manual version bump. Durable — stored beside the
-/// settings (<see cref="LabPaths.FirstRunAcceptanceFile"/>).
+/// Records that the modder accepted a first-run pop-up, stamped with a hash of the terms' ENGLISH text
+/// whatever language the window showed them in, so one acceptance holds across languages and any edit to
+/// the English terms re-prompts with no manual version bump. The caller passes that English text. Durable —
+/// stored beside the settings (<see cref="LabPaths.FirstRunAcceptanceFile"/>).
 /// </summary>
 public static class FirstRunGate
 {

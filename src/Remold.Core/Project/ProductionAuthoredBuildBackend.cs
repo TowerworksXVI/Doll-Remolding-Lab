@@ -60,11 +60,11 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
             // The read's own exception is a diagnosis of this app's read, not of the mod: it names bundles,
             // path ids and exception types. The line says what failed; the exception goes to the log.
             return new BuildSlotResolution(BuildPlanVerdict.Unresolved, null,
-                "couldn't read this part from the game files", e.ToString());
+                CoreStrings.PlanReasonPartUnreadable, e.ToString());
         }
         if (part is null)
             return new BuildSlotResolution(BuildPlanVerdict.Unresolved, null,
-                "this part is not in the current game files");
+                CoreStrings.PlanReasonPartGone);
 
         GameAssetRef renderer = part.Renderer;
         GameAssetRef mesh = part.Mesh;
@@ -79,15 +79,14 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
                 return new BuildSlotResolution(tiers.Count == 0 ? BuildPlanVerdict.Unresolved
                         : BuildPlanVerdict.Conflict, null,
                     tiers.Count == 0
-                        ? $"this part has no {tier} level of detail in the current game files"
-                        : $"this part has {tiers.Count} meshes for its {tier} level of detail in the "
-                          + "current game files");
+                        ? CoreStrings.PlanReasonNoTier(tier)
+                        : CoreStrings.PlanReasonManyTierMeshes(tiers.Count, tier));
             renderer = tiers[0].Renderer;
             mesh = tiers[0].Mesh;
         }
         if (!Exact(renderer) || !Exact(mesh))
             return new BuildSlotResolution(BuildPlanVerdict.Unresolved, null,
-                "this part's mesh could not be identified in the current game files");
+                CoreStrings.PlanReasonMeshUnidentified);
 
         GameAssetRef? material = null;
         int? drawIndexCount = null;
@@ -97,7 +96,7 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
                     (TargetInputKind.Geometry or TargetInputKind.Visibility));
         if (needsGameMaterial && alternateTier)
             return new BuildSlotResolution(BuildPlanVerdict.Unresolved, null,
-                $"materials on the {authoredSlot.Tier} level of detail cannot be changed");
+                CoreStrings.PlanReasonTierMaterialsFixed(authoredSlot.Tier));
         if (needsGameMaterial)
         {
             int index = authoredSlot.MaterialSlotIndex ?? authoredSlot.SubmeshIndex!.Value;
@@ -107,11 +106,10 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
                 return new BuildSlotResolution(matches.Count > 1 ? BuildPlanVerdict.Conflict
                         : BuildPlanVerdict.Unresolved, null,
                     matches.Count == 0
-                        ? $"this part has no material {index} in the current game files"
+                        ? CoreStrings.PlanReasonNoMaterial(index)
                         : matches.Count > 1
-                            ? $"this part has {matches.Count} materials at material {index} in the "
-                              + "current game files"
-                            : $"material {index} could not be identified in the current game files");
+                            ? CoreStrings.PlanReasonManyMaterials(matches.Count, index)
+                            : CoreStrings.PlanReasonMaterialUnidentified(index));
             material = matches[0].Material;
             if (part.MaterialIndexCounts is { } counts && index >= 0)
                 drawIndexCount = index < counts.Count ? counts[index] : 0;
@@ -141,8 +139,7 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
         {
             var evidence = _materialEvidence?.Invoke(request.CurrentSlot);
             if (evidence is null)
-                return Block(BuildPlanVerdict.Unsupported,
-                    "this material's shader has no adjustable values");
+                return Block(BuildPlanVerdict.Unsupported, CoreStrings.PlanReasonNoAdjustableValues);
             var render = Render(request.CurrentSlot, Proof(request.CurrentSlot, "material-draw"),
                 evidence);
             return MaterialValueBuildSupport.Resolve(request, render, _materialValues);
@@ -156,8 +153,7 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
             _ => BuildRuntimeAction.None,
         };
         if (action == BuildRuntimeAction.None)
-            return Block(BuildPlanVerdict.Unsupported,
-                "this value cannot be built into the mod");
+            return Block(BuildPlanVerdict.Unsupported, CoreStrings.PlanReasonValueNotBuildable);
 
         // Replacement geometry is a capability of the GAME mesh, not of the replacement: a mesh the swap
         // routes cannot take (blend shapes, an unreadable skin shape, a spring rig) blocks at plan
@@ -215,21 +211,14 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
     /// from another material's, or null when it can. A part listing more materials than its mesh has
     /// submeshes draws the last submesh once more for each extra material, over the same index range, so
     /// every material from the last submesh on shares one draw range. Null where the mesh's submeshes did
-    /// not read: the build reads every tier again and refuses there.</summary>
+    /// not read: the build reads every tier again and refuses there. The sentence is a clause: the page and
+    /// the build's refusal each put their own "cannot build" in front of it.</summary>
     private static string? SharedDrawReason(LegacyResolvedPart part, int position)
     {
         if (part.MaterialIndexCounts is not { Count: > 0 } counts) return null;
         if (part.Materials.Count <= counts.Count || position < counts.Count - 1) return null;
-        return SharedDrawCause;
+        return CoreStrings.PlanReasonSharedDraw;
     }
-
-    /// <summary>What a plan line and a build refusal both say about a material whose own draw cannot be told
-    /// apart from another material's. Written as a clause: the page and the refusal each put their own
-    /// "cannot build" in front of it.</summary>
-    internal const string SharedDrawCause =
-        "this part draws several of its materials over the same faces, so a change to one of them would "
-        + "change the others too. Replace the part's mesh to change this material on its own, or remove the "
-        + "change";
 
     public BuildOperationResolution ResolveVisibility(BuildVisibilityRequest request)
     {
@@ -329,13 +318,12 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
             }
             if (textures.Count != 1)
             {
-                string label = Textures.TextureMap.SlotLabel(slot.Input, slot.ShaderProperty);
+                string label = Textures.TextureMap.DisplaySlotLabel(slot.Input, slot.ShaderProperty);
                 return Failure(textures.Count > 1 ? BuildPlanVerdict.Conflict
                         : BuildPlanVerdict.Unresolved,
                     textures.Count == 0
-                        ? $"the original material has no {label} in the current game files"
-                        : $"the original material has {textures.Count} textures for its {label}, so "
-                          + "the build cannot choose one");
+                        ? CoreStrings.PlanReasonNoMap(label)
+                        : CoreStrings.PlanReasonManyMaps(textures.Count, label));
             }
             return (new BuildTargetingProof("renderer-index-buffer-and-exact-texture",
                     $"{ObjectId(slot.Renderer)} / {ObjectId(textures[0].Texture)}"),
@@ -351,18 +339,15 @@ public sealed class ProductionAuthoredBuildBackend : IAuthoredBuildBackend
             if (!replacement)
             {
                 if (material is null)
-                    return Failure(BuildPlanVerdict.Unresolved,
-                        "the original material is not in the current game files");
+                    return Failure(BuildPlanVerdict.Unresolved, CoreStrings.PlanReasonMaterialGone);
                 var rampTargets = material.Textures.Where(texture => texture.Input == TargetInputKind.Ramp
                     && Exact(texture.Texture)).ToList();
                 if (rampTargets.Count != 1)
                     return Failure(rampTargets.Count > 1 ? BuildPlanVerdict.Conflict
                             : BuildPlanVerdict.Unresolved,
                         rampTargets.Count == 0
-                            ? "the original material draws without a toon ramp, so one cannot be "
-                              + "picked for it"
-                            : $"the original material has {rampTargets.Count} toon ramps, so the build "
-                              + "cannot choose one");
+                            ? CoreStrings.PlanReasonNoRamp
+                            : CoreStrings.PlanReasonManyRamps(rampTargets.Count));
                 if (SharedDrawReason(resolved!, material.MaterialSlotIndex) is { } shared)
                     return Failure(BuildPlanVerdict.Unsupported, shared);
                 return (new BuildTargetingProof(BuildTargetingProof.StockDrawRange,

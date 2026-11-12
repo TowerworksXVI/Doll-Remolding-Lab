@@ -142,8 +142,7 @@ public class SkinLayoutTests : IDisposable
         Assert.False(SkinLayout.Recoverable(field));
         Assert.False(SkinLayout.Widen(field));
         Assert.Throws<InvalidDataException>(() => SkinLayout.Canonical(field));
-        Assert.Equal("its skin weights are stored in a shape this app can't read",
-            StreamDump.UnrecoverableSkinReason(field));
+        Assert.Equal(CoreStrings.SkinReasonUnreadableLayout, StreamDump.UnrecoverableSkinReason(field));
     }
 
     [Fact]

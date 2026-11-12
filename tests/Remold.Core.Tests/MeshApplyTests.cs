@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -52,7 +53,7 @@ public class MeshApplyTests
 
         var built = MeshApply.BuildSkinned(orig, glb, new uint[] { 5, 7 });
 
-        Assert.Contains(built.Warnings, w => w.Contains("1 vertex") && w.Contains("bind pose"));
+        Assert.Contains(CoreStrings.MeshWeightlessVertices_One(1), built.Warnings);
     }
 
     [Fact]
@@ -181,10 +182,9 @@ public class MeshApplyTests
     {
         var ex = new MeshApply.OffSkeletonWeightException(12, 3);
 
-        Assert.Equal("the mesh edit on 'c_Body' has 12 vertices weighted to 3 bones this item doesn't have. "
-            + "Open the edit in Blender, run Check Mesh, and send it again", ex.For("c_Body"));
-        Assert.StartsWith("the new mesh has 12 vertices weighted to 3 bones", ex.Message);
-        Assert.StartsWith("the new mesh has 1 vertex weighted to 1 bone this item",
+        Assert.Equal(CoreStrings.OffSkeletonEditVerticesBones("c_Body", 12, 3), ex.For("c_Body"));
+        Assert.Equal(CoreStrings.OffSkeletonNewMeshVerticesBones(12, 3), ex.Message);
+        Assert.Equal(CoreStrings.OffSkeletonNewMeshVertexBone(1, 1),
             new MeshApply.OffSkeletonWeightException(1, 1).Message);
     }
 
@@ -235,6 +235,46 @@ public class MeshApplyTests
     }
 
     [Fact]
+    public void Skinned_ReductionOnSeveralVertices_CountsThemAll()
+    {
+        var orig = new UnityMesh
+        {
+            Name = "narrow", VertexCount = 2,
+            Channels = new Dictionary<string, float[]>
+            {
+                ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 },
+                ["BlendWeight"] = new float[] { 1.0f, 1.0f },
+                ["BlendIndices"] = new float[] { 0, 0 },
+            },
+            Dims = new Dictionary<string, int> { ["Vertex"] = 3, ["BlendWeight"] = 1, ["BlendIndices"] = 1 },
+            Submeshes = new List<int[]> { new[] { 0, 1, 0 } },
+        };
+        var glb = new MeshApply.Payload
+        {
+            Mesh = Mesh(2, new Dictionary<string, float[]> { ["Vertex"] = new float[] { 0, 0, 0, 10, 0, 0 } },
+                new Dictionary<string, int> { ["Vertex"] = 3 }, new List<int[]> { new[] { 0, 1, 0 } }),
+            SkinJointHashes = new uint[] { 5, 7 },
+            JointIndices = new[] { 0, 1, 0, 0, /*v1*/ 0, 1, 0, 0 },
+            JointWeights = new float[] { 0.25f, 0.75f, 0, 0, /*v1*/ 0.5f, 0.5f, 0, 0 },
+        };
+
+        var built = MeshApply.BuildSkinned(orig, glb, new uint[] { 5, 7 });
+
+        Assert.Contains(CoreStrings.MeshReducedInfluences_Other(2, 1), built.Warnings);
+    }
+
+    [Fact]
+    public void Weightless_vertices_are_counted_one_or_many()
+    {
+        Assert.Equal(new[] { CoreStrings.MeshWeightlessVertices_One(1) }, MeshApply.WeightHealth(
+            new Dictionary<string, float[]> { ["BlendWeight"] = new float[] { 0, 0, 1, 0 } }, 2));
+        Assert.Equal(new[] { CoreStrings.MeshWeightlessVertices_Other(2) }, MeshApply.WeightHealth(
+            new Dictionary<string, float[]> { ["BlendWeight"] = new float[] { 0, 0, 0.1f, 0.2f } }, 2));
+        Assert.Empty(MeshApply.WeightHealth(
+            new Dictionary<string, float[]> { ["BlendWeight"] = new float[] { 1, 0, 0.6f, 0 } }, 2));
+    }
+
+    [Fact]
     public void Skinned_FourWideTarget_ReducesNothing_AndSaysNothing()
     {
         // The far side of the boundary: the authored skin is 4-wide at its widest (glTF WEIGHTS_0 is a vec4)
@@ -254,8 +294,9 @@ public class MeshApplyTests
         var built = MeshApply.BuildSkinned(Orig(), glb, new uint[] { 5, 7, 9, 11 });   // Orig stores dim 4
 
         Assert.Equal(new float[] { 0.4f, 0.3f, 0.2f, 0.1f, 1, 0, 0, 0 }, built.Arrays["BlendWeight"]);
-        Assert.DoesNotContain(built.Warnings, w => w.Contains("bone influence"));
-        Assert.DoesNotContain(built.Diagnostics, d => d.Contains("bone influence"));
+        var reduced = CatalogShape.Of(CoreStrings.MeshReducedInfluences_Other(CatalogShape.Any, CatalogShape.Any));
+        Assert.DoesNotContain(built.Warnings, reduced.IsMatch);
+        Assert.DoesNotContain(built.Diagnostics, reduced.IsMatch);
     }
 
     [Fact]

@@ -511,7 +511,7 @@ public class KeyOffModeEmissionTests : IDisposable
             string ini = BuildPooled(hideWhenOff: hide);
             string alpha = Section(ini, "[TextureOverride_Cap_alpha]");
             Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CustomShaderRingBlock_alpha\n$zz_drew_alpha = 1\nendif\nendif\n", alpha);
-            Assert.Equal(1, Regex.Matches(alpha, Regex.Escape("run = ")).Count);
+            Assert.Single(Regex.Matches(alpha, Regex.Escape("run = ")));
             Assert.Contains(hide ? "if $zz_key_f6 == 0\nhandling = skip\nendif\n"
                 : "if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nhandling = skip\nendif\nendif\n", alpha);
             Assert.Contains("if $zz_key_f6 == 0\nif $zz_key_f8 == 0\nrun = CustomShaderPoseBlock_beta_swap\nrun = CommandListDraw_swap\n",

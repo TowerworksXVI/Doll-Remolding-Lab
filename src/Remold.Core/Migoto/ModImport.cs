@@ -122,70 +122,53 @@ public static partial class ModImport
 
     // ---- the sentences ------------------------------------------------------------------------------
 
-    public static string NotAModFolderMessage(string name) => $"'{name}' is not a mod folder.";
+    public static string NotAModFolderMessage(string name) => CoreStrings.ImportNotAModFolder(name);
 
-    public static string NoModInZipMessage(string name) => $"'{name}' does not contain a mod.";
+    public static string NoModInZipMessage(string name) => CoreStrings.ImportNoModInZip(name);
 
     public static string BuiltBeforeRepairDataMessage(string name, string version) =>
-        $"'{name}' is not editable. It was built by version {version}, and only its author can rebuild it.";
+        CoreStrings.ImportBuiltBeforeRepairData(name, version);
 
-    public static string BuiltWithoutRepairDataMessage(string name) => $"'{name}' is not editable.";
+    public static string BuiltWithoutRepairDataMessage(string name) => CoreStrings.ImportBuiltWithoutRepairData(name);
 
-    public static string NoRepairDataMessage(string name) =>
-        $"'{name}' is not editable, and it does not say which version built it.";
+    public static string NoRepairDataMessage(string name) => CoreStrings.ImportNoRepairData(name);
 
-    public static string PreReleaseBuildMessage(string name) =>
-        $"'{name}' is not editable. It was built by a pre-release version, and only its author can "
-        + "rebuild it.";
+    public static string PreReleaseBuildMessage(string name) => CoreStrings.ImportPreReleaseBuild(name);
 
-    public static string NewerAppMessage(string name) =>
-        $"'{name}' was built by a newer version of Doll Remolding Lab. Update the app to import it.";
+    public static string NewerAppMessage(string name) => CoreStrings.ImportNewerApp(name);
 
     /// <summary>What a record, or a file beside it, that would not read says. The reason is the reader's
     /// own, with the machine's paths taken out of it.</summary>
-    public static string UnreadableMessage(string name, string reason) =>
-        $"Couldn't read '{name}': {reason}.";
+    public static string UnreadableMessage(string name, string reason) => CoreStrings.ImportUnreadable(name, reason);
 
-    public static string MissingFileMessage(string name, string file) =>
-        $"'{name}' is missing the file '{file}'.";
+    public static string MissingFileMessage(string name, string file) => CoreStrings.ImportMissingFile(name, file);
 
     public static string ZipUnreadableMessage(string name, string reason) =>
-        $"Couldn't open '{name}': {reason}.";
+        CoreStrings.ImportZipUnreadable(name, reason);
 
-    public static string MoreThanOneModMessage(string name) =>
-        $"'{name}' contains more than one mod. Import one at a time.";
+    public static string MoreThanOneModMessage(string name) => CoreStrings.ImportMoreThanOneMod(name);
 
     /// <summary>What a mod cannot be imported for once the reading has started. The reason names what the
     /// record could not supply, so the two import-time refusals below read as one shape.</summary>
-    public static string ImportFailedMessage(string name, string reason) =>
-        $"Couldn't import '{name}': {reason}.";
+    public static string ImportFailedMessage(string name, string reason) => CoreStrings.ImportFailed(name, reason);
 
     public static string UnrecordedRestMessage(string name, string part) => ImportFailedMessage(name,
-        $"the new mesh for '{part}' was saved without its rest pose");
+        CoreStrings.ImportReasonUnrecordedRest(part));
 
     public static string UnreadableRestMessage(string name, string part) => ImportFailedMessage(name,
-        $"the rest pose recorded for '{part}' can't be read");
+        CoreStrings.ImportReasonUnreadableRest(part));
 
     /// <summary>What a mod holding a hide says when the install no longer names the part. The reason side
     /// of <see cref="ImportFailedMessage"/>, because it is thrown out of the reconstruction.</summary>
-    public static string PartGoneReason(string part) =>
-        $"the game files no longer contain '{part}', which this mod hides";
+    public static string PartGoneReason(string part) => CoreStrings.ImportReasonPartGone(part);
 
     /// <summary>What a part reading a shading value off another part says when neither the record nor the
     /// install says where the material the value came from sits. The reason side of
     /// <see cref="ImportFailedMessage"/>, because it is thrown out of the reconstruction.</summary>
-    public static string UndescribedSourcePartReason(string part) =>
-        $"'{part}' takes a value from a part its repair data does not describe";
+    public static string UndescribedSourcePartReason(string part) => CoreStrings.ImportReasonUndescribedSourcePart(part);
 
     /// <summary>A file name in the record that does not land inside the mod folder.</summary>
-    public static string EscapingFileReason(string file) =>
-        $"the file name '{file}' points outside the mod";
-
-    /// <summary>What every import says while the install is still being read. An import needs the game
-    /// files: a hide states only that a part does not draw, and which objects that is comes from the
-    /// install alone.</summary>
-    public const string ScanRunningMessage =
-        "Cannot import a mod while the game files are being read. Try again when the scan finishes.";
+    public static string EscapingFileReason(string file) => CoreStrings.ImportReasonEscapingFile(file);
 
     // ---- the author check ---------------------------------------------------------------------------
 
@@ -214,7 +197,9 @@ public static partial class ModImport
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folderOrZip);
         if (!gameFilesRead)
-            return ImportInspection.Refused(ImportRefusalCause.ScanRunning, ScanRunningMessage);
+            // An import needs the game files: a hide states only that a part does not draw, and which
+            // objects that is comes from the install alone.
+            return ImportInspection.Refused(ImportRefusalCause.ScanRunning, CoreStrings.ImportScanRunning);
 
         string full = Path.GetFullPath(folderOrZip);
 
@@ -321,7 +306,7 @@ public static partial class ModImport
                 return ImportInspection.Refused(value > RepairData.Schema
                     ? ImportRefusalCause.NewerApp : ImportRefusalCause.UnreadableRepairData,
                     value > RepairData.Schema ? NewerAppMessage(name)
-                        : UnreadableMessage(name, $"it states schema {value}"));
+                        : UnreadableMessage(name, CoreStrings.ImportReasonOldSchema(value)));
 
             // A record carrying a field this app's writer never writes was written by another build under
             // the same schema number. The reader would ignore that field and hand back a record that looks
@@ -486,7 +471,7 @@ public static partial class ModImport
 
     /// <inheritdoc cref="ShippedPathOrNull"/>
     internal static string ShippedPath(string folder, string file) =>
-        ShippedPathOrNull(folder, file) ?? throw new InvalidDataException(EscapingFileReason(file));
+        ShippedPathOrNull(folder, file) ?? throw ReasonRefusal(EscapingFileReason(file));
 
     /// <inheritdoc cref="InspectFolder"/>
     private static string? FirstUnstateableRest(RepairData.Payload payload) => payload.Changes
@@ -524,10 +509,24 @@ public static partial class ModImport
     /// each with the paths taken out; anything else names nothing the modder can act on.</summary>
     public static string FailureReason(Exception exception, string source) => exception switch
     {
+        InvalidDataException when exception.Data.Contains(CataloguedReason) => exception.Message,
         InvalidDataException or IOException or UnauthorizedAccessException =>
             Strip(exception.Message, source),
-        _ => "it describes something this app can't rebuild",
+        _ => CoreStrings.ImportReasonCannotRebuild,
     };
+
+    /// <summary>A refusal out of the import whose message is a catalogued reason, a clause the import notice
+    /// shows as written: it names no machine path, so <see cref="FailureReason"/> passes it through untrimmed.
+    /// Marked on the exception's data rather than by type, since every caller catches the exception as an
+    /// <see cref="InvalidDataException"/>.</summary>
+    internal static InvalidDataException ReasonRefusal(string reason)
+    {
+        var refusal = new InvalidDataException(reason);
+        refusal.Data[CataloguedReason] = true;
+        return refusal;
+    }
+
+    private const string CataloguedReason = "Remold.ImportReason";
 
     /// <summary>A reader's own message with the machine's paths taken out of it: the person picked a folder,
     /// and a temp path from this run names nothing they can act on.</summary>

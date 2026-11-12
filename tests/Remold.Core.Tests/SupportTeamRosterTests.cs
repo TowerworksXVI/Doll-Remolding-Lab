@@ -55,7 +55,11 @@ public class SupportTeamRosterTests
         Assert.Equal("TEAM01", team.Name);
         Assert.Equal(new[] { "TEAM01_MemberA", "TEAM01_MemberB", "TEAM01_MemberC", "TEAM01_WL" },
             team.Outfits.Select(o => o.Stem).ToArray());
-        Assert.Equal(new[] { "Member A", "Member B", "Member C", "Weapon" }, team.Outfits.Select(o => o.DisplayName).ToArray());
+        Assert.Equal(new[]
+        {
+            CoreStrings.SupportTeamMember("A"), CoreStrings.SupportTeamMember("B"), CoreStrings.SupportTeamMember("C"),
+            CoreStrings.SupportTeamWeapon,
+        }, team.Outfits.Select(o => o.DisplayName).ToArray());
         Assert.All(team.Outfits, o => Assert.Equal(OutfitKind.Other, o.Kind));
         // members are on screen together, which is what lets a build warn when an edit reaches two of them
         Assert.True(team.OutfitsAppearTogether);

@@ -1,5 +1,7 @@
+using Remold.Core.Text;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -19,8 +21,6 @@ using Remold.Core.Project;
 using Remold.Core.Tables;
 using Remold.Core.Textures;
 using Remold.Core.Workbench;
-// The Edit page's own type, aliased: `EditPage` alone names this class's property, not the namespace.
-using EditPageStrings = Remold.App.ViewModels.EditPage.EditPageVm;
 namespace Remold.App.ViewModels;
 
 public partial class MainWindowViewModel : ObservableObject
@@ -45,25 +45,62 @@ public partial class MainWindowViewModel : ObservableObject
         return "";
     }
 
-    // The glyph strings double as each step's identity — they are compared by value.
-    public string[] Steps { get; } = { "① Pick", "② Edit", "③ Build" };
+    public IReadOnlyList<WorkflowStepItem> Steps { get; } =
+    [
+        new(WorkflowStep.Pick, Strings.StepPick),
+        new(WorkflowStep.Edit, Strings.StepEdit),
+        new(WorkflowStep.Build, Strings.StepBuild),
+    ];
 
-    [ObservableProperty] private string _selectedStep = "① Pick";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedStepItem))]
+    [NotifyPropertyChangedFor(nameof(IsPickStep))]
+    [NotifyPropertyChangedFor(nameof(IsEditStep))]
+    [NotifyPropertyChangedFor(nameof(IsBuildStep))]
+    private WorkflowStep _selectedStep = WorkflowStep.Pick;
+
+    /// <summary>The step list's selection. A list that selects nothing (a Ctrl+click on the selected step)
+    /// leaves the step as it was and is told the current step again, so the rail never shows no step over a
+    /// visible pane. Selecting the current step after such a clear enters it again, as a click on another
+    /// step and back would.</summary>
+    public WorkflowStepItem SelectedStepItem
+    {
+        get => Steps[(int)SelectedStep];
+        set
+        {
+            if (value is null)
+            {
+                _stepListCleared = true;
+                OnPropertyChanged(nameof(SelectedStepItem));
+                return;
+            }
+            bool reentry = _stepListCleared && value.Step == SelectedStep;
+            _stepListCleared = false;
+            if (reentry) OnSelectedStepChanged(SelectedStep);
+            else SelectedStep = value.Step;
+        }
+    }
+
+    private bool _stepListCleared;
+
+    public bool IsPickStep => SelectedStep == WorkflowStep.Pick;
+    public bool IsEditStep => SelectedStep == WorkflowStep.Edit;
+    public bool IsBuildStep => SelectedStep == WorkflowStep.Build;
 
     // mod identity / lifecycle
     /// <summary>The home/landing screen; the background game load runs behind it.</summary>
     [ObservableProperty] private bool _showHome = true;
     [ObservableProperty] private bool _isDirty;
     public string ModTitleDisplay =>
-        (string.IsNullOrWhiteSpace(PackageName) ? "Untitled mod" : PackageName.Trim()) + (IsDirty ? " *" : "");
+        (string.IsNullOrWhiteSpace(PackageName) ? Strings.UntitledModTitle : PackageName.Trim()) + (IsDirty ? " *" : "");
     public ObservableCollection<RecentModVm> RecentMods { get; } = new();
     public bool HasRecentMods => RecentMods.Count > 0;
 
     // Status bar: three facets (game / roster / Blender), a background-work cell, a notice cell.
     // Long remedies and multi-warning lists go in the facet tooltip (Detail), never inline.
-    [ObservableProperty] private StatusFacet _gameStatus = StatusFacet.Loading("Game…");
-    [ObservableProperty] private string _statusChars = "Characters…";
-    [ObservableProperty] private StatusFacet _blenderStatus = StatusFacet.Loading("Blender…");
+    [ObservableProperty] private StatusFacet _gameStatus = StatusFacet.Loading(Strings.StatusGameLoading);
+    [ObservableProperty] private string _statusChars = Strings.StatusCharactersLoading;
+    [ObservableProperty] private StatusFacet _blenderStatus = StatusFacet.Loading(Strings.StatusBlenderLoading);
     [ObservableProperty] private StatusFacet _noticeStatus = StatusFacet.None;
 
     /// <summary>The background-work cell: one line while long background disk work runs, blank
@@ -99,19 +136,19 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private string _exportOutDir = "";
     public string CharactersTabHeader
     {
-        get { var n = _allCharacters.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Characters ({n})" : "Characters"; }
+        get { var n = _allCharacters.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? Strings.PickTabCharactersCount(n) : Strings.PickTabCharacters; }
     }
     public string EnemiesTabHeader
     {
-        get { var n = _allEnemies.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Enemies ({n})" : "Enemies"; }
+        get { var n = _allEnemies.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? Strings.PickTabEnemiesCount(n) : Strings.PickTabEnemies; }
     }
     public string WeaponsTabHeader
     {
-        get { var n = _allWeapons.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Weapons ({n})" : "Weapons"; }
+        get { var n = _allWeapons.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? Strings.PickTabWeaponsCount(n) : Strings.PickTabWeapons; }
     }
     public string SupportTeamsTabHeader
     {
-        get { var n = _allSupportTeams.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? $"Support Teams ({n})" : "Support Teams"; }
+        get { var n = _allSupportTeams.Sum(c => c.Outfits.Count(o => o.IsInMod)); return n > 0 ? Strings.PickTabSupportTeamsCount(n) : Strings.PickTabSupportTeams; }
     }
     private void RefreshTabHeaders()
     {
@@ -165,6 +202,14 @@ public partial class MainWindowViewModel : ObservableObject
     private GameVfs? _vfs;
     private string _pkgCharacter = "", _pkgOutfit = "";
     private readonly LabSettings _settings = LabSettings.Load();
+
+    /// <summary>The language the settings file last took: what it held when the app loaded it, then each
+    /// successful write's. A Save compares against this, not against the in-memory value, so a Save whose
+    /// write failed and a retry that lands still offers the restart.</summary>
+    private string? _persistedLanguage;
+
+    /// <summary>Writes the settings file; true when the write landed. Tests replace it to make a write fail.</summary>
+    internal Func<LabSettings, bool> TrySaveSettings { get; set; } = settings => settings.TrySave();
 
     /// <summary>Render-time internal-key → friendly-label resolver. Empty until phase 1 builds it, so labels
     /// fall back to the internal token until then. The keys it maps FROM stay internal everywhere.</summary>
@@ -276,6 +321,18 @@ public partial class MainWindowViewModel : ObservableObject
 
     public MainWindowViewModel() : this(startLoad: true, coalesceResolvedRebuilds: true) { }
 
+    /// <summary>The app's view model after the first-run window, which records the language picked there in
+    /// the settings file before the game load starts. See <see cref="AdoptFirstRunLanguage"/>.</summary>
+    internal static MainWindowViewModel AfterFirstRun(LanguageChoice picked) =>
+        new(startLoad: true, coalesceResolvedRebuilds: true, firstRunLanguage: picked);
+
+    /// <summary>The app's view model for an ordinary launch, holding the mod a language-change restart handed
+    /// over, if any, until the window opens. See <see cref="OpenRestartTargetAsync"/>.</summary>
+    internal static MainWindowViewModel Reopening(ReopenTarget? target) =>
+        new(startLoad: true, coalesceResolvedRebuilds: true, restartTarget: target);
+
+    private ReopenTarget? _restartTarget;
+
     /// <summary>The app always constructs through the parameterless form. <paramref name="startLoad"/> is
     /// false only in tests — the game load reaches the registry, the install and the dispatcher.
     /// <paramref name="cacheRootFor"/> redirects the sweep's cache root, which the CONSTRUCTION path
@@ -284,11 +341,15 @@ public partial class MainWindowViewModel : ObservableObject
     /// <paramref name="coalesceResolvedRebuilds"/> is the EXPLICIT app-vs-headless mode for the Edit
     /// board's resolver-burst batching — only the parameterless app ctor sets it, and it is never
     /// inferred from the dispatch delegate or any ambient context; the safe headless default is the
-    /// synchronous behavior.</summary>
+    /// synchronous behavior. <paramref name="restartTarget"/> is the mod a language-change restart handed
+    /// over; see <see cref="OpenRestartTargetAsync"/>.</summary>
     internal MainWindowViewModel(bool startLoad, Func<string>? cacheRootFor = null,
         Func<string, string, SubjectModel?>? subjectModelWarm = null, Action<Action>? pageDispatch = null,
-        string? bridgeScriptPath = null, bool coalesceResolvedRebuilds = false)
+        string? bridgeScriptPath = null, bool coalesceResolvedRebuilds = false,
+        LanguageChoice? firstRunLanguage = null, ReopenTarget? restartTarget = null)
     {
+        _persistedLanguage = _settings.Language;
+        _restartTarget = restartTarget;
         _subjectModelWarm = subjectModelWarm;
         _pageDispatch = pageDispatch ?? OnUi;
         _bridgeScriptPath = bridgeScriptPath ?? BridgeScriptPath();
@@ -316,6 +377,7 @@ public partial class MainWindowViewModel : ObservableObject
         // stand for at this line: nothing has been started yet, there is no VFS, no sharing pass and no
         // build. The one reader that follows is that load, and it waits the sweep out — see PendingCachePurge.
         _forceRescanPending = _settings.ForceRescanOwed;
+        if (firstRunLanguage is not null) AdoptFirstRunLanguage(firstRunLanguage.Tag);
         if (startLoad)
         {
             BeginForceRescanPurge();
@@ -356,7 +418,7 @@ public partial class MainWindowViewModel : ObservableObject
         PackageIncludesRepairData = _settings.IncludeRepairData;
         _loadingIdentityForm = false;
         BuildPage.IdentityChanged();
-        SelectedStep = "① Pick";
+        SelectedStep = WorkflowStep.Pick;
         IsDirty = false;
         ShowHome = false;
         // The session-native page was loaded above. The workbench holder has no session projection to read.
@@ -368,7 +430,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (IsOpeningMod) return false;   // an open is already in flight — ignore a second trigger
         IsOpeningMod = true;
-        EditPage.ReportStatus("Opening…");
+        EditPage.ReportStatus(Strings.StatusOpening);
         try
         {
             AuthoredProjectDocument document;
@@ -395,9 +457,9 @@ public partial class MainWindowViewModel : ObservableObject
                 if (MainWindow is { } owner)
                 {
                     var body = removed
-                        ? $"{OpenFailedBody(e)}\n\nRemoved from Recent mods because the folder no longer exists."
+                        ? OpenFailedBody(e) + "\n\n" + Strings.OpenRemovedFromRecents
                         : OpenFailedBody(e);
-                    await ConfirmWindow.Notice(owner, "Couldn't open the mod", body);
+                    await ConfirmWindow.Notice(owner, Strings.OpenFailedTitle, body);
                 }
                 return false;
             }
@@ -413,7 +475,7 @@ public partial class MainWindowViewModel : ObservableObject
     /// read rather than of the mod, so the dialog says what happened and where to look instead.</summary>
     private static string OpenFailedBody(Exception e) => e is InvalidDataException
         ? e.Message
-        : "This mod couldn't be read. It may be damaged, or open in another program.";
+        : Strings.OpenFailedBody;
 
     /// <summary>Drop a recent-mods entry ONLY when its target is genuinely gone; a transient open failure
     /// (file lock, parse hiccup, the game holding a bundle) leaves the row so the user can retry. Returns
@@ -476,10 +538,10 @@ public partial class MainWindowViewModel : ObservableObject
         IsDirty = false;
         int replacementCount = authored.EditDefinitions.Count(
             edit => edit.Kind == EditDefinitionKind.Content);
-        EditPage.ReportStatus(LandedLine("Opened", info.Name, replacementCount));
+        EditPage.ReportStatus(LandedLine(imported: false, info.Name, replacementCount));
         // After the open's own line, so a save the mod takes now is the line the modder reads.
         ScanPictureSaves();
-        SelectedStep = "② Edit";
+        SelectedStep = WorkflowStep.Edit;
         ShowHome = false;   // enter the flow
         // Not awaited: the page is usable while it reads, and every row it draws stands on the project's own
         // names until the model behind it lands.
@@ -507,16 +569,10 @@ public partial class MainWindowViewModel : ObservableObject
         TrySaveProject();
     }
 
-    /// <summary>Where a failed write to the mod folder sends the modder. The write's own exception names an
-    /// OS condition on a path they never typed; what they can act on is the folder the app was told to keep
-    /// projects in, so every save refusal carries this and not the diagnosis.</summary>
-    internal const string SaveFailedSteer =
-        "Check that the projects folder still exists and isn't read-only.";
-
     /// <summary>The single save-or-mint route (File → Save Mod and the close/leave flush both land here).
     /// Never throws: a failed write returns <c>(false, reason)</c> and leaves the project dirty in memory so
-    /// the caller can prompt and the modder can retry.</summary>
-    private (bool Ok, string? Reason) TrySaveProject()
+    /// the caller can prompt and the modder can retry. A save that lands returns an empty reason.</summary>
+    private (bool Ok, string Reason) TrySaveProject()
     {
         try
         {
@@ -534,17 +590,17 @@ public partial class MainWindowViewModel : ObservableObject
             _roundTripIdUnsaved = false;
             RememberRecent();
             IsDirty = false;
-            EditPage.ReportStatus($"Saved to {CurrentProjectRoot}.");
+            EditPage.ReportStatus(Strings.SavedTo(CurrentProjectRoot));
             // The first save after an open that converted is the save that migrates the file, so it is the
             // one that reports what the conversion inferred.
             if (migrating) ShowMigrationReport(_projectDocument.LastMigrationReport);
-            return (true, null);
+            return (true, "");
         }
         catch (Exception e)
         {
             AppLog.Write("Couldn't save the mod", e);
-            EditPage.ReportStatus($"Couldn't save the mod. {SaveFailedSteer}");
-            return (false, SaveFailedSteer);
+            EditPage.ReportStatus(Strings.CouldntSaveMod + " " + Strings.SaveFailedSteer);
+            return (false, Strings.SaveFailedSteer);
         }
     }
 
@@ -566,10 +622,9 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (report is null) return;
         string detail = report.Items.Count == 0
-            ? "The old project file is kept as mod.drlproj.bak."
-            : "The old project file is kept as mod.drlproj.bak. "
-                + string.Join(" ", report.Items.Select(item => item.Detail));
-        ReplaceNoticeCell(new NoticeMessage(ProjectMigrationNoticeId, "Project updated", detail,
+            ? Strings.MigrationBackupKept
+            : Strings.MigrationBackupKept + " " + string.Join(" ", report.Items.Select(item => item.Detail));
+        ReplaceNoticeCell(new NoticeMessage(ProjectMigrationNoticeId, Strings.ProjectUpdatedNotice, detail,
             ProjectScoped: true, Severity: NoticeSeverity.Info));
     }
 
@@ -588,18 +643,17 @@ public partial class MainWindowViewModel : ObservableObject
             PersistProject();   // ensure the source is complete (and current-schema) before copying
             _projectDocument.SaveCopyAs(dest, newName.Trim());
             await OpenModAsync(dest);   // switch to the copy (clean reload from disk)
-            EditPage.ReportStatus($"Saved a copy as '{newName.Trim()}'.");
+            EditPage.ReportStatus(Strings.SavedCopyAs(newName.Trim()));
         }
         catch (PartialCopyException e)
         {
             AppLog.Write("Couldn't save a copy", e);
-            EditPage.ReportStatus($"Couldn't save a copy. The unfinished copy is still in the projects folder "
-                + $"as '{Path.GetFileName(e.Folder)}'. Delete that folder.");
+            EditPage.ReportStatus(Strings.SaveCopyPartial(Path.GetFileName(e.Folder)));
         }
         catch (Exception e)
         {
             AppLog.Write("Couldn't save a copy", e);
-            EditPage.ReportStatus($"Couldn't save a copy. {SaveFailedSteer}");
+            EditPage.ReportStatus(Strings.CouldntSaveCopy + " " + Strings.SaveFailedSteer);
         }
     }
 
@@ -608,43 +662,53 @@ public partial class MainWindowViewModel : ObservableObject
     /// notice the cell carries, none of which outlives the session that raised it.</summary>
     internal const string ImportChangedTargetsNoticeId = "project.import-changed-targets";
 
-    internal const string ImportConfirmTitle = "Import mod?";
-
-    /// <summary>The acceptable-use paragraph the import confirmation carries, in its approved words. It is
-    /// what the person is agreeing to, not a description of the mod, so it is never reworded to fit a
-    /// case.</summary>
-    internal const string ImportConfirmTerms =
-        "This tool is intended for personal use only, or to repair orphaned mods broken by game updates. "
-        + "Do not distribute works originally authored by someone else without their permission.";
-
     /// <summary>What the import confirmation says: what is about to happen and whose work it is, then the
     /// terms. A person with no name of their own set gets the one line that stops the question coming back
     /// on every mod they made themselves.</summary>
     internal static string ImportConfirmBody(string modName, string? author, string? settingsAuthor)
     {
         string opening = string.IsNullOrWhiteSpace(author)
-            ? $"'{modName}' (no author listed) will be added to your mods library as a new project."
-            : $"'{modName}' by {author!.Trim()} will be added to your mods library as a new project.";
-        string body = opening + "\n\n" + ImportConfirmTerms;
+            ? Strings.ImportOpeningNoAuthor(modName)
+            : Strings.ImportOpeningByAuthor(modName, author!.Trim());
+        string body = opening + "\n\n" + Strings.ImportConfirmTerms;
         return string.IsNullOrWhiteSpace(settingsAuthor)
-            ? body + "\n\nSet your name under Settings · Author to skip this for your own mods."
+            ? body + "\n\n" + Strings.ImportSetAuthorHint
             : body;
     }
 
     /// <summary>What the status line says when a mod lands in the workspace: the verb, the mod's name, and
     /// how many edits came with it. One shape for Open and Import, so the two routes read alike.</summary>
-    private static string LandedLine(string verb, string name, int edits) => edits > 0
-        ? $"{verb} '{name}'. {EditPageStrings.Count(edits, "edit")}."
-        : $"{verb} '{name}'.";
+    internal static string LandedLine(bool imported, string name, int edits) => edits > 0
+        ? imported
+            ? Catalog.Plural(edits, Strings.ImportedModEdits_One(name, edits), Strings.ImportedModEdits_Other(name, edits))
+            : Catalog.Plural(edits, Strings.OpenedModEdits_One(name, edits), Strings.OpenedModEdits_Other(name, edits))
+        : imported ? Strings.ImportedMod(name) : Strings.OpenedMod(name);
 
     /// <summary>What the changed-parts notice says. Each part is named the way the Edit page names it —
-    /// the install's short token, the renderer slot where the subject model has not loaded — so the notice
-    /// and the page it sends the person to call the same part the same thing.</summary>
+    /// the install's short token in the UI language, the renderer slot where the subject model has not
+    /// loaded — so the notice and the page it sends the person to call the same part the same thing.</summary>
     internal string ChangedTargetsDetail(IReadOnlyList<TargetPart> parts) =>
-        $"{EditPageStrings.Count(parts.Count, "part")} changed in the game since this mod was built: "
-        + string.Join(", ", parts.Select(part =>
-            PartToken(part) is { Length: > 0 } token ? token : part.RendererSlot))
-        + ". Build the mod to check them.";
+        Catalog.Plural(parts.Count,
+            Strings.ChangedTargets_One(parts.Count, ChangedTargetNames(parts, CoreStrings.ListSeparator, true)),
+            Strings.ChangedTargets_Other(parts.Count, ChangedTargetNames(parts, CoreStrings.ListSeparator, true)));
+
+    /// <summary>The changed-parts notice's sentence in English, for the app log, which is never translated.</summary>
+    private string ChangedTargetsLogDetail(IReadOnlyList<TargetPart> parts)
+    {
+        string names = ChangedTargetNames(parts, ", ", false);
+        return parts.Count == 1
+            ? $"1 part changed in the game since this mod was built: {names}. Build the mod to check them."
+            : string.Create(CultureInfo.InvariantCulture,
+                $"{parts.Count} parts changed in the game since this mod was built: {names}. Build the mod to check them.");
+    }
+
+    /// <summary>The parts joined by <paramref name="separator"/>: each by its short token, read in the UI
+    /// language when <paramref name="shown"/> and kept as the game spells it for the log, or by its renderer
+    /// slot where the subject model has not loaded.</summary>
+    private string ChangedTargetNames(IReadOnlyList<TargetPart> parts, string separator, bool shown) =>
+        string.Join(separator, parts.Select(part =>
+            PartToken(part) is { Length: > 0 } token ? shown ? PartNames.Display(token) : token
+            : part.RendererSlot));
 
     /// <summary>Read a BUILT mod — a folder or a distribution zip — back into a new project and open it.
     /// The folder is inspected before anything is written, so the question about its author is asked while
@@ -672,7 +736,7 @@ public partial class MainWindowViewModel : ObservableObject
             }
             if (inspection.Refusal is { } refusal)
             {
-                await NoticeAsync("Couldn't import the mod", refusal.Message);
+                await NoticeAsync(Strings.ImportFailedTitle, refusal.Message);
                 return false;
             }
 
@@ -685,8 +749,8 @@ public partial class MainWindowViewModel : ObservableObject
             if (ModImport.AuthorDiffers(mod.Author, _settings.Author)
                 // Enter confirms: this dialog adds a project and changes nothing the person already has,
                 // so it is not one of the destructive questions that make Cancel the default.
-                && !await ConfirmAsync(ImportConfirmTitle,
-                    ImportConfirmBody(mod.ModName, mod.Author, _settings.Author), "Import"))
+                && !await ConfirmAsync(Strings.ImportConfirmTitle,
+                    ImportConfirmBody(mod.ModName, mod.Author, _settings.Author), Strings.ImportButton))
                 return false;
 
             // A second import of the same mod mints a second project, exactly as Save mod as does. That is
@@ -721,15 +785,14 @@ public partial class MainWindowViewModel : ObservableObject
                 TryDeleteMinted(dest);
                 return false;
             }
-            EditPage.ReportStatus(LandedLine("Imported", mod.ModName,
+            EditPage.ReportStatus(LandedLine(imported: true, mod.ModName,
                 _projectDocument?.Authored.EditDefinitions.Count(
                     edit => edit.Kind == EditDefinitionKind.Content) ?? 0));
             if (result.ChangedTargets.Count > 0)
             {
-                string detail = ChangedTargetsDetail(result.ChangedTargets);
-                AppLog.Write("Game files changed", detail);
-                MergeNoticeIntoCell(new NoticeMessage(ImportChangedTargetsNoticeId, "Game files changed",
-                    detail, ProjectScoped: true));
+                AppLog.Write("Game files changed", ChangedTargetsLogDetail(result.ChangedTargets));
+                MergeNoticeIntoCell(new NoticeMessage(ImportChangedTargetsNoticeId, Strings.GameFilesChangedNotice,
+                    ChangedTargetsDetail(result.ChangedTargets), ProjectScoped: true));
             }
             return true;
         }
@@ -751,7 +814,7 @@ public partial class MainWindowViewModel : ObservableObject
     private async Task<bool> ImportFailed(string source, string body, Exception e)
     {
         AppLog.Write($"Couldn't import the mod at {source}", e);
-        await NoticeAsync("Couldn't import the mod", body);
+        await NoticeAsync(Strings.ImportFailedTitle, body);
         return false;
     }
 
@@ -780,7 +843,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>The gate before anything that drops the current project (New / Open / Close): never prompt
     /// when a save can simply happen. Only a FAILED save prompts. True = go ahead.</summary>
-    public Task<bool> ConfirmLeaveProjectAsync() => SaveOrConfirmLeaveAsync("Leave");
+    public Task<bool> ConfirmLeaveProjectAsync() => SaveOrConfirmLeaveAsync(quitting: false);
 
     /// <summary>True when the window can close with no flow at all; false routes through
     /// <see cref="ConfirmAppCloseAsync"/>, which saves rather than discards.</summary>
@@ -799,34 +862,34 @@ public partial class MainWindowViewModel : ObservableObject
     public async Task<bool> ConfirmCloseWithWorkAsync()
     {
         if (MainWindow is not { } owner) return true;   // headless — don't trap the close
-        return await ConfirmWindow.Show(owner, "Work in progress",
+        return await ConfirmWindow.Show(owner, Strings.WorkInProgressTitle,
             CloseWithWorkBody(BuildingCombinedRig, IsModBuilding),
-            "Quit anyway", "Keep working", danger: true);
+            Strings.QuitAnyway, Strings.KeepWorking, danger: true);
     }
 
     /// <summary>What quitting does to the work in flight, per state. ORDERED by what quitting COSTS: a mod
     /// build is abandoned mid-run, so it leads and says what is left behind. The Blender composition is
     /// cancelled cleanly, and says so. Pure, so the wording is settled without standing up the window.</summary>
     internal static string CloseWithWorkBody(bool buildingRig, bool buildingMod) => buildingMod
-        ? "A mod is still building. Quitting abandons this run."
-        : buildingRig ? "The Blender file is still being prepared. Quitting stops it."
-        : "The work has already finished.";
+        ? Strings.CloseWhileBuilding
+        : buildingRig ? Strings.CloseWhilePreparingBlender
+        : Strings.CloseWorkFinished;
 
     /// <summary>The window-close variant of <see cref="ConfirmLeaveProjectAsync"/> — same save-first rule.</summary>
-    public Task<bool> ConfirmAppCloseAsync() => SaveOrConfirmLeaveAsync("Quit");
+    public Task<bool> ConfirmAppCloseAsync() => SaveOrConfirmLeaveAsync(quitting: true);
 
     /// <summary>The one save-first close/leave route; returns true to proceed. Only a FAILED save prompts.
     /// There is deliberately NO discard path: the app autosaves after every meaningful step, so a
     /// "quit to discard" never reliably discarded.</summary>
-    private async Task<bool> SaveOrConfirmLeaveAsync(string leaveVerb)
+    private async Task<bool> SaveOrConfirmLeaveAsync(bool quitting)
     {
         if (!LeaveNeedsSave(IsDirty, ShowHome)) return true;
         var (ok, reason) = TrySaveProject();
         if (LeaveProceedsWithoutPrompt(saveNeeded: true, saveOk: ok)) return true;
         if (MainWindow is not { } owner) return true;   // headless — can't prompt; don't trap the user
-        return await ConfirmWindow.Show(owner, "Couldn't save the mod",
-            $"Couldn't save '{ProjectName}'. {reason}\n\n{leaveVerb} anyway and lose these changes?",
-            $"{leaveVerb} anyway", "Cancel", danger: true);
+        return await ConfirmWindow.Show(owner, Strings.SaveFailedTitle,
+            SaveFailedBody(quitting, PackageName, reason),
+            quitting ? Strings.QuitAnyway : Strings.LeaveAnyway, Strings.Cancel, danger: true);
     }
 
     /// <summary>Move the mod folder to match a renamed mod and rebase the in-memory paths. The mod's round
@@ -907,10 +970,18 @@ public partial class MainWindowViewModel : ObservableObject
         bool applyingBlenderReturn) =>
         !buildingCombinedRig && !buildingMod && !applyingBlenderReturn;
 
-    /// <summary>What a mod the modder never named is called, everywhere the app has to name one.</summary>
+    /// <summary>The name a mod the modder never named is saved under, and its folder is named from. On screen
+    /// such a mod is <see cref="Strings.UntitledModDisplay"/>.</summary>
     internal const string UntitledMod = "untitled mod";
 
     private string ProjectName => string.IsNullOrWhiteSpace(PackageName) ? UntitledMod : PackageName.Trim();
+
+    /// <summary>The body of the dialog a failed save on Quit or on leaving the mod raises.</summary>
+    internal static string SaveFailedBody(bool quitting, string? packageName, string reason)
+    {
+        string name = string.IsNullOrWhiteSpace(packageName) ? Strings.UntitledModDisplay : packageName.Trim();
+        return quitting ? Strings.QuitSaveFailedBody(name, reason) : Strings.LeaveSaveFailedBody(name, reason);
+    }
 
     /// <summary>Tear down the current mod's transient UI state, between New/Open.</summary>
     private void ResetWorkspace(bool clearSelection = true)
@@ -1071,11 +1142,11 @@ public partial class MainWindowViewModel : ObservableObject
         if (edits > 0)
         {
             if (MainWindow is not { } owner) { character.RefreshSubjectState(); return; }
-            string title = $"Remove {character.DisplayName}'s "
-                + $"{(inMod.Count == 1 ? "outfit" : $"{inMod.Count} outfits")}?";
-            string body = $"Their {edits} edit{(edits == 1 ? " goes" : "s go")} with them. "
-                + "Their files stay in the mod folder.\n\nThis cannot be undone.";
-            if (!await ConfirmWindow.Show(owner, title, body, "Remove all", "Cancel", danger: true))
+            string title = Catalog.Plural(inMod.Count, Strings.RemoveCharacterTitle_One(character.DisplayName),
+                Strings.RemoveCharacterTitle_Other(character.DisplayName, inMod.Count));
+            string body = Catalog.Plural(edits, Strings.RemoveCharacterBody_One(edits), Strings.RemoveCharacterBody_Other(edits))
+                + "\n\n" + Strings.CannotBeUndone;
+            if (!await ConfirmWindow.Show(owner, title, body, Strings.RemoveAll, Strings.Cancel, danger: true))
             {
                 character.RefreshSubjectState();
                 return;
@@ -1089,7 +1160,8 @@ public partial class MainWindowViewModel : ObservableObject
         });
         SyncSubjectsFromLedger();
         TryStartRiggedGlbPrewarm();
-        EditPage.ReportStatus($"Removed {inMod.Count} outfit{(inMod.Count == 1 ? "" : "s")} from the mod.");
+        EditPage.ReportStatus(Catalog.Plural(inMod.Count, Strings.RemovedOutfits_One(inMod.Count),
+            Strings.RemovedOutfits_Other(inMod.Count)));
     }
 
     internal void AddSubject(CharacterVm character, OutfitVm outfit)
@@ -1123,8 +1195,8 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>One subject's remove-confirm body. The Pick uncheck and the ② page's Remove verb ask the
     /// same question of the same thing, so they share the sentence.</summary>
     internal static string RemoveSubjectConfirmBody(int edits) =>
-        $"Its {edits} edit{(edits == 1 ? " goes" : "s go")} with it. Its files stay in the mod folder."
-        + "\n\nThis cannot be undone.";
+        Catalog.Plural(edits, Strings.RemoveSubjectBody_One(edits), Strings.RemoveSubjectBody_Other(edits))
+        + "\n\n" + Strings.CannotBeUndone;
 
     internal async Task<bool> RemoveSubjectAsync(string character, string stem, string meshPrefix, string label)
     {
@@ -1133,13 +1205,13 @@ public partial class MainWindowViewModel : ObservableObject
         if (edits > 0)
         {
             if (MainWindow is not { } owner) return false;
-            if (!await ConfirmWindow.Show(owner, $"Remove {label}?", RemoveSubjectConfirmBody(edits),
-                    "Remove", "Cancel", danger: true))
+            if (!await ConfirmWindow.Show(owner, Strings.RemoveSubjectTitle(label), RemoveSubjectConfirmBody(edits),
+                    Strings.ConfirmRemove, Strings.Cancel, danger: true))
                 return false;
         }
 
         RemoveSubjectNoConfirm(session, character, stem);
-        EditPage.ReportStatus($"Removed {label} from the mod.");
+        EditPage.ReportStatus(Strings.RemovedSubject(label));
         return true;
     }
 
@@ -1173,7 +1245,7 @@ public partial class MainWindowViewModel : ObservableObject
                 return;
         }
 
-        SelectedStep = "② Edit";
+        SelectedStep = WorkflowStep.Edit;
         if (opened is { } subject) EditPage.SelectSubject(subject.Character, subject.Stem);
     }
 
@@ -1236,8 +1308,7 @@ public partial class MainWindowViewModel : ObservableObject
         catch (Exception e)
         {
             AppLog.Write("Autosave failed", e);
-            var line = "Couldn't save automatically. Your changes are unsaved. "
-                + "Use File · Save mod to try again.";
+            var line = Strings.AutosaveFailed;
             EditPage.ReportStatus(line);
             return line;
         }
@@ -1352,14 +1423,14 @@ public partial class MainWindowViewModel : ObservableObject
     // ---- export / edit / package -------------------------------------------
 
     [RelayCommand]
-    private void GoToEdit() => SelectedStep = "② Edit";
+    private void GoToEdit() => SelectedStep = WorkflowStep.Edit;
 
     /// <summary>Rebuild a step's pane whenever it is entered, so it reflects the current state.</summary>
-    partial void OnSelectedStepChanged(string value)
+    partial void OnSelectedStepChanged(WorkflowStep value)
     {
-        if (value == "① Pick") RefreshTabHeaders();
-        else if (value == "② Edit") EditPage.Enter();
-        else if (value == "③ Build") BuildPage.Enter();
+        if (value == WorkflowStep.Pick) RefreshTabHeaders();
+        else if (value == WorkflowStep.Edit) EditPage.Enter();
+        else if (value == WorkflowStep.Build) BuildPage.Enter();
     }
 
     /// <summary>Bind the open mod to its round-trip folder and watch it for what Blender and the image
@@ -1432,26 +1503,10 @@ public partial class MainWindowViewModel : ObservableObject
             {
                 if (!ReferenceEquals(documentAtLaunch, _projectDocument)) return;
                 if (Interlocked.Read(ref _lastSendTicksUtc) <= launchedTicks)
-                    status.Report("Blender closed. Nothing was sent back.");
+                    status.Report(Strings.BlenderClosedNothingSent);
             }, BlenderExitSettle);
         });
     }
-
-    /// <summary>What a return says when it carries no app-minted address at all: it belongs to the removed
-    /// workbench protocol, and a destination cannot be inferred from a filename.</summary>
-    internal const string BlenderReturnUnaddressed =
-        "The file sent back from Blender doesn't say which edit it belongs to. "
-        + "Nothing was changed. Use Open in Blender to start again.";
-
-    /// <summary>…and when it carries an address this build no longer understands.</summary>
-    internal const string BlenderReturnFromAnOlderLab =
-        "The file sent back from Blender was made by an older version of Doll Remolding Lab. "
-        + "Nothing was changed. Open this part in Blender again, then send it back.";
-
-    /// <summary>What the ② page says while a return is being read and applied — the parse, every re-export,
-    /// every install read — which for a whole outfit is the stretch the page otherwise spends saying
-    /// nothing at all. Replaced by the transaction's own line the moment the return answers.</summary>
-    internal const string BlenderReturnApplying = "Applying the file sent back from Blender…";
 
     /// <summary>How long a return is read before the page says it is being read. A send-all's read is
     /// seconds and is owed the line; a lone part's is now a blink, and a line that appears and is replaced
@@ -1459,22 +1514,11 @@ public partial class MainWindowViewModel : ObservableObject
     /// a budget of one or two words, if anything.</summary>
     private static readonly TimeSpan BlenderReturnApplyingAfter = TimeSpan.FromMilliseconds(400);
 
-    /// <summary>…and when reading it fell over for a reason the return itself has no word for. The failure
-    /// is a diagnosis of the read, not of the modder's work, so the line says what happened to their edit and
-    /// what to do with it instead.</summary>
-    internal const string BlenderReturnUnreadable =
-        "Couldn't apply the file sent back from Blender. Nothing was changed. "
-        + "Open it in Blender again, then send it back.";
-
-    /// <summary>What a return says when it landed nothing — every part came back exactly as it was handed
-    /// out, which is what a send-all does with the parts the modder never touched.</summary>
-    internal const string BlenderReturnNoChanges = "Blender sent back no changes.";
-
     /// <summary>What a Blender send for a mod that is not the open one says. It is never landed on whatever
     /// is open (a part route addresses by subject and outfit, and those resolve just as well in the wrong
     /// mod); it waits in that mod's round-trip folder, and the mod takes it when it next opens.</summary>
     internal static string BlenderReturnModClosed(string mod) =>
-        $"Blender sent back changes for '{mod}'. Open '{mod}' to apply them.";
+        Strings.BlenderReturnModClosed(mod);
 
     private readonly object _blenderReturnGate = new();
 
@@ -1556,8 +1600,8 @@ public partial class MainWindowViewModel : ObservableObject
                 answered = true;
                 if (!ReferenceEquals(document, _projectDocument)) { RefuseClosedModReturn(document, edit); return; }
                 EditPage.ReportStatus(e is AuthoredRefusalException
-                    ? $"Couldn't apply the file sent back from Blender: {Reason(e)} Nothing was changed."
-                    : BlenderReturnUnreadable);
+                    ? Strings.BlenderReturnRefused(Reason(e))
+                    : Strings.BlenderReturnUnreadable);
             });
         }
         finally
@@ -1639,7 +1683,7 @@ public partial class MainWindowViewModel : ObservableObject
         _ = Task.Delay(BlenderReturnApplyingAfter, done).ContinueWith(_ => _pageDispatch(() =>
         {
             if (answered() || !ReferenceEquals(document, _projectDocument)) return;
-            EditPage.ReportStatus(BlenderReturnApplying);
+            EditPage.ReportStatus(Strings.BlenderReturnApplying);
         }), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
     }
 
@@ -1670,11 +1714,10 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>What a Blender send for a closed mod says when it could not be kept for that mod.</summary>
     internal static string BlenderReturnLost(string mod) =>
-        $"Couldn't keep the changes Blender sent back for '{mod}'. Nothing was changed. "
-        + $"Open '{mod}' and send again from Blender.";
+        Strings.BlenderReturnLost(mod);
 
     /// <summary>What to call a mod that is no longer open: the name the modder gave it, or the same
-    /// <see cref="UntitledMod"/> the rest of the app calls an unnamed one. The folder it happens to live in
+    /// <see cref="Strings.UntitledModDisplay"/> the rest of the app calls an unnamed one. The folder it happens to live in
     /// is not one of the answers — the modder never wrote that name, and the page calling one mod by its
     /// title and the next by a folder slug is two names for one thing.</summary>
     private static string ClosedModName(AuthoredProjectDocument document) =>
@@ -1686,7 +1729,7 @@ public partial class MainWindowViewModel : ObservableObject
     private static string ClosedModName(AuthoredEditSession session)
     {
         string named = session.Snapshot().Info.Name.Trim();
-        return named.Length > 0 ? named : UntitledMod;
+        return named.Length > 0 ? named : Strings.UntitledModDisplay;
     }
 
     /// <summary>Run one action on the page's own thread and hand back a task that completes when it has.
@@ -1711,8 +1754,8 @@ public partial class MainWindowViewModel : ObservableObject
     {
         AppLog.Write($"Couldn't read {Path.GetFileName(glbPath)} from Blender", failure);
         EditPage.ReportStatus(failure is AuthoredRefusalException
-            ? $"Couldn't read {Path.GetFileName(glbPath)} from Blender: {Reason(failure)} Nothing was changed."
-            : $"Couldn't read {Path.GetFileName(glbPath)} from Blender. Nothing was changed. Send it again.");
+            ? Strings.BlenderFileUnreadableReason(Path.GetFileName(glbPath), Reason(failure))
+            : Strings.BlenderFileUnreadable(Path.GetFileName(glbPath)));
     }
     /// <summary>The app's main window, for parenting modal confirmations from a command.</summary>
     private static Window? MainWindow =>
@@ -1733,7 +1776,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (RescanMustWait)
         {
             _rescanAfterScan = true;
-            ShowQueuedRescanNotice(RescanQueuedNotice);
+            ShowQueuedRescanNotice(Strings.RescanQueuedNotice);
             return;
         }
         GameRescanOffered = false;
@@ -1778,8 +1821,8 @@ public partial class MainWindowViewModel : ObservableObject
         if (resolved is null)
         {
             // Leave the game facet reflecting the real install.
-            ReplaceNoticeCell(new NoticeMessage("game.invalid-folder", "Not a GF2 install",
-                problem ?? "The folder isn't a GF2 install.", Severity: NoticeSeverity.Error));
+            ReplaceNoticeCell(new NoticeMessage("game.invalid-folder", Strings.NotGameInstallNotice,
+                problem ?? Strings.NotGameInstallDetail, Severity: NoticeSeverity.Error));
             return;
         }
         _settings.GamePath = resolved;
@@ -1796,7 +1839,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (IsScanning)
         {
             _rescanAfterScan = true;
-            ShowQueuedRescanNotice(GameDirChangedNotice, GameDirChangedLead);
+            ShowQueuedRescanNotice(Strings.GameDirChangedNotice, Strings.GameDirChangedLead);
             return;
         }
         ReloadRoster();
@@ -1813,25 +1856,8 @@ public partial class MainWindowViewModel : ObservableObject
     internal bool RescanMustWait => IsScanning || BuildingCombinedRig || IsModBuilding
         || RiggedGlbPrewarmRunning;
 
-    /// <summary>The notice while a queued rescan waits on whatever is holding the roster. ONE line for every
-    /// route that can queue one, so a wait the modder can't see the cause of always reads the same.</summary>
-    internal const string RescanQueuedNotice = "Rescan queued";
-    /// <inheritdoc cref="RescanQueuedNotice"/>
-    internal const string RescanQueuedDetail = "Game files are re-read when the current work finishes.";
-    /// <summary>The same wait, when a force rescan is the thing waiting: deleting caches is a bigger promise
-    /// than re-reading files, so the detail says so. The CELL still reads "Rescan queued" — one wait, one
-    /// word for it — and this rides the tooltip beneath it.</summary>
-    internal const string RescanQueuedForceDetail =
-        "Caches are cleared and game files re-read when the current work finishes.";
-
-    /// <summary>The game folder changed under a scan in flight. Its own title, because what the modder just
-    /// did is the news; the wait itself is described by the shared detail after the lead.</summary>
-    internal const string GameDirChangedNotice = "Folder change pending";
-    /// <inheritdoc cref="GameDirChangedNotice"/>
-    internal const string GameDirChangedLead = "The new folder takes effect after this scan.";
-
     /// <summary>Which detail the queued-rescan notice carries: the force variant while a sweep is owed.</summary>
-    private string QueuedRescanDetail => _forceRescanPending ? RescanQueuedForceDetail : RescanQueuedDetail;
+    private string QueuedRescanDetail => _forceRescanPending ? Strings.RescanQueuedForceDetail : Strings.RescanQueuedDetail;
 
     /// <summary>The standing queued-rescan notice's fixed half: the title and leading sentence it was
     /// written with. Kept so the DETAIL can be re-rendered when what the wait will do changes under it —
@@ -1845,7 +1871,7 @@ public partial class MainWindowViewModel : ObservableObject
     private void ShowQueuedRescanNotice(string title, string lead = "")
     {
         _queuedNoticeShape = (title, lead);
-        ReplaceNoticeCell(new NoticeMessage("game.rescan-queued", title,
+        ReplaceNoticeCell(new NoticeMessage(QueuedRescanNoticeId, title,
             lead.Length == 0 ? QueuedRescanDetail : lead + " " + QueuedRescanDetail));
     }
 
@@ -1855,9 +1881,13 @@ public partial class MainWindowViewModel : ObservableObject
     /// anything else has been written over since and is left alone.</summary>
     private void RefreshQueuedRescanNotice()
     {
-        if (_queuedNoticeShape is { } shape && NoticeStatus.Text == shape.Title)
+        AdoptExternallyAssignedNotice();
+        if (_queuedNoticeShape is { } shape && _noticeMessages.Count == 1
+            && string.Equals(_noticeMessages[0].Identity, QueuedRescanNoticeId, StringComparison.Ordinal))
             ShowQueuedRescanNotice(shape.Title, shape.Lead);
     }
+
+    private const string QueuedRescanNoticeId = "game.rescan-queued";
 
     /// <summary>Run a queued rescan once the roster's holds let go. Called at every load exit AFTER
     /// IsScanning clears and at the end of each build/materialize scope; it re-tests the hold rather than
@@ -1983,11 +2013,12 @@ public partial class MainWindowViewModel : ObservableObject
         // session that closed before it ran — shows as armed rather than as an offer to arm it again.
         ForceRescanOwed = _forceRescanPending,
         EncoderCpuLimit = _settings.EncoderCpuLimit,
+        Language = _settings.Language,
     };
 
     /// <summary>The support facts for the About dialog — only what the app can truthfully report.</summary>
     public Views.AboutInfo BuildAboutInfo() => new(
-        AppVersion: System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown",
+        AppVersion: System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? Strings.AboutVersionUnknown,
         ProjectSchema: ModProject.CurrentSchema,
         SettingsPath: LabSettings.DefaultPath,
         LibraryRoot: _settings.ResolvedLibraryRoot,
@@ -1995,9 +2026,11 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>Apply the edited settings; a null means "fall back" (auto-detect / OS default / default
     /// library). Author and the repair-data default apply to <i>new</i> mods only — the open project keeps
-    /// its own, both of them.</summary>
-    public void ApplySettings(SettingsResult r)
+    /// its own, both of them. True when the caller should offer a restart: see
+    /// <see cref="OffersLanguageRestart"/>.</summary>
+    public bool ApplySettings(SettingsResult r)
     {
+        string? languageBefore = _persistedLanguage;
         _settings.Author = r.Author;
         _settings.IncludeRepairData = r.IncludeRepairData;
         var newBlender = Empty2Null(r.BlenderPath);
@@ -2007,6 +2040,8 @@ public partial class MainWindowViewModel : ObservableObject
         _settings.LibraryRoot = Empty2Null(r.LibraryRoot);
         _settings.MigotoLoaderExe = Empty2Null(r.MigotoLoaderExe);
         _settings.EncoderCpuLimit = r.EncoderCpuLimit;
+        // Read at the next launch only: the UI language is selected once, before any window exists.
+        _settings.Language = r.Language;
         RaiseModsFolderGates();
 
         var newGame = Empty2Null(r.GamePath);
@@ -2029,7 +2064,7 @@ public partial class MainWindowViewModel : ObservableObject
         // rather than lost — settled again where the sweep is handed off (BeginForceRescanPurge).
         _forceRescanPending = r.ForceRescan;
         _settings.ForceRescanOwed = r.ForceRescan;
-        SaveSettings();
+        bool saved = SaveSettings();
         // A queued notice may be standing over this Save — the request was armed under a build, and the
         // build is still running. It was written with the wording of the moment it went up, so a sweep taken
         // back here would leave it promising cleared caches for a wait that will now only re-read files.
@@ -2053,6 +2088,76 @@ public partial class MainWindowViewModel : ObservableObject
         // that happens for its own reasons honours it. Costing an unrelated settings edit a whole re-read is
         // the thing this gate exists to prevent.
         if (r.ForceRescan && !r.ForceRescanWasOwed && !reloaded) ReloadRoster();
+        return OffersLanguageRestart(languageBefore, r.Language, Catalog.CurrentTag, saved);
+    }
+
+    /// <summary>Stores the language picked on the first-run window, null for English, so the next launch
+    /// starts in it. Runs before the game load starts, because the load's own settings write would otherwise
+    /// race it. A tag the file already holds is not written again; a failed write takes the settings notice
+    /// like any other.</summary>
+    internal void AdoptFirstRunLanguage(string? tag)
+    {
+        if (string.Equals(_settings.Language, tag, StringComparison.Ordinal)) return;
+        _settings.Language = tag;
+        SaveSettings();
+    }
+
+    /// <summary>Whether a Save asks to restart into its language: the Save changed which language the stored
+    /// tag selects, the settings file took the write, and the new language is not the one this process
+    /// already runs in. A Save that puts back the running language, or leaves an earlier unapplied choice
+    /// untouched, asks nothing.</summary>
+    internal static bool OffersLanguageRestart(string? before, string? after, string running, bool saved) =>
+        saved && Catalog.Resolve(before) != Catalog.Resolve(after) && Catalog.Resolve(after) != running;
+
+    /// <summary>The restart prompt's text, in the language the Save just picked rather than the one the app
+    /// is leaving.</summary>
+    internal readonly record struct LanguageRestartPrompt(string Title, string Body, string Restart, string Later);
+
+    internal static LanguageRestartPrompt RestartPromptIn(string? tag) => new(
+        Catalog.In(tag, Strings.Rm, nameof(Strings.RestartLanguageTitle)),
+        Catalog.In(tag, Strings.Rm, nameof(Strings.RestartLanguageBody)),
+        Catalog.In(tag, Strings.Rm, nameof(Strings.RestartLanguageConfirm)),
+        Catalog.In(tag, Strings.Rm, nameof(Strings.RestartLanguageLater)));
+
+    /// <summary>After a Save that changed the language: asks to restart into <paramref name="tag"/> and, on
+    /// a yes, runs the close flow. True when the app should now close and start again. No prompt appears
+    /// when this process cannot start itself again (<see cref="Program.CanRelaunch"/>); the Language row's
+    /// hint is then the only cue, and the log says why. Later, or a close the modder takes back, leaves the
+    /// app running with no restart owed.</summary>
+    internal async Task<bool> OfferLanguageRestartAsync(string? tag, string? processPath,
+        Func<LanguageRestartPrompt, Task<bool>> ask)
+    {
+        if (!Program.CanRelaunch(processPath))
+        {
+            AppLog.Write("No restart was offered after the language change",
+                $"The app cannot start itself again from '{processPath ?? "(no path)"}'.");
+            return false;
+        }
+        if (!await ask(RestartPromptIn(tag))) return false;
+        return await CloseFlowAsync();
+    }
+
+    /// <summary>The mod a restart should open again, read after the close flow went ahead: the open mod's
+    /// folder and step, or null when Home is showing, the mod has no folder yet, or its save failed and left
+    /// changes unsaved.</summary>
+    internal ReopenTarget? ReopenAfterRestart() =>
+        ShowHome || IsDirty || CurrentProjectRoot is not { } root ? null : new ReopenTarget(root, SelectedStep);
+
+    /// <summary>Opens the mod a restart handed over, as its Recent mods row would, then returns to the step it
+    /// was on. Runs once. A mod that no longer opens says so as any open does, and Home stays.</summary>
+    internal async Task OpenRestartTargetAsync()
+    {
+        if (_restartTarget is not { } target) return;
+        _restartTarget = null;
+        if (await OpenModAsync(target.Folder)) SelectedStep = target.Step;
+    }
+
+    /// <summary>The questions a close asks before it goes ahead: about work in flight first, since the work
+    /// often produces the changes the save-first gate would save, then the save-first gate. True = close.</summary>
+    internal async Task<bool> CloseFlowAsync()
+    {
+        if (IsWorkInFlight && !await ConfirmCloseWithWorkAsync()) return false;   // keep working — stay open
+        return await ConfirmAppCloseAsync();   // false: the save-first gate said no — stay open
     }
 
     /// <summary>Recompute the status-bar Blender line. Presence-only (no process spawn), so it runs
@@ -2061,7 +2166,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         var exe = BlenderLocator.Find(_settings.PreferredBlender);
         BlenderPath = exe ?? "";
-        BlenderStatus = exe is null ? StatusFacet.Bad("Blender · not found", "Set the Blender path in Settings.") : StatusFacet.Good("Blender");
+        BlenderStatus = exe is null ? StatusFacet.Bad(Strings.StatusBlenderNotFound, Strings.StatusBlenderNotFoundTip) : StatusFacet.Good(Strings.StatusBlender);
     }
 
     private static string? Empty2Null(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
@@ -2072,7 +2177,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (Directory.Exists(ExportOutDir))
             Process.Start(new ProcessStartInfo { FileName = ExportOutDir, UseShellExecute = true });
         else
-            EditPage.ReportStatus("The mod folder is gone. Save the mod to create it again.");
+            EditPage.ReportStatus(Strings.ModFolderGone);
     }
 
     partial void OnSearchTextChanged(string value) => ApplyFilter();
@@ -2106,6 +2211,9 @@ public partial class MainWindowViewModel : ObservableObject
         var _lt = Stopwatch.StartNew();
         // Fresh log per launch.
         if (TimeLaunch) try { if (System.IO.File.Exists(LaunchTimingLog)) System.IO.File.Delete(LaunchTimingLog); } catch { }
+        // Settled in phase 1 and carried by every later exit, the failure path included: English names stay
+        // on screen after any later failure, so their notice stays with them.
+        NoticeMessage[] namesNotice = [];
         try
         {
             // THE GUARANTEE: a force rescan's deletions run off this thread, but no cache is read or written
@@ -2128,10 +2236,10 @@ public partial class MainWindowViewModel : ObservableObject
                 {
                     IsLoading = false;
                     IsScanning = false;
-                    GameStatus = StatusFacet.Bad("Game · not found");
+                    GameStatus = StatusFacet.Bad(Strings.StatusGameNotFound);
                     StatusChars = "";
-                    ReplaceNoticeCell(new NoticeMessage("game.locate", "Locate the game",
-                        "Choose the folder that contains the game's .exe. Use Tools · Locate game…"));
+                    ReplaceNoticeCell(new NoticeMessage("game.locate", Strings.LocateGameNotice,
+                        Strings.LocateGameDetail));
                     ShowSettingsSaveNotice();   // this path never reaches the finalize aggregation
                     // Neither surface can read the install: both say so rather than reading as empty.
                     EditPage.Rebuild();
@@ -2147,15 +2255,15 @@ public partial class MainWindowViewModel : ObservableObject
             // load failure and propagates to the catch rather than silently emptying the Pick tree.
             PhaseTime(_lt, "ResolveGameDir");
             var nameDb = GameDatabase.FromGameDir(GameDir);
-            // Localized display names for the Pick tree. Best-effort: a missing locale table leaves every
-            // label on its token/stem. Loaded once here (~394k-row map) and reused for the enemy roster.
-            LocalizationDb? loc = null;
-            try
-            {
-                loc = LocalizationDb.LoadRosterCached(nameDb,
-                    LabPaths.DisplayNameSnapshotFile("Enus"), out _);
-            }   // English (Enus) is fixed for v1
-            catch { /* locale table unreadable — labels fall back to tokens */ }
+            // Localized display names for the Pick tree, in the game's own text for the UI language. A UI
+            // language whose table the install lacks or cannot decode shows English names, never bare tokens;
+            // a table that is present but cannot be decoded says so on the status bar. Best-effort: an
+            // unreadable English table leaves every label on its token/stem. Loaded once here (~394k-row
+            // map) and reused for the enemy roster.
+            var rosterText = LoadRosterText(nameDb, Catalog.CurrentTag, LabPaths.DisplayNameSnapshotFile,
+                AppLog.Write);
+            LocalizationDb? loc = rosterText.Text;
+            namesNotice = RosterNamesNotice(rosterText);
             DisplayNames? names = null;
             if (loc is not null)
                 try { names = DisplayNames.Build(nameDb, loc); }
@@ -2229,11 +2337,11 @@ public partial class MainWindowViewModel : ObservableObject
                 _roster = dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList();   // full roster until finalize narrows it
                 // Built from the full roster so a mod OPENED DURING the load already reads friendly.
                 RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList());
-                GameStatus = StatusFacet.Good("Game");
-                StatusChars = "Reading game files…";
-                ReplaceLoadNotices(Array.Empty<NoticeMessage>());   // retire notices from a prior load
+                GameStatus = StatusFacet.Good(Strings.StatusGame);
+                StatusChars = Strings.StatusReadingGameFiles;
+                ReplaceLoadNotices(namesNotice);   // retire notices from a prior load; the names notice holds from here
                 BlenderPath = blenderExe ?? "";
-                BlenderStatus = blenderExe is null ? StatusFacet.Bad("Blender · not found", "Set the Blender path in Settings.") : StatusFacet.Good("Blender");
+                BlenderStatus = blenderExe is null ? StatusFacet.Bad(Strings.StatusBlenderNotFound, Strings.StatusBlenderNotFoundTip) : StatusFacet.Good(Strings.StatusBlender);
                 IsLoading = false;     // the tree is interactive now
                 IsScanning = true;
                 RaiseModsFolderGates();     // the install resolved — the header's Launch can come alive
@@ -2254,16 +2362,15 @@ public partial class MainWindowViewModel : ObservableObject
                     IsScanning = false;
                     // Only the running cell carries a detail: its notice is about THIS load, the tooltip
                     // is what the open files cost everything else.
-                    GameStatus = StatusFacet.Warn(inUse ? GameRunningLabel : "Game · unreadable",
-                        inUse ? GameRunningDetail : "");
+                    GameStatus = StatusFacet.Warn(inUse ? Strings.StatusGameRunning : Strings.StatusGameUnreadable,
+                        inUse ? Strings.StatusGameRunningTip : "");
                     StatusChars = "";
                     GameRescanOffered = true;
-                    ReplaceLoadNotices(new[] { inUse
-                        ? new NoticeMessage("game.running", "The game is running",
-                            "Cannot read the game's files while it's open. Close the game, then Rescan.")
-                        : new NoticeMessage("game.files-unreadable", "Game files unreadable",
-                            "The game's file list is missing, so nothing could be read. "
-                            + "The install may be mid-update. Rescan to try again.") });
+                    ReplaceLoadNotices(namesNotice.Prepend(inUse
+                        ? new NoticeMessage("game.running", Strings.GameRunningNotice,
+                            Strings.GameRunningNoticeDetail)
+                        : new NoticeMessage("game.files-unreadable", Strings.GameFilesUnreadableNotice,
+                            Strings.GameFilesUnreadableDetail)));
                     EditPage.Rebuild();
                     _ = BuildPage.ReplanAsync();
                     // The install is located either way, and the gates' disk reads may never have been
@@ -2325,7 +2432,7 @@ public partial class MainWindowViewModel : ObservableObject
                 _allWeapons = candidates.Where(c => c.IsWeapon).Select(c => c.Vm).ToList();
                 _allSupportTeams = candidates.Where(c => c.IsTeam).Select(c => c.Vm).ToList();
                 ApplyFilter();
-                StatusChars = $"Reading models… 0/{candidates.Count}";
+                StatusChars = Strings.StatusReadingModels(0, candidates.Count);
                 // …and the Edit page, whose rows read the install through the model memo: redrawn now for
                 // the state line, and the subjects of whatever mod is open read into that memo behind it.
                 EditPage.Rebuild();
@@ -2435,7 +2542,7 @@ public partial class MainWindowViewModel : ObservableObject
                         Dispatcher.UIThread.Post(() =>
                         {
                             cand.Vm.Populate(listed.Select(x => (x.Outfit, (IEnumerable<string>)x.Parts)));
-                            StatusChars = $"Reading models… {++confirmedChars}/{candidates.Count}";
+                            StatusChars = Strings.StatusReadingModels(++confirmedChars, candidates.Count);
                         });
                     });
                 // Persist only a CLEAN fill: a partial result must not become this game state's truth.
@@ -2483,12 +2590,13 @@ public partial class MainWindowViewModel : ObservableObject
                 // and not just the ones that survived it.
                 RebuildFriendlyNames(dbRoster.Concat(enemyRoster).Concat(weaponRoster).Concat(teamRoster).ToList());
 
-                StatusChars = $"Characters: {surviving.Count} · Enemies: {survivingEnemies.Count} · Weapons: {survivingWeapons.Count} · Support Teams: {survivingTeams.Count} · game data v{vfs.CatalogVersion}";
+                StatusChars = Strings.StatusRosterCounts(surviving.Count, survivingEnemies.Count, survivingWeapons.Count, survivingTeams.Count, vfs.CatalogVersion);
                 // Warnings ride the notice cell, not the roster line — full detail in its tooltip.
                 var notices = new List<NoticeMessage>();
+                notices.AddRange(namesNotice);
                 if (_settings.LoadedFromDefaultsAfterError)
-                    notices.Add(new NoticeMessage("settings.reset", "Settings reset",
-                        "Your settings file couldn't be read. Default settings are in use until you save.",
+                    notices.Add(new NoticeMessage("settings.reset", Strings.SettingsResetNotice,
+                        Strings.SettingsResetDetail,
                         BulletWhenAlone: true));
                 // Carries a save failure from the off-UI-thread detection write, which has no cell to
                 // reach. Load finalization replaces only load-owned identities, so include this standing
@@ -2499,32 +2607,31 @@ public partial class MainWindowViewModel : ObservableObject
                     _settingsSaveNoticeShown = true;
                 }
                 if (enemyRosterUnreadable)
-                    notices.Add(new NoticeMessage("game.enemy-list-unreadable", "Enemy list unreadable",
-                        "The enemy list couldn't be read, so the Enemies tab is empty. "
-                        + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
+                    notices.Add(new NoticeMessage("game.enemy-list-unreadable", Strings.EnemyListUnreadable,
+                        Strings.EnemyListUnreadableDetail, BulletWhenAlone: true));
                 if (weaponRosterUnreadable)
-                    notices.Add(new NoticeMessage("game.weapon-list-unreadable", "Weapon list unreadable",
-                        "The weapon list couldn't be read, so the Weapons tab is empty. "
-                        + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
+                    notices.Add(new NoticeMessage("game.weapon-list-unreadable", Strings.WeaponListUnreadable,
+                        Strings.WeaponListUnreadableDetail, BulletWhenAlone: true));
                 if (teamRosterUnreadable)
-                    notices.Add(new NoticeMessage("game.support-team-list-unreadable", "Support team list unreadable",
-                        "The support team list couldn't be read, so the Support Teams tab is empty. "
-                        + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
+                    notices.Add(new NoticeMessage("game.support-team-list-unreadable", Strings.SupportTeamListUnreadable,
+                        Strings.SupportTeamListUnreadableDetail, BulletWhenAlone: true));
                 if (missing.Count > 0)
                 {
-                    string files = $"game file{(missing.Count == 1 ? "" : "s")}";
-                    notices.Add(new NoticeMessage("game.files-missing", $"{missing.Count} {files} missing",
-                        $"{missing.Count} {files} {(missing.Count == 1 ? "is" : "are")} missing. "
-                        + "The install may be mid-update. Verify the game files.", BulletWhenAlone: true));
+                    notices.Add(new NoticeMessage("game.files-missing",
+                        Catalog.Plural(missing.Count, Strings.GameFilesMissingShort_One(missing.Count),
+                            Strings.GameFilesMissingShort_Other(missing.Count)),
+                        Catalog.Plural(missing.Count, Strings.GameFilesMissingDetail_One(missing.Count),
+                            Strings.GameFilesMissingDetail_Other(missing.Count)), BulletWhenAlone: true));
                 }
                 if (!fillErrors.IsEmpty)
                 {
                     AppLog.Write("Outfits couldn't be read", string.Join(Environment.NewLine, fillErrors));
-                    string outfits = $"outfit{(fillErrors.Count == 1 ? "" : "s")}";
                     notices.Add(new NoticeMessage("game.outfits-unreadable",
-                        $"{fillErrors.Count} {outfits} unreadable",   // count-led, like the files-missing label
-                        $"{fillErrors.Count} {outfits} couldn't be read, so they aren't listed. "
-                        + "Use Tools · Rescan game files to try again.", BulletWhenAlone: true));
+                        // count-led, like the files-missing label
+                        Catalog.Plural(fillErrors.Count, Strings.OutfitsUnreadableShort_One(fillErrors.Count),
+                            Strings.OutfitsUnreadableShort_Other(fillErrors.Count)),
+                        Catalog.Plural(fillErrors.Count, Strings.OutfitsUnreadableDetail_One(fillErrors.Count),
+                            Strings.OutfitsUnreadableDetail_Other(fillErrors.Count)), BulletWhenAlone: true));
                 }
                 // The stale-version warning goes INTO this notices list rather than overwriting the cell
                 // afterward: an overwrite silently loses whatever warning was already there.
@@ -2559,16 +2666,15 @@ public partial class MainWindowViewModel : ObservableObject
                 IsScanning = false;
                 // Location ALREADY succeeded above, so this is a read failure and NOT a missing install:
                 // the remedy is Rescan, never Locate. "not found" is reserved for ResolveGameDir.
-                GameStatus = StatusFacet.Warn(inUse ? GameRunningLabel : "Game · unreadable",
-                    inUse ? GameRunningDetail : "");
+                GameStatus = StatusFacet.Warn(inUse ? Strings.StatusGameRunning : Strings.StatusGameUnreadable,
+                    inUse ? Strings.StatusGameRunningTip : "");
                 StatusChars = "";
                 GameRescanOffered = true;
-                ReplaceLoadNotices(new[] { inUse
-                    ? new NoticeMessage("game.running", "The game is running",
-                        "Cannot read the game's files while it's open. Close the game, then Rescan.")
-                    : new NoticeMessage("game.data-unreadable", "Game data unreadable",
-                        "Couldn't read the game data. Rescan to try again. "
-                        + "If it keeps happening, the install may be damaged or an unsupported version.") });
+                ReplaceLoadNotices(namesNotice.Prepend(inUse
+                    ? new NoticeMessage("game.running", Strings.GameRunningNotice,
+                        Strings.GameRunningNoticeDetail)
+                    : new NoticeMessage("game.data-unreadable", Strings.GameDataUnreadableNotice,
+                        Strings.GameDataUnreadableDetail)));
                 EditPage.Rebuild();
                 _ = BuildPage.ReplanAsync();
                 // Location ALREADY succeeded, so both gates' halves are knowable; a phase-1 failure would
@@ -2577,6 +2683,63 @@ public partial class MainWindowViewModel : ObservableObject
                 RunQueuedRescan();
             });
         }
+    }
+
+    /// <summary>The roster's localized names, or null when not even English could be read, and whether they
+    /// are English because the UI language's table is present but could not be read.</summary>
+    internal readonly record struct RosterText(LocalizationDb? Text, bool TableUnreadable);
+
+    /// <summary>The roster's names from the install's text tables, in the game locale for
+    /// <paramref name="uiTag"/>, each locale's roster snapshot kept at <paramref name="snapshotFile"/>.</summary>
+    internal static RosterText LoadRosterText(GameDatabase nameDb, string uiTag, Func<string, string> snapshotFile,
+        Action<string, string> log) => LoadRosterText(uiTag,
+        table => File.Exists(nameDb.TablePath(table)),
+        locale => LocalizationDb.LoadRosterCached(nameDb, snapshotFile(locale), out _, locale),
+        log);
+
+    /// <summary>The status-bar notice a load posts for its names: one when they show in English because the
+    /// UI language's table is present but could not be read, whose advice is a rescan. An install with no
+    /// table for the language shows English names with only the log line, since no rescan can add one.</summary>
+    internal static NoticeMessage[] RosterNamesNotice(RosterText text) => text.TableUnreadable
+        ? [new NoticeMessage(RosterNamesEnglishNoticeId, Strings.RosterNamesEnglish,
+            Strings.RosterNamesEnglishDetail, BulletWhenAlone: true)]
+        : [];
+
+    /// <summary>The names in the UI language's game locale when its table is present and decodes; English
+    /// when the table is missing or its decode throws (a corrupt or half-written table mid-update), with one
+    /// log line either way. Only the decode failure is marked <see cref="RosterText.TableUnreadable"/>. An
+    /// English table that cannot be read leaves every label on its token.</summary>
+    internal static RosterText LoadRosterText(string uiTag, Func<string, bool> hasTable,
+        Func<string, LocalizationDb> load, Action<string, string> log)
+    {
+        string locale = RosterLocale(uiTag, hasTable, log);
+        bool unreadable = false;
+        if (locale != LocalizationDb.EnglishLocale)
+        {
+            try { return new(load(locale), false); }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                log("The game's text table for the UI language couldn't be read, so names show in English",
+                    e.ToString());
+                unreadable = true;
+            }
+        }
+        try { return new(load(LocalizationDb.EnglishLocale), unreadable); }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            log("The game's English text table couldn't be read, so names show as internal names", e.ToString());
+            return new(null, false);
+        }
+    }
+
+    /// <summary>The game locale the roster's names are read in: the UI language's, or English when the
+    /// install has no table for it, which the log records.</summary>
+    internal static string RosterLocale(string uiTag, Func<string, bool> hasTable, Action<string, string> log)
+    {
+        string locale = LocalizationDb.AvailableLocale(LocalizationDb.GameLocale(uiTag), hasTable, out var missing);
+        if (missing is not null)
+            log("The game's text table for the UI language is missing, so names show in English", missing);
+        return locale;
     }
 
     /// <summary>The playable rows Phase 1 is allowed to expose before any game bundle/index read. Curated
@@ -2616,15 +2779,16 @@ public partial class MainWindowViewModel : ObservableObject
         // Order by the label the modder READS, not the internal roster name — the backing lists are
         // internal-name-ordered, which would file "Mirel" under V (Vesna). Sorted here so the backing
         // lists keep their own order for keyed lookups.
+        var order = PickNameOrder();
         var q = SearchText?.Trim() ?? "";
         Characters.Clear();
-        foreach (var c in _allCharacters.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+        foreach (var c in _allCharacters.OrderBy(c => c.DisplayName, order))
             if (q.Length == 0 || MatchesCharacter(c, q))
                 Characters.Add(c);
 
         var eq = EnemySearchText?.Trim() ?? "";
         Enemies.Clear();
-        foreach (var c in _allEnemies.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+        foreach (var c in _allEnemies.OrderBy(c => c.DisplayName, order))
             if (eq.Length == 0 || MatchesCharacter(c, eq))
                 Enemies.Add(c);
 
@@ -2637,7 +2801,7 @@ public partial class MainWindowViewModel : ObservableObject
         foreach (var c in _allWeapons
                      .OrderBy(c => c.Name.StartsWith(WeaponRoster.PartGroupPrefix, StringComparison.Ordinal) ? 2
                                  : c.Name.StartsWith(WeaponRoster.SkinGroupPrefix, StringComparison.Ordinal) ? 1 : 0)
-                     .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+                     .ThenBy(c => c.DisplayName, order))
             if (wq.Length == 0 || MatchesCharacter(c, wq)
                 || c.Outfits.Any(o => o.Label.Contains(wq, StringComparison.OrdinalIgnoreCase)
                                    || o.Stem.Contains(wq, StringComparison.OrdinalIgnoreCase)))
@@ -2647,12 +2811,19 @@ public partial class MainWindowViewModel : ObservableObject
         // labels are shared by every team, and their stems contain the team's.
         var sq = SupportSearchText?.Trim() ?? "";
         SupportTeams.Clear();
-        foreach (var c in _allSupportTeams.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
+        foreach (var c in _allSupportTeams.OrderBy(c => c.DisplayName, order))
             if (sq.Length == 0 || MatchesCharacter(c, sq))
                 SupportTeams.Add(c);
 
         RefreshEmptyStates();
     }
+
+    /// <summary>The order the Pick tree lists names in. A Simplified Chinese UI uses its own collation, so
+    /// Chinese names sort by pinyin rather than by code point; every other language keeps the ordinal,
+    /// case-blind order the English tree has always used.</summary>
+    internal static StringComparer PickNameOrder() => Catalog.CurrentTag == Catalog.SimplifiedChinese
+        ? StringComparer.Create(CultureInfo.GetCultureInfo(Catalog.SimplifiedChinese), ignoreCase: true)
+        : StringComparer.OrdinalIgnoreCase;
 
     /// <summary>Filter match: the query hits the localized label OR the internal roster name, so "Mirel"
     /// and "Vesna" both find her.</summary>
@@ -2688,13 +2859,8 @@ public partial class MainWindowViewModel : ObservableObject
     internal static string NoMatchLine(string? query, int shown)
     {
         var q = query?.Trim() ?? "";
-        return shown == 0 && q.Length > 0 ? $"No match for '{q}'." : "";
+        return shown == 0 && q.Length > 0 ? Strings.PickNoMatch(q) : "";
     }
-
-    /// <summary>Why an enemy the modder searched for may not be listed under its own name. The tab's
-    /// duplicate-door filter is otherwise invisible, and a stated fact beats a hole.</summary>
-    internal const string EnemyDoorNote =
-        "Enemies that reuse a character's meshes are listed under that character.";
 
     public string CharactersNoMatch => NoMatchLine(SearchText, Characters.Count);
     public string EnemiesNoMatch => NoMatchLine(EnemySearchText, Enemies.Count);
@@ -2704,8 +2870,8 @@ public partial class MainWindowViewModel : ObservableObject
     public bool HasEnemiesNoMatch => EnemiesNoMatch.Length > 0;
     public bool HasWeaponsNoMatch => WeaponsNoMatch.Length > 0;
     public bool HasSupportTeamsNoMatch => SupportTeamsNoMatch.Length > 0;
-    /// <summary><see cref="EnemyDoorNote"/> for the view, so the sentence has one home.</summary>
-    public string EnemiesNoMatchNote => EnemyDoorNote;
+    /// <summary><see cref="Strings.PickEnemyReuseNote"/> for the view, so the sentence has one home.</summary>
+    public string EnemiesNoMatchNote => Strings.PickEnemyReuseNote;
 
     private void RefreshEmptyStates()
     {
@@ -2954,7 +3120,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>The auto mod name for a subject's character. Static so a test can pin the naming rule
     /// without constructing the VM.</summary>
-    public static string AutoModName(string friendlyCharacter) => $"{friendlyCharacter} mod";
+    public static string AutoModName(string friendlyCharacter) => Strings.AutoModName(friendlyCharacter);
 
     /// <summary>Ensure the mod folder exists for a first-touch materialize; the folder is minted lazily,
     /// not at New Mod. False if it couldn't be created.</summary>
@@ -2978,7 +3144,7 @@ public partial class MainWindowViewModel : ObservableObject
         {
             _projectDocument.RebaseRoot(_modRoot); ExportOutDir = _modRoot;
             EnsureWatcher();
-            EditPage.ReportStatus($"Reconnected to the mod folder ({Path.GetFileName(_modRoot)}).");
+            EditPage.ReportStatus(Strings.ReconnectedModFolder(Path.GetFileName(_modRoot)));
             return true;
         }
         try
@@ -3039,24 +3205,9 @@ public partial class MainWindowViewModel : ObservableObject
 
     // Short enough that the cell's 180px cap never eats the counter; "shared" is the tooltip's job.
     private static string SharingLine(SharingProgress s) =>
-        (s.Delta ? "Updating assets" : "Checking assets")
-        + (s.Total > 0 ? $"… {s.Done}/{s.Total}" : "…");
-
-    /// <summary>What the measurement pass is for. The cell's label is a bare count, so the tooltip
-    /// carries the whole answer.</summary>
-    internal const string SharingCellTip =
-        "Reading which outfits share textures and meshes.";
-
-    /// <summary>What a failed pass leaves on the cell: a build after this one discloses instead of
-    /// scoping, and Rescan is the retry.</summary>
-    internal const string SharingUnmeasured = "Shared assets not checked";
-    internal const string SharingUnmeasuredDetail =
-        "Edits may also change other outfits that share the same textures or meshes. "
-        + "Use Tools · Rescan game files to try again.";
-
-    /// <summary>What the cell says while a built mod is being read back into a project.</summary>
-    internal const string ImportingModLine = "Reading the mod…";
-    internal const string ImportingModTip = "Reading a built mod back into a new project.";
+        s.Total > 0
+            ? s.Delta ? Strings.SharingUpdatingProgress(s.Done, s.Total) : Strings.SharingCheckingProgress(s.Done, s.Total)
+            : s.Delta ? Strings.SharingUpdating : Strings.SharingChecking;
 
     /// <summary>The background-work cell, as a pure rule. Running work outranks a past failure — a pass is
     /// answering the question the failure raised — and a failure that nothing is replacing STAYS, since a
@@ -3067,13 +3218,13 @@ public partial class MainWindowViewModel : ObservableObject
     {
         // An import outranks both measurements: it is the one thing here the person asked for and is
         // waiting on, and it is the only cell they can see from the Home page.
-        if (importingMod) return StatusFacet.Loading(ImportingModLine, ImportingModTip);
+        if (importingMod) return StatusFacet.Loading(Strings.ImportingModLine, Strings.ImportingModTip);
         if (riggedGlbPrewarm is { } prewarm)
-            return StatusFacet.Loading(RiggedGlbPrewarmLine(prewarm), RiggedGlbPrewarmTip);
-        if (sharing is { } s) return StatusFacet.Loading(SharingLine(s), SharingCellTip);
+            return StatusFacet.Loading(RiggedGlbPrewarmLine(prewarm), Strings.PrewarmTip);
+        if (sharing is { } s) return StatusFacet.Loading(SharingLine(s), Strings.SharingCellTip);
         if (riggedGlbPrewarmFailed)
-            return StatusFacet.Warn(RiggedGlbPrewarmUnavailable, RiggedGlbPrewarmUnavailableDetail);
-        return sharingFailed ? StatusFacet.Warn(SharingUnmeasured, SharingUnmeasuredDetail) : StatusFacet.None;
+            return StatusFacet.Warn(Strings.PrewarmUnavailable, Strings.PrewarmUnavailableTip);
+        return sharingFailed ? StatusFacet.Warn(Strings.SharingUnmeasured, Strings.SharingUnmeasuredDetail) : StatusFacet.None;
     }
 
     /// <summary>The current-install reads needed to adapt schema-1 routes and resolve session slots.</summary>
@@ -3137,7 +3288,7 @@ public partial class MainWindowViewModel : ObservableObject
         catch (Exception e)
         {
             AppLog.Write("Couldn't start the image editor", e);
-            status.Report($"{failure}. Set an image editor in Settings.");
+            status.Report(failure);
             return false;
         }
     }
@@ -3170,8 +3321,8 @@ public partial class MainWindowViewModel : ObservableObject
         if (!AuthoredAgainstPolicy.NeedsStaleNotice(authoredAgainst, live)) return null;
         if (string.Equals(_authoredNoticeShownFor, live, StringComparison.Ordinal)) return null;
         _authoredNoticeShownFor = live;
-        return new NoticeMessage(AuthoredAgainstNoticeId, "Made for a different game version",
-            "This mod was made for a different version of the game. Check your edits, then build again.",
+        return new NoticeMessage(AuthoredAgainstNoticeId, Strings.AuthoredAgainstNotice,
+            Strings.AuthoredAgainstDetail,
             ProjectScoped: true, BulletWhenAlone: true);
     }
 
@@ -3184,21 +3335,22 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>The latched failure is already on the notice cell.</summary>
     private bool _settingsSaveNoticeShown;
 
-    private const string SettingsSaveFailedShort = "settings not saved";
-    private const string SettingsSaveFailedDetail =
-        "Cannot save settings. Changes are lost when the app closes. Move the app out of a protected folder.";
-
     /// <summary>Persist settings, reporting a failed write instead of dropping it. A silent failure is the
     /// bad case: the change looks applied and is gone at exit.</summary>
-    private void SaveSettings()
+    private bool SaveSettings()
     {
-        if (_settings.TrySave()) return;
+        if (TrySaveSettings(_settings))
+        {
+            _persistedLanguage = _settings.Language;
+            return true;
+        }
         AppLog.Write("Settings couldn't be saved", $"The write to {LabSettings.DefaultPath} failed.");
         _settingsSaveFailed = true;
         // ResolveGameDir saves off the UI thread, and the notice cell is UI-thread state. That save runs
         // inside the load, whose finalize folds the latch into its own notice list — so an off-thread
         // failure is reported there rather than raced onto the cell from here.
         if (Dispatcher.UIThread.CheckAccess()) ShowSettingsSaveNotice();
+        return false;
     }
 
     /// <summary>Put the latched settings-write failure on the notice cell, once. UI thread.</summary>
@@ -3219,7 +3371,7 @@ public partial class MainWindowViewModel : ObservableObject
     /// <summary>Fold one notice into the cell without losing what's there: an occupied cell is rebuilt as
     /// the same "N warnings" + "• "-bulleted facet the load-finalize aggregation renders.</summary>
     private static NoticeMessage SettingsSaveFailedNotice() =>
-        new("settings.save-failed", SettingsSaveFailedShort, SettingsSaveFailedDetail,
+        new("settings.save-failed", Strings.SettingsSaveFailedNotice, Strings.SettingsSaveFailedDetail,
             BulletWhenAlone: true);
 
     internal enum NoticeSeverity { Info, Warning, Error }
@@ -3263,16 +3415,20 @@ public partial class MainWindowViewModel : ObservableObject
     {
         "settings.reset",
         "game.invalid-folder",
-        "game.rescan-queued",
+        QueuedRescanNoticeId,
         "game.locate",
         "game.running",
         "game.files-unreadable",
         "game.data-unreadable",
         "game.enemy-list-unreadable",
         "game.weapon-list-unreadable",
+        "game.support-team-list-unreadable",
         "game.files-missing",
         "game.outfits-unreadable",
+        RosterNamesEnglishNoticeId,
     };
+
+    private const string RosterNamesEnglishNoticeId = "game.names-english";
 
     /// <summary>Replace only the notices one game-file load owns. Project and other standing identities stay
     /// in the cell; a later load has no lifecycle authority over them.</summary>
@@ -3344,8 +3500,8 @@ public partial class MainWindowViewModel : ObservableObject
         {
             var severity = _noticeMessages.Max(notice => notice.Severity);
             string label = _noticeMessages.All(notice => notice.Severity == NoticeSeverity.Warning)
-                ? $"{_noticeMessages.Count} warnings"
-                : $"{_noticeMessages.Count} notices";
+                ? Strings.NoticeCountWarnings(_noticeMessages.Count)
+                : Strings.NoticeCountNotices(_noticeMessages.Count);
             rendered = NoticeFacet(severity, label,
                 string.Join("\n", _noticeMessages.Select(notice =>
                     "• " + (notice.Detail.Length > 0 ? notice.Detail : notice.Short))));

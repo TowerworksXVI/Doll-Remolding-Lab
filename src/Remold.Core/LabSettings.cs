@@ -68,6 +68,13 @@ public sealed class LabSettings
     /// <para>ADDITIVE: a settings.json without the key deserializes to null, and the pane opens at its own
     /// default width, as it did before the divider could move.</para></summary>
     public double? EditTreeWidth { get; set; }
+    /// <summary>The UI language tag the Settings form chose (<c>zh-Hans</c>), or null for English. Read once,
+    /// before the first window opens, so a change applies the next time the app starts. Stored as chosen: a
+    /// tag the form does not list stays in the file as it is, and <see cref="Text.Catalog.Apply"/> decides
+    /// which language it selects.
+    /// <para>ADDITIVE: a settings.json without the key deserializes to null, which is English, the only
+    /// language a build before the key existed had.</para></summary>
+    public string? Language { get; set; }
     /// <summary>Recent mod projects, most-recent-first.</summary>
     public List<RecentMod> RecentMods { get; set; } = new();
 

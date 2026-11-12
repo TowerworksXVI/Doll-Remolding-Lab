@@ -465,7 +465,8 @@ public class BindSpaceConversionTests : IDisposable
         const int n = 3;
         var cpinv = Enumerable.Range(1, 2 * 4 * n).Select(i => (float)i).ToArray();
         var art = new MigotoEmitter.OperatorArt(cpinv, new bool[2], new[] { -1, -1 }, new uint[] { A, B },
-            new[] { 0, 1 }, Array.Empty<string>(), Sel: null, Off: null, N: n);
+            new[] { 0, 1 }, Array.Empty<string>(), Sel: null, Off: null, N: n,
+            TieWidth: new[] { -1, -1 }, GroupOf: new[] { -1, -1 }, Groups: Array.Empty<MigotoEmitter.TieGroup>());
         double[] c = { 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1 };
 
         var folded = MigotoEmitter.FoldConstants(art, new[] { null, c });

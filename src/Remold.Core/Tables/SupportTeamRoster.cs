@@ -35,8 +35,6 @@ public static class SupportTeamRoster
     /// <summary>The member suffix letters, in listing order.</summary>
     public static readonly IReadOnlyList<string> MemberLetters = new[] { "A", "B", "C" };
 
-    /// <summary>The team weapon row's label.</summary>
-    public const string WeaponLabel = "Weapon";
 
     /// <summary>Base of the synthetic id band. Every team outfit id is <c>-(IdBand + teamId·10 + slot)</c>,
     /// slot 0–2 for the members and 3 for the weapon.</summary>
@@ -104,7 +102,7 @@ public static class SupportTeamRoster
                     MeshPrefixOverride = $"c_{stem}_slg_",
                     Route = SubjectRoute.Addressable(
                         $"Assets/ConfigPrefab/Character/SupportTeam/{team.Stem}/{stem}.prefab", stem),
-                    DisplayName = $"Member {letter}",
+                    DisplayName = CoreStrings.SupportTeamMember(letter),
                 });
             }
             // The team weapon, in the weapon roster's own shape (prefix, pooling) so it builds like every
@@ -116,7 +114,7 @@ public static class SupportTeamRoster
                 MeshPrefixOverride = $"cw_{team.Stem}_",
                 Route = SubjectRoute.Addressable(
                     $"Assets/ConfigPrefab/Weapon/SupportTeam/{team.Stem}/{weaponRoot}.prefab", weaponRoot),
-                DisplayName = WeaponLabel,
+                DisplayName = CoreStrings.SupportTeamWeapon,
                 PartsPoolAlone = true,
             });
             result.Add(new Character(

@@ -102,19 +102,57 @@ public static class StreamDump
         return weights > 0 ? weights : Dim(13);
     }
 
-    /// <summary><see cref="UnrecoverableSkin"/> phrased for the build log, or null when the mesh can feed
-    /// palette recovery. Every stored influence count 1–4 is one recovery accepts, so a layout refusal
-    /// with influences present is about the shape they are spelled in — an index format, a stream, a
-    /// channel sharing the stream — and only a mesh storing none is refused for the count itself.</summary>
-    public static string? UnrecoverableSkinReason(AssetTypeValueField meshField) =>
+    /// <summary>What a refusal names as the reason a mesh's skin can't be replaced.</summary>
+    public enum SkinReason
+    {
+        BlendShapes,
+        NoWeights,
+        UnreadableLayout,
+
+        /// <summary>The skin rule passed the mesh, but its weights still did not read.</summary>
+        WeightsUnread,
+    }
+
+    /// <summary>A skin refusal's reason, carried as a value so each surface phrases it: <see cref="English"/>
+    /// for exception messages and the build log, <see cref="Shown"/> for the refusal a modder reads.
+    /// <paramref name="BlendShapes"/> is the count on the <see cref="SkinReason.BlendShapes"/> branch.</summary>
+    public readonly record struct SkinWhy(SkinReason Reason, int BlendShapes = 0)
+    {
+        public string English => Reason switch
+        {
+            SkinReason.BlendShapes => string.Create(CultureInfo.InvariantCulture,
+                $"it has {BlendShapes} blend shapes, which the swap can't reproduce"),
+            SkinReason.NoWeights => "it has no skin weights",
+            SkinReason.UnreadableLayout => "its skin weights are stored in a shape this app can't read",
+            _ => "its skin weights can't be read",
+        };
+
+        public string Shown => Reason switch
+        {
+            SkinReason.BlendShapes => CoreStrings.SkinReasonBlendShapes(BlendShapes),
+            SkinReason.NoWeights => CoreStrings.SkinReasonNoWeights,
+            SkinReason.UnreadableLayout => CoreStrings.SkinReasonUnreadableLayout,
+            _ => CoreStrings.SkinReasonWeightsUnread,
+        };
+    }
+
+    /// <summary>Why <see cref="UnrecoverableSkin"/> refuses the mesh, or null when the mesh can feed palette
+    /// recovery. Every stored influence count 1–4 is one recovery accepts, so a layout refusal with
+    /// influences present is about the shape they are spelled in — an index format, a stream, a channel
+    /// sharing the stream — and only a mesh storing none is refused for the count itself.</summary>
+    public static SkinWhy? UnrecoverableSkinWhy(AssetTypeValueField meshField) =>
         UnrecoverableSkin(meshField) switch
         {
-            (SkinRefusal.BlendShapes, var n) => $"it has {n} blend shapes, which the swap can't reproduce",
-            (SkinRefusal.SkinLayout, _) => StoredInfluences(meshField) == 0
-                ? "it has no skin weights"
-                : "its skin weights are stored in a shape this app can't read",
+            (SkinRefusal.BlendShapes, var n) => new SkinWhy(SkinReason.BlendShapes, n),
+            (SkinRefusal.SkinLayout, _) => new SkinWhy(StoredInfluences(meshField) == 0
+                ? SkinReason.NoWeights : SkinReason.UnreadableLayout),
             _ => null,
         };
+
+    /// <summary><see cref="UnrecoverableSkinWhy"/> in English, for exception messages and the build log, or
+    /// null when the mesh can feed palette recovery.</summary>
+    public static string? UnrecoverableSkinReason(AssetTypeValueField meshField) =>
+        UnrecoverableSkinWhy(meshField)?.English;
 
     /// <summary>The bone hashes this mesh's skin actually POSES: the ones carrying nonzero summed vertex
     /// weight. A hash listed in <c>m_BoneNameHashes</c> with no weight behind it moves no vertex, so the

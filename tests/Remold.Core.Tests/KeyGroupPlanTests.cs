@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -106,11 +107,10 @@ public sealed class KeyGroupPlanTests : IDisposable
             },
         });
 
-        var conflict = Assert.Single(Plan(project).Conflicts, value =>
-            value.Contains("can be active together", StringComparison.Ordinal));
+        var conflict = Assert.Single(Plan(project).Conflicts, ActiveTogether.IsMatch);
 
-        Assert.Contains("Long body at F7 · State 1", conflict, StringComparison.Ordinal);
-        Assert.Contains("Short body at F8 · State 1", conflict, StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.PlanActiveTogether("Long body", PlacementNames.Place("F7", null, null, 0),
+            "Short body", PlacementNames.Place("F8", null, null, 0), "body"), conflict);
         Assert.DoesNotContain("key-1", conflict, StringComparison.Ordinal);
         Assert.DoesNotContain("key-2", conflict, StringComparison.Ordinal);
     }
@@ -121,12 +121,15 @@ public sealed class KeyGroupPlanTests : IDisposable
         var project = Fixture();
         project.KeyGroups.Add(Group("F7", ("short", "edit-short"), ("off", null)));
 
-        var conflict = Assert.Single(Plan(project).Conflicts, value =>
-            value.Contains("can be active together", StringComparison.Ordinal));
+        var conflict = Assert.Single(Plan(project).Conflicts, ActiveTogether.IsMatch);
 
-        Assert.Contains("Long body at Always", conflict, StringComparison.Ordinal);
-        Assert.Contains("Short body at F7 · State 1", conflict, StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.PlanActiveTogether("Long body", PlacementNames.Always,
+            "Short body", PlacementNames.Place("F7", null, null, 0), "body"), conflict);
     }
+
+    /// <summary>The conflict that two placements can show one part's content at once, whatever it names.</summary>
+    private static System.Text.RegularExpressions.Regex ActiveTogether => CatalogShape.Of(CoreStrings.PlanActiveTogether(
+        CatalogShape.Any, CatalogShape.Any, CatalogShape.Any, CatalogShape.Any, CatalogShape.Any));
 
     [Fact]
     public void Different_states_of_one_group_prove_content_exclusivity()
@@ -137,8 +140,7 @@ public sealed class KeyGroupPlanTests : IDisposable
 
         var plan = Plan(project);
 
-        Assert.DoesNotContain(plan.Conflicts, conflict => conflict.Contains("can be active together",
-            StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.Conflicts, ActiveTogether.IsMatch);
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
     }
 
@@ -151,12 +153,10 @@ public sealed class KeyGroupPlanTests : IDisposable
         var plan = Plan(project);
 
         // The part by the short name the rest of the app shows it under, never the renderer slot.
-        string warning = Assert.Single(plan.Warnings, line =>
-            line.Contains("Long body on body is in Always", StringComparison.Ordinal));
         // The part it is about, the place it is about, and what the modder actually gets.
-        Assert.Contains("F7 · State 1", warning, StringComparison.Ordinal);
+        string warning = Assert.Single(plan.Warnings, line => line == CoreStrings.PlanRedundantInAlways(
+            "Long body", "body", PlacementNames.Place("F7", null, null, 0)));
         Assert.DoesNotContain("c_vesna_body_lod0", warning, StringComparison.Ordinal);
-        Assert.Contains("changes nothing", warning, StringComparison.Ordinal);
         Assert.DoesNotContain("edit-long", warning, StringComparison.Ordinal);
         Assert.DoesNotContain("key-1", warning, StringComparison.Ordinal);
         // Attributed by id rather than by whatever name the text happens to contain.
@@ -174,9 +174,7 @@ public sealed class KeyGroupPlanTests : IDisposable
         var plan = Plan(project);
 
         string conflict = Assert.Single(plan.Conflicts,
-            value => value.Contains("has no key", StringComparison.Ordinal));
-        Assert.Equal("Key group 'Body cycle' has no key. This blocks the build. "
-            + "Give it a key, or delete the group.", conflict);
+            value => value == CoreStrings.PlanKeylessGroupLabeled("Body cycle"));
         Assert.DoesNotContain("key-1", conflict, StringComparison.Ordinal);
         // The edits used inside it are the rows the line marks: a group with no key blocks every one.
         Assert.Equal(new[] { "edit-short" }, plan.IssueEditIds[conflict]);
@@ -191,7 +189,7 @@ public sealed class KeyGroupPlanTests : IDisposable
 
         var plan = Plan(project);
 
-        Assert.Contains("F7 switches nothing.", plan.Warnings);
+        Assert.Contains(CoreStrings.PlanGroupSwitchesNothing("F7"), plan.Warnings);
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
     }
 
@@ -265,10 +263,30 @@ public sealed class KeyGroupPlanTests : IDisposable
         var plan = Plan(project);
         var execution = AuthoredBuildExecution.Create(project, plan);
 
-        Assert.Contains(plan.Warnings, warning => warning.Contains("Long body on body never appears in Always",
-                StringComparison.Ordinal)
-            && warning.Contains("body is hidden there", StringComparison.Ordinal));
+        Assert.Contains(CoreStrings.PlanNeverAppears("Long body", "body", PlacementNames.Always), plan.Warnings);
         Assert.Equal(EditVerbs.Hide, Assert.Single(execution.Work).Verb);
+    }
+
+    [Fact]
+    public void A_plan_line_names_a_part_under_the_outfits_own_mesh_prefix_without_its_slg_marker()
+    {
+        var plan = PlanHidingTheBodyUnder($"c_{AuthoredEditFixtures.Body.Outfit}_slg_body_lod0");
+
+        Assert.Contains(CoreStrings.PlanNeverAppears("Long body", "body", PlacementNames.Always), plan.Warnings);
+    }
+
+    /// <summary>The plan of the golden project with its body part moved to <paramref name="slot"/> and hidden
+    /// always, so its content edit never appears and a plan line names the part.</summary>
+    internal AuthoredBuildPlan PlanHidingTheBodyUnder(string slot)
+    {
+        var body = AuthoredEditFixtures.Body;
+        var project = Fixture();
+        foreach (var edit in project.EditDefinitions.Where(edit => edit.Target.SameAs(body)))
+            edit.Target = AuthoredEditFixtures.Part(slot);
+        foreach (var target in project.TargetSlots.Where(target => target.Part.SameAs(body)))
+            target.Part = AuthoredEditFixtures.Part(slot);
+        project.Always.Add(project.Hide(AuthoredEditFixtures.Part(slot)));
+        return Plan(project);
     }
 
     [Fact]
@@ -289,9 +307,8 @@ public sealed class KeyGroupPlanTests : IDisposable
         var plan = Plan(project);
         var execution = AuthoredBuildExecution.Create(project, plan);
 
-        Assert.Contains(plan.Warnings, warning => warning.Contains("Long body on body never appears in F7 · State 1",
-                StringComparison.Ordinal)
-            && warning.Contains("body is hidden there", StringComparison.Ordinal));
+        Assert.Contains(CoreStrings.PlanNeverAppears("Long body", "body", PlacementNames.Place("F7", null, null, 0)),
+            plan.Warnings);
         Assert.Equal(EditVerbs.Hide, Assert.Single(execution.Work).Verb);
     }
 
@@ -315,8 +332,7 @@ public sealed class KeyGroupPlanTests : IDisposable
 
         var plan = Plan(project);
 
-        const string warning =
-            "Long body on body never appears in F7 · Layered because body is hidden there.";
+        string warning = CoreStrings.PlanNeverAppears("Long body", "body", PlacementNames.Place("F7", null, "Layered", 0));
         Assert.Contains(warning, plan.Warnings);
         Assert.Equal(new[] { "edit-long" }, plan.IssueEditIds[warning]);
         var part = Assert.Single(plan.Parts);

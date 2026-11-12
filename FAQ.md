@@ -39,7 +39,7 @@ Technical limitations of the 3DMigoto workaround. Some parts use facial expressi
 Yes. I'd like it if at least some of your mods ended up free eventually - my main goal for this tool is to grow the GFL2 modding ecosystem - but the Lab comes with no obligations. 
 
 **Can I edit someone else's mod?**
-This is in progress. Mods include the instructions for the Lab to do this (you can opt out with a checkbox, or permanently in Settings). The actual loading will be built soon.
+By default,  yes, using the Import feature on the main page. You can opt your mods out by unchecking "Editable by others" for a mod, or permanently in Settings. This does *not* give you a license to redistribute any mods or their content without the author's permission.
 
 **Only Girls' Frontline 2? What about other games?**
 Most F2P/gacha games use DX12 and GPU skinning and are serviced fine by 3DMigoto already. Most non-F2P games allow less roundabout modding techniques. 

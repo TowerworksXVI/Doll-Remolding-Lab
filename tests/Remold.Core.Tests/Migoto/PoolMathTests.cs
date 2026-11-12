@@ -17,6 +17,55 @@ namespace Remold.Core.Tests.Migoto;
 /// </summary>
 public class PoolMathTests
 {
+    // ---- anchor pools and noise gain --------------------------------------------------------------
+
+    [Fact]
+    public void A_weight_floor_spreads_the_anchors_over_every_vertex_at_or_above_it()
+    {
+        // 40 vertices at weight 0.9 on a line near the origin, then 40 at 0.5 and 40 at 0.2 farther and
+        // farther out. With four anchors the best-weighted pool (16 vertices) never leaves the line's start.
+        const int n = 120;
+        var p = new double[n, 3];
+        var w = new double[n, 4];
+        var bi = new int[n, 4];
+        for (int v = 0; v < n; v++)
+        {
+            p[v, 0] = v * 0.01 + (v >= 40 ? 10 : 0) + (v >= 80 ? 10 : 0);
+            w[v, 0] = v < 40 ? 0.9 : v < 80 ? 0.5 : 0.2;
+        }
+
+        Assert.All(PoolMath.SelectAnchorRows(p, w, bi, 0, 4), v => Assert.True(v < 16));
+        var half = PoolMath.SelectAnchorRows(p, w, bi, 0, 4, weightFloor: 0.5);
+        Assert.Contains(half, v => v >= 40);
+        Assert.All(half, v => Assert.True(v < 80));           // 0.2 is under half of 0.9
+        Assert.Contains(PoolMath.SelectAnchorRows(p, w, bi, 0, 4, weightFloor: 0.0), v => v >= 80);
+        // the pick opens with the best-weighted vertex and is the same set every time
+        Assert.Contains(0, half);
+        Assert.Equal(half, PoolMath.SelectAnchorRows(p, w, bi, 0, 4, weightFloor: 0.5));
+        // a floor never takes fewer anchors than asked for while candidates remain
+        Assert.Equal(60, PoolMath.SelectAnchorRows(p, w, bi, 0, 60, weightFloor: 0.99).Length);
+    }
+
+    [Fact]
+    public void Row_gain_is_the_weight_for_a_vertex_read_straight_back_and_grows_with_cancelling_coefficients()
+    {
+        // one bone, two vertices one unit apart, weighted 0.5 on it
+        var p = new double[,] { { 0, 0, 0 }, { 1, 0, 0 } };
+        var w = new double[,] { { 0.5, 0, 0, 0 }, { 0.5, 0, 0, 0 } };
+        var bi = new int[2, 4];
+
+        // rows that hand each vertex back whole: x-row = q1 − q0, offset row = q0
+        var plain = new[] { new double[] { -1, 1 }, new double[2], new double[2], new double[] { 1, 0 } };
+        Assert.Equal(0.5, PoolMath.RowGain(p, w, bi, 0, plain), 6);
+
+        // the same rows through coefficients a thousand times larger that cancel on exact input
+        var loud = new[] { new double[] { -1, 1 }, new double[2], new double[2], new double[] { 1001, -1000 } };
+        Assert.True(PoolMath.RowGain(p, w, bi, 0, loud) > 500);
+
+        // a bone no vertex carries multiplies nothing
+        Assert.Equal(0, PoolMath.RowGain(p, w, bi, 3, plain));
+    }
+
     // ---- recover round-trip: BuildC + PInv invert linear-blend skinning -----------------------------
 
     [Fact]

@@ -72,8 +72,7 @@ public static class SwapCompile
     {
         if (!File.Exists(weightedGlb)) throw new FileNotFoundException($"weighted glb not found: {weightedGlb}");
         var field = (reader ?? new BundleReader()).GetMeshField(deobfuscatedBundle, meshName, which)
-            ?? throw new AuthoredRefusalException(
-                $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
+            ?? throw new AuthoredRefusalException(CoreStrings.BuildGameFilesNoLongerHoldMesh(meshName));
 
         // compile onto the target's format (mutates field in place), then slice raw streams
         payload ??= MeshGltf.ImportPayload(weightedGlb, lenient: true);   // tolerate morph-accessor quirks
@@ -139,8 +138,7 @@ public static class SwapCompile
         foreach (var m in meshes)
         {
             var f = reader.GetMeshField(m.DeobfuscatedBundle, m.MeshName, m.Which)
-                ?? throw new AuthoredRefusalException(
-                $"the game files no longer hold the mesh '{m.MeshName}'. Rescan, then build again");
+                ?? throw new AuthoredRefusalException(CoreStrings.BuildGameFilesNoLongerHoldMesh(m.MeshName));
             fields.Add(f);
         }
 

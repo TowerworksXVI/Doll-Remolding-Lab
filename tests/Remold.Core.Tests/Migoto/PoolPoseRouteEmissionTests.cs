@@ -416,8 +416,7 @@ public class PoolPoseRouteEmissionTests : IDisposable
         Assert.True(ComputeTemplates.RingSlotRows(max + 1) * MigotoEmitter.PoseRingEntries > MigotoEmitter.MaxTextureRows);
         MigotoEmitter.RequireRingFits("c_body", "c_cloth", max);
         var e = Assert.Throws<AuthoredRefusalException>(() => MigotoEmitter.RequireRingFits("c_body", "c_cloth", max + 1));
-        Assert.Equal("'c_body' can't be replaced: it moves with 'c_cloth', which has too many vertices to follow. "
-            + "Remove this mesh edit", e.Message);
+        Assert.Equal(CoreStrings.EmitterRingTooLarge("c_body", "c_cloth"), e.Message);
     }
 
     [Fact]

@@ -53,6 +53,8 @@ Download the release zip and extract it anywhere. Run `Doll Remolding Lab.exe`.
 
 Set paths for GF2_Exilium.exe and Blender if they weren't auto-detected. Optional: set the 3DMigoto path to DollMI's or Nexus's `3DMigoto Loader.exe`, or SSMT's per-game `Run.exe`.
 
+The app runs in English or Simplified Chinese (machine translated) / 简体中文（机器翻译）. Choose the language on the first-run window, or later under **Language** in Settings. A change in Settings applies the next time the app starts.
+
 On first run and after an update, there will be a short crawl on startup to gather character data.
 
 ## Update

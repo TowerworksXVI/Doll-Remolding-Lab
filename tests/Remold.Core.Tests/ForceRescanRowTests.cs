@@ -1,4 +1,5 @@
-﻿using System.IO;
+using Remold.App;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Remold.App.ViewModels;
@@ -57,11 +58,11 @@ public class ForceRescanRowTests : IClassFixture<ForceRescanRowTests.FakeInstall
     [Fact]
     public void The_row_says_what_it_clears_and_what_it_keeps()
     {
-        Assert.Equal("Force rescan", SettingsWindow.ForceRescanLabel);
+        Assert.Equal("Force rescan", Strings.SettingsForceRescanLabel);
         Assert.Equal("Clears the app's rebuilt caches, thumbnails included, then re-reads the game. "
-            + "Mods, projects, and edits are kept.", SettingsWindow.ForceRescanHint);
-        Assert.Equal("Clear caches and rescan", SettingsWindow.ForceRescanRestingLabel);
-        Assert.Equal("Caches clear on Save", SettingsWindow.ForceRescanArmedLabel);
+            + "Mods, projects, and edits are kept.", Strings.SettingsForceRescanHint);
+        Assert.Equal("Clear caches and rescan", Strings.SettingsForceRescanResting);
+        Assert.Equal("Caches clear on Save", Strings.SettingsForceRescanArmed);
     }
 
     /// <summary>The hint names the caches as a CATEGORY, not tree by tree. The sweep takes four of them and
@@ -73,9 +74,9 @@ public class ForceRescanRowTests : IClassFixture<ForceRescanRowTests.FakeInstall
         Assert.True(LabPaths.DerivedCacheFolders.Count > 2, "a listing hint would now be false by omission");
         // no tree is named by its own name — "thumbnails" is the modder's word, not the folder's
         foreach (var folder in LabPaths.DerivedCacheFolders)
-            Assert.DoesNotContain(folder, SettingsWindow.ForceRescanHint, System.StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("caches", SettingsWindow.ForceRescanHint);
-        Assert.Contains("thumbnails", SettingsWindow.ForceRescanHint);
+            Assert.DoesNotContain(folder, Strings.SettingsForceRescanHint, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("caches", Strings.SettingsForceRescanHint);
+        Assert.Contains("thumbnails", Strings.SettingsForceRescanHint);
     }
 
     /// <summary>The armed word is a STATEMENT of what the Save will do, like the Recents row's beside it —
@@ -84,9 +85,9 @@ public class ForceRescanRowTests : IClassFixture<ForceRescanRowTests.FakeInstall
     [Fact]
     public void The_armed_word_reports_what_the_save_does_rather_than_asking()
     {
-        Assert.DoesNotContain("?", SettingsWindow.ForceRescanArmedLabel);
-        Assert.EndsWith("clear on Save", SettingsWindow.ForceRescanArmedLabel);
-        Assert.EndsWith("clear on Save", SettingsWindow.RecentsPendingLabel);
+        Assert.DoesNotContain("?", Strings.SettingsForceRescanArmed);
+        Assert.EndsWith("clear on Save", Strings.SettingsForceRescanArmed);
+        Assert.EndsWith("clear on Save", Strings.SettingsRecentsPending);
     }
 
     /// <summary>Arming is reversible on this row: the button toggles rather than latching, so the label goes
@@ -94,8 +95,8 @@ public class ForceRescanRowTests : IClassFixture<ForceRescanRowTests.FakeInstall
     [Fact]
     public void The_button_word_follows_the_row_back_out_of_armed()
     {
-        Assert.Equal(SettingsWindow.ForceRescanRestingLabel, SettingsWindow.ForceRescanButtonLabel(armed: false));
-        Assert.Equal(SettingsWindow.ForceRescanArmedLabel, SettingsWindow.ForceRescanButtonLabel(armed: true));
+        Assert.Equal(Strings.SettingsForceRescanResting, SettingsWindow.ForceRescanButtonLabel(armed: false));
+        Assert.Equal(Strings.SettingsForceRescanArmed, SettingsWindow.ForceRescanButtonLabel(armed: true));
     }
 
 
@@ -108,7 +109,7 @@ public class ForceRescanRowTests : IClassFixture<ForceRescanRowTests.FakeInstall
         var vm = new MainWindowViewModel(startLoad: false) { IsScanning = false };
 
         Assert.False(vm.BuildSettingsInput().ForceRescanOwed);
-        Assert.Equal(SettingsWindow.ForceRescanRestingLabel, SettingsWindow.ForceRescanButtonLabel(armed: false));
+        Assert.Equal(Strings.SettingsForceRescanResting, SettingsWindow.ForceRescanButtonLabel(armed: false));
     }
 
     // ---- the fired route --------------------------------------------------------------------------

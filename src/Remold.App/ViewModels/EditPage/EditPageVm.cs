@@ -1,4 +1,5 @@
-﻿using System;
+using Remold.Core.Text;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -10,6 +11,7 @@ using CommunityToolkit.Mvvm.Input;
 using Remold.Core;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tables;
 using Remold.Core.Textures;
 
 namespace Remold.App.ViewModels.EditPage;
@@ -257,9 +259,10 @@ public sealed partial class EditPageVm : ObservableObject
     public void SelectPart(TargetPart part, string? label = null)
     {
         if (Locate(part, null, null, "", "") is { } row) { SelectedNode = row; return; }
-        // Named as the row would have been named: the install's short token, which is the part's title in
-        // this tree. The renderer slot is the model's address for it and the row's dim subtitle at most.
-        Status = $"{(string.IsNullOrEmpty(label) ? Token(part) : label)} isn't in this list.";
+        // Named as the row would have been named: the install's short token in the UI language, which is the
+        // part's title in this tree. The renderer slot is the model's address for it and the row's dim
+        // subtitle at most.
+        Status = Strings.EditNotInList((string.IsNullOrEmpty(label) ? PartTitle(part) : label));
     }
 
     /// <summary>Land a ③ Build hop on the exact edit row, not merely its part.</summary>
@@ -267,7 +270,7 @@ public sealed partial class EditPageVm : ObservableObject
     {
         if (Locate(edit.Part, edit.EditDefinitionId, EditNodeKind.Edit, "", "") is { } row)
         { SelectedNode = row; return; }
-        Status = $"{edit.Label} isn't in this list.";
+        Status = Strings.EditNotInList(edit.Label);
     }
 
     /// <inheritdoc cref="SelectPart"/>
@@ -278,7 +281,7 @@ public sealed partial class EditPageVm : ObservableObject
         { SelectedNode = row; return; }
         // The friendly label, through the shell's one naming home — the same one the row it failed to find
         // would have carried. An internal character key is not a name the modder ever chose or read.
-        Status = $"{_shell.SubjectLabel(subject, outfit)} isn't in this list.";
+        Status = Strings.EditNotInList(_shell.SubjectLabel(subject, outfit));
     }
 
     /// <summary>Put the selection back on what it was on. A miss clears it, which is what a rebuild that
@@ -414,20 +417,22 @@ public sealed partial class EditPageVm : ObservableObject
                 InspectorHeader = label,
             };
             root.Detail = Join(ambiguous.Contains(label) ? subject.Outfit : "",
-                Count(parts.Count, "part"));
+                Catalog.Plural(parts.Count, Strings.EditPartCount_One(parts.Count), Strings.EditPartCount_Other(parts.Count)));
             root.InspectorDetail = root.Detail;
             foreach (var part in parts) root.Children.Add(part);
 
-            if (_shell.ReadSkeleton(subject.Subject, subject.Outfit) is { } skeleton)
+            if (_shell.ReadSkeleton(subject.Subject, subject.Outfit) is { } skeleton
+                && Catalog.Plural(skeleton.BoneCount, Strings.EditBoneCount_One(skeleton.BoneCount),
+                    Strings.EditBoneCount_Other(skeleton.BoneCount)) is var bones)
                 root.Children.Add(new EditNodeVm
                 {
                     Kind = EditNodeKind.Skeleton,
-                    Title = "Skeleton",
+                    Title = Strings.EditSkeleton,
                     Subject = subject.Subject,
                     Outfit = subject.Outfit,
-                    Detail = Count(skeleton.BoneCount, "bone"),
-                    InspectorHeader = "Skeleton",
-                    InspectorDetail = Count(skeleton.BoneCount, "bone"),
+                    Detail = bones,
+                    InspectorHeader = Strings.EditSkeleton,
+                    InspectorDetail = bones,
                     SkeletonTree = skeleton.Bones,
                 });
 
@@ -442,10 +447,10 @@ public sealed partial class EditPageVm : ObservableObject
     private EditNodeVm BuildPart(EditBoardSnapshot board, TargetPart part,
         IReadOnlyList<AuthoredEditOutlineEntry> edits)
     {
-        // The part's own name for the tree: the install's short token, with the renderer slot under it, which
-        // is the shipped workbench's part row exactly. An install that cannot name the token leaves the
-        // renderer slot standing as the title rather than an empty one.
-        string token = Token(part);
+        // The part's own name for the tree: the install's short token in the UI language, with the renderer
+        // slot under it, which is the shipped workbench's part row exactly. An install that cannot name the
+        // token leaves the renderer slot standing as the title rather than an empty one.
+        string title = PartTitle(part);
         // The lod0 mesh the project recorded when it opened the part. It is a label, never identity, and it
         // is off the row now that the slot is the row's own subtitle — the filter still finds a part by it.
         string mesh = board.Lod0MeshName(part);
@@ -458,16 +463,19 @@ public sealed partial class EditPageVm : ObservableObject
         var node = new EditNodeVm
         {
             Kind = EditNodeKind.Part,
-            Title = token,
+            Title = title,
             Part = part,
             Subject = part.Subject,
             Outfit = part.Outfit,
-            InspectorHeader = token,
+            InspectorHeader = title,
             Detail = part.RendererSlot,
-            FilterExtra = Join(part.RendererSlot, mesh),
+            // The token itself too, so the game's own word finds the part whatever language the title is in.
+            FilterExtra = Join(_shell.PartToken(part) ?? "", part.RendererSlot, mesh),
         };
         node.InspectorDetail = Join(part.RendererSlot,
-            ordered.Count == 0 ? "no edits yet" : Count(ordered.Count, "edit"));
+            ordered.Count == 0 ? Strings.EditNoEditsYet
+                : Catalog.Plural(ordered.Count, Strings.EditEditCount_One(ordered.Count),
+                    Strings.EditEditCount_Other(ordered.Count)));
         node.Problem = _refusals.TryGetValue(Key(part), out string? refusal) ? refusal : null;
         node.MeshEditBlock = _meshEditBlocks.TryGetValue(Key(part), out string? meshBlock) ? meshBlock : null;
         node.StartsHidden = _hiddenParts.Contains(Key(part));
@@ -493,8 +501,8 @@ public sealed partial class EditPageVm : ObservableObject
             // The failed read is the one a retry can fix, and saying it as "this part isn't in the current
             // game files" is a lie about the install told for the rest of the session.
             node.OriginalsNote = node.IsReadingOriginals || node.MapGroups.Count > 0 ? null
-                : _resolveFailures.Contains(Key(part)) ? EditNodeVm.OriginalsReadFailed
-                : resolved is null ? EditNodeVm.OriginalsNotInstalled : EditNodeVm.OriginalsUnreadable;
+                : _resolveFailures.Contains(Key(part)) ? Strings.EditOriginalsReadFailed
+                : resolved is null ? Strings.EditOriginalsNotInstalled : Strings.EditOriginalsUnreadable;
         }
 
         node.HasEditBadge = ordered.Any(e => e.Kind == EditDefinitionKind.Content);
@@ -522,15 +530,15 @@ public sealed partial class EditPageVm : ObservableObject
             ReturnWarning = edit.ReturnWarning,
             Subject = part.Subject,
             Outfit = part.Outfit,
-            InspectorHeader = $"{Token(part)} · {edit.Label}",
-            Detail = edit.Kind == EditDefinitionKind.Hide ? "hides this part" : "",
+            InspectorHeader = $"{PartTitle(part)} · {edit.Label}",
+            Detail = edit.Kind == EditDefinitionKind.Hide ? Strings.EditHidesThisPart : "",
             EditLabel = edit.Label,
             HasEditBadge = edit.Kind == EditDefinitionKind.Content,
             HasMeshEdit = meshEdited,
         };
         node.InspectorDetail = edit.Kind == EditDefinitionKind.Hide
-            ? $"hide edit on {Token(part)}"
-            : $"edit {position} of {total} on {Token(part)}";
+            ? Strings.EditHideEditOn(PartTitle(part))
+            : Strings.EditPositionOn(position, total, PartTitle(part));
         node.PlacementSummary = EditNodeVm.Uses(edit.Placements.Any(placement => placement.IsAlways),
             edit.Placements.Count(placement => !placement.IsAlways));
 
@@ -566,10 +574,10 @@ public sealed partial class EditPageVm : ObservableObject
                     MaterialOrdinal = m,
                     Subject = part.Subject,
                     Outfit = part.Outfit,
-                    InspectorHeader = $"{Token(part)} · {edit.Label} · {group.Title}",
+                    InspectorHeader = $"{PartTitle(part)} · {edit.Label} · {group.Title}",
                 };
                 material.InspectorDetail =
-                    $"material {m + 1} of {node.MapGroups.Count} on {edit.Label}";
+                    Strings.EditMaterialPositionOn(m + 1, node.MapGroups.Count, edit.Label);
                 material.MapGroups.Add(group);
                 node.Children.Add(material);
             }
@@ -614,7 +622,7 @@ public sealed partial class EditPageVm : ObservableObject
                         role: meshEdited ? EditCardRole.StandIn : EditCardRole.Edited))
                     .ToList();
                 string title = group.Select(state => state.Slot.Material?.Name)
-                    .FirstOrDefault(name => !string.IsNullOrEmpty(name)) ?? $"material {group.Key}";
+                    .FirstOrDefault(name => !string.IsNullOrEmpty(name)) ?? Strings.MaterialByPosition(group.Key);
                 yield return new EditMapGroupVm(title, new[] { new EditMapSetVm("", cards) },
                     BuildShadingRow(edit, group.Key, title, all));
             }
@@ -663,10 +671,10 @@ public sealed partial class EditPageVm : ObservableObject
             var donorSets = group.OrderBy(set => set.Submesh).ToList();
             bool foldMany = donorSets.Count > 1;
             var sets = donorSets.Select(set => new EditMapSetVm(
-                foldMany ? $"submesh {set.Submesh}" : "", set.Cards)).ToList();
+                foldMany ? Strings.EditSubmeshLabel(set.Submesh) : "", set.Cards)).ToList();
             string? materialName = resolved?.Materials?.FirstOrDefault(material =>
                 material.MaterialSlotIndex == group.Key)?.Material.Name;
-            string title = string.IsNullOrEmpty(materialName) ? $"material {group.Key}" : materialName;
+            string title = string.IsNullOrEmpty(materialName) ? Strings.MaterialByPosition(group.Key) : materialName;
             yield return new EditMapGroupVm(title, sets,
                 BuildShadingRow(edit, group.Key, title, all));
         }
@@ -686,7 +694,7 @@ public sealed partial class EditPageVm : ObservableObject
                 .Select(state => BuildCard(all, edit, state, gameMaterialPosition: null,
                     role: EditCardRole.StandIn)).ToList();
             string title = group.Select(state => state.Slot.Material?.Name)
-                .FirstOrDefault(name => !string.IsNullOrEmpty(name)) ?? $"material {group.Key}";
+                .FirstOrDefault(name => !string.IsNullOrEmpty(name)) ?? Strings.MaterialByPosition(group.Key);
             yield return new EditMapGroupVm(title, new[] { new EditMapSetVm("", cards) },
                 BuildShadingRow(edit, group.Key, title, all));
         }
@@ -721,10 +729,10 @@ public sealed partial class EditPageVm : ObservableObject
                 cards.Add(BuildOriginalCard(part, material, texture, resolved));
             }
             string title = string.IsNullOrEmpty(material.Material.Name)
-                ? $"material {material.MaterialSlotIndex}" : material.Material.Name;
+                ? Strings.MaterialByPosition(material.MaterialSlotIndex) : material.Material.Name;
             yield return new EditMapGroupVm(title, new[] { new EditMapSetVm("", cards) },
                 BuildBareShadingRow(part, material.MaterialSlotIndex, title, material.Material),
-                note: cards.Count == 0 ? EditMapGroupVm.NoMapsRead : null);
+                note: cards.Count == 0 ? Strings.MaterialNoMapsRead : null);
         }
     }
 
@@ -899,22 +907,17 @@ public sealed partial class EditPageVm : ObservableObject
             && counts[materialPosition.Value] > 0;
     }
 
-    /// <summary>A count and its noun, pluralised: <c>1 edit</c>, <c>7 edits</c>. Shared with the shell so a
-    /// sentence built there counts the same way a sentence built here does.</summary>
-    internal static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
 
     private static string Join(params string[] parts) =>
         string.Join(" · ", parts.Where(p => !string.IsNullOrEmpty(p)));
 
-    /// <summary>What the page calls one part: the install's short token where it has one, the renderer slot
-    /// where it does not.</summary>
-    private string Token(TargetPart part)
+    /// <summary>What the page calls one part: the install's short token, read in the UI language, where it has
+    /// one; the renderer slot, as it is, where it does not.</summary>
+    private string PartTitle(TargetPart part)
     {
         string token = _shell.PartToken(part) ?? "";
-        return token.Length > 0 ? token : part.RendererSlot;
+        return token.Length > 0 ? PartNames.Display(token) : part.RendererSlot;
     }
-
-    private string PartTitle(TargetPart part) => Token(part);
 
     // A part the install refused, kept by part so the sentence survives the next status line. Cleared for a
     // part the moment one of its routes succeeds.
@@ -1168,7 +1171,7 @@ public sealed partial class EditPageVm : ObservableObject
     /// <summary>Claim the gate for one verb, or refuse it in the same words the disabled button carries.</summary>
     private bool Take(string key, bool blocked)
     {
-        if (blocked || !_busy.Add(key)) { Status = BlenderGate.Busy; return false; }
+        if (blocked || !_busy.Add(key)) { Status = Strings.BlenderBusy; return false; }
         ShowBusy();
         return true;
     }
@@ -1607,7 +1610,7 @@ public sealed partial class EditPageVm : ObservableObject
             }
         }
         catch (Exception e) { Status = AuthoredRefusal.ForScreen(e,
-            node.IsPart ? "open this part in Blender" : "open this edit in Blender"); }
+            node.IsPart ? Strings.Action_OpenPartInBlender : Strings.Action_OpenEditInBlender); }
         finally { Release(key); }
     }
 
@@ -1620,11 +1623,10 @@ public sealed partial class EditPageVm : ObservableObject
         if (_session is null || node?.Edit is not { } edit || node.Part is null) return;
         CommitPendingRename();
         var part = node.Part;
-        if (!await _shell.ConfirmAsync($"Revert the mesh on '{edit.Label}'?",
-                Undoable($"'{edit.Label}' goes back to the original mesh, at every level of detail. "
-                    + "Its maps are kept."), "Revert", dangerous: true)) return;
+        if (!await _shell.ConfirmAsync(Strings.EditRevertMeshTitle(edit.Label),
+                Undoable(Strings.EditRevertMeshBody(edit.Label)), Strings.EditRevert, dangerous: true)) return;
         Mutate(part, EditBusy(part, edit.EditDefinitionId), EditIsBusy(part, edit.EditDefinitionId),
-            "revert the mesh", () =>
+            Strings.Action_RevertTheMesh, () =>
         {
             var slotIds = _session.Slots(edit.EditDefinitionId)
                 .Where(state => state.Slot.Input == TargetInputKind.Geometry
@@ -1637,7 +1639,7 @@ public sealed partial class EditPageVm : ObservableObject
             });
             InvalidateMesh(part, edit.EditDefinitionId);
             ReloadSelectedPreviews();
-            return $"{edit.Label} is back to the original mesh.";
+            return Strings.EditMeshReverted(edit.Label);
         });
     }
 
@@ -1649,10 +1651,10 @@ public sealed partial class EditPageVm : ObservableObject
         var part = node.Part;
         string? created = null;
         Mutate(part, EditBusy(part, edit.EditDefinitionId), EditIsBusy(part, edit.EditDefinitionId),
-            "copy this edit", () =>
+            Strings.Action_CopyThisEdit, () =>
             {
                 created = _session.DuplicateEdit(edit.EditDefinitionId);
-                return $"Copied {edit.Label}.";
+                return Strings.EditCopied(edit.Label);
             },
             after: () => { if (created is not null) Reselect(part, created, EditNodeKind.Edit); });
     }
@@ -1666,23 +1668,21 @@ public sealed partial class EditPageVm : ObservableObject
         CommitPendingRename();
         var part = node.Part;
         var (always, states) = PlacementSplit(edit.EditDefinitionId);
-        string body = !always && states == 0
-            ? "This edit isn't used anywhere."
-            : $"This edit is used in {EditNodeVm.Where(always, states)}.";
+        string body = EditNodeVm.DeleteUses(always, states);
 
-        if (!await _shell.ConfirmAsync($"Delete '{edit.Label}'?", Undoable(body), "Delete", dangerous: true))
+        if (!await _shell.ConfirmAsync(Strings.EditDeleteTitle(edit.Label), Undoable(body), Strings.EditDelete, dangerous: true))
             return;
         Mutate(part, EditBusy(part, edit.EditDefinitionId), EditIsBusy(part, edit.EditDefinitionId),
-            "delete this edit", () =>
+            Strings.Action_DeleteThisEdit, () =>
         {
             _session.DeleteEdit(edit.EditDefinitionId);
             InvalidateMesh(part, edit.EditDefinitionId);
-            return $"Deleted {edit.Label}.";
+            return Strings.EditDeleted(edit.Label);
         });
     }
 
     /// <summary>The tail a destructive confirm carries, in the app's own words.</summary>
-    private static string Undoable(string body) => body + "\n\nThis cannot be undone.";
+    private static string Undoable(string body) => body + "\n\n" + Strings.CannotBeUndone;
 
     /// <summary>The delete confirm's one activation fact. Always and each state count once.</summary>
     internal int PlacementCount(string editDefinitionId)
@@ -1701,8 +1701,8 @@ public sealed partial class EditPageVm : ObservableObject
             found.Placements.Count(placement => !placement.IsAlways));
     }
 
-    /// <summary>Commit the inline rename. A blank name restores the default this edit would have been given,
-    /// which for a hide edit is "Hidden". Every edit is renamed the same way.</summary>
+    /// <summary>Commit the inline rename. A blank name restores the default this edit would be given now, in
+    /// the UI language, which for a hide edit is the hide name. Every edit is renamed the same way.</summary>
     [RelayCommand]
     private void CommitRename(EditNodeVm? node)
     {
@@ -1713,7 +1713,7 @@ public sealed partial class EditPageVm : ObservableObject
         if (string.Equals(node.EditLabel, edit.Label, StringComparison.Ordinal)) return;
         var part = node.Part;
         Mutate(part, EditBusy(part, edit.EditDefinitionId), EditIsBusy(part, edit.EditDefinitionId),
-            "rename this edit",
+            Strings.Action_RenameThisEdit,
             () => { _session.RenameEdit(edit.EditDefinitionId, node.EditLabel); return null; });
     }
 
@@ -1769,14 +1769,14 @@ public sealed partial class EditPageVm : ObservableObject
         var part = node.Part;
         string? standing = HideEdit(part);
         string? created = null;
-        Mutate(part, PartBusy(part), PartIsBusy(part), "hide this part",
+        Mutate(part, PartBusy(part), PartIsBusy(part), Strings.Action_HideThisPart,
             () =>
             {
                 OpenPart(part);
                 created = _session.AddHideEdit(part);
                 var (always, states) = PlacementSplit(created);
                 return standing is null ? AddedEdit(created, EditLabel(created))
-                    : $"{EditLabel(created)} already exists. {EditNodeVm.Uses(always, states)}";
+                    : Strings.EditAlreadyExists(EditLabel(created)) + " " + EditNodeVm.Uses(always, states);
             },
             after: () => { if (created is not null) Reselect(part, created, EditNodeKind.Edit); });
     }
@@ -1788,19 +1788,16 @@ public sealed partial class EditPageVm : ObservableObject
     {
         var (always, states) = PlacementSplit(editDefinitionId);
         return !always && states == 0
-            ? $"Added {label}. {EditNodeVm.NotUsedYet} {PlaceItInBuild}"
-            : $"Added {label}. {EditNodeVm.Uses(always, states)}";
+            ? Strings.EditAdded(label) + " " + Strings.EditNotUsedYet + " " + Strings.EditPlaceItInBuild
+            : Strings.EditAdded(label) + " " + EditNodeVm.Uses(always, states);
     }
-
-    /// <summary>Where an edit nothing uses yet is given its place.</summary>
-    public const string PlaceItInBuild = "Add it to Always or a state in ③ Build.";
 
     /// <summary>The part's hide edit, or null where it has none.</summary>
     private string? HideEdit(TargetPart part) => _session?.Outline().Edits.FirstOrDefault(edit =>
         edit.Kind == EditDefinitionKind.Hide && edit.Target.SameAs(part))?.Id;
 
     private string EditLabel(string editDefinitionId) => _session?.Outline().Edits.FirstOrDefault(edit =>
-        string.Equals(edit.Id, editDefinitionId, StringComparison.Ordinal))?.Label ?? "the edit";
+        string.Equals(edit.Id, editDefinitionId, StringComparison.Ordinal))?.Label ?? Strings.EditFallbackName;
 
     // ---- verbs: the subject inspector ----
     //
@@ -1811,13 +1808,13 @@ public sealed partial class EditPageVm : ObservableObject
     /// <summary>Open every part of this subject in one Blender session.</summary>
     [RelayCommand]
     private async Task OpenSubjectInBlender(EditNodeVm? node) =>
-        await RunSubject(node, "open this item's parts in Blender",
+        await RunSubject(node, Strings.Action_OpenItemPartsInBlender,
             subject => _shell.OpenSubjectInBlenderAsync(subject.Subject, subject.Outfit, _progress));
 
     /// <summary>Open every part from its active or first content edit, falling back to the original.</summary>
     [RelayCommand]
     private async Task OpenSubjectFirstEditInBlender(EditNodeVm? node) =>
-        await RunSubject(node, "open this item's first edits in Blender",
+        await RunSubject(node, Strings.Action_OpenItemFirstEditsInBlender,
             subject => _shell.OpenSubjectFirstEditInBlenderAsync(
                 subject.Subject, subject.Outfit, _progress));
 
@@ -1825,7 +1822,7 @@ public sealed partial class EditPageVm : ObservableObject
     /// since a cancel leaves the mod exactly as it was and a removal takes the whole branch with it.</summary>
     [RelayCommand]
     private async Task RemoveSubject(EditNodeVm? node) =>
-        await RunSubject(node, "remove this item from the mod", async subject =>
+        await RunSubject(node, Strings.Action_RemoveItemFromMod, async subject =>
         {
             await _shell.RemoveSubjectAsync(subject.Subject, subject.Outfit);
         });
@@ -1837,7 +1834,7 @@ public sealed partial class EditPageVm : ObservableObject
         if (node is not { IsSubject: true }) return;
         CommitPendingRename();
         try { _shell.ShowSubjectFolder(node.Subject, node.Outfit); }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "show this item's files"); }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_ShowItemFiles); }
     }
 
     /// <summary>Run one subject verb behind the subject's own gate. <paramref name="action"/> is what the
@@ -1879,7 +1876,7 @@ public sealed partial class EditPageVm : ObservableObject
             await OpenOriginalCardAsync(card);
             return;
         }
-        await RunCard(card, "open this map", async () =>
+        await RunCard(card, Strings.Action_OpenThisMap, async () =>
         {
             var opened = await _shell.OpenPictureAsync(card.Slot, _progress);
             ReportBound(card, opened.Published);
@@ -1900,7 +1897,7 @@ public sealed partial class EditPageVm : ObservableObject
         }
         string? path;
         try { path = await _shell.PickPictureAsync(); }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "choose an image"); return; }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_ChooseAnImage); return; }
         if (path is null) return;   // cancelled: nothing was chosen, so nothing is said
         await HandleDropAsync(new[] { path }, card);
     }
@@ -1909,7 +1906,7 @@ public sealed partial class EditPageVm : ObservableObject
     private async Task OpenCardUvGuide(EditMapCardVm? card)
     {
         if (card is null) return;
-        await RunCard(card, "open the UV guide", () => _shell.OpenUvGuideAsync(card.Slot, _progress));
+        await RunCard(card, Strings.Action_OpenUvGuide, () => _shell.OpenUvGuideAsync(card.Slot, _progress));
     }
 
     /// <summary>Put one card back to the game's own picture. Only a game slot has one; a replacement's own
@@ -1925,7 +1922,7 @@ public sealed partial class EditPageVm : ObservableObject
         if (!card.IsGameSlot && !rampRecord) return;
         CommitPendingRename();
         var slot = card.Slot;
-        Mutate(slot.Edit.Part, CardBusy(slot), CardIsBusy(slot), "revert this map",
+        Mutate(slot.Edit.Part, CardBusy(slot), CardIsBusy(slot), Strings.Action_RevertThisMap,
             () =>
             {
                 if (rampRecord)
@@ -1933,12 +1930,12 @@ public sealed partial class EditPageVm : ObservableObject
                     _session.ChooseInheritedCarrier(slot.Edit.EditDefinitionId, slot.SlotId);
                     InvalidateThumbs(slot.SlotId);
                     ReloadSelectedPreviews();
-                    return "Cleared the toon ramp choice. The replacement uses the original part's toon ramp again.";
+                    return Strings.RampChoiceCleared;
                 }
                 _session.ChooseTargetGameValue(slot.Edit.EditDefinitionId, slot.SlotId);
                 InvalidateThumbs(slot.SlotId);
                 ReloadSelectedPreviews();
-                return $"{card.MapLabel} is back to the original.";
+                return Strings.EditMapReverted(card.MapLabel);
             },
             after: () => Reselect(slot.Edit.Part, slot.Edit.EditDefinitionId, EditNodeKind.Edit));
     }
@@ -1957,7 +1954,7 @@ public sealed partial class EditPageVm : ObservableObject
             await ChooseRampOnOriginalCardAsync(card);
             return;
         }
-        await RunCard(card, "choose a toon ramp", async () =>
+        await RunCard(card, Strings.Action_ChooseToonRamp, async () =>
         {
             if (await _shell.PickRampAsync(card.Slot) is not { } pick) return;
             if (pick.Picked is { } picked) { ReportBound(card, picked); return; }
@@ -1987,12 +1984,8 @@ public sealed partial class EditPageVm : ObservableObject
         InvalidateThumbs(slot.SlotId);
         Reselect(slot.Edit.Part, slot.Edit.EditDefinitionId, EditNodeKind.Edit);
         ReloadSelectedPreviews();
-        Status = KeptGameOwnRamp;
+        Status = Strings.RampKeptGameOwn;
     }
-
-    /// <summary>What the pinned row's answer reports. It names the state rather than the mechanism: what the
-    /// modder chose is that the game's own ramp keeps drawing here.</summary>
-    internal const string KeptGameOwnRamp = "This material uses the original toon ramp.";
 
     [RelayCommand]
     private void RevertRamp(EditMapCardVm? card) => RevertCard(card);
@@ -2012,6 +2005,25 @@ public sealed partial class EditPageVm : ObservableObject
         finally { Release(gate); }
     }
 
+    /// <summary>What a copy says about the values the source material does not state: nothing when it
+    /// states them all.</summary>
+    internal static string CopySkippedLine(IReadOnlyList<string> skipped) => skipped.Count == 0 ? ""
+        : Catalog.Plural(skipped.Count,
+            Strings.EditCopyLeavesUnchanged_One(string.Join(CoreStrings.ListSeparator, skipped)),
+            Strings.EditCopyLeavesUnchanged_Other(string.Join(CoreStrings.ListSeparator, skipped)));
+
+    /// <summary>What a write of shading values says, by how many values it set and how many it returned to
+    /// the original.</summary>
+    internal static string ShadingWriteLine(int set, int cleared) => set > 0 && cleared > 0
+        ? Catalog.Plural(set,
+            Catalog.Plural(cleared, Strings.ShadingSetReturned_One_One(set, cleared),
+                Strings.ShadingSetReturned_One_Other(set, cleared)),
+            Catalog.Plural(cleared, Strings.ShadingSetReturned_Other_One(set, cleared),
+                Strings.ShadingSetReturned_Other_Other(set, cleared)))
+        : set > 0 ? Catalog.Plural(set, Strings.ShadingSetValues_One(set), Strings.ShadingSetValues_Other(set))
+        : Catalog.Plural(cleared, Strings.ShadingReturnedValues_One(cleared),
+            Strings.ShadingReturnedValues_Other(cleared));
+
     private async Task CopyShadingFromMaterialAsync(EditShadingRowVm row)
     {
         if (_session is null) return;
@@ -2028,42 +2040,43 @@ public sealed partial class EditPageVm : ObservableObject
         }
         catch
         {
-            Status = CopyShadingFailed;
+            Status = Strings.ShadingCopyFailed;
             return;
         }
         if (source is null) return;
         var disabled = source.EffectsToDisable ?? Array.Empty<string>();
         var warnings = source.SourceOnlyEffects ?? Array.Empty<string>();
         var skipped = source.SkippedUnreadable ?? Array.Empty<string>();
-        string skippedLine = skipped.Count == 0 ? ""
-            : $"Leaves {string.Join(", ", skipped)} unchanged: the source material doesn't state "
-              + (skipped.Count == 1 ? "it." : "them.");
+        string skippedLine = CopySkippedLine(skipped);
         if (source.Rows.Count == 0 && disabled.Count == 0 && !source.CopyRamp)
         {
-            Status = skipped.Count > 0 ? "Nothing to copy. " + skippedLine
-                : warnings.Count == 0 ? ShadingAlreadyMatches
-                : "This material cannot use these source effects: " + string.Join(", ", warnings) + ".";
-            if (!source.EffectsCompared) Status += " " + EffectsNotCompared;
+            Status = skipped.Count > 0 ? Strings.EditCopyNothingToCopy + " " + skippedLine
+                : warnings.Count == 0 ? Strings.ShadingAlreadyMatches
+                : Strings.EditCopySourceEffectsUnusable(string.Join(CoreStrings.ListSeparator, warnings));
+            if (!source.EffectsCompared) Status += " " + Strings.ShadingEffectsNotCompared;
             return;
         }
         var body = new List<string>();
         int copies = source.Rows.Count(value => value.SourceValue is not null);
         int returned = source.Rows.Count - copies;
-        if (copies > 0) body.Add($"Copies {Count(copies, "shading value")}.");
-        if (returned > 0) body.Add($"Returns {Count(returned, "value")} to the original.");
+        if (copies > 0)
+            body.Add(Catalog.Plural(copies, Strings.EditCopyCopiesValues_One(copies), Strings.EditCopyCopiesValues_Other(copies)));
+        if (returned > 0)
+            body.Add(Catalog.Plural(returned, Strings.EditCopyReturnsValues_One(returned),
+                Strings.EditCopyReturnsValues_Other(returned)));
         if (disabled.Count > 0)
-            body.Add("Disables " + string.Join(", ", disabled.Select(id =>
-                MaterialEffectCatalog.Definition(id)?.Label ?? id)) + ".");
-        if (source.CopyRamp) body.Add("Copies the toon ramp.");
+            body.Add(Strings.EditCopyDisables(string.Join(CoreStrings.ListSeparator, disabled.Select(id =>
+                MaterialEffectCatalog.Definition(id)?.Label ?? id))));
+        if (source.CopyRamp) body.Add(Strings.EditCopyCopiesRamp);
         if (skipped.Count > 0) body.Add(skippedLine);
         if (warnings.Count > 0)
-            body.Add("This material cannot use these source effects: " + string.Join(", ", warnings) + ".");
-        if (!source.EffectsCompared) body.Add(EffectsNotCompared);
-        if (row.IsFirstEdit) body.Add(AddsFirstEdit);
-        if (!await _shell.ConfirmAsync($"Copy from {source.Label}?", string.Join(" ", body), "Copy"))
+            body.Add(Strings.EditCopySourceEffectsUnusable(string.Join(CoreStrings.ListSeparator, warnings)));
+        if (!source.EffectsCompared) body.Add(Strings.ShadingEffectsNotCompared);
+        if (row.IsFirstEdit) body.Add(Strings.EditAddsFirstEdit);
+        if (!await _shell.ConfirmAsync(Strings.EditCopyFromTitle(source.Label), string.Join(" ", body), Strings.ShadingSourceCopy))
             return;
         var session = _session;
-        WriteShading(row, "copy these shading values", edit =>
+        WriteShading(row, Strings.Action_CopyShadingValues, edit =>
             {
                 session.ApplyMaterialShading(edit.EditDefinitionId, row.Part,
                     row.MaterialSlotIndex, source.Rows.Select(value =>
@@ -2073,29 +2086,9 @@ public sealed partial class EditPageVm : ObservableObject
                     source.CopyRamp ? source.SourcePart : null, source.SourceMaterialSlotIndex,
                     new MaterialShadingSource(source.SourcePart, source.SourceMaterialSlotIndex,
                         source.SourceMaterialName));
-                return $"Copied shading from {source.Label}.";
+                return Strings.EditCopiedShadingFrom(source.Label);
             });
     }
-
-    /// <summary>Copy compares effects only when both materials' effects were read.</summary>
-    internal const string EffectsNotCompared =
-        "Effects are not compared: this material's effects couldn't be read.";
-
-    /// <summary>The two materials already agree on every value the shader reads, so a copy has nothing
-    /// to set.</summary>
-    internal const string ShadingAlreadyMatches =
-        "The two materials already have the same shading values.";
-    internal const string ShadingMatchesOriginal =
-        "The shading values already match the original.";
-    internal const string ReadingShadingValues = "Reading shading values…";
-    internal const string CopyShadingFailed =
-        "Couldn't open the material list. Try again.";
-    internal const string ShadingSourceUnreadable =
-        "Couldn't read the chosen material's shading values.";
-    internal const string ShadingInstallUnavailable =
-        "Couldn't read the game files, so shading values are unavailable.";
-    internal const string EditShadingValuesFailed =
-        "Couldn't open the shading values. Try again.";
 
     /// <summary>Open the shading-values dialog and apply what came back: typed values are set, cleared
     /// rows return to the original.</summary>
@@ -2126,14 +2119,14 @@ public sealed partial class EditPageVm : ObservableObject
         }
         catch
         {
-            Status = EditShadingValuesFailed;
+            Status = Strings.ShadingValuesOpenFailed;
             return;
         }
         if (answer is null) return;
         var effects = answer.EffectEdits ?? Array.Empty<EditShadingEffectEdit>();
         if (answer.Edits.Count == 0 && effects.Count == 0)
         {
-            if (answer.MatchesOriginal) Status = ShadingMatchesOriginal;
+            if (answer.MatchesOriginal) Status = Strings.ShadingMatchesOriginal;
             return;
         }
         IReadOnlyList<EditShadingValueEdit> edits = answer.Edits;
@@ -2149,7 +2142,7 @@ public sealed partial class EditPageVm : ObservableObject
             ? await ReadShadingEffectsAsync(row) : null;
         if (effects.Any(effect => !effect.Enabled) && proof?.EffectOperations is null) return;
         var session = _session;
-        WriteShading(row, "set these shading values", edit =>
+        WriteShading(row, Strings.Action_SetShadingValues, edit =>
             {
                 int set = edits.Count(value => value.Value is { Length: > 0 });
                 int cleared = edits.Count - set;
@@ -2158,11 +2151,8 @@ public sealed partial class EditPageVm : ObservableObject
                         new AuthoredMaterialValueEdit(value.Semantic, value.Value)).ToArray(),
                     effects.Select(effect => new AuthoredMaterialEffectEdit(effect.EffectId,
                         effect.Enabled)).ToArray(), _shell.ResolvePart, proof?.EffectOperations);
-                if (effects.Count > 0) return "Updated shading.";
-                return set > 0 && cleared > 0
-                    ? $"Set {Count(set, "value")}, returned {Count(cleared, "value")} to the original."
-                    : set > 0 ? $"Set {Count(set, "value")}."
-                    : $"Returned {Count(cleared, "value")} to the original.";
+                if (effects.Count > 0) return Strings.ShadingUpdated;
+                return ShadingWriteLine(set, cleared);
             });
     }
 
@@ -2204,14 +2194,14 @@ public sealed partial class EditPageVm : ObservableObject
         if (row is null || _session is null || !row.IsEdited) return;
         var session = _session;
         Mutate(row.Part, EditBusy(row.Part, row.Edit.EditDefinitionId),
-            EditIsBusy(row.Part, row.Edit.EditDefinitionId), "revert these shading values", () =>
+            EditIsBusy(row.Part, row.Edit.EditDefinitionId), Strings.Action_RevertShadingValues, () =>
             {
                 session.ApplyMaterialShading(row.Edit.EditDefinitionId, row.Part,
                     row.MaterialSlotIndex, row.AuthoredValues.Keys.Select(semantic =>
                         new AuthoredMaterialValueEdit(semantic, null)).ToArray(),
                     row.DisabledEffectIds.Select(id => new AuthoredMaterialEffectEdit(id, true)).ToArray(),
                     _shell.ResolvePart);
-                return "Returned shading to the original.";
+                return Strings.ShadingReverted;
             },
             after: () => Reselect(row.Edit.Part, row.Edit.EditDefinitionId, EditNodeKind.Edit));
     }
@@ -2249,7 +2239,7 @@ public sealed partial class EditPageVm : ObservableObject
         var pngs = paths.Where(p => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase)).ToList();
         if (pngs.Count != 1)
         {
-            Status = pngs.Count == 0 ? "Only a .png can replace a map." : "Drop one .png at a time.";
+            Status = pngs.Count == 0 ? Strings.EditDropOnlyPng : Strings.EditDropOnePng;
             return;
         }
         await DropOnCardAsync(card, pngs[0]);
@@ -2261,19 +2251,15 @@ public sealed partial class EditPageVm : ObservableObject
     private string NoDropTargetHere()
     {
         var node = SelectedNode;
-        if (node is null || node.IsSubject || node.IsSkeleton) return SelectAPart;
-        if (node.HasMapGroups) return NoDropTarget;
+        if (node is null || node.IsSubject || node.IsSkeleton) return Strings.EditDropSelectPart;
+        if (node.HasMapGroups) return Strings.EditDropOnMapCard;
         // A part with edits shows its overview instead of cards; a part whose read is still running gets
         // the app's own wait sentence, because a gesture that clears the line and says nothing reads as a
         // drop that was taken. A part the install could not answer for already says which on the row.
-        return node.IsPart && node.HasOverview ? SelectAnEdit
+        return node.IsPart && node.HasOverview ? Strings.EditDropSelectEdit
             : node.IsPart && node.IsReadingOriginals ? GameFilesGate.SubjectReading
             : "";
     }
-
-    public const string NoDropTarget = "Drop a .png on a map card.";
-    public const string SelectAPart = "Select a part to see its maps.";
-    public const string SelectAnEdit = "Select an edit to see its maps.";
 
     /// <summary>A <c>.png</c> dropped on one card lands on that card's slot, whatever the file is called.
     /// What the card IS is asked before anything is decoded or published: a toon ramp is shading data and no
@@ -2293,12 +2279,12 @@ public sealed partial class EditPageVm : ObservableObject
         }
         if (card.IsRamp)
         {
-            Status = $"Cannot apply {Path.GetFileName(path)} here. {card.RampRefusal}";
+            Status = Strings.CannotApplyHere(Path.GetFileName(path)) + " " + card.RampRefusal;
             return;
         }
         if (card.Role == EditCardRole.StandIn)
         {
-            Status = $"Cannot apply {Path.GetFileName(path)} here. {EditMapCardVm.StandInNotDroppable}";
+            Status = Strings.CannotApplyHere(Path.GetFileName(path)) + " " + Strings.MapStandInNotDroppable;
             return;
         }
         if (card.Role == EditCardRole.FirstEdit)
@@ -2306,7 +2292,7 @@ public sealed partial class EditPageVm : ObservableObject
             await DropOnOriginalCardAsync(card, path);
             return;
         }
-        await RunCard(card, "apply this image", async () =>
+        await RunCard(card, Strings.Action_ApplyThisImage, async () =>
         {
             var produced = await _shell.AcceptDroppedPictureAsync(card.Slot, path, _progress);
             ReportBound(card, produced);
@@ -2341,12 +2327,12 @@ public sealed partial class EditPageVm : ObservableObject
         bool confirmed;
         try
         {
-            confirmed = await _shell.ConfirmAsync($"Apply {name}?",
-                $"{name} becomes this part's {map}. {AddsFirstEdit}{size}{consequence}", "Apply");
+            confirmed = await _shell.ConfirmAsync(Strings.EditApplyTitle(name),
+                Strings.ApplyImageBecomesMap(name, map) + " " + Strings.EditAddsFirstEdit + size + consequence, Strings.Apply);
         }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "apply this image"); return; }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_ApplyThisImage); return; }
         if (!confirmed) return;
-        await RunCard(card, "apply this image", async () =>
+        await RunCard(card, Strings.Action_ApplyThisImage, async () =>
         {
             var produced = await _shell.AcceptDroppedPictureAsync(card.Slot, path, _progress,
                 confirmed: true, offered: new EditTextureSharingOffer(card.Sharing, card.SharingUses));
@@ -2356,7 +2342,7 @@ public sealed partial class EditPageVm : ObservableObject
 
     private async Task OpenOriginalCardAsync(EditMapCardVm card)
     {
-        await RunCard(card, "open this map", async () =>
+        await RunCard(card, Strings.Action_OpenThisMap, async () =>
         {
             var opened = await _shell.OpenPictureAsync(card.Slot, _progress);
             if (opened.Published is { } published)
@@ -2366,14 +2352,12 @@ public sealed partial class EditPageVm : ObservableObject
 
     private async Task ChooseRampOnOriginalCardAsync(EditMapCardVm card)
     {
-        await RunCard(card, "choose a toon ramp", async () =>
+        await RunCard(card, Strings.Action_ChooseToonRamp, async () =>
         {
             if (await _shell.PickRampAsync(card.Slot) is not { Picked: { } picked }) return;
             ReportBoundOnMaterial(card.Slot, card.MapLabel, picked);
         });
     }
-
-    internal const string AddsFirstEdit = "This adds the part's first edit.";
 
     /// <summary>Take back a shading-row mint whose write did not complete. Picture and ramp cards no longer
     /// mint before their external action and never use this cleanup.</summary>
@@ -2387,7 +2371,7 @@ public sealed partial class EditPageVm : ObservableObject
         }
         catch (Exception e)
         {
-            Status = AuthoredRefusal.ForScreen(e, "remove the empty edit");
+            Status = AuthoredRefusal.ForScreen(e, Strings.Action_RemoveEmptyEdit);
             return false;
         }
     }
@@ -2412,7 +2396,7 @@ public sealed partial class EditPageVm : ObservableObject
         // Named exactly as the question that led here named it — the map, on its material.
         string name = string.IsNullOrWhiteSpace(produced.Label)
             ? Path.GetFileName(produced.ProjectRelativeFile) : produced.Label.Trim();
-        Status = $"{name} is now {slot.Edit.Label}'s {subject}.";
+        Status = Strings.EditBoundTo(name, slot.Edit.Label, subject);
     }
 
     // ---- the zero-to-first-edit path ----
@@ -2448,7 +2432,7 @@ public sealed partial class EditPageVm : ObservableObject
             // The model's own refusals are written for the person reading them; anything else names the
             // action instead, since its message names identities the model keeps for itself. Kept on the
             // part row too, so the reason is still there once the status line has moved on.
-            string line = AuthoredRefusal.ForScreen(e, $"add an edit to {PartTitle(part)}");
+            string line = AuthoredRefusal.ForScreen(e, Strings.Action_AddEditTo(PartTitle(part)));
             _refusals[Key(part)] = line;
             Status = line;
             Rebuild();

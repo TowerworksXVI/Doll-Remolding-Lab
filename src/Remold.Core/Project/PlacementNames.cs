@@ -10,10 +10,10 @@ namespace Remold.Core.Project;
 public static class PlacementNames
 {
     /// <summary>The place an edit is in when no key can switch it off.</summary>
-    public const string Always = "Always";
+    public static string Always => CoreStrings.PlacementAlways;
 
     /// <summary>What a key group with neither a key nor a name is called.</summary>
-    public const string UnnamedGroup = "Unnamed key group";
+    public static string UnnamedGroup => CoreStrings.PlacementUnnamedGroup;
 
     /// <summary>The key group, by its key where it has one and by its name otherwise.</summary>
     public static string Group(string? key, string? label) =>
@@ -23,7 +23,7 @@ public static class PlacementNames
 
     /// <summary>The state, by its name where it has one and by its position otherwise.</summary>
     public static string State(string? label, int stateIndex) =>
-        !string.IsNullOrWhiteSpace(label) ? label.Trim() : $"State {stateIndex + 1}";
+        !string.IsNullOrWhiteSpace(label) ? label.Trim() : CoreStrings.PlacementStateNumbered(stateIndex + 1);
 
     /// <summary>One place, both halves together.</summary>
     public static string Place(string? key, string? groupLabel, string? stateLabel, int stateIndex) =>

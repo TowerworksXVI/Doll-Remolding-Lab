@@ -539,8 +539,7 @@ public sealed class AuthoredEditSessionTests : IDisposable
         Assert.Equal("slot-ramp", session.GameRampSlot(body, 0));
 
         var error = Assert.Throws<AuthoredRefusalException>(() => session.GameRampSlot(body, 3));
-        Assert.Contains("Material 3", error.Message);
-        Assert.Contains("without a toon ramp", error.Message);
+        Assert.Equal(CoreStrings.SessionNoRampToSet(3), error.Message);
         // The address the model finds the part by is not what the person reading this calls it.
         Assert.DoesNotContain("c_vesna_body_lod0", error.Message);
     }

@@ -82,7 +82,12 @@ public static class PoolDerive
     /// own — an unmeasured piece of a worn cell co-draws beside that cell's measured posers and displaces
     /// nothing.</para></summary>
     public sealed record MissingPart(string Mesh, string Why, IReadOnlySet<uint>? BoneHashes,
-        PartPresence? Presence = null);
+        PartPresence? Presence = null)
+    {
+        /// <summary>The skin reason behind <see cref="Why"/> where the skin rule held the part back, so a
+        /// refusal can show it in the UI language; <see cref="Why"/> is its English form.</summary>
+        public StreamDump.SkinWhy? Skin { get; init; }
+    }
 
     /// <summary>The derived pool: part mesh names in roster order, the anchor, and how many donor-used
     /// bones each pool part owns. A part pooled only to carry another part's tier bones owns none, and
@@ -421,8 +426,7 @@ public static class PoolDerive
         string? replacedPart = null, IReadOnlyList<VariantGroup>? groups = null)
     {
         if (donor.JointIndices is null || donor.JointWeights is null || donor.SkinJointHashes is null)
-            throw new AuthoredRefusalException(
-                "the donor carries no skin. Weight it to the outfit's reference armature in Blender first");
+            throw new AuthoredRefusalException(CoreStrings.PoolDonorNoSkin);
 
         // the bone hashes the donor actually rides (nonzero-weight influences only)
         var used = new HashSet<uint>();
@@ -431,8 +435,7 @@ public static class PoolDerive
                 used.Add(donor.SkinJointHashes[donor.JointIndices[i]]);
         used.Remove(0);   // 0 = unrecoverable hash (MeshApply.Payload contract) — never an owner key
         if (used.Count == 0)
-            throw new AuthoredRefusalException(
-                "the new mesh's weights name no bone this item has");
+            throw new AuthoredRefusalException(CoreStrings.PoolNoKnownBone);
 
         var pool = new List<string>();
         var pooled = new List<PartBones>();
@@ -527,10 +530,7 @@ public static class PoolDerive
         // pool. There is no union to compile against and no draw to host the replacement — the anchor
         // selection below would read an empty pool. Refuse in words rather than index off the end.
         if (pool.Count == 0)
-            throw new AuthoredRefusalException(
-                "the new mesh uses only bones that belong to this item's other wardrobe or scene options, "
-                + "so no part of it can carry the replacement. Re-weight the mesh onto the bones this "
-                + "item's own parts move as well");
+            throw new AuthoredRefusalException(CoreStrings.PoolOnlyOtherOptions);
 
         string anchor;
         if (anchorOverride is not null)

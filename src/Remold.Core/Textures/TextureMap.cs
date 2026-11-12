@@ -8,6 +8,9 @@ namespace Remold.Core.Textures;
 /// <summary>
 /// GFL2 character-texture map suffixes: maps are named <c>&lt;stem&gt;_&lt;map&gt;</c>. Turns that
 /// trailing token into a friendly label for the Edit pane.
+///
+/// <para>Two vocabularies: the <c>Label</c> members are English and fixed, because a project records them
+/// in asset labels; the <c>Display</c> members are the same names in the UI language, for screens.</para>
 /// </summary>
 public static class TextureMap
 {
@@ -123,9 +126,7 @@ public static class TextureMap
     /// <summary>What the ramp card's ℹ says. The four bands are the one thing the picture cannot show, and
     /// the last sentence is what keeps the preview from being read as the data: a ramp is float shading
     /// values, so what the tile draws is a rendering of them and not the file.</summary>
-    public const string RampInfo =
-        "Four bands of four rows: the character's shading curve. "
-        + "The preview is tone mapped for display. The values stay float.";
+    public static string RampInfo => CoreStrings.RampInfo;
 
     /// <summary>A human label for a texture's map (base color, normal, …); an unknown suffix is shown
     /// uppercased verbatim rather than guessed at.</summary>
@@ -140,4 +141,60 @@ public static class TextureMap
         "emi" or "e" => "Emission",
         var other => other.ToUpperInvariant(),
     };
+
+    /// <summary><see cref="Label"/> in the UI language.</summary>
+    public static string DisplayLabel(string textureName) => Suffix(textureName) switch
+    {
+        "d" => CoreStrings.MapBaseColor,
+        "da" => CoreStrings.MapBaseColorAlpha,
+        "n" => CoreStrings.MapNormal,
+        "rmo" => CoreStrings.MapRmo,
+        "spc" => CoreStrings.MapSpecular,
+        "trans" => CoreStrings.MapTransparency,
+        "emi" or "e" => CoreStrings.MapEmission,
+        var other => other.ToUpperInvariant(),
+    };
+
+    /// <summary><see cref="SlotLabel"/> in the UI language.</summary>
+    public static string DisplaySlotLabel(TargetInputKind input, string? shaderProperty)
+    {
+        if (!string.IsNullOrWhiteSpace(shaderProperty))
+            return DisplayPropertyLabel(shaderProperty);
+        return input switch
+        {
+            TargetInputKind.BaseColor => CoreStrings.MapBaseColor,
+            TargetInputKind.Normal => CoreStrings.MapNormal,
+            TargetInputKind.Rmo => CoreStrings.MapRmo,
+            TargetInputKind.Blend => CoreStrings.MapEffect,
+            TargetInputKind.Ramp => CoreStrings.MapToonRamp,
+            _ => input.ToString(),
+        };
+    }
+
+    /// <summary><see cref="PropertyLabel"/> in the UI language. A property outside
+    /// <see cref="ShaderPropertyLabels"/> has no catalog name: its label is spelled from the property's own
+    /// name, the same in every language.</summary>
+    public static string DisplayPropertyLabel(string shaderProperty)
+    {
+        ArgumentNullException.ThrowIfNull(shaderProperty);
+        return shaderProperty switch
+        {
+            "_BaseMap" or "_MainTex" => CoreStrings.MapBaseColor,
+            "_BumpMap" => CoreStrings.MapNormal,
+            "_RMOTex" => CoreStrings.MapRmo,
+            "_BlendTex" => CoreStrings.MapEffect,
+            "_RampMap" => CoreStrings.MapToonRamp,
+            "_GlitterMap" => CoreStrings.MapGlitter,
+            "_SMO" => CoreStrings.MapSmo,
+            "_DetailAlbedo" => CoreStrings.MapDetailColor,
+            "_DetailNormalRM" => CoreStrings.MapDetailNormalRoughness,
+            "_DetailMask" => CoreStrings.MapDetailMask,
+            "_MatcapTex" => CoreStrings.MapMatcap,
+            "_MatcapNormalTex" => CoreStrings.MapMatcapNormal,
+            "_Specularmap" => CoreStrings.MapSpecularMap,
+            "_MaskTex" => CoreStrings.MapMask,
+            "_TurbulenceTex" => CoreStrings.MapTurbulence,
+            _ => PropertyLabel(shaderProperty),
+        };
+    }
 }

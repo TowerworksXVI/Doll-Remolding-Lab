@@ -491,7 +491,7 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
         var error = Assert.Throws<AuthoredRefusalException>(() => session.PublishAssetForBinding(ingress,
             ProjectAssetKind.Picture, "Stale drop", ProjectAssetIngress.Png));
 
-        Assert.Equal(ProjectAssetIngress.EditMovedWhileOpen, error.Message);
+        Assert.Equal(CoreStrings.SessionEditMovedWhileOpen, error.Message);
         Assert.Equal(BindingKind.SourceSlot,
             Binding(session.Snapshot(), "edit-long", "slot-base-0").Kind);
     }
@@ -573,7 +573,7 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
 
         string line = AuthoredRefusal.ForScreen(failure, "save this map");
 
-        Assert.Equal($"Couldn't save this map: {osWrote}.", line);
+        Assert.Equal(CoreStrings.CouldntActionCause("save this map", osWrote + "."), line);
     }
 
     /// <summary>Everything else is a defect, and a defect's message names slot ids, edit ids, file handles
@@ -582,16 +582,16 @@ public sealed class AuthoredSessionFoundationTests : IDisposable
     [Fact]
     public void A_defect_names_the_action_and_a_written_refusal_is_shown_as_it_is()
     {
-        Assert.Equal("Couldn't save this map.", AuthoredRefusal.ForScreen(
+        Assert.Equal(CoreStrings.CouldntAction("save this map"), AuthoredRefusal.ForScreen(
             new InvalidOperationException("slot 'slot-0007' has no binding on edit 'edit-3f2a'"),
             "save this map"));
 
-        Assert.Equal("This part has no material 4.", AuthoredRefusal.ForScreen(
-            new AuthoredRefusalException("This part has no material 4."), "save this map"));
+        string written = CoreStrings.SessionNoMaterial(4);
+        Assert.Equal(written, AuthoredRefusal.ForScreen(new AuthoredRefusalException(written), "save this map"));
 
         // An outside-world failure with nothing to say falls back to the action rather than to a colon
         // with an empty half after it.
-        Assert.Equal("Couldn't save this map.",
+        Assert.Equal(CoreStrings.CouldntAction("save this map"),
             AuthoredRefusal.ForScreen(new IOException("   "), "save this map"));
     }
 

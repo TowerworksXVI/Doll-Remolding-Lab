@@ -1632,6 +1632,142 @@ class StandardChannelCollectionTests(unittest.TestCase):
             self.assertEqual(returned[1]["outbound_hash"], returned[2]["outbound_hash"])
 
 
+class UiLanguageTests(unittest.TestCase):
+    """Which language the add-on shows: Blender's when the add-on has a table for it, then the Lab's,
+    then English."""
+
+    def tearDown(self):
+        rb._LANGUAGE["tag"] = rb.ENGLISH
+
+    def test_blender_in_chinese_shows_chinese_whatever_the_lab_shows(self):
+        self.assertEqual(rb.gf2_ui_language("zh_HANS", True, None), rb.SIMPLIFIED_CHINESE)
+        self.assertEqual(rb.gf2_ui_language("zh_HANS", True, rb.ENGLISH), rb.SIMPLIFIED_CHINESE)
+        self.assertEqual(rb.gf2_ui_language("zh_CN", True, None), rb.SIMPLIFIED_CHINESE)
+
+    def test_english_blender_follows_the_lab(self):
+        self.assertEqual(rb.gf2_ui_language("en_US", True, rb.SIMPLIFIED_CHINESE), rb.SIMPLIFIED_CHINESE)
+        self.assertEqual(rb.gf2_ui_language("en_US", True, rb.ENGLISH), rb.ENGLISH)
+        self.assertEqual(rb.gf2_ui_language("en_US", True, None), rb.ENGLISH)
+
+    def test_a_blender_language_without_a_table_follows_the_lab_then_english(self):
+        self.assertEqual(rb.gf2_ui_language("ja_JP", True, rb.ENGLISH), rb.ENGLISH)
+        self.assertEqual(rb.gf2_ui_language("ja_JP", True, rb.SIMPLIFIED_CHINESE), rb.SIMPLIFIED_CHINESE)
+        self.assertEqual(rb.gf2_ui_language("zh_HANT", True, None), rb.ENGLISH)
+        self.assertEqual(rb.gf2_ui_language("ja_JP", True, "fr-FR"), rb.ENGLISH)
+
+    def test_chinese_blender_that_does_not_translate_its_interface_follows_the_lab(self):
+        self.assertEqual(rb.gf2_ui_language("zh_HANS", False, None), rb.ENGLISH)
+        self.assertEqual(rb.gf2_ui_language("zh_HANS", False, rb.SIMPLIFIED_CHINESE), rb.SIMPLIFIED_CHINESE)
+
+    def test_the_lab_pseudolocale_brackets_every_message(self):
+        self.assertEqual(rb.gf2_ui_language("en_US", True, rb.PSEUDO), rb.PSEUDO)
+        rb._LANGUAGE["tag"] = rb.PSEUDO
+        self.assertEqual(rb.gf2_status_line([]), "[Ready to send]")
+
+    def test_chinese_messages_fill_their_fields_and_join_as_chinese(self):
+        rb._LANGUAGE["tag"] = rb.SIMPLIFIED_CHINESE
+        self.assertEqual(rb.gf2_status_line([]), "可以发送")
+        self.assertEqual(rb.gf2_status_line([("HARD", "a"), ("SOFT", "b"), ("SOFT", "c")]),
+                         "1个阻止发送的问题 · 2个警告，点击“检查网格”查看详情")
+        self.assertEqual(rb.gf2_dropped_options_line(["b", "a"]), "当前运行的Blender版本不支持以下导出选项：a、b。")
+        self.assertEqual(rb.gf2_binding_line("veil", ["RigA", "RigB"]),
+                         "“veil”由“RigA”、“RigB”变形，而不是Mod/Armature中的骨架。将其父级设为该骨架"
+                         "（Ctrl+P，骨架形变），然后删除其针对“RigA”、“RigB”的骨架修改器。")
+        self.assertEqual(rb.gf2_off_skeleton_line("veil", 3, {"a", "b"}),
+                         "“veil”中有3个顶点的权重位于此对象没有的2根骨骼上，例如“a”。将这些顶点的权重绘制到Mod中骨架的骨骼上。")
+        self.assertEqual(rb.gf2_scope_lines(1, 12345, True), ["1个物体 · 12,345个顶点", "发送时会应用修改器。"])
+
+    def test_english_stays_as_it_was(self):
+        self.assertEqual(rb.gf2_binding_line("veil", ["RigA", "RigB"]),
+                         "'veil' is deformed by 'RigA', 'RigB' instead of the armature in Mod/Armature. "
+                         "Parent it to that armature (Ctrl+P, Armature Deform), then delete its Armature "
+                         "modifier for 'RigA', 'RigB'.")
+        self.assertEqual(rb.gf2_off_skeleton_line("veil", 1, {"b"}),
+                         "1 vertex in 'veil' is weighted to 1 bone this item does not have, such as 'b'. "
+                         "Weight-paint those vertices to the bones of the armature in Mod.")
+
+
+def _message_ids():
+    """Every English id `_t` is called with in the bridge's source, read off the syntax tree: a literal,
+    either branch of a conditional, or a module constant."""
+    import ast
+    with open(rb.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    constants = {target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                 for target in node.targets if isinstance(target, ast.Name)
+                 and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)}
+
+    def ids(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, ast.IfExp):
+            return ids(node.body) + ids(node.orelse)
+        if isinstance(node, ast.Name) and node.id in constants:
+            return [constants[node.id]]
+        raise AssertionError(f"line {node.lineno}: _t is called with something other than a message id")
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_t":
+            found.extend(ids(node.args[0]))
+    return found
+
+
+class ChineseTableTests(unittest.TestCase):
+    """The Simplified Chinese table against the messages the bridge shows."""
+
+    @staticmethod
+    def _fields(text):
+        import string
+        return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
+
+    def test_every_message_has_an_entry_and_every_entry_is_shown(self):
+        used = set(_message_ids())
+        self.assertEqual(sorted(used - set(rb._ZH_HANS)), [], "messages with no Chinese entry")
+        self.assertEqual(sorted(set(rb._ZH_HANS) - used), [], "Chinese entries no message uses")
+
+    def test_every_entry_keeps_the_fields_of_its_english(self):
+        for english, chinese in rb._ZH_HANS.items():
+            self.assertEqual(self._fields(english), self._fields(chinese), english)
+
+    def test_every_entry_closes_as_its_english_does(self):
+        for english, chinese in rb._ZH_HANS.items():
+            self.assertEqual(english.endswith("."), chinese.endswith("。"), english)
+            self.assertEqual(english.endswith("…"), chinese.endswith("…"), english)
+
+    def test_chinese_quotes_names_with_chinese_quotation_marks(self):
+        for english, chinese in rb._ZH_HANS.items():
+            self.assertNotIn("'", chinese, english)
+            self.assertEqual(english.count("'{"), chinese.count("“{"), english)
+
+
+class WideWrapTests(unittest.TestCase):
+    """Chinese has no spaces to wrap at, so the sidebar wraps it between characters."""
+
+    TEXT = ("“c_VesnaSSR0101_body1”的材质槽在导入后已更改，面范围现在可能使用不同的材质。"
+            "如果并非有意更改，恢复导入时的材质槽顺序（Ctrl+Z）。")
+
+    def test_chinese_wraps_within_the_width_and_keeps_every_character(self):
+        lines = rb.gf2_wrapped_lines(self.TEXT, 32)
+        self.assertGreater(len(lines), 1)
+        self.assertEqual("".join(lines), self.TEXT)
+        for line in lines:
+            self.assertLessEqual(rb._gf2_text_width(line), 32, line)
+
+    def test_no_line_starts_with_closing_punctuation_or_splits_a_latin_run(self):
+        for width in range(16, 60):
+            lines = rb.gf2_wrapped_lines(self.TEXT, width)
+            for line in lines[1:]:
+                self.assertNotIn(line[0], "，。、：；？）”", (width, lines))
+            for run in ("c_VesnaSSR0101_body1", "Ctrl+Z"):
+                self.assertTrue(any(run in line for line in lines), (width, lines))
+
+    def test_a_notice_lead_indents_chinese_continuations(self):
+        lines = rb.gf2_wrapped_notice_lines(self.TEXT, 24)
+        self.assertTrue(lines[0].startswith("⚠ "))
+        self.assertTrue(all(line.startswith("  ") for line in lines[1:]))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -483,10 +483,12 @@ public class ModBuilderTests : IDisposable
         var warm = new List<string>();
         ReleasedBuild.Build(p, env, _out, warm.Add, zip: false, caches: caches);
 
-        Assert.Contains(cold, l => l.Contains("Encoding skin.png"));
-        Assert.DoesNotContain(cold, l => l.Contains("texture cache: reusing"));
-        Assert.Contains(warm, l => l.Contains("texture cache: reusing skin.png"));
-        Assert.DoesNotContain(warm, l => l.Contains("Encoding skin.png"));
+        var encoding = CatalogShape.Of(CoreStrings.BuildEncodingTexture("skin.png", CatalogShape.Any, CatalogShape.Any));
+        var reusing = CatalogShape.Of(CoreStrings.BuildTextureCacheReuse(CatalogShape.Any));
+        Assert.Contains(cold, encoding.IsMatch);
+        Assert.DoesNotContain(cold, reusing.IsMatch);
+        Assert.Contains(CoreStrings.BuildTextureCacheReuse("skin.png"), warm);
+        Assert.DoesNotContain(warm, encoding.IsMatch);
     }
 
     [Fact]
@@ -513,6 +515,31 @@ public class ModBuilderTests : IDisposable
         foreach (var n in names)
             Assert.Equal(File.ReadAllBytes(Path.Combine(snapshot, n!)),
                          File.ReadAllBytes(Path.Combine(warm.OutDir, n!)));
+    }
+
+    /// <summary>The bundle reads a cold build of an unchanged project costs, and those its rebuild costs with
+    /// <paramref name="between"/> run between the two; a rebuild the completion cache serves reads none.</summary>
+    internal (int Cold, int Rebuild) BundleReadsAcrossRebuild(Action between)
+    {
+        var sourceEnv = MakeEnv(out _, out _);
+        var project = NewProject("RebuildReads");
+        AddEditedTexture(project);
+        var execution = Authored(project, sourceEnv, _ => { });
+        int bundleReads = 0;
+        var env = sourceEnv with
+        {
+            Deobfuscate = bundle => { bundleReads++; return sourceEnv.Deobfuscate(bundle); },
+            BundleContentHash = bundle => "content-" + bundle,
+            CatalogIdentity = "catalog-file-A",
+            CompilerIdentity = "compiler-A",
+        };
+        var caches = new BuildCaches(Path.Combine(_root, "rebuild-op"), Path.Combine(_root, "rebuild-tex"),
+            Path.Combine(_root, "rebuild-results"));
+        ModBuilder.Build(execution, env, _out, _ => { }, zip: false, caches: caches);
+        int cold = bundleReads;
+        between();
+        ModBuilder.Build(execution, env, _out, _ => { }, zip: false, caches: caches);
+        return (cold, bundleReads - cold);
     }
 
     [Fact]
@@ -697,10 +724,10 @@ public class ModBuilderTests : IDisposable
         ReleasedBuild.Build(p, env, _out, lines.Add, zip: false);
 
         // the line names the file and what is being made of it, and nothing about how
-        int encoding = lines.FindIndex(l => l.Contains("Encoding skin.png") && l.Contains("8×8"));
+        int encoding = lines.IndexOf(CoreStrings.BuildEncodingTexture("skin.png", 8, 8));
         Assert.True(encoding >= 0, "no encode progress line in: " + string.Join(" | ", lines));
         // it streams DURING the encode, not as part of the final-assembly span
-        Assert.True(encoding < lines.FindIndex(l => l.Contains("Assembling the mod files")));
+        Assert.True(encoding < lines.IndexOf(CoreStrings.BuildAssembling));
     }
 
     /// <summary>An encode that did not run on the GPU costs minutes a build log otherwise never explains.
@@ -760,18 +787,18 @@ public class ModBuilderTests : IDisposable
         var w1 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), MapSlot.From("n.dds")),
             albedoOnly, "Body", w1);
-        Assert.Contains("Couldn't apply the edited normal map on 'Body'", Assert.Single(w1));
+        Assert.Equal(CoreStrings.BuildEditedMapUnappliedNormal("Body"), Assert.Single(w1));
 
         var normalOnly = new[] { new StockMapTag("aabbccdd", StockMapKind.Normal) };
         var w2 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), MapSlot.From("n.dds")),
             normalOnly, "Body", w2);
-        Assert.Contains("Couldn't apply the edited base color map on 'Body'", Assert.Single(w2));
+        Assert.Equal(CoreStrings.BuildEditedMapUnappliedBaseColor("Body"), Assert.Single(w2));
 
         // RMO is its own kind, and warns on its own
         var w3 = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(rmo: MapSlot.From("r.dds")), albedoOnly, "Body", w3);
-        Assert.Contains("Couldn't apply the edited RMO map on 'Body'", Assert.Single(w3));
+        Assert.Equal(CoreStrings.BuildEditedMapUnappliedRmo("Body"), Assert.Single(w3));
 
         // nothing bound of a kind is nothing to warn about
         var none = new List<string>();
@@ -787,7 +814,7 @@ public class ModBuilderTests : IDisposable
         var authored = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), rmo: MapSlot.From("r.dds")),
             albedoOnly, "Body", authored);
-        Assert.Contains("Couldn't apply the edited RMO map", Assert.Single(authored));
+        Assert.Equal(CoreStrings.BuildEditedMapUnappliedRmo("Body"), Assert.Single(authored));
 
         var defaulted = new List<string>();
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds"), rmo: MapSlot.Neutral),
@@ -819,8 +846,7 @@ public class ModBuilderTests : IDisposable
 
         // the survivor is tagged, and the failure is the author's to see, with what it costs them
         Assert.Equal(new[] { new StockMapTag("aabbccdd", StockMapKind.Albedo) }, tags);
-        Assert.Contains(warnings, w => w.Contains("Couldn't match the original map 'lower_d' on 'Body'")
-            && w.Contains("Some edited maps may not show in game."));
+        Assert.Contains(CoreStrings.BuildOriginalMapUnmatched("lower_d", "Body"), warnings);
         // the reason it wouldn't tag is the build's own record
         Assert.Contains(diagnostics, d => d.Contains("anchor map 'lower_d' (vesna_body) can't be slot-tagged")
             && d.Contains("isn't in bundle 'bundleT'"));
@@ -828,7 +854,7 @@ public class ModBuilderTests : IDisposable
 
         // and the kind-level warning stays quiet, because the kind DID keep a tag — the whole point
         ModBuilder.WarnUnbindableDonorMaps(OneRow(MapSlot.From("a.dds")), tags, "vesna_body", warnings);
-        Assert.DoesNotContain(warnings, w => w.Contains("Couldn't apply the edited base color map"));
+        Assert.DoesNotContain(CoreStrings.BuildEditedMapUnappliedBaseColor("vesna_body"), warnings);
     }
 
     [Fact]
@@ -900,11 +926,9 @@ public class ModBuilderTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        var warning = Assert.Single(r.Warnings, w => w.Contains("texture slot data"));
-        Assert.Contains("Some maps won't show on replaced meshes", warning);
         // what is actually lost, and nothing wider: the registers past the classic range. Nothing about
         // toon ramps — a mod that asks for one is refused outright rather than warned at.
-        Assert.Contains("the mesh swap itself still works", warning);
+        var warning = Assert.Single(r.Warnings, w => w == CoreStrings.BuildSlotDataUnreadable);
         Assert.DoesNotContain("Toon ramp", warning);
 
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(r.OutDir, "gf2mod.json")));
@@ -1112,8 +1136,8 @@ public class ModBuilderTests : IDisposable
             byConvention: false, "vesna_body", "Body", m => family[m.TextureName], warnings, diagnostics);
 
         Assert.True(albedo);   // the FIRST readable map's family, not the convention
-        Assert.Contains(warnings, w => w.Contains("disagree") && w.Contains("'upper_d' is sRGB")
-            && w.Contains("'lower_d' is linear") && w.Contains("written as sRGB"));
+        Assert.Contains(CoreStrings.BuildAnchorMapsDisagree(CoreStrings.BuildMapKindBaseColor, "Body", "upper_d",
+            CoreStrings.BuildColorFamilySrgb, "lower_d", CoreStrings.BuildColorFamilyLinear), warnings);
     }
 
     [Fact]
@@ -1128,8 +1152,8 @@ public class ModBuilderTests : IDisposable
 
         Assert.True(albedo);
         // the unreadable map is the author's problem; which tag the fallback picked is the build's own record
-        Assert.Contains(warnings, w => w.Contains("Couldn't read the original base color map 'anchor_d'")
-            && w.Contains("may show with the wrong colours"));
+        Assert.Contains(CoreStrings.BuildAnchorMapUnreadable(CoreStrings.BuildMapKindBaseColor, "anchor_d", "Body"),
+            warnings);
         Assert.Contains(diagnostics, d => d.Contains("tagged sRGB by convention"));
         Assert.DoesNotContain(warnings, w => w.Contains("by convention"));
     }
@@ -2058,9 +2082,9 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be built", ex.Message);
-        Assert.Contains("is 4x4", ex.Message);
-        Assert.Contains($"{ModBuilder.RampWidth}x{ModBuilder.RampHeight}", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildRampUnbuildable(0, CatalogShape.Any)), ex.Message);
+        Assert.Contains(CoreStrings.RampWrongSize("small_ramp.dds", 4, 4, ModBuilder.RampWidth, ModBuilder.RampHeight),
+            ex.Message);
     }
 
     // ---- which donor sources the content refusal walks ----------------------------------------------
@@ -2235,7 +2259,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<AuthoredRefusalException>(()
             => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("names no toon ramp slot", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildSlotDataNoRamp(CatalogShape.Any)), ex.Message);
         Assert.DoesNotContain(Directory.GetDirectories(_out),
             d => !Path.GetFileName(d).StartsWith('.'));
     }
@@ -2270,7 +2294,7 @@ public class ModBuilderTests : IDisposable
         // a ramp at all, so the refusal is the same either way
         var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildAssetNotSupported(CatalogShape.Any)), ex.Message);
     }
 
     [Fact]
@@ -2329,7 +2353,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<BlockedAssetException>(() =>
             ModBuilder.Build(execution, env, _out, zip: false));
 
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildAssetNotSupported(CatalogShape.Any)), ex.Message);
     }
 
     /// <summary>Two donor submeshes carrying DIFFERENT ramps each ship their own file and record their own
@@ -2405,7 +2429,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<BlockedAssetException>(() =>
             ModBuilder.Build(execution, buildEnv, _out, zip: false));
 
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildAssetNotSupported(CatalogShape.Any)), ex.Message);
     }
 
     /// <summary>The released catalog shape before BlendTex was measured.</summary>
@@ -2459,8 +2483,7 @@ public class ModBuilderTests : IDisposable
 
         // ③ lists the planner's own reason and disables Build; this route is the backstop behind that,
         // so the reason rides the exception into the build log rather than onto the footer.
-        Assert.Contains("draws without a toon ramp",
-            string.Join("; ", BuildLogDiagnostics.From(ex)));
+        Assert.Contains(CoreStrings.PlanReasonNoRamp, string.Join("; ", BuildLogDiagnostics.From(ex)));
         Assert.Empty(Directory.GetFileSystemEntries(_out));
     }
 
@@ -2748,6 +2771,50 @@ public class ModBuilderTests : IDisposable
         return (session, session.CreateEdit(target), resolver);
     }
 
+    /// <summary>A Replace whose shading value sits on a material no face of the replacement uses: the plan
+    /// drops the value with a warning, and the built mod's record keeps the drop's reason.</summary>
+    internal (AuthoredBuildPlan Plan, string RepairJson, string EditLabel) BuildShadingValueNoFaceUses()
+    {
+        var env = WithExactIdentities(MakeSkinnedEnv(bodySharedMaterial: true, bodySubmeshes: new[] { 96, 0 }));
+        var legacy = NewProject("Shading value on no faces");
+        WriteDonorGlb();
+        AddReplaceTarget(legacy);
+        var resolver = new LegacyProjectResolver(env);
+        var adaptation = LegacyProjectAdapter.Adapt(legacy, resolver.ResolvePart);
+        Assert.True(adaptation.Report.CanSave,
+            string.Join("; ", adaptation.Report.Items.Select(item => item.Detail)));
+        var session = new AuthoredEditSession(adaptation.Project);
+        session.SetRootDir(_proj);
+        var body = Slot("c_vesna01_body_lod0");
+        var edit = session.Snapshot().EditDefinitions.Single(candidate => candidate.Target.SameAs(body));
+        string slot = session.EnsureMaterialValueSlot(body, 1, MaterialValueSemantics.UseGiFlatten,
+            resolver.ResolvePart);
+        session.ChooseMaterialValue(edit.Id, slot, "0");
+        var project = session.Snapshot();
+        var plan = AuthoredBuildPlanner.Plan(project, new ProductionAuthoredBuildBackend(resolver.ResolvePart,
+            _ => ColorProgramEvidence()));
+        Assert.True(plan.CanBuild, string.Join("; ", plan.Conflicts));
+
+        var result = ModBuilder.Build(AuthoredBuildExecution.Create(project, plan), env, _out, zip: false);
+
+        return (plan, File.ReadAllText(Path.Combine(result.OutDir, RepairData.FileName)), edit.Label);
+    }
+
+    [Fact]
+    public void A_shading_value_no_face_of_the_replacement_uses_is_dropped_and_its_reason_recorded()
+    {
+        var (plan, repairJson, label) = BuildShadingValueNoFaceUses();
+
+        string warning = CoreStrings.PlanShadingValueNoFaces(label, 1);
+        Assert.Contains(warning, plan.Warnings);
+        var dropped = Assert.Single(plan.Bindings,
+            binding => binding.AuthoredSlot.Input == TargetInputKind.MaterialValue);
+        Assert.Equal(BuildPlanVerdict.InheritedAsRequested, dropped.Decision.Verdict);
+        // in English the reason the record keeps is the warning the page shows, word for word
+        Assert.Equal(warning, dropped.Decision.Reason);
+        Assert.Contains(System.Text.Json.JsonSerializer.Serialize(warning), repairJson);
+    }
+
     private static MaterialRenderEvidence ColorProgramEvidence() => new("proved-material-family",
         new[] { "45dbffd6cb513d80" }, 4978303, MaterialValueCatalog.UnityPerMaterial544,
         new[]
@@ -2855,7 +2922,7 @@ public class ModBuilderTests : IDisposable
         Assert.False(plan.CanBuild);
         var blocked = Assert.Single(plan.Bindings, binding => binding.Decision.BlocksBuild);
         Assert.Equal(slot, blocked.AuthoredSlot.Id);
-        Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, blocked.Decision.Reason);
+        Assert.Equal(CoreStrings.PlanReasonSharedDraw, blocked.Decision.Reason);
     }
 
     /// <summary>Effect disables on an unreplaced part: the outline pass's draw of the material is skipped, and
@@ -3024,8 +3091,7 @@ public class ModBuilderTests : IDisposable
         string section = SectionOn(ini, SkinnedIb("s0.bundle", "c_vesna01_body_lod0"));
         Assert.Contains("if $zz_gate_", section);
         Assert.DoesNotContain("$zz_mt", section);
-        Assert.Contains(r.Infos, info => info == "'body' is on a mesh shared with Member B. While VesnaSSR01 is "
-            + "on screen, this shading change applies to theirs too.");
+        Assert.Contains(CoreStrings.BuildShadingSharedMesh("body", "Member B", "VesnaSSR01"), r.Infos);
     }
 
     /// <summary>Another outfit wears the body with a material of its own. The change's material binds a base
@@ -3117,7 +3183,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ModBuilder.Build(
             AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out, zip: false));
-        Assert.Contains(ProductionAuthoredBuildBackend.SharedDrawCause, ex.Message);
+        Assert.Contains(CoreStrings.PlanReasonSharedDraw, ex.Message);
     }
 
     /// <summary>A lower level whose material list the install could not read: the change skips that level and
@@ -3136,10 +3202,10 @@ public class ModBuilderTests : IDisposable
         var r = ModBuilder.Build(AuthoredBuildExecution.Create(project, PlanFor(project, resolver)), env, _out,
             zip: false);
 
-        Assert.Contains(r.Warnings, warning => warning.StartsWith(
-            "Couldn't read which materials 'body' uses at ", StringComparison.Ordinal)
-            && warning.EndsWith(" Rescan, then build again.", StringComparison.Ordinal));
-        Assert.DoesNotContain(r.Warnings, warning => warning.Contains(" doesn't use "));
+        Assert.Contains(r.Warnings, CatalogShape.Of(
+            CoreStrings.BuildStockMaterialsUnreadable("body", CatalogShape.Any, CatalogShape.Any)).IsMatch);
+        Assert.DoesNotContain(r.Warnings, CatalogShape.Of(
+            CoreStrings.BuildStockMaterialUnused(CatalogShape.Any, CatalogShape.Any, CatalogShape.Any)).IsMatch);
     }
 
     // ---- what a plan's gate says, read by every emission that answers to one ------------------------
@@ -4020,8 +4086,7 @@ public class ModBuilderTests : IDisposable
             Authored(p, env, project => LongCycle(project, Slot("c_vesna01_body_lod0"), "F7")),
             env, _out, zip: false));
 
-        Assert.Contains("switches the whole mod", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("needs its own key", ex.Message, StringComparison.Ordinal);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildModKeyCycles("F7", CatalogShape.Any)), ex.Message);
     }
 
     /// <summary>A change seated at the position of the MOD'S OWN key that switches the mod off. Route:
@@ -4247,7 +4312,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains(ProductionAuthoredBuildBackend.SharedDrawCause,
+        Assert.Contains(CoreStrings.PlanReasonSharedDraw,
             string.Join("; ", BuildLogDiagnostics.From(ex)));
         Assert.Empty(Directory.GetFileSystemEntries(_out));
     }
@@ -4317,8 +4382,7 @@ public class ModBuilderTests : IDisposable
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.Equal(1, CountOf(ini, "[TextureOverride_RetexScope_"));
-        Assert.Contains("'body' doesn't use 'm_body' at the furthest detail level. "
-            + "The change to 'm_body' doesn't show there.", r.Warnings);
+        Assert.Contains(CoreStrings.BuildStockMaterialUnused("body", "'m_body'", CoreStrings.BuildDetailLevelFurthest), r.Warnings);
     }
 
     /// <summary>A material need not bind base color, normal or RMO in order to receive a picked ramp: its
@@ -4438,8 +4502,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<AuthoredRefusalException>(()
             => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("names no toon ramp slot", ex.Message);
-        Assert.Contains("Reinstall the app", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildSlotDataNoRamp(CatalogShape.Any)), ex.Message);
         Assert.DoesNotContain(Directory.GetDirectories(_out),
             d => !Path.GetFileName(d).StartsWith('.'));
     }
@@ -4455,8 +4518,10 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be built", ex.Message);
-        Assert.Contains("is 4x4", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildRampPickUnreadable(CatalogShape.Any, CatalogShape.Any,
+            CatalogShape.Any)), ex.Message);
+        Assert.Contains(CoreStrings.RampWrongSize("small_ramp.dds", 4, 4, ModBuilder.RampWidth, ModBuilder.RampHeight),
+            ex.Message);
     }
 
     [Fact]
@@ -4471,8 +4536,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("The material 'm_gone' the toon ramp was picked on is not in the current "
-            + "game files.", ex.Message);
+        Assert.Contains(CoreStrings.MigrationRampMaterialGone("m_gone"), ex.Message);
     }
 
     /// <summary>A pick derives no verb — nothing about the part's geometry or pictures moves — so a mod
@@ -4586,7 +4650,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("nothing to build", ex.Message);
+        Assert.Equal(CoreStrings.BuildNothingToBuild, ex.Message);
     }
 
     /// <summary>…and where the pick rides another change's row, that row's tick is the one that decides.
@@ -4602,7 +4666,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("nothing to build", ex.Message);
+        Assert.Equal(CoreStrings.BuildNothingToBuild, ex.Message);
     }
 
     /// <summary>A pick's file is referenced exactly as a replaced submesh's ramp is
@@ -4620,7 +4684,8 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
         string blocked = string.Join("; ", BuildLogDiagnostics.From(ex));
-        Assert.Contains("is missing", blocked);
+        Assert.Matches(CatalogShape.Within(CoreStrings.PlanReasonMissingFromModFolder(CatalogShape.Any,
+            CatalogShape.Any)), blocked);
         Assert.Contains(ramp, blocked);
         Assert.Empty(Directory.GetFileSystemEntries(_out));   // no folder, no zip, no work dirs
     }
@@ -4768,7 +4833,8 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<AuthoredRefusalException>(()
             => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("cannot be told apart from another texture this mod changes", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildRampPickAmbiguous(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
     }
 
     /// <summary>A ramp the modder NAMED on a replaced submesh is their own choice, so it ships as their own
@@ -5193,7 +5259,7 @@ public class ModBuilderTests : IDisposable
     {
         var env = MakeEnv(out _, out _);
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(NewProject(), env, _out));
-        Assert.Contains("nothing to build", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CoreStrings.BuildNothingToBuild, ex.Message);
     }
 
     [Fact]
@@ -5204,7 +5270,7 @@ public class ModBuilderTests : IDisposable
         p.SetHidden("Vesna", "VesnaSSR01", "c_vesna01_ghost_lod0", true);
         // the stale hide is warned away by derivation, leaving an empty build — refused loudly
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out));
-        Assert.Contains("nothing to build", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CoreStrings.BuildNothingToBuild, ex.Message);
     }
 
     [Fact]
@@ -5221,7 +5287,7 @@ public class ModBuilderTests : IDisposable
         });
         var ex = Assert.Throws<InvalidOperationException>(() => ReleasedBuild.Build(p, env, _out));
         Assert.Contains("c_vesna01_ghost_lod0", ex.Message);
-        Assert.Contains("This part is not in the current game files.", ex.Message);
+        Assert.Contains(CoreStrings.MigrationPartGone, ex.Message);
     }
 
     [Fact]
@@ -5256,9 +5322,7 @@ public class ModBuilderTests : IDisposable
                 BuildEmissionGate.Unconditional),
         });
 
-        Assert.Equal("'CommanderMale · CommanderMale · face' and 'CommanderMale · CommanderNeutral · face' "
-            + "replace one mesh they share, and only one replacement could show. "
-            + "Remove one of the two mesh edits, or switch them with one key", clash);
+        Assert.Equal(CoreStrings.BuildReplacementsShareMesh("CommanderMale · CommanderMale · face", "CommanderMale · CommanderNeutral · face"), clash);
     }
 
     [Fact]
@@ -5289,9 +5353,7 @@ public class ModBuilderTests : IDisposable
         }));
 
         // two different groups can stand anywhere at once, so their claims are not exclusive
-        Assert.Equal("'Vesna · VesnaSSR01 · body' and 'Vesna · VesnaSSR02 · body' "
-            + "replace one mesh they share, and only one replacement could show. "
-            + "Remove one of the two mesh edits, or switch them with one key",
+        Assert.Equal(CoreStrings.BuildReplacementsShareMesh("Vesna · VesnaSSR01 · body", "Vesna · VesnaSSR02 · body"),
             ModBuilder.ReplacedMeshConflict(new[]
             {
                 ("Vesna · VesnaSSR01 · body", "210b832c", At("key-0001", 0)),
@@ -5312,7 +5374,8 @@ public class ModBuilderTests : IDisposable
         // different content under one dump name would feed a pipeline foreign geometry
         var differs = ModBuilder.DumpNameConflict("commandermale_face", held,
             new ModBuilder.DumpIdentity("c_CommanderMale_dorm_face_lod0", "00927735"));
-        Assert.Contains("for different meshes", differs, StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.BuildPartNameTwoMeshes("commandermale_face", "c_CommanderMale_dorm_face_lod0",
+            "c_CommanderMale_dorm_face_lod0"), differs);
 
         // and so would a different mesh under it
         Assert.NotNull(ModBuilder.DumpNameConflict("commandermale_face", held,
@@ -5536,7 +5599,8 @@ public class ModBuilderTests : IDisposable
         AddReplaceTarget(p);
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildClaimantsNotTellableApart(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
     }
 
     [Fact]
@@ -5667,7 +5731,8 @@ public class ModBuilderTests : IDisposable
         string ini = File.ReadAllText(Path.Combine(result.OutDir, "mod.ini"));
         AssertNoDuplicateSections(ini);
         Assert.DoesNotContain("global $zz_tw_", ini);
-        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("also hides"));
+        Assert.DoesNotContain(result.Warnings,
+            CatalogShape.Of(CoreStrings.BuildHideAlsoHides(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         foreach (string key in new[] { a, b })
             Assert.Contains($"vb2 == {MigotoEmitter.RetexTag(DrawSelector.Parse(key).Vb2!)}", ini);
         if (edit == "replace")
@@ -5786,7 +5851,8 @@ public class ModBuilderTests : IDisposable
         Assert.Single(Regex.Matches(ini, $"\nhash = {ib}\n"));
         Assert.Equal($"if vb1 == {MigotoEmitter.RetexTag(SkinnedVb1("s2.bundle", "c_vesna01_body2_lod0"))}\n",
             DrawGuard(ini, ib));
-        Assert.DoesNotContain(result.Warnings, w => w.Contains("also hides"));
+        Assert.DoesNotContain(result.Warnings,
+            CatalogShape.Of(CoreStrings.BuildHideAlsoHides(CatalogShape.Any, CatalogShape.Any)).IsMatch);
     }
 
     /// <summary>Two Replaces, one on a mesh and one on a same-ib mesh binding the same colour/UV stream but
@@ -5814,7 +5880,8 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("replace one mesh they share", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildReplacementsShareMesh(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
     }
 
     /// <summary>A tier two parts reach is one index entry carrying both tokens: the body's own further tier
@@ -5831,7 +5898,8 @@ public class ModBuilderTests : IDisposable
 
         var result = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.DoesNotContain(result.Warnings, w => w.Contains("also hides"));
+        Assert.DoesNotContain(result.Warnings,
+            CatalogShape.Of(CoreStrings.BuildHideAlsoHides(CatalogShape.Any, CatalogShape.Any)).IsMatch);
     }
 
     /// <summary>An edit on a mesh another outfit of the same character also wears: when the roster says the
@@ -5876,9 +5944,8 @@ public class ModBuilderTests : IDisposable
 
         var result = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        string warning = "'c_vesna01_body_lod0' is also drawn by Member B, on screen together with Member A. "
-            + "The hide applies to them too.";
-        string info = "'c_vesna01_body_lod0' is also drawn by Member B. The hide applies while VesnaSSR01 is on screen.";
+        string warning = CoreStrings.BuildHideOnSiblings("c_vesna01_body_lod0", "Member B", "Member A");
+        string info = CoreStrings.BuildHideSharedDrawn("c_vesna01_body_lod0", "Member B", "VesnaSSR01");
         Assert.Equal(disclosure == "warning", result.Warnings.Contains(warning));
         Assert.Equal(disclosure == "info", result.Infos.Contains(info));
         Assert.DoesNotContain(result.Infos, i => i.Contains("also drawn by Vesna."));
@@ -6020,8 +6087,7 @@ public class ModBuilderTests : IDisposable
         AddReplaceTarget(p);
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
-        Assert.Contains("'c_vesna01_body_lod0' and 'body2' can't be told apart in game", ex.Message);
-        Assert.Contains("would change the other", ex.Message);
+        Assert.Equal(CoreStrings.BuildEditTwinOfMesh("c_vesna01_body_lod0", "body2"), ex.Message);
     }
 
     [Fact]
@@ -6070,7 +6136,10 @@ public class ModBuilderTests : IDisposable
         string tierIb = SkinnedIb("s1.bundle", "c_vesna01_body_lod1");
         Assert.Equal(SkinnedIb("smt.bundle", "c_vesna01_mate_lod1"), tierIb);
         string v = $"zz_tw_{SelectorKey(ini, tierIb)}";
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("keeps its original mesh"));
+        Assert.DoesNotContain(r.Warnings,
+            CatalogShape.Of(CoreStrings.BuildTierKeepsOriginal(CatalogShape.Any, CatalogShape.Any)).IsMatch);
+        Assert.DoesNotContain(r.Warnings,
+            CatalogShape.Of(CoreStrings.BuildTierUnprepared(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
         Assert.Contains($"global ${v} = 0\n", ini);
         string tier = SectionOn(ini, tierIb);
@@ -6223,7 +6292,8 @@ public class ModBuilderTests : IDisposable
         Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 1" }));
         Assert.Contains(skips, g => g.SequenceEqual(new[] { "if $zz_key_f7 == 2" }));
         Assert.DoesNotContain("zz_tw_", ini);
-        Assert.Equal(2, r.Warnings.Count(w => w.Contains(" also hides ")));
+        Assert.Equal(2, r.Warnings.Count(
+            CatalogShape.Of(CoreStrings.BuildHideAlsoHides(CatalogShape.Any, CatalogShape.Any)).IsMatch));
     }
 
     /// <summary>Two outfits wearing one mesh, each hiding it on a key of its own. The hide section is one,
@@ -6349,8 +6419,7 @@ public class ModBuilderTests : IDisposable
         Assert.DoesNotContain("TwinTag", ini);
         Assert.Contains($"[TextureOverride_Hide_0]\nhash = "
             + $"{SkinnedIb("s2.bundle", "c_vesna01_body2_lod0")}\nmatch_priority = 0\n{DrawGuard(ini, SkinnedIb("s2.bundle", "c_vesna01_body2_lod0"))}handling = skip\n", ini);
-        Assert.Contains("Hiding 'c_vesna01_body2_lod0' also hides 'c_vesna01_body_lod0' because their "
-            + "draws cannot be told apart.", r.Warnings);
+        Assert.Contains(CoreStrings.BuildHideAlsoHides("c_vesna01_body2_lod0", "c_vesna01_body_lod0"), r.Warnings);
     }
 
     [Fact]
@@ -6547,8 +6616,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' can't be told apart in game", ex.Message);
-        Assert.Contains("would change the other", ex.Message);
+        Assert.Equal(CoreStrings.BuildEditTwinOfMesh("c_vesna01_dress1_lod0", "dress2"), ex.Message);
     }
 
     [Fact]
@@ -6603,8 +6671,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' can't be told apart in game", ex.Message);
-        Assert.Contains("would change the other", ex.Message);
+        Assert.Equal(CoreStrings.BuildEditTwinOfMesh("c_vesna01_dress1_lod0", "dress2"), ex.Message);
     }
 
     [Fact]
@@ -6642,8 +6709,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' can't be told apart in game", ex.Message);
-        Assert.Contains("would change the other", ex.Message);
+        Assert.Equal(CoreStrings.BuildEditTwinOfMesh("c_vesna01_dress1_lod0", "dress2"), ex.Message);
     }
 
     [Fact]
@@ -6659,7 +6725,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildEditTwinOfMesh(CatalogShape.Any, CatalogShape.Any)), ex.Message);
         Assert.Contains("mate", ex.Message);
     }
 
@@ -6777,8 +6843,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("'c_vesna01_dress1_lod0' and 'dress2' can't be told apart in game", ex.Message);
-        Assert.Contains("would change the other", ex.Message);
+        Assert.Equal(CoreStrings.BuildEditTwinOfMesh("c_vesna01_dress1_lod0", "dress2"), ex.Message);
     }
 
     [Fact]
@@ -6891,8 +6956,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("uses the same base color that tells 'dress2' apart", ex.Message);
-        Assert.Contains("so this mod can't be built", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildTwinBaseColorShared(CatalogShape.Any, "dress2")), ex.Message);
     }
 
     [Fact]
@@ -6908,9 +6972,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("'body' and 'body2' can only be told apart by 'body's base color",
-            ex.Message);
-        Assert.Contains("so this mod can't be built", ex.Message);
+        Assert.Equal(CoreStrings.BuildTwinBaseColorRepainted("body", "body2"), ex.Message);
     }
 
     // ---- parts the recoverable-skin rule holds back ----------------------------------------------
@@ -7029,20 +7091,18 @@ public class ModBuilderTests : IDisposable
 
         Assert.Contains("pool (vesna_acc): c_vesna01_body_lod0 (anchor c_vesna01_body_lod0)",
             r.Diagnostics);
-        var warning = Assert.Single(r.Warnings, w => w.Contains("original material"));
-        Assert.Equal("The new mesh for 'c_vesna01_acc_lod0' uses no bone that part moves, so it is "
-            + "drawn as part of 'c_vesna01_body_lod0' and shows that part's original material. To use "
-            + "the edited part's own material, weight the new mesh to bones that 'c_vesna01_acc_lod0' "
-            + "moves.", warning);
+        Assert.Single(r.Warnings, CatalogShape.Of(CoreStrings.BuildDrawnAsOtherPart(CatalogShape.Any, CatalogShape.Any))
+            .IsMatch);
+        Assert.Contains(CoreStrings.BuildDrawnAsOtherPart("c_vesna01_acc_lod0", "c_vesna01_body_lod0"), r.Warnings);
     }
 
     [Theory]
-    [InlineData(21, 4, false, "it has 21 blend shapes, which the swap can't reproduce")]
-    [InlineData(0, 1, true, "its skin weights are stored in a shape this app can't read")]
-    [InlineData(0, 2, true, "its skin weights are stored in a shape this app can't read")]
-    [InlineData(0, 4, true, "its skin weights are stored in a shape this app can't read")]
+    [InlineData(21, 4, false)]
+    [InlineData(0, 1, true)]
+    [InlineData(0, 2, true)]
+    [InlineData(0, 4, true)]
     public void A_replace_whose_target_cant_feed_recovery_refuses_over_that_mesh(
-        int blendShapes, int skinWidth, bool sharedSkinStream, string why)
+        int blendShapes, int skinWidth, bool sharedSkinStream)
     {
         // The target's own mesh failing the rule says nothing about how the donor was weighted, so the
         // refusal names the mesh and the rule rather than sending the author back to re-weight. Every
@@ -7056,7 +7116,10 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Equal($"'c_vesna01_body_lod0' can't be replaced: {why}. Remove this mesh edit", ex.Message);
+        string why = blendShapes > 0
+            ? CoreStrings.SkinReasonBlendShapes(blendShapes)
+            : CoreStrings.SkinReasonUnreadableLayout;
+        Assert.Equal(CoreStrings.BuildCantBeReplaced("c_vesna01_body_lod0", why), ex.Message);
         Assert.DoesNotContain("re-weight", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("armature", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("pool", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -7075,8 +7138,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<InvalidDataException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
         Assert.Contains("2 bone(s) that no part this mod can build with has", ex.Message);
-        Assert.Contains("Left out: 'c_vesna01_face_lod0' · it has 21 blend shapes, which the swap "
-            + "can't reproduce", ex.Message);
+        Assert.Contains("Left out: 'c_vesna01_face_lod0' · " + CoreStrings.SkinReasonBlendShapes(21), ex.Message);
         Assert.DoesNotContain("different armature", ex.Message);
     }
 
@@ -7163,8 +7225,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<InvalidDataException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("Left out: 'c_vesna01_unread_lod0' · its skin weights can't be read",
-            ex.Message);
+        Assert.Contains("Left out: 'c_vesna01_unread_lod0' · " + CoreStrings.SkinReasonWeightsUnread, ex.Message);
         Assert.DoesNotContain("poses", ex.Message);
     }
 
@@ -7223,7 +7284,7 @@ public class ModBuilderTests : IDisposable
         Assert.Contains($"if $zz_t == {tag}\n$zz_slot_a = 0\nendif\n", ini);
         Assert.Contains("if $zz_slot_a == 0\nps-t0 = Resource_Tex0\nendif\n", ini);
         // the inheriting submesh keeps drawing the pre-retexture image at the replacement — disclosed
-        Assert.Contains(r.Infos, i => i.Contains("keeps an original map"));
+        Assert.Contains(r.Infos, CatalogShape.Of(CoreStrings.BuildKeepsOriginalMap(CatalogShape.Any)).IsMatch);
         AssertNoDuplicateSections(ini);
     }
 
@@ -7300,8 +7361,7 @@ public class ModBuilderTests : IDisposable
 
         var r = ReleasedBuild.Build(p, MakeSkinnedEnv(), _out, zip: false);
 
-        Assert.Contains(r.Warnings, w => w.Contains("rest pose recorded for")
-            && w.Contains("c_vesna01_body_lod0"));
+        Assert.Contains(CoreStrings.BuildRestPoseUnapplied("c_vesna01_body_lod0"), r.Warnings);
         // and it landed where a target with no bake at all lands
         var plainProject = NewProject("SwapNoRest");
         WriteDonorGlb();
@@ -7390,7 +7450,8 @@ public class ModBuilderTests : IDisposable
         var result = ReleasedBuild.Build(p, env, _out, zip: false);
 
         Assert.Contains(result.Diagnostics, d => d.Contains("pool (") && d.Contains("mate"));
-        Assert.DoesNotContain(result.Infos, i => i.Contains("shares meshes"));
+        Assert.DoesNotContain(result.Infos, CatalogShape.Of(
+            CoreStrings.BuildReplacementSharesMeshes(CatalogShape.Any, CatalogShape.Any, CatalogShape.Any)).IsMatch);
         Assert.Contains("$zz_gate_vesnassr01", File.ReadAllText(Path.Combine(result.OutDir, "mod.ini")));
     }
 
@@ -7559,7 +7620,8 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildClaimantsNotTellableApart(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
         Assert.Contains("KarstDorm", ex.Message);
         Assert.Contains("VesnaSSR01", ex.Message);
     }
@@ -7632,7 +7694,8 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildClaimantsNotTellableApart(CatalogShape.Any, CatalogShape.Any)),
+            ex.Message);
         Assert.Contains("KarstDorm", ex.Message);
         Assert.Contains("VesnaSSR01", ex.Message);
         // the TIER is what collided, not either pool's lod0
@@ -7653,7 +7716,7 @@ public class ModBuilderTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildEditTwinOfMesh(CatalogShape.Any, CatalogShape.Any)), ex.Message);
         Assert.Contains("c_vesna01_body_lod0", ex.Message);
         Assert.Contains("mate", ex.Message);
     }
@@ -7818,9 +7881,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         Assert.Equal(
-            "'body' does not show some geometry from 'cloth_dorm' at longer view "
-            + "distances. The build log names the bones.",
-            Assert.Single(r.Warnings, w => w.Contains("does not show some geometry", StringComparison.Ordinal)));
+            CoreStrings.EmitterMergedTierWarning("body", "'cloth_Dorm'"),
+            Assert.Single(r.Warnings,
+                CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch));
         Assert.Contains(r.Diagnostics, d => d.Contains(
             "affected part 'c_vesna01_body_lod0'; tier mesh 'c_vesna01_body_lod1'; owning parts "
             + "'c_vesna01_cloth_lod0_Dorm'; bones no matching chain suffix (0x00000201)",
@@ -7861,7 +7924,8 @@ public class ModBuilderTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("does not show some geometry", StringComparison.Ordinal));
+        Assert.DoesNotContain(r.Warnings,
+            CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         var map = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_body_lod1_map_vesna_body.buf"));
         AssertSentinelAtCompactBone(map, tierBones, ClothBones[0]);
     }
@@ -7884,11 +7948,11 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         if (siblingPoses)
-            Assert.Contains(r.Warnings, w => w.Contains(
-                "some geometry from 'cloth'", StringComparison.Ordinal));
+            Assert.Contains(r.Warnings,
+                CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, "'cloth'")).IsMatch);
         else
-            Assert.DoesNotContain(r.Warnings, w => w.Contains(
-                "does not show some geometry", StringComparison.Ordinal));
+            Assert.DoesNotContain(r.Warnings,
+                CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         var map = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_body_lod1_map_vesna_body.buf"));
         AssertSentinelAtCompactBone(map, tierBones, ClothBones[0]);
     }
@@ -7916,10 +7980,9 @@ public class ModBuilderTests : IDisposable
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
         string warning = Assert.Single(r.Warnings,
-            w => w.Contains("does not show some geometry", StringComparison.Ordinal));
+            CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         Assert.Equal(
-            "'body' does not show some geometry from 'cloth' at longer view "
-            + "distances. The build log names the bones.",
+            CoreStrings.EmitterMergedTierWarning("body", "'cloth'"),
             warning);
         Assert.DoesNotContain("Shoes01_L/Shoes02_L", warning, StringComparison.Ordinal);
         Assert.DoesNotContain(r.Warnings, w => w.Contains("0x", StringComparison.OrdinalIgnoreCase));
@@ -7940,7 +8003,8 @@ public class ModBuilderTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("does not show some geometry", StringComparison.Ordinal));
+        Assert.DoesNotContain(r.Warnings,
+            CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         var map = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_mate_lod1_map_vesna_body.buf"));
         AssertSentinelAtCompactBone(map, tierBones, ClothBones[0]);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
@@ -7967,9 +8031,7 @@ public class ModBuilderTests : IDisposable
         Assert.Contains(r.Diagnostics, d => d.StartsWith(
             "pool (vesna_body): c_vesna01_mate_lod0, c_vesna01_body_lod0",
             StringComparison.Ordinal));
-        Assert.Contains(r.Warnings, w => w.Contains(
-            "'body' does not show some geometry from 'cloth'",
-            StringComparison.Ordinal));
+        Assert.Contains(CoreStrings.EmitterMergedTierWarning("body", "'cloth'"), r.Warnings);
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         Assert.Contains("[TextureOverride_Cap_vesna_body_lod1]", ini);
         var map = File.ReadAllBytes(Path.Combine(r.OutDir, "vesna_body_lod1_map_vesna_body.buf"));
@@ -8429,7 +8491,7 @@ public class ModBuilderTests : IDisposable
         var ex = Assert.Throws<AuthoredRefusalException>(
             () => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Contains("can't be told apart in game", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildEditTwinOfMesh(CatalogShape.Any, CatalogShape.Any)), ex.Message);
         Assert.Contains("c_vesna01_body_lod0", ex.Message);
         Assert.Contains("mate", ex.Message);
     }

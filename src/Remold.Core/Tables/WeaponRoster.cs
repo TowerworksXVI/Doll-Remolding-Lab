@@ -145,9 +145,8 @@ public static class WeaponRoster
                 if (!pathById.TryGetValue(partId * 1000 + family * 100 + tier * 10 + 1, out var path))
                     continue;
                 // the row is an appearance entry, so the game prefixes it as one; the family shows bare
-                const string skinPrefix = "Skin - ";
-                var bare = name.StartsWith(skinPrefix, StringComparison.Ordinal)
-                    ? name[skinPrefix.Length..] : name;
+                var bare = AppearancePrefix(loc!.Locale) is { } prefix
+                    && name.StartsWith(prefix, StringComparison.Ordinal) ? name[prefix.Length..] : name;
                 familyNames.TryAdd(SplitTier(path).Stripped, bare);
                 break;
             }
@@ -172,6 +171,15 @@ public static class WeaponRoster
         return list;
     }
 
+    /// <summary>The prefix the game's text puts on an appearance entry's name in <paramref name="locale"/>,
+    /// or null for a locale whose names are shown whole.</summary>
+    internal static string? AppearancePrefix(string locale) => locale switch
+    {
+        LocalizationDb.EnglishLocale => "Skin - ",
+        LocalizationDb.SimplifiedChineseLocale => "涂装·",
+        _ => null,
+    };
+
     /// <summary>The attachments branch: one group per category folder (the slot label the game's own
     /// paths carry — Sights, Silencers, Lights, Grip, Stool, Blades), base families first, then that
     /// slot's skins by rarity.</summary>
@@ -187,7 +195,8 @@ public static class WeaponRoster
             var category = slash > 0 ? a.ModelPath[..slash] : "Other";
             var key = PartGroupPrefix + category;
             if (!groups.TryGetValue(key, out var g))
-                groups[key] = g = ($"Parts · {category}", new List<Outfit>());
+                groups[key] = g = (slash > 0 ? CoreStrings.WeaponPartsGroup(category) : CoreStrings.WeaponPartsOtherGroup,
+                    new List<Outfit>());
 
             var basename = a.ModelPath[(a.ModelPath.LastIndexOf('/') + 1)..];
             g.Outfits.Add(new Outfit(-a.Id, basename, OutfitKind.Other)
@@ -239,7 +248,7 @@ public static class WeaponRoster
             if (folderStem.StartsWith("Bp", StringComparison.Ordinal))
             {
                 key = BattlePassGroup;
-                display = "Battle Pass";
+                display = CoreStrings.WeaponBattlePassGroup;
             }
             else
             {
@@ -268,7 +277,7 @@ public static class WeaponRoster
             // where the token's display spacing has no business.
             var key = SkinGroupPrefix + (WeaponType.IsKnown(s.Type) ? token : s.Type.ToString());
             if (!groups.TryGetValue(key, out var g))
-                groups[key] = g = ($"Skins · {token}", new List<Outfit>());
+                groups[key] = g = (CoreStrings.WeaponSkinsGroup(WeaponType.DisplayName(s.Type)), new List<Outfit>());
             g.Outfits.Add(WeaponOutfit(s.SkinId, FolderStem(s.ModelPath), s.Rarity, s.ModelPath, s.DisplayName));
         }
         return SortedGroups(groups);
@@ -342,7 +351,8 @@ public static class WeaponRoster
 public static class WeaponType
 {
     /// <summary>Type code → the token the game's UI uses for it. Codes outside the vocabulary label
-    /// as themselves rather than vanishing.</summary>
+    /// as themselves rather than vanishing. The token is part of a grouping key the selection ledger
+    /// persists, so it never follows the UI language; <see cref="DisplayName"/> is what the roster shows.</summary>
     public static string Token(int type) => type switch
     {
         1 => "HG",
@@ -353,6 +363,15 @@ public static class WeaponType
         6 => "SG",
         7 => "Melee",
         _ => $"Type {type}",
+    };
+
+    /// <summary>The type as the roster shows it: the game's own Latin token for a firearm type, and a
+    /// catalog entry for melee and for a code outside the vocabulary.</summary>
+    public static string DisplayName(int type) => type switch
+    {
+        7 => CoreStrings.WeaponTypeMelee,
+        _ when IsKnown(type) => Token(type),
+        _ => CoreStrings.WeaponTypeNumbered(type),
     };
 
     /// <summary>Whether the code is in the measured vocabulary (its token is a real name, not a

@@ -12,8 +12,8 @@ public sealed partial class EditPageVm
     private EditShadingRowVm WithShadingEffects(EditShadingRowVm row)
     {
         var read = _shell.PeekShading(row.Part, row.MaterialSlotIndex, row.Material);
-        row.EffectsNote = read is null ? "Reading material effects…"
-            : read.Problem ?? (read.Info is null ? "No adjustable effects are available for this material." : "");
+        row.EffectsNote = read is null ? Strings.ShadingEffectsReading
+            : read.Problem ?? (read.Info is null ? Strings.ShadingNoEffects : "");
         var info = read?.Info;
         if (info is null) return row;
         row.EffectOperations = info.EffectOperations ?? Array.Empty<MaterialEffectOperation>();
@@ -33,13 +33,13 @@ public sealed partial class EditPageVm
         try
         {
             var info = await _shell.ReadShadingAsync(row.Part, row.MaterialSlotIndex, row.Material);
-            row.EffectsNote = info is null ? "No adjustable effects are available for this material." : "";
+            row.EffectsNote = info is null ? Strings.ShadingNoEffects : "";
             return info;
         }
         catch (Exception failure)
         {
             row.EffectsNote = failure is EditShadingFailureException ? failure.Message
-                : "Couldn't read this material's effects.";
+                : Strings.ShadingEffectsUnreadable;
             return null;
         }
     }
@@ -63,13 +63,13 @@ public sealed partial class EditPageVm
             var info = enabled ? null : await ReadShadingEffectsAsync(row);
             if (!enabled && info?.EffectOperations is null) return;
             var session = _session;
-            WriteShading(row, "change this effect", edit =>
+            WriteShading(row, Strings.Action_ChangeThisEffect, edit =>
             {
                 session.ApplyMaterialShading(edit.EditDefinitionId, row.Part, row.MaterialSlotIndex,
                     Array.Empty<AuthoredMaterialValueEdit>(),
                     new[] { new AuthoredMaterialEffectEdit(effect.Id, enabled) },
                     _shell.ResolvePart, info?.EffectOperations);
-                return $"{(enabled ? "Enabled" : "Disabled")} {effect.Label}.";
+                return enabled ? Strings.ShadingEffectEnabled(effect.Label) : Strings.ShadingEffectDisabled(effect.Label);
             });
         }
         finally
@@ -96,16 +96,16 @@ public sealed partial class EditPageVm
                 .Select(effect => new AuthoredMaterialEffectEdit(effect.Id, false)).ToArray();
             if (effects.Length == 0)
             {
-                Status = "All removable effects are already disabled.";
+                Status = Strings.ShadingAllAlreadyDisabled;
                 return;
             }
             var session = _session;
-            WriteShading(row, "disable these effects", edit =>
+            WriteShading(row, Strings.Action_DisableTheseEffects, edit =>
             {
                 session.ApplyMaterialShading(edit.EditDefinitionId, row.Part, row.MaterialSlotIndex,
                     Array.Empty<AuthoredMaterialValueEdit>(), effects, _shell.ResolvePart,
                     info.EffectOperations);
-                return "Disabled all removable effects.";
+                return Strings.ShadingDisabledAll;
             });
         }
         finally { Release(gate); }

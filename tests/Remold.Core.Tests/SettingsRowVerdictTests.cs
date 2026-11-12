@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using Remold.App.ViewModels;
 using Remold.App.Views;
@@ -73,7 +74,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.BlankGameRow();
 
         Assert.Equal(SettingsValidation.GlyphAdvisory, reading.Glyph);
-        Assert.Equal("Not set. The app asks for the game folder on the main screen.", reading.Tooltip);
+        Assert.Equal(Strings.SettingsGameNotSet, reading.Tooltip);
     }
 
     /// <summary>A blank projects folder is the default library, which is a working answer — so it reads as
@@ -84,7 +85,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.BlankProjectsRow(@"D:\Mods\Library");
 
         Assert.Equal(SettingsValidation.GlyphOk, reading.Glyph);
-        Assert.Equal(@"Using the default projects folder: D:\Mods\Library.", reading.Tooltip);
+        Assert.Equal(Strings.SettingsProjectsDefault("D:\\Mods\\Library"), reading.Tooltip);
     }
 
     /// <summary>A blank CPU limit is every core, named with the number it comes to on this machine.</summary>
@@ -94,7 +95,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.BlankCpuRow(12);
 
         Assert.Equal(SettingsValidation.GlyphOk, reading.Glyph);
-        Assert.Equal("Using every core (12).", reading.Tooltip);
+        Assert.Equal(Strings.SettingsCpuEveryCore(12), reading.Tooltip);
     }
 
     /// <summary>The one row that shows nothing when it is blank. The loader is optional, and the Launch
@@ -129,7 +130,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.CpuRow("6", processorCount: 12);
 
         Assert.Equal(SettingsValidation.GlyphOk, reading.Glyph);
-        Assert.Equal("Capped at 6 cores.", reading.Tooltip);
+        Assert.Equal(Strings.SettingsCpuCapped_Other(6), reading.Tooltip);
     }
 
     [Fact]
@@ -152,7 +153,7 @@ public class SettingsRowVerdictTests
         var reading = SettingsValidation.CpuRow(typed, processorCount: 12);
 
         Assert.Equal(SettingsValidation.GlyphBlocking, reading.Glyph);
-        Assert.Equal(SettingsValidation.CpuNotANumber, reading.Tooltip);
+        Assert.Equal(Strings.SettingsCpuNotANumber, reading.Tooltip);
     }
 
     // ---- and the words on the tooltip ----
@@ -162,22 +163,25 @@ public class SettingsRowVerdictTests
     [Fact]
     public void TheLoaderVerdicts_SayWhatHappensToTheMods_NotHowTheHostWorks()
     {
-        Assert.DoesNotContain("hook", SettingsValidation.LoaderReady);
+        Assert.DoesNotContain("hook", Strings.SettingsLoaderReady);
         Assert.DoesNotContain("hook", SettingsValidation.LoaderNoHook);
-        Assert.Contains("show up in game", SettingsValidation.LoaderReady);
+        Assert.Contains("show up in game", Strings.SettingsLoaderReady);
         Assert.Contains("show up in game", SettingsValidation.LoaderNoHook);
         // the ini is a file the modder has no reason to have heard of, so its absence is reported as the same
         // outcome its siblings name rather than as a missing filename
-        Assert.Contains("show up in game", SettingsValidation.LoaderNoIni);
-        Assert.DoesNotContain(MigotoIni.FileName, SettingsValidation.LoaderNoIni);
+        Assert.Contains("show up in game", Strings.SettingsLoaderNoIni);
+        Assert.DoesNotContain(MigotoIni.FileName, Strings.SettingsLoaderNoIni);
     }
+
+    public static TheoryData<string> LoaderRefusals => new()
+    {
+        Strings.SettingsLoaderNotThere, Strings.SettingsLoaderNoIni, SettingsValidation.LoaderNoHook,
+    };
 
     /// <summary>Every loader refusal is two sentences: what is wrong, then what to pick. A verdict that only
     /// diagnoses leaves the modder on a row they can't act on.</summary>
     [Theory]
-    [InlineData(SettingsValidation.LoaderNotThere)]
-    [InlineData(SettingsValidation.LoaderNoIni)]
-    [InlineData(SettingsValidation.LoaderNoHook)]
+    [MemberData(nameof(LoaderRefusals))]
     public void EveryLoaderRefusal_EndsInSomethingToDo(string text)
     {
         var remedy = text[(text.IndexOf(". ", StringComparison.Ordinal) + 2)..];
@@ -191,8 +195,8 @@ public class SettingsRowVerdictTests
     [Fact]
     public void TheSettingsRowExtendsTheSharedTextureModDiagnosis()
     {
-        Assert.StartsWith(LoaderGate.NoTextureHook, SettingsValidation.LoaderNoHook);
-        Assert.DoesNotContain(SettingsValidation.LoaderStillSaveable, LoaderGate.NoTextureHook);
+        Assert.StartsWith(Strings.LoaderNoTextureHook, SettingsValidation.LoaderNoHook);
+        Assert.DoesNotContain(Strings.SettingsLoaderStillSaveable, Strings.LoaderNoTextureHook);
     }
 
     /// <summary>The one row whose refusal the form saves past says so, on the row itself: a caution the
@@ -200,8 +204,8 @@ public class SettingsRowVerdictTests
     [Fact]
     public void TheLoaderRefusal_SaysTheFormStillSaves()
     {
-        Assert.EndsWith(SettingsValidation.LoaderStillSaveable, SettingsValidation.LoaderNoHook);
-        Assert.Contains("still save", SettingsValidation.LoaderStillSaveable);
+        Assert.EndsWith(Strings.SettingsLoaderStillSaveable, SettingsValidation.LoaderNoHook);
+        Assert.Contains("still save", Strings.SettingsLoaderStillSaveable);
     }
 
     // ---- and the form-level line under them all ----

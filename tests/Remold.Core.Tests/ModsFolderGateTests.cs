@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -58,7 +59,7 @@ public class ModsFolderGateTests : IDisposable
 
         vm.SetGameDir(gameRoot);
         vm.ApplySettings(new SettingsResult { GamePath = gameRoot, MigotoLoaderExe = loader });
-        Assert.Equal(LoaderGate.LoaderNotFound(loader), vm.LaunchDisabledReason);
+        Assert.Equal(Strings.LoaderNotFound(loader), vm.LaunchDisabledReason);
         Assert.False(vm.CanLaunchGame);
 
         Directory.CreateDirectory(migoto);
@@ -86,9 +87,9 @@ public class ModsFolderGateTests : IDisposable
         Directory.CreateDirectory(migoto);
 
         Assert.Null(SettingsValidation.MigotoLoaderExe(""));
-        Assert.Equal(SettingsValidation.LoaderNotThere, SettingsValidation.MigotoLoaderExe(loader));
+        Assert.Equal(Strings.SettingsLoaderNotThere, SettingsValidation.MigotoLoaderExe(loader));
         File.WriteAllText(loader, "x");
-        Assert.Equal(SettingsValidation.LoaderNoIni, SettingsValidation.MigotoLoaderExe(loader));
+        Assert.Equal(Strings.SettingsLoaderNoIni, SettingsValidation.MigotoLoaderExe(loader));
         File.WriteAllText(Path.Combine(migoto, MigotoIni.FileName),
             "[ShaderRegexEnableTextureOverrides]\n; checktextureoverride = ps-t0\n");
         Assert.Equal(SettingsValidation.LoaderNoHook, SettingsValidation.MigotoLoaderExe(loader));

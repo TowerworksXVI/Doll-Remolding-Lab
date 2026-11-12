@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
+using Remold.Core.Text;
 
 namespace Remold.Core.Blender;
 
@@ -304,13 +305,27 @@ public static class BlenderBridge
     public static Process Launch(string blenderExe, string scriptPath, string glbPath, string sendDir)
     {
         Directory.CreateDirectory(sendDir);
+        return Process.Start(LaunchStart(blenderExe, scriptPath, glbPath, sendDir, Catalog.CurrentTag))
+            ?? throw new InvalidOperationException("Blender did not start");
+    }
+
+    /// <summary>The environment variable that tells the bridge the app's UI language. The bridge shows
+    /// Blender's own language when it has that language, and this one otherwise.</summary>
+    public const string LanguageVariable = "DRL_UI_LANGUAGE";
+
+    /// <summary>How <see cref="Launch"/> starts Blender, with <paramref name="uiLanguage"/> handed to the
+    /// bridge in <see cref="LanguageVariable"/>.</summary>
+    internal static ProcessStartInfo LaunchStart(string blenderExe, string scriptPath, string glbPath,
+        string sendDir, string uiLanguage)
+    {
         var psi = new ProcessStartInfo(blenderExe) { UseShellExecute = false };
         psi.ArgumentList.Add("--python");
         psi.ArgumentList.Add(scriptPath);
         psi.ArgumentList.Add("--");
         psi.ArgumentList.Add(glbPath);
         psi.ArgumentList.Add(sendDir);
-        return Process.Start(psi) ?? throw new InvalidOperationException("Blender did not start");
+        psi.Environment[LanguageVariable] = uiLanguage;
+        return psi;
     }
 
     /// <summary>Where the session description lives: beside the glb, same stem-plus-suffix rule as the
@@ -676,8 +691,7 @@ public static class BlenderBridge
         {
             if (string.IsNullOrWhiteSpace(part)) continue;
             if (!seen.Add(part))
-                throw new AuthoredRefusalException(
-                    $"The send sidecar names part '{part}' more than once with different capitalization.");
+                throw new AuthoredRefusalException(CoreStrings.BlenderSidecarDuplicatePart(part));
             if (target is not null && (target.IsExisting || target.IsNew)) result.Add(part, target);
         }
         return result;

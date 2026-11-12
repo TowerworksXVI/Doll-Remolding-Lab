@@ -6,6 +6,7 @@ using Remold.Core.Bundles;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Remold.Core.Tests.Support;
+using Remold.Core.Text;
 using Remold.Core.Workbench;
 using Xunit;
 
@@ -764,7 +765,7 @@ public sealed class LegacyProjectAdapterTests : IDisposable
         var adapted = LegacyProjectAdapter.Adapt(legacy, ResolveBodyWithRamp);
 
         Assert.Contains(adapted.Report.Items, item => item.Code == "ramp.keep_own"
-            && item.Detail.Contains("A picked toon ramp already answers", StringComparison.Ordinal));
+            && item.Detail == CoreStrings.MigrationKeepRampAnswered("body_material"));
         var edit = adapted.Project.EditDefinitions.Single(e =>
             e.Target.RendererSlot == "c_vesna_body_lod0" && e.Kind == EditDefinitionKind.Content);
         Assert.Equal(BindingKind.InheritedLiveCarrier, OutputRamp(edit, adapted.Project).Kind);
@@ -885,7 +886,7 @@ public sealed class LegacyProjectAdapterTests : IDisposable
 
     /// <summary>The pinned schema-1 project with its build exclusion cleared and a second change put on
     /// the coat, so one key can be made to span two parts.</summary>
-    private ModProject KeyedFixture(string coatKey, bool coatStartsOff)
+    internal ModProject KeyedFixture(string coatKey, bool coatStartsOff)
     {
         var legacy = LoadFixture(meshEdited: true, textureEdited: false, out _);
         legacy.BuildExcluded.Clear();
@@ -921,7 +922,7 @@ public sealed class LegacyProjectAdapterTests : IDisposable
         File.WriteAllBytes(originalPath, new byte[] { 1 });
     }
 
-    private static LegacyResolvedPart? ResolveFixturePart(TargetPart part)
+    internal static LegacyResolvedPart? ResolveFixturePart(TargetPart part)
     {
         if (part.Subject != "Vesna" || part.Outfit != "VesnaSSR01") return null;
         var renderer = Game(70000 + Math.Abs(part.RendererSlot.GetHashCode(StringComparison.Ordinal)) % 1000,
@@ -1001,4 +1002,33 @@ public sealed class LegacyProjectAdapterTests : IDisposable
 
     private static TargetSlot Slot(AuthoredProject project, Binding binding) =>
         project.TargetSlots.Single(s => s.Id == binding.SlotId);
+}
+
+/// <summary>The conversion notes under another language: the kind of change a note names reads from the
+/// catalog, never as the old file's own word.</summary>
+[Collection("UiCulture")]
+public sealed class LegacyProjectAdapterLanguageTests : IDisposable
+{
+    private readonly LegacyProjectAdapterTests _fixtures = new();
+
+    public void Dispose() => _fixtures.Dispose();
+
+    [Fact]
+    public void A_note_names_the_kind_of_change_from_the_catalog_under_the_pseudolocale()
+    {
+        var legacy = _fixtures.KeyedFixture(coatKey: "F7", coatStartsOff: true);
+        legacy.SetBuildExcluded("Vesna", "VesnaSSR01", "c_vesna_body_lod0", EditVerbs.Replace, true);
+        try
+        {
+            Catalog.Apply(Catalog.Pseudo);
+
+            var adapted = LegacyProjectAdapter.Adapt(legacy, LegacyProjectAdapterTests.ResolveFixturePart);
+
+            var note = Assert.Single(adapted.Report.Items, item => item.Code == "build.inactive_key");
+            Assert.Equal(CoreStrings.MigrationOrphanKey(CoreStrings.MigrationKindReplace), note.Detail);
+            Assert.Contains("[replace]", note.Detail, StringComparison.Ordinal);
+            Assert.DoesNotMatch(@"(?<!\[)replace(?!\])", note.Detail);
+        }
+        finally { Catalog.Apply(Catalog.English); }
+    }
 }

@@ -197,9 +197,11 @@ public class DrawSelectorTests
         var ex = Assert.Throws<AuthoredRefusalException>(() => MigotoEmitter.RefuseTagCollisions(
             Array.Empty<(string, string)>(), new[] { (texture, "cloth1") },
             bufferTags: new[] { (buffer, "c_vesna01_body_lod0") }));
-        Assert.Contains("the mesh c_vesna01_body_lod0", ex.Message);
-        Assert.Contains("stock texture 00000001 on cloth1", ex.Message);
-        Assert.Contains("Leave the edit on c_vesna01_body_lod0 or the new textures on cloth1 out of the build.", ex.Message);
+        Assert.Equal(CoreStrings.EmitterDrawTagCollision(
+            CoreStrings.EmitterStockTexture(CoreStrings.EmitterTextureOnPart(texture, "cloth1")),
+            CoreStrings.EmitterMeshNamed("c_vesna01_body_lod0"), MigotoEmitter.RetexTag(texture),
+            CoreStrings.EmitterFixLeaveEither(CoreStrings.EmitterEditOn("c_vesna01_body_lod0"),
+                CoreStrings.EmitterNewTexturesOn("cloth1"))), ex.Message);
         // no collision, no refusal — and a buffer against itself is one resource, not two
         MigotoEmitter.RefuseTagCollisions(Array.Empty<(string, string)>(), new[] { ("00000002", "cloth1") },
             bufferTags: new[] { (buffer, "body"), (buffer, "body") });

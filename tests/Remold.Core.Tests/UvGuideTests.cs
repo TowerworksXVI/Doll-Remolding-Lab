@@ -284,7 +284,7 @@ public class UvGuideTests
         var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "effect.png", guide,
             (_, _) => TriMeshWithGeometry(UvA), "TexCoord1");
 
-        Assert.Equal("The mesh that samples effect.png has no second UV set, so no UV1 guide can be drawn.",
+        Assert.Equal(CoreStrings.UvGuideNoSecondUv_One("effect.png"),
             problem);
         Assert.DoesNotContain("Rescan", problem);
         Assert.False(File.Exists(guide));
@@ -303,7 +303,7 @@ public class UvGuideTests
         var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "base.png", guide,
             (_, _) => mesh);
 
-        Assert.Equal("The mesh that samples base.png has no UV layout, so no UV guide can be drawn.",
+        Assert.Equal(CoreStrings.UvGuideNoLayout_One("base.png"),
             problem);
         Assert.DoesNotContain("Rescan", problem);
         Assert.False(File.Exists(guide));
@@ -322,8 +322,7 @@ public class UvGuideTests
         var problem = AssetExporter.PlotUvGuide(samplers, 100, 100, "base.png", guide,
             (_, _) => { originalAsked = true; return TriMeshWithGeometry(UvB); });
 
-        Assert.Equal("Couldn't read this edit's mesh, so no UV guide was drawn. "
-            + "Send it back from Blender again, or use Revert mesh.", problem);
+        Assert.Equal(CoreStrings.UvGuideEditUnreadable, problem);
         Assert.False(originalAsked);
         Assert.False(File.Exists(guide));
     }

@@ -28,7 +28,7 @@ public sealed class RampPickerWindow : Window
     {
         _vm = vm;
         DataContext = vm;
-        Title = "Choose a toon ramp";
+        Title = Strings.RampPickerTitle;
         Width = 560;
         Height = 580;
         CanResize = false;
@@ -52,7 +52,7 @@ public sealed class RampPickerWindow : Window
 
         var filter = new TextBox
         {
-            Watermark = "Filter by character, outfit, or part", Padding = new Thickness(8, 4),
+            Watermark = Strings.RampPickerFilter, Padding = new Thickness(8, 4),
         };
         filter.Bind(TextBox.TextProperty, new Binding(nameof(RampPickerVm.Filter), BindingMode.TwoWay));
 
@@ -83,7 +83,7 @@ public sealed class RampPickerWindow : Window
                 dot,
                 new TextBlock
                 {
-                    Text = "Reading toon ramps…",
+                    Text = Strings.RampPickerReading,
                     Foreground = Brush("HudSubtextBrush"),
                     FontSize = 12,
                     VerticalAlignment = VerticalAlignment.Center,
@@ -94,7 +94,7 @@ public sealed class RampPickerWindow : Window
 
         var empty = new TextBlock
         {
-            Text = RampPickerVm.NoRowsLine,
+            Text = Strings.RampPickerNoRows,
             Foreground = Brush("HudSubtextBrush"),
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap,
@@ -156,15 +156,15 @@ public sealed class RampPickerWindow : Window
 
     private Panel Footer(RampPickerVm vm)
     {
-        var import = Small("Import DDS…", nameof(RampPickerVm.ImportCommand));
-        import[ToolTip.TipProperty] = ImportTip;
-        var export = Small("Export…", nameof(RampPickerVm.ExportCommand));
+        var import = Small(Strings.RampPickerImport, nameof(RampPickerVm.ImportCommand));
+        import[ToolTip.TipProperty] = Strings.RampPickerImportTip;
+        var export = Small(Strings.RampPickerExport, nameof(RampPickerVm.ExportCommand));
         export.Bind(IsEnabledProperty, new Binding(nameof(RampPickerVm.CanExport)));
-        export[ToolTip.TipProperty] = ExportTip;
+        export[ToolTip.TipProperty] = Strings.RampPickerExportTip;
 
-        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6) };
+        var cancel = new Button { Content = Strings.Cancel, IsCancel = true, Padding = new Thickness(16, 6) };
         cancel.Bind(Button.CommandProperty, new Binding(nameof(RampPickerVm.CancelCommand)));
-        var apply = new Button { Content = "Apply", IsDefault = true, Padding = new Thickness(16, 6) };
+        var apply = new Button { Content = Strings.Apply, IsDefault = true, Padding = new Thickness(16, 6) };
         apply.Bind(Button.CommandProperty, new Binding(nameof(RampPickerVm.ApplyCommand)));
         apply.Bind(IsEnabledProperty, new Binding(nameof(RampPickerVm.CanApply)));
 
@@ -182,13 +182,6 @@ public sealed class RampPickerWindow : Window
         };
         return new Panel { Children = { left, right } };
     }
-
-    /// <summary>What Import states before the file dialog: the one shape a ramp file has, so a refusal
-    /// afterwards is not the first time it is said.</summary>
-    internal const string ImportTip = "Use a 256×16 RGBAHalf .dds as this material's toon ramp";
-
-    /// <summary>Export writes what is selected, byte for byte.</summary>
-    internal const string ExportTip = "Save the selected toon ramp as a .dds";
 
     private Button Small(string content, string command)
     {
@@ -294,7 +287,7 @@ public sealed class RampPickerWindow : Window
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Import a toon ramp",
+            Title = Strings.RampPickerImportTitle,
             AllowMultiple = false,
             FileTypeFilter = new[] { DdsFiles },
         });
@@ -305,7 +298,7 @@ public sealed class RampPickerWindow : Window
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
-            Title = "Export this toon ramp",
+            Title = Strings.RampPickerExportTitle,
             SuggestedFileName = suggested,
             DefaultExtension = "dds",
             FileTypeChoices = new[] { DdsFiles },
@@ -314,7 +307,7 @@ public sealed class RampPickerWindow : Window
     }
 
     private static FilePickerFileType DdsFiles =>
-        new("DDS texture") { Patterns = new[] { "*.dds" } };
+        new(Strings.RampPickerDdsFilter) { Patterns = new[] { "*.dds" } };
 
     /// <summary>Show the pick list modally over <paramref name="owner"/>. Resolves to the chosen ramp, or
     /// null when the modder cancelled.</summary>

@@ -37,9 +37,20 @@ public class RigidReplaceTests : IDisposable
 
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
 
-    private const string Part = "p_CrateMk2_frame_lod0";
-    private const string Tier = "p_CrateMk2_frame_lod1";
+    /// <summary>The replaced part's token and its lod0 and lod1 mesh names; every test but
+    /// <see cref="AmbiguousPartWarnings"/> keeps the frame.</summary>
+    private string _partToken = "frame";
+    private string Part = "p_CrateMk2_frame_lod0";
+    private string Tier = "p_CrateMk2_frame_lod1";
     private const string Panel = "p_CrateMk2_panel_lod0";
+
+    /// <summary>The warning that a detail level has no place to draw part of the new mesh, whatever it names.</summary>
+    private static System.Text.RegularExpressions.Regex NoPlace => CatalogShape.Of(
+        CoreStrings.BuildTierNoPlace(CatalogShape.Any, CatalogShape.Any, CatalogShape.Any));
+
+    /// <summary>The warning that a part has more than one stock material configuration, whichever part.</summary>
+    private static System.Text.RegularExpressions.Regex Ambiguous => CatalogShape.Of(
+        CoreStrings.BuildAmbiguousMaterials(CatalogShape.Any));
     private static readonly uint[] Bone = { 0x11111111u };
 
     /// <summary>The frame's and the panel's own base color hashes, once the twin world gives them one.</summary>
@@ -273,7 +284,7 @@ public class RigidReplaceTests : IDisposable
                 Materials = new[] { new TierMaterialRef("bundleMat", 2, true) },
             };
         }
-        parts.Insert(0, new SubjectPart("frame", Part, "addr_frame", frameMaterials,
+        parts.Insert(0, new SubjectPart(_partToken, Part, "addr_frame", frameMaterials,
             SiblingTiers: new[] { tierSlot }, AmbiguousMaterials: ambiguousTarget));
 
         var model = new SubjectModel("Crate", "CrateMk2", SubjectSource.Prefab, parts.ToArray(),
@@ -381,10 +392,9 @@ public class RigidReplaceTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        var warning = Assert.Single(r.Warnings, w => w.Contains("no place to draw"));
-        Assert.Contains("At the furthest detail level", warning);
-        Assert.Contains("'m_frame'", warning);
-        Assert.EndsWith("so that part of it is not drawn there.", warning);
+        var warning = Assert.Single(r.Warnings, NoPlace.IsMatch);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildTierNoPlace(CoreStrings.BuildDetailLevelFurthest,
+            CatalogShape.Any, CoreStrings.BuildMaterialNamed("m_frame"))), warning);
         Assert.Contains(r.Diagnostics, d => d.Contains($"{Tier}: 0→none unresolved"));
 
         // the tier's own section still suppresses the vanilla draw, and issues no donor draw at all
@@ -417,10 +427,9 @@ public class RigidReplaceTests : IDisposable
         // the map the two renderers produced: the second material pairs by identity onto the tier's
         // first position, and the first material has no place at this tier at all
         Assert.Contains(r.Diagnostics, d => d.Contains($"{Tier}: 0→none unresolved, 1→0 identity"));
-        var warning = Assert.Single(r.Warnings, w => w.Contains("no place to draw"));
-        Assert.Contains("At the furthest detail level", warning);
-        Assert.Contains("'m_frame'", warning);
-        Assert.EndsWith("so that part of it is not drawn there.", warning);
+        var warning = Assert.Single(r.Warnings, NoPlace.IsMatch);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildTierNoPlace(CoreStrings.BuildDetailLevelFurthest,
+            CatalogShape.Any, CoreStrings.BuildMaterialNamed("m_frame"))), warning);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         // at the tier the matched range draws at the position binding its material, and the unmatched
@@ -451,8 +460,9 @@ public class RigidReplaceTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        var warning = Assert.Single(r.Warnings, w => w.Contains("no place to draw"));
-        Assert.Contains("that uses material 0,", warning);
+        var warning = Assert.Single(r.Warnings, NoPlace.IsMatch);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildTierNoPlace(CatalogShape.Any, CatalogShape.Any,
+            CoreStrings.BuildMaterialNumbered(0))), warning);
     }
 
     /// <summary>The game files can hold more than one stock material configuration for a part. The build
@@ -461,17 +471,21 @@ public class RigidReplaceTests : IDisposable
     [Fact]
     public void A_part_with_more_than_one_stock_material_configuration_says_so_once_and_names_itself()
     {
+        var warning = Assert.Single(AmbiguousPartWarnings(_partToken, Part, Tier), Ambiguous.IsMatch);
+        Assert.Equal(CoreStrings.BuildAmbiguousMaterials("frame"), warning);
+    }
+
+    /// <summary>The warnings of a build replacing a part that has more than one stock material
+    /// configuration, the part given <paramref name="token"/> and the lod0 and lod1 mesh names
+    /// <paramref name="partMesh"/> and <paramref name="tierMesh"/>.</summary>
+    internal IReadOnlyList<string> AmbiguousPartWarnings(string token, string partMesh, string tierMesh)
+    {
+        (_partToken, Part, Tier) = (token, partMesh, tierMesh);
         var env = MakeEnv(out _, out _, ambiguousTarget: true);
         var p = NewProject();
         WriteDonorGlb();
         AddReplaceTarget(p);
-
-        var r = ReleasedBuild.Build(p, env, _out, zip: false);
-
-        var warning = Assert.Single(r.Warnings, w => w.Contains("stock material configuration"));
-        Assert.Equal("'frame': This part has more than one stock material configuration in the game files. "
-            + "The edit was built against the most common one; on the others, colors may sit on the wrong "
-            + "pieces.", warning);
+        return ReleasedBuild.Build(p, env, _out, zip: false).Warnings;
     }
 
     /// <summary>A build that changes two such parts has something to say about each of them, and says
@@ -493,11 +507,11 @@ public class RigidReplaceTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        var said = r.Warnings.Where(w => w.Contains("stock material configuration")).ToList();
+        var said = r.Warnings.Where(w => Ambiguous.IsMatch(w)).ToList();
         Assert.Equal(2, said.Count);
         Assert.Equal(2, said.Distinct(StringComparer.Ordinal).Count());
-        Assert.Single(said, w => w.StartsWith("'frame': ", StringComparison.Ordinal));
-        Assert.Single(said, w => w.StartsWith("'panel': ", StringComparison.Ordinal));
+        Assert.Single(said, w => w == CoreStrings.BuildAmbiguousMaterials("frame"));
+        Assert.Single(said, w => w == CoreStrings.BuildAmbiguousMaterials("panel"));
     }
 
     /// <summary>The same part, left alone: a mod that changes nothing about it has nothing to say about
@@ -512,7 +526,7 @@ public class RigidReplaceTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("stock material configuration"));
+        Assert.DoesNotContain(r.Warnings, Ambiguous.IsMatch);
     }
 
     /// <summary>A tier whose draws another mesh's cannot be told apart from keeps its draw inside the
@@ -529,10 +543,11 @@ public class RigidReplaceTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _out, zip: false);
 
-        var warning = Assert.Single(r.Warnings, w => w.Contains("can't be told apart from another mesh"));
-        Assert.Contains("At the furthest detail level", warning);
-        Assert.EndsWith("Some of it may show under the wrong material.", warning);
-        Assert.DoesNotContain(r.Warnings, w => w.Contains("no place to draw"));
+        var guarded = CatalogShape.Of(CoreStrings.BuildTierTwinGuarded(CatalogShape.Any, CatalogShape.Any));
+        var warning = Assert.Single(r.Warnings, guarded.IsMatch);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildTierTwinGuarded(CoreStrings.BuildDetailLevelFurthest,
+            CatalogShape.Any)), warning);
+        Assert.DoesNotContain(r.Warnings, NoPlace.IsMatch);
 
         string ini = File.ReadAllText(Path.Combine(r.OutDir, "mod.ini"));
         // the tier's own section still runs the whole donor behind the guard, and no per-range sections

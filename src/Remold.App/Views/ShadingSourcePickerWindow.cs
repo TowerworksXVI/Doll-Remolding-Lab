@@ -27,7 +27,7 @@ public sealed class ShadingSourcePickerWindow : Window
         Func<long, CancellationToken, Task> waitForWarm)
     {
         DataContext = _vm;
-        Title = "Copy from material";
+        Title = Strings.ShadingSourceTitle;
         Width = 520;
         Height = 520;
         CanResize = true;
@@ -39,7 +39,7 @@ public sealed class ShadingSourcePickerWindow : Window
 
         var filter = new TextBox
         {
-            Watermark = "Filter by part or material", Padding = new Thickness(8, 4),
+            Watermark = Strings.ShadingSourceFilter, Padding = new Thickness(8, 4),
         };
         filter.Bind(TextBox.TextProperty,
             new Binding(nameof(ShadingSourcePickerVm.Filter), BindingMode.TwoWay));
@@ -75,12 +75,12 @@ public sealed class ShadingSourcePickerWindow : Window
 
         _copy = new Button
         {
-            Content = "Copy", IsDefault = true, IsEnabled = false, Padding = new Thickness(16, 6),
+            Content = Strings.ShadingSourceCopy, IsDefault = true, IsEnabled = false, Padding = new Thickness(16, 6),
         };
         ToolTip.SetShowOnDisabled(_copy, true);
-        ToolTip.SetTip(_copy, CopyDisabledTip);
+        ToolTip.SetTip(_copy, Strings.ShadingSourceCopyDisabled);
         _copy.Click += (_, _) => CloseWithSelection();
-        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6) };
+        var cancel = new Button { Content = Strings.Cancel, IsCancel = true, Padding = new Thickness(16, 6) };
         cancel.Click += (_, _) => Close(null);
 
         Content = new Grid
@@ -89,7 +89,7 @@ public sealed class ShadingSourcePickerWindow : Window
             RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto,Auto"),
             Children =
             {
-                Put(new TextBlock { Text = $"Onto {targetLabel}", FontSize = 12, Foreground = dim,
+                Put(new TextBlock { Text = Strings.ShadingSourceOnto(targetLabel), FontSize = 12, Foreground = dim,
                     TextWrapping = TextWrapping.Wrap }, 0),
                 Put(filter, 1),
                 Put(new ScrollViewer { Content = _list }, 2),
@@ -122,7 +122,7 @@ public sealed class ShadingSourcePickerWindow : Window
         {
             if (gone.IsCancellationRequested) return;
             _vm.Read = EditSubjectRead.Answered;
-            _vm.Failure = "Couldn't read materials: " + e.Message;
+            _vm.Failure = Strings.ShadingSourceReadFailed(e.Message);
         }
     }
 
@@ -140,8 +140,6 @@ public sealed class ShadingSourcePickerWindow : Window
     private static IBrush? Brush(string key) =>
         Application.Current?.TryFindResource(key, out var value) == true && value is IBrush brush
             ? brush : null;
-
-    internal const string CopyDisabledTip = "Select a material to copy.";
 
     private const string PulseClass = "pulse";
 

@@ -31,9 +31,7 @@ public class StreamDumpGateTests : IDisposable
         var field = new BundleReader().GetMeshField(File.ReadAllBytes(bundle), "rigid");
 
         Assert.NotNull(field);
-        var reason = StreamDump.UnrecoverableSkinReason(field!);
-        Assert.NotNull(reason);
-        Assert.Contains("skin weights", reason);
+        Assert.Equal(CoreStrings.SkinReasonNoWeights, StreamDump.UnrecoverableSkinReason(field!));
     }
 
     [Fact]

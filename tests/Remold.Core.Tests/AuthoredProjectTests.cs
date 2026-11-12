@@ -129,7 +129,7 @@ public sealed class AuthoredProjectTests : IDisposable
 
         // The message is the one sentence a damaged project earns; the per-field account rides underneath
         // it, where the log takes it and no surface reads it.
-        Assert.Equal(AuthoredProjectSerializer.DamagedProject, error.Message);
+        Assert.Equal(CoreStrings.ProjectDamaged, error.Message);
         Assert.Contains("mesh has no path id", error.InnerException!.Message);
     }
 
@@ -522,7 +522,7 @@ public sealed class AuthoredProjectTests : IDisposable
         File.WriteAllText(ModProject.ManifestPathFor(dir), "{\"schema\": 4}");
 
         var refused = Assert.Throws<InvalidDataException>(() => AuthoredProjectDocument.Load(dir));
-        Assert.Equal("'Newer Mod' was made with a newer version of Doll Remolding Lab. Update the app to open it.",
+        Assert.Equal(CoreStrings.ProjectNewerNamed("Newer Mod"),
             refused.Message);
         Assert.Equal(refused.Message, Assert.Throws<InvalidDataException>(
             () => AuthoredProjectSerializer.Load(dir)).Message);

@@ -158,7 +158,7 @@ public class VariantGroupTests
         // P2_dress_extra is a second piece of variant 22, whose own member P2_dress measures and poses 40
         var unread = new[]
         {
-            new PoolDerive.MissingPart("P2_dress_extra", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P2_dress_extra", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, 22)),
         };
         Assert.Equal(new uint[] { 40 }, Assert.Single(Groups(Roster, "body", Scheme, unread)).GroupBones);
@@ -166,7 +166,7 @@ public class VariantGroupTests
         // …as does a held-back part of no wardrobe slot: it can be the missing member of nothing.
         var elsewhere = new[]
         {
-            new PoolDerive.MissingPart("hair", "its skin weights can't be read", null, PartPresence.Always),
+            new PoolDerive.MissingPart("hair", CoreStrings.SkinReasonWeightsUnread, null, PartPresence.Always),
         };
         Assert.Single(Groups(Roster, "body", Scheme, elsewhere));
     }
@@ -181,7 +181,7 @@ public class VariantGroupTests
         var roster = new[] { Body(10, 11, 40), Member("P1_dress", 21, new uint[] { 40 }) };
         var unread = new[]
         {
-            new PoolDerive.MissingPart("P2_dress", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P2_dress", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, 22)),
         };
         Assert.Empty(Groups(roster, "body", Scheme, unread));
@@ -190,7 +190,7 @@ public class VariantGroupTests
         // of its own. The kill above is the missing member's doing and not the held-back entry's.
         Assert.Single(Groups(Roster, "body", Scheme, new[]
         {
-            new PoolDerive.MissingPart("P2_dress_extra", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P2_dress_extra", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, 22)),
         }));
     }
@@ -219,7 +219,7 @@ public class VariantGroupTests
     {
         var unread = new[]
         {
-            new PoolDerive.MissingPart("P3_dress", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P3_dress", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, PartPresence.UnknownVariant)),
         };
         Assert.Empty(Groups(Roster, "body", Scheme, unread));
@@ -472,9 +472,7 @@ public class VariantGroupTests
         var e = Assert.Throws<AuthoredRefusalException>(() =>
             PoolDerive.Derive(Donor(40), candidates, missingParts: leftOut, replacedPart: "body",
                 groups: groups));
-        Assert.Equal("the new mesh uses only bones that belong to this item's other wardrobe or scene "
-            + "options, so no part of it can carry the replacement. Re-weight the mesh onto the bones "
-            + "this item's own parts move as well", e.Message);
+        Assert.Equal(CoreStrings.PoolOnlyOtherOptions, e.Message);
 
         // the control: one bone of the body's own is all it takes for the pool to form, and the covered
         // bone rides along
@@ -621,7 +619,7 @@ public class VariantGroupTests
         // piece co-draws beside the variant's measured member and displaces nothing it certifies
         var sibling = new[]
         {
-            new PoolDerive.MissingPart("P2_dress_extra", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P2_dress_extra", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, 22)),
         };
         Assert.Contains(40u, AssetExporter.ValidTailBones(Roster, "body", Scheme, sibling));
@@ -631,7 +629,7 @@ public class VariantGroupTests
         var roster = new[] { Body(10, 11, 40), Member("P1_dress", 21, new uint[] { 40 }) };
         var onlyPart = new[]
         {
-            new PoolDerive.MissingPart("P2_dress", "its skin weights can't be read", null,
+            new PoolDerive.MissingPart("P2_dress", CoreStrings.SkinReasonWeightsUnread, null,
                 new PartPresence(PresenceContext.Always, 22)),
         };
         Assert.DoesNotContain(40u, AssetExporter.ValidTailBones(roster, "body", Scheme, onlyPart));

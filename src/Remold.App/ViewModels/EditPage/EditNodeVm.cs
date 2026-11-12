@@ -1,3 +1,4 @@
+using Remold.Core.Text;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -95,7 +96,7 @@ public sealed partial class EditNodeVm : ObservableObject
     /// <summary>What the part-level refusal row says: the install's own refusal where there is one, else the
     /// mesh-edit gate's reason on a part with no edits, and then, on every row of a part the game starts
     /// hidden, <see cref="HiddenPartNote"/> on a line of its own. Where the gate greys a hidden part's opens,
-    /// every row of it says the gate's reason first and then only <see cref="HiddenPartShrunk"/>: the
+    /// every row of it says the gate's reason first and then only <see cref="Strings.EditHiddenPartShrunk"/>: the
     /// sentence about the part's position in Blender would contradict the greyed opens above it.
     ///
     /// <para>The gate's reason is on the two Blender opens' hover everywhere else, and that is enough where
@@ -112,18 +113,15 @@ public sealed partial class EditNodeVm : ObservableObject
             if (!StartsHidden) return Problem ?? (IsBarePart ? MeshEditBlock : null);
             bool greyed = MeshEditBlock is not null;
             string? refusal = Problem ?? MeshEditBlock;
-            string note = greyed ? HiddenPartShrunk : HiddenPartNote;
+            string note = greyed ? Strings.EditHiddenPartShrunk : HiddenPartNote;
             return refusal is null ? note : refusal + "\n" + note;
         }
     }
 
-    /// <summary>The first sentence of <see cref="HiddenPartNote"/>, all a hidden part whose opens the gate
-    /// greys says.</summary>
-    public const string HiddenPartShrunk = "This part starts shrunk or off screen.";
+    /// <summary>The note on every row of a part the game starts hidden: that it starts shrunk, and that its
+    /// position in Blender will not match the game.</summary>
+    internal static string HiddenPartNote => Strings.EditHiddenPartShrunk + " " + Strings.EditHiddenPartPosition;
 
-    /// <summary>What every row of a part the game starts hidden says under its action row.</summary>
-    public const string HiddenPartNote = HiddenPartShrunk
-        + " Its position in Blender will not match the game.";
 
     /// <summary>The game starts this row's part shrunk out of sight, so it opens in Blender centred at full
     /// size. Set on part and content-edit rows by the page, which reads it lazily per part and keeps the
@@ -146,10 +144,7 @@ public sealed partial class EditNodeVm : ObservableObject
 
     public bool HasProblemBadge => HasProblem || HasProblemUnder;
 
-    public string ProblemBadgeTip => Problem ?? UnderThisRow;
-
-    /// <summary>What the rolled-up badge says on a row that carries no sentence of its own.</summary>
-    public const string UnderThisRow = "A part under this one needs attention.";
+    public string ProblemBadgeTip => Problem ?? Strings.EditProblemUnder;
 
     /// <summary>A verb on what this row addresses is running — disables its buttons so a second click cannot
     /// race it. Pushed on by the page, which holds the gate by identity: a rebuild replaces this object, and
@@ -192,28 +187,28 @@ public sealed partial class EditNodeVm : ObservableObject
     /// <summary>The Open-in-Blender tooltip: the refusal when the mesh is blocked, the wait while a verb
     /// runs, else what the verb does on this row's kind.</summary>
     public string OpenInBlenderHint => MeshEditBlock
-        ?? (IsBusy ? BlenderGate.Busy
-            : IsPart ? "Opens the original part on its own, without the item's other parts."
-            : "Opens this edit on its own, without the item's other parts.");
+        ?? (IsBusy ? Strings.BlenderBusy
+            : IsPart ? Strings.EditOpenInBlenderPartTip
+            : Strings.EditOpenInBlenderEditTip);
 
     /// <summary>The Open-with-References tooltip, on the same gate.</summary>
     public string OpenWithReferencesHint => MeshEditBlock
-        ?? (IsBusy ? BlenderGate.Busy
-            : IsPart ? "Opens the original part with the item's other parts for reference."
-            : "Opens this edit with the item's other parts for reference.");
+        ?? (IsBusy ? Strings.BlenderBusy
+            : IsPart ? Strings.EditOpenWithRefsPartTip
+            : Strings.EditOpenWithRefsEditTip);
 
     // ---- the subject verbs' tooltips ----
     //
     // Why the button is off when it is (shown via ToolTip.ShowOnDisabled), else what the verb does — the
     // shipped pane's rule and its wording, so the two surfaces answer alike.
 
-    public string OpenAllHint => IsBusy ? BlenderGate.Busy : BlenderGate.ReadyAll;
+    public string OpenAllHint => IsBusy ? Strings.BlenderBusy : Strings.BlenderOpenAllReady;
 
-    public string OpenAllFirstEditHint => IsBusy ? BlenderGate.Busy
-        : "Each part opens from its active or first edit; parts without edits open from stock.";
+    public string OpenAllFirstEditHint => IsBusy ? Strings.BlenderBusy
+        : Strings.EditOpenAllFirstEditTip;
 
-    public string RemoveSubjectHint => IsBusy ? BlenderGate.Busy
-        : "Removes this item from the mod. Its files stay in the mod folder.";
+    public string RemoveSubjectHint => IsBusy ? Strings.BlenderBusy
+        : Strings.EditRemoveSubjectTip;
 
     // ---- the part verbs' tooltips ----
     //
@@ -223,20 +218,15 @@ public sealed partial class EditNodeVm : ObservableObject
     // opens beside them are, and a hover that describes the verb while the button refuses it says nothing
     // about the refusal.
 
-    public string NewEditHint => IsBusy ? BlenderGate.Busy
+    public string NewEditHint => IsBusy ? Strings.BlenderBusy
         : HasOverview
-        ? "Adds another edit for this part, starting from the original."
-        : "Adds an edit for this part, starting from the original.";
+        ? Strings.EditNewEditAnotherTip
+        : Strings.EditNewEditFirstTip;
 
-    public string HidePartHint => IsBusy ? BlenderGate.Busy
+    public string HidePartHint => IsBusy ? Strings.BlenderBusy
         : HasOverview
-        ? "Hides this part in the game. Its other edits stay as they are."
-        : "Hides this part in the game.";
-
-    /// <summary>What Duplicate leaves the modder with: a second edit on this part, holding what this one
-    /// holds. How the two edits' files are stored between here and the first change is the app's business,
-    /// not the modder's.</summary>
-    public const string DuplicateHint = "Adds another edit for this part, starting from this one.";
+        ? Strings.EditHidePartWithEditsTip
+        : Strings.EditHidePartTip;
 
     // ---- view helpers ----
 
@@ -260,9 +250,9 @@ public sealed partial class EditNodeVm : ObservableObject
 
     public bool CanRevertMesh => HasMeshEdit && !IsBusy;
 
-    public string RevertMeshHint => !HasMeshEdit ? EditMapCardVm.NothingToRevert
-        : IsBusy ? BlenderGate.Busy
-        : "Goes back to the original mesh. This edit's maps are kept.";
+    public string RevertMeshHint => !HasMeshEdit ? Strings.NothingToRevert
+        : IsBusy ? Strings.BlenderBusy
+        : Strings.EditRevertMeshTip;
 
     /// <summary>The part has no edits at all: the inspector shows the bare-part shape, whose first action
     /// mints Edit 1.</summary>
@@ -293,8 +283,9 @@ public sealed partial class EditNodeVm : ObservableObject
     public bool ShowsEditRollup => HasEditBadge && !IsEdit;
 
     /// <summary>Labels are the modder's vocabulary for the answers they wrote, and every edit is named the
-    /// same way — a hide starts out called "Hidden" and a cleared name puts that back, which is what a
-    /// default name is. ③ Build lists edits by name, so a mod that hides four parts is worth naming.</summary>
+    /// same way — a hide starts out with the hide name in the UI language and a cleared name puts that back,
+    /// which is what a default name is. ③ Build lists edits by name, so a mod that hides four parts is worth
+    /// naming.</summary>
     public bool IsRenameable => IsEdit;
 
     public ObservableCollection<EditNodeVm> Children { get; } = new();
@@ -330,12 +321,6 @@ public sealed partial class EditNodeVm : ObservableObject
 
     public bool HasSkeletonTree => SkeletonTree.Count > 0;
 
-    /// <summary>What a hide edit's inspector says it does — and, because a hide is an ordinary edit rather
-    /// than a switch, the two ways out of it: delete it, or choose something else where choosing happens.</summary>
-    public const string HideExplanation = "This part is hidden wherever this edit is active. "
-        + "The part's other edits stay as they are. "
-        + "Deleting this edit shows the part again.";
-
     /// <summary>The cards below are the part's ORIGINAL maps rather than an edit's, so the set is labelled
     /// once instead of card by card.</summary>
     public bool ShowsOriginalMaps => IsBarePart && MapGroups.Count > 0;
@@ -345,10 +330,10 @@ public sealed partial class EditNodeVm : ObservableObject
     public string OriginalMapsLabel => MapGroups.SelectMany(group => group.Cards)
         .FirstOrDefault()?.SubjectRead switch
     {
-        EditSubjectRead.Unavailable => "Original maps · game files unavailable",
-        EditSubjectRead.Reading => "Original maps · still being read",
-        EditSubjectRead.Unreadable => "Original maps · couldn't be read",
-        _ => "Original maps",
+        EditSubjectRead.Unavailable => Strings.EditOriginalMapsUnavailable,
+        EditSubjectRead.Reading => Strings.EditOriginalMapsReading,
+        EditSubjectRead.Unreadable => Strings.EditOriginalMapsUnreadable,
+        _ => Strings.EditOriginalMaps,
     };
 
     /// <summary>The install is still being read for this part, so its original maps are not on screen yet.
@@ -364,44 +349,29 @@ public sealed partial class EditNodeVm : ObservableObject
 
     public bool HasOriginalsNote => !string.IsNullOrEmpty(OriginalsNote);
 
-    /// <summary>What a bare part says while the game files are being read for it.</summary>
-    public const string ReadingOriginals = "Reading this part's maps…";
-
-    /// <summary>What a bare part says when the game files do not have it. The same fact the authored model
-    /// refuses a first edit with, said here as a state rather than as a failed action.</summary>
-    public const string OriginalsNotInstalled =
-        "This part isn't in the current game files, so its original maps cannot be shown.";
-
-    /// <summary>What a bare part says when the read of its maps FAILED — a different fact from the game
-    /// files not having the part, and the only one of the three a retry can fix. Worded off the mesh
-    /// preview's own failed-read line, since it is the same cause (the game holding the files it needs)
-    /// and the same way out.</summary>
-    public const string OriginalsReadFailed =
-        "Couldn't read this part's maps. The game may have these files open. Select the row again to retry.";
-
-    /// <summary>What a bare part says when the game files have it but nothing readable stands behind
-    /// it.</summary>
-    public const string OriginalsUnreadable = "No maps could be read for this part.";
-
     /// <summary>Where this edit is used, in the words ③ Build uses for the same fact. Every edit's inspector
     /// carries it: naming an edit and knowing whether anything selects it are the two questions asked of one
     /// here, and a hide is an edit like any other.</summary>
     [ObservableProperty] private string _placementSummary = "";
 
     /// <summary>Where an edit with <paramref name="always"/> and <paramref name="states"/> uses is used.
-    /// Always and each state count once, the way the delete confirm counts them.</summary>
+    /// Always and each state count once, the way the delete confirm counts them. One vocabulary for where an
+    /// edit is used, here and in <see cref="DeleteUses"/>: Always and states, never a count of "places".</summary>
     internal static string Uses(bool always, int states) =>
-        !always && states == 0 ? NotUsedYet : $"Used in {Where(always, states)}.";
+        !always && states == 0 ? Strings.EditNotUsedYet
+        : always && states == 0 ? Strings.EditUsedInAlways
+        : !always ? Catalog.Plural(states, Strings.EditUsedInStates_One(states), Strings.EditUsedInStates_Other(states))
+        : Catalog.Plural(states, Strings.EditUsedInAlwaysAndStates_One(states),
+            Strings.EditUsedInAlwaysAndStates_Other(states));
 
-    /// <summary>What an edit nothing selects says, everywhere it is said.</summary>
-    internal const string NotUsedYet = "Not used yet.";
-
-    /// <summary>The places alone, for a sentence that supplies its own verb — the delete confirm's. One
-    /// vocabulary for where an edit is used: Always and states, never a count of "places".</summary>
-    internal static string Where(bool always, int states) =>
-        always && states == 0 ? "Always"
-        : !always ? $"{states} state{(states == 1 ? "" : "s")}"
-        : $"Always and {states} state{(states == 1 ? "" : "s")}";
+    /// <summary>The delete confirm's one activation fact, in <see cref="Uses"/>'s vocabulary.</summary>
+    internal static string DeleteUses(bool always, int states) =>
+        !always && states == 0 ? Strings.EditDeleteUnused
+        : always && states == 0 ? Strings.EditDeleteUsedInAlways
+        : !always ? Catalog.Plural(states, Strings.EditDeleteUsedInStates_One(states),
+            Strings.EditDeleteUsedInStates_Other(states))
+        : Catalog.Plural(states, Strings.EditDeleteUsedInAlwaysAndStates_One(states),
+            Strings.EditDeleteUsedInAlwaysAndStates_Other(states));
 
 
     // ---- demand-driven async mesh preview ----
@@ -431,10 +401,6 @@ public sealed partial class EditNodeVm : ObservableObject
     private bool _meshPreviewThrew;
 
     public bool HasPreviewCause => IsMeshPreviewFailed && MeshPreviewThrew;
-
-    /// <summary>The cause and the way out under a failed preview, in the shipped pane's own words.</summary>
-    public const string PreviewUnavailable =
-        "Couldn't load the preview. The game may have these files open. Select the row again to retry.";
 
     /// <summary>The vertex-count line under the preview, in the workbench's own wording.</summary>
     [ObservableProperty]

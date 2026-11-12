@@ -71,7 +71,7 @@ public partial class OutfitVm : ObservableObject
         var kindAndName = FriendlyNames.KindAndLabel(outfit);
         var trailStem = string.Equals(FriendlyNames.Label(outfit), outfit.Stem, System.StringComparison.Ordinal)
             ? "" : $"  ·  {outfit.Stem}";
-        Label = $"{kindAndName}{trailStem}{(layout.IsModular ? "  ·  modular" : "")}";
+        Label = layout.IsModular ? Strings.PickOutfitModular(kindAndName + trailStem) : kindAndName + trailStem;
     }
 
     /// <summary>Set the checkbox WITHOUT running the add/remove path, for reflecting the ledger and for

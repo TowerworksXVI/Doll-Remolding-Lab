@@ -4,10 +4,12 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using Remold.Core.Project;
+using Remold.Core.Tables;
 using SharpGLTF.Schema2;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using Remold.Core.Text;
 using GltfImage = SharpGLTF.Schema2.Image;   // disambiguate from SixLabors.ImageSharp.Image
 
 namespace Remold.Core.Mesh;
@@ -67,14 +69,16 @@ public static class MeshGltf
         string named = layers.Count == 1
             ? layers[0]
             : layers.Count == 2
-                ? $"{layers[0]} and {layers[1]}"
-                : string.Join(", ", layers.Take(layers.Count - 1)) + $", and {layers[^1]}";
-        string reason = missing
-            ? $"UV{prefix} is missing"
-            : $"UV{prefix} has {blockerDim} {(blockerDim == 1 ? "value" : "values")} per vertex instead of at least two";
+                ? CoreStrings.TexCoordListTwo(layers[0], layers[1])
+                : CoreStrings.TexCoordListMany(
+                    string.Join(CoreStrings.ListSeparator, layers.Take(layers.Count - 1)), layers[^1]);
+        string shown = PartNames.Display(part);
         return new[]
         {
-            $"{part}: {named} cannot be edited in Blender because {reason}. The game values will be kept.",
+            missing
+                ? CoreStrings.TexCoordUneditableMissing(shown, named, prefix)
+                : Catalog.Plural(blockerDim, CoreStrings.TexCoordUneditableNarrow_One(shown, named, prefix, blockerDim),
+                    CoreStrings.TexCoordUneditableNarrow_Other(shown, named, prefix, blockerDim)),
         };
     }
 
@@ -92,12 +96,10 @@ public static class MeshGltf
         var warnings = new List<string>();
         for (int i = 0; i < allowed; i++)
             if (!sent.Has($"TexCoord{i}"))
-                warnings.Add($"Restored UV{i} on {meshName} from the part's game mesh because that UV "
-                    + "layer was deleted in Blender.");
+                warnings.Add(CoreStrings.TexCoordRestored(i, meshName));
         for (int i = allowed; i < MaxTexCoordSets; i++)
             if (sent.Has($"TexCoord{i}"))
-                warnings.Add($"Ignored UV{i} on {meshName} because that UV layer is not supported by "
-                    + "the part's game mesh.");
+                warnings.Add(CoreStrings.TexCoordIgnored(i, meshName));
         return warnings;
     }
 
@@ -1066,7 +1068,7 @@ public static class MeshGltf
             if (bone.Path.Length == 0 || hashOf.ContainsKey(bone.Path)) continue;
             if (!Matrix4x4.Invert(bone.RestWorld, out _))
             {
-                log?.Invoke($"Bone {bone.Path} is off the armature: no usable rest pose.");
+                log?.Invoke(CoreStrings.ExportBoneOffArmature(bone.Path));
                 continue;
             }
             var segs = bone.Path.Split('/');
@@ -1789,10 +1791,9 @@ public static class MeshGltf
             { /* refused below: with no record at all, an "unchanged" marker cannot be honored */ }
         }
         if (sessionOutbound.Count == 0 && hashOnly is { } unanswerable)
-            throw new AuthoredRefusalException(
-                $"The {Textures.TextureMap.PropertyLabel(unanswerable.ShaderProperty)} on {owner} came "
-                + "back marked unchanged, but it isn't the picture this session sent. Open the part "
-                + "again from the Lab and send it once more");
+            throw new AuthoredRefusalException(CoreStrings.BlenderUnchangedNotSent(
+                Textures.TextureMap.DisplayPropertyLabel(unanswerable.ShaderProperty),
+                PartNames.Display(owner))) { Part = owner };
         // The part's rows, folded onto the primitives that CAME BACK: a replacement with more submeshes than
         // the record was projected over draws its extra ranges at the last drawable material, and its
         // pictures for them join that material's rows here exactly as the edit's cards slot them.
@@ -1804,7 +1805,7 @@ public static class MeshGltf
         {
             if (reportUnkeyed)
                 foreach (string image in transport.UnkeyedImages)
-                    report?.Invoke($"Ignored {image} from Blender: it isn't linked to a texture slot.");
+                    report?.Invoke(CoreStrings.BlenderIgnoredUnlinked(image));
             var outboundKeys = outbound.Select(Key).ToHashSet();
             foreach (var binding in transport.Bindings.Where(binding =>
                          string.Equals(binding.Mesh, owner, StringComparison.Ordinal)))
@@ -1815,14 +1816,12 @@ public static class MeshGltf
                     // An "unchanged" marker for a slot this session never sent asks for nothing and names
                     // no picture; a byte row on such a slot is a picture the modder is owed a word about.
                     if (binding.Png is null) continue;
-                    report?.Invoke($"Ignored {binding.ImageName} "
-                        + $"({Textures.TextureMap.PropertyLabel(binding.ShaderProperty)}) from Blender: "
-                        + "that texture slot wasn't in the file this session opened.");
+                    report?.Invoke(CoreStrings.BlenderIgnoredUnsentSlot(binding.ImageName,
+                        Textures.TextureMap.DisplayPropertyLabel(binding.ShaderProperty)));
                     continue;
                 }
                 if (!returned.TryAdd(key, binding))
-                    report?.Invoke($"Ignored a duplicate {binding.ImageName} from Blender: its texture "
-                        + "slot already has an image.");
+                    report?.Invoke(CoreStrings.BlenderIgnoredDuplicate(binding.ImageName));
             }
         }
 
@@ -1856,19 +1855,17 @@ public static class MeshGltf
                     // mismatch the send refuses whole rather than guess which picture "unchanged" meant.
                     if (!string.Equals(returnedHash, binding.OutboundHash, StringComparison.OrdinalIgnoreCase)
                         || string.IsNullOrWhiteSpace(binding.Source))
-                        throw new AuthoredRefusalException(
-                            $"The {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} on {owner} came "
-                            + "back marked unchanged, but it isn't the picture this session sent. Open the part "
-                            + "again from the Lab and send it once more");
+                        throw new AuthoredRefusalException(CoreStrings.BlenderUnchangedNotSent(
+                            Textures.TextureMap.DisplayPropertyLabel(binding.ShaderProperty),
+                            PartNames.Display(owner))) { Part = owner };
                     resolved = ResolvedMap.Untouched(binding.Source, binding.Origin);
                 }
                 else resolved = PreviewMaps.ResolveTransport(image.Png, binding, neutrals);
                 if (binding.PrimitiveIndex is not { } primitive)
                 {
                     if (resolved.Answer == MapAnswer.Authored)
-                        report?.Invoke(
-                            $"Ignored {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} from "
-                            + $"Blender: material {binding.MaterialIndex + 1} is not on any submesh.");
+                        report?.Invoke(CoreStrings.BlenderIgnoredNoSubmesh(
+                            Textures.TextureMap.DisplayPropertyLabel(binding.ShaderProperty), binding.MaterialIndex + 1));
                     continue;
                 }
                 if (!resolvedByPrimitive.TryGetValue(primitive, out var list))
@@ -1888,9 +1885,8 @@ public static class MeshGltf
                 int index = answered.FindIndex(item => item.MaterialIndex == binding.MaterialIndex
                     && string.Equals(item.ShaderProperty, binding.ShaderProperty, StringComparison.Ordinal));
                 if (index >= 0 && answered[index].Map.Answer is MapAnswer.None or MapAnswer.Removed)
-                    report?.Invoke($"The {Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} on {owner} "
-                        + "came back from Blender without a picture. The picture set up for that texture slot "
-                        + "is no longer used.");
+                    report?.Invoke(CoreStrings.BlenderPictureDropped(
+                        Textures.TextureMap.DisplayPropertyLabel(binding.ShaderProperty), PartNames.Display(owner)));
             }
         }
 
@@ -1941,29 +1937,31 @@ public static class MeshGltf
         // Nothing is said about a channel still showing what the session sent.
         void ReadStandardChannels(int primitive, Material? material)
         {
-            var channels = new (MapKind Kind, byte[]? Image, string? Name, string Label)[]
+            var channels = new (MapKind Kind, byte[]? Image, string? Name, string Label, string Unnamed)[]
             {
                 (MapKind.BaseColor, ChannelImage(material, "BaseColor"), ChannelImageName(material, "BaseColor"),
-                    Textures.TextureMap.BaseColorLabel),
+                    CoreStrings.MapBaseColor, CoreStrings.BlenderGenericImageBaseColor),
                 (MapKind.Normal, ChannelImage(material, "Normal"), ChannelImageName(material, "Normal"),
-                    Textures.TextureMap.NormalLabel),
-                (MapKind.Rmo, OrmImage(material), OrmImageName(material), Textures.TextureMap.RmoLabel),
+                    CoreStrings.MapNormal, CoreStrings.BlenderGenericImageNormal),
+                (MapKind.Rmo, OrmImage(material), OrmImageName(material), CoreStrings.MapRmo,
+                    CoreStrings.BlenderGenericImageRmo),
             };
-            string materialName = string.IsNullOrEmpty(material?.Name) ? $"material {primitive + 1}" : $"'{material!.Name}'";
-            foreach (var (kind, image, name, label) in channels)
+            string materialName = string.IsNullOrEmpty(material?.Name)
+                ? CoreStrings.BlenderMaterialNumbered(primitive + 1)
+                : CoreStrings.BlenderMaterialNamed(material!.Name);
+            foreach (var (kind, image, name, label, unnamed) in channels)
             {
                 if (image is null) continue;
-                string imageName = string.IsNullOrEmpty(name) ? $"the {label.ToLowerInvariant()} image" : name;
+                string imageName = string.IsNullOrEmpty(name) ? unnamed : name;
                 var slots = outbound.Where(b => b.PrimitiveIndex == primitive && b.Kind == kind).ToList();
                 if (slots.Count == 0)
                 {
-                    report?.Invoke($"Ignored {imageName} from Blender: {materialName} has no {label} slot.");
+                    report?.Invoke(CoreStrings.BlenderIgnoredNoSlot(imageName, materialName, label));
                     continue;
                 }
                 if (slots.Count > 1)
                 {
-                    report?.Invoke($"Ignored {imageName} from Blender: {materialName} has {slots.Count} {label} "
-                        + "slots and the image isn't linked to one of them.");
+                    report?.Invoke(CoreStrings.BlenderIgnoredAmbiguousSlot(imageName, materialName, slots.Count, label));
                     continue;
                 }
                 var binding = slots[0];
@@ -1983,8 +1981,8 @@ public static class MeshGltf
                 {
                     if (!returned.TryGetValue(Key(binding), out var carried)
                         || carried.Png is not { } carriedPng || !carriedPng.AsSpan().SequenceEqual(image))
-                        report?.Invoke($"Ignored {imageName} from Blender: {materialName} already has an edited "
-                            + $"{Textures.TextureMap.PropertyLabel(binding.ShaderProperty)} image.");
+                        report?.Invoke(CoreStrings.BlenderIgnoredAlreadyEdited(imageName, materialName,
+                            Textures.TextureMap.DisplayPropertyLabel(binding.ShaderProperty)));
                     continue;
                 }
                 var resolved = PreviewMaps.ResolveTransport(image, binding, neutrals);

@@ -1,4 +1,5 @@
-﻿using System;
+using Remold.App;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -27,6 +28,10 @@ namespace Remold.Core.Tests;
 public class EditPageActivationTests
 {
     private const string Character = "Vesna", Outfit = "VesnaSSR01", Mesh = "c_vesna01_body_lod0";
+
+    /// <summary>The line an image editor's save that landed says, whichever picture, edit and map it names.</summary>
+    private static System.Text.RegularExpressions.Regex SavedPicture => CatalogShape.Of(
+        Strings.PictureSavedTo(CatalogShape.Any, CatalogShape.Any, CatalogShape.Any));
 
     private static TargetPart Part => new() { Subject = Character, Outfit = Outfit, RendererSlot = Mesh };
 
@@ -89,12 +94,38 @@ public class EditPageActivationTests
         var vm = new MainWindowViewModel(startLoad: false);
         AuthorPart(vm);
 
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
 
         var subject = Assert.Single(vm.EditPage.Nodes);
         Assert.Equal(Character, subject.Subject);
         Assert.Equal(Outfit, subject.Outfit);
         Assert.True(vm.EditPage.HasNodes);
+    }
+
+    /// <summary>The step list clearing its selection (a Ctrl+click on the selected step) leaves the step where
+    /// it was and tells the list the current step again; selecting that step afterwards enters it again,
+    /// while selecting it with no clear in between does not.</summary>
+    [Fact]
+    public void ClearingTheStepListReassertsTheStepAndReselectingItEntersItAgain()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        var changed = new List<string?>();
+        vm.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        vm.SelectedStepItem = null!;
+
+        Assert.Equal(WorkflowStep.Pick, vm.SelectedStep);
+        Assert.Equal(WorkflowStep.Pick, vm.SelectedStepItem.Step);
+        Assert.Contains(nameof(MainWindowViewModel.SelectedStepItem), changed);
+
+        // the Pick step's enter path redraws the tab headers
+        changed.Clear();
+        vm.SelectedStepItem = vm.Steps[(int)WorkflowStep.Pick];
+        Assert.Contains(nameof(MainWindowViewModel.CharactersTabHeader), changed);
+
+        changed.Clear();
+        vm.SelectedStepItem = vm.Steps[(int)WorkflowStep.Pick];
+        Assert.DoesNotContain(nameof(MainWindowViewModel.CharactersTabHeader), changed);
     }
 
     /// <summary>A page verb on a mod that has NEVER been saved. The autosave is the app's other route to a
@@ -107,7 +138,7 @@ public class EditPageActivationTests
         using var settings = new SettingsSnapshot();
         var vm = new MainWindowViewModel(startLoad: false);
         var session = AuthorPart(vm);
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
         Assert.Null(session.Snapshot().RootDir);
 
         string hide = session.CreateHideEdit(Part);
@@ -162,7 +193,7 @@ public class EditPageActivationTests
             release.Wait(TimeSpan.FromSeconds(5));
             return WarmModel();
         }, pageDispatch: work => work());
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
         var rows = PickRows();
 
         vm.AddSubject(rows.Character, rows.Outfit);
@@ -184,7 +215,7 @@ public class EditPageActivationTests
     {
         var vm = new MainWindowViewModel(startLoad: false, pageDispatch: work => work());
         AuthorPart(vm);
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
         vm.BuildPage.Enter();
         Assert.Equal(Mesh, Assert.Single(Assert.Single(vm.EditPage.Nodes).Children, node => node.IsPart).Title);
         Assert.Equal(Mesh, Assert.Single(Assert.Single(vm.BuildPage.Subjects).Parts).Label);
@@ -459,7 +490,7 @@ public class EditPageActivationTests
         var vm = new MainWindowViewModel(startLoad: false, subjectModelWarm: warm,
             pageDispatch: work => work()) { IsScanning = scanning };
         Assert.True(await vm.OpenModAsync(root));
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
         return vm;
     }
 
@@ -771,7 +802,7 @@ public class EditPageActivationTests
             Assert.Null(await ((IEditPageShell)vm).AcceptDroppedPictureAsync(stale, png, status,
                 confirmed: true));
 
-            Assert.Equal("This map is no longer in the game files.", status.Value);
+            Assert.Equal(Strings.MapNotInGameFiles, status.Value);
             Assert.Empty(session.Snapshot().EditDefinitions);
             return 0;
         });
@@ -986,17 +1017,17 @@ public class EditPageActivationTests
 
             Assert.False((await ((IEditPageShell)vm).OpenPictureAsync(card.Slot, status)).Launched);
 
-            Assert.Equal("Edit this map?", title);
-            Assert.Equal($"Base color on {card.Slot.MaterialName}.\n\n"
-                + "This outfit draws this original map in 2 places. The edit changes all of them.", body);
-            Assert.Equal("Edit", button);
+            Assert.Equal(Strings.EditThisMapTitle, title);
+            Assert.Equal(Strings.EditThisMapBody(Strings.MapOnMaterial(BaseColorLabel, card.Slot.MaterialName),
+                Strings.MapSharedConsequence(2)), body);
+            Assert.Equal(Strings.EditThisMapButton, button);
             title = body = button = null;
             Assert.False((await ((IEditPageShell)vm).OpenPictureAsync(
                 card.Slot with { MaterialName = null }, status)).Launched);
-            Assert.Equal("Edit this map?", title);
-            Assert.Equal("Base color on material 0.\n\n"
-                + "This outfit draws this original map in 2 places. The edit changes all of them.", body);
-            Assert.Equal("Edit", button);
+            Assert.Equal(Strings.EditThisMapTitle, title);
+            Assert.Equal(Strings.EditThisMapBody(Strings.MapOnMaterial(BaseColorLabel, Strings.MaterialByPosition(0)),
+                Strings.MapSharedConsequence(2)), body);
+            Assert.Equal(Strings.EditThisMapButton, button);
             // Nothing was opened: a transport would have minted a folder in the mod's round-trip folder.
             Assert.Empty(Directory.GetDirectories(vm.ProjectDocument.Session!.Snapshot().TransportRoot!));
             Assert.DoesNotContain(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
@@ -1075,8 +1106,8 @@ public class EditPageActivationTests
 
             await vm.EditPage.HandleDropAsync(new[] { png }, card);
             Assert.Equal("Apply paint.png?", title);
-            Assert.Equal($"paint.png becomes this edit's base color on {card.Slot.MaterialName}.\n\n"
-                + "This outfit draws this original map in 2 places. The edit changes all of them.", body);
+            Assert.Equal(Strings.ApplyImageBecomesEditMap("paint.png", EditMapCardVm.MapInSentence(card.Slot))
+                + "\n\n" + Strings.MapSharedConsequence(2), body);
             Assert.Equal("Apply", button);
             Assert.DoesNotContain(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
@@ -1092,7 +1123,7 @@ public class EditPageActivationTests
             string later = TestImages.WritePng(Path.Combine(root, "in", "later.png"), g: 77);
             body = null;
             await vm.EditPage.HandleDropAsync(new[] { later }, bound);
-            Assert.Equal($"later.png becomes this edit's base color on {bound.Slot.MaterialName}.", body);
+            Assert.Equal(Strings.ApplyImageBecomesEditMap("later.png", EditMapCardVm.MapInSentence(bound.Slot)), body);
             Assert.DoesNotContain("places", body);
             return 0;
         });
@@ -1123,9 +1154,8 @@ public class EditPageActivationTests
             // One use: the save lands, exactly as it did before the check was added — and the line says
             // WHERE it landed, the way the drop's own result line does: the edit, the map, the material.
             vm.PublishPictureReturn(ingress, status);
-            Assert.Contains("Saved", status.Value);
-            Assert.Contains(card.Slot.Edit.Label, status.Value);
-            Assert.Contains(card.Slot.MaterialName!, status.Value);
+            Assert.Equal(Strings.PictureSavedTo("paint", card.Slot.Edit.Label, Strings.MapOnMaterial(
+                EditMapCardVm.LabelInSentence(CoreStrings.MapBaseColor), card.Slot.MaterialName!)), status.Value);
             Assert.DoesNotContain("this map", status.Value);
             int landed = session.Snapshot().ProjectAssets.Count(
                 asset => asset.Kind == ProjectAssetKind.Picture);
@@ -1138,7 +1168,7 @@ public class EditPageActivationTests
 
             vm.PublishPictureReturn(ingress, status);
 
-            Assert.StartsWith("Saved ", status.Value);
+            Assert.Matches(SavedPicture, status.Value);
             Assert.DoesNotContain(GameFilesGate.Unavailable, status.Value);
             Assert.Equal(landed + 1, session.Snapshot().ProjectAssets.Count(
                 asset => asset.Kind == ProjectAssetKind.Picture));
@@ -1177,7 +1207,8 @@ public class EditPageActivationTests
             Assert.Equal("Skin", label);
             Assert.Equal("Skin", rebound.Label);
             Assert.StartsWith("asset-", Path.GetFileNameWithoutExtension(rebound.File));
-            Assert.Equal("Saved Skin to Long body's base color.", status.Value);
+            Assert.Equal(Strings.PictureSavedTo("Skin", "Long body",
+                EditMapCardVm.LabelInSentence(CoreStrings.MapBaseColor)), status.Value);
             return 0;
         });
     }
@@ -1209,7 +1240,7 @@ public class EditPageActivationTests
             Assert.NotNull(opened);
             Assert.Equal("Skin", opened!.Label);
             Assert.Equal(opened!.Outbound, launched);
-            Assert.Equal("Opened Skin in the image editor. Save to send it back.", status.Value);
+            Assert.Equal(Strings.ImageEditorOpened("Skin"), status.Value);
             return 0;
         });
     }
@@ -1239,7 +1270,7 @@ public class EditPageActivationTests
                 candidate.Slot.Id == card.Slot.SlotId).ProjectAsset!;
             Assert.Equal("body_base", label);
             Assert.Equal("body_base", rebound.Label);
-            Assert.Equal("Saved body_base to Edit 1's base color on body_material.", status.Value);
+            Assert.Equal(Strings.PictureSavedTo("body_base", "Edit 1", "base color on body_material"), status.Value);
             return 0;
         });
     }
@@ -1303,7 +1334,7 @@ public class EditPageActivationTests
             Assert.Equal(2, ingress.LaunchUses);
             Assert.True(ingress.SharedConsent);
             Assert.Equal(0, confirms);
-            Assert.Contains("Saved", status.Value);
+            Assert.Matches(SavedPicture, status.Value);
             Assert.Contains(session.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1332,7 +1363,7 @@ public class EditPageActivationTests
             vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
             vm.PublishPictureReturn(ingress, status);
 
-            Assert.StartsWith("Saved ", status.Value);
+            Assert.Matches(SavedPicture, status.Value);
             Assert.Contains(session.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1382,7 +1413,7 @@ public class EditPageActivationTests
             TestImages.WritePng(ingress.Outbound, g: 77);
             vm.ScanPictureSaves();
 
-            Assert.StartsWith("Saved ", status.Value);
+            Assert.Matches(SavedPicture, status.Value);
             Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1403,7 +1434,7 @@ public class EditPageActivationTests
             TestImages.WritePng(ingress.Outbound, g: 88);
             Assert.True(await vm.OpenModAsync(root));
 
-            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Matches(SavedPicture, vm.EditPage.Status);
             Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             // …and only once: opening again finds nothing new in the file.
@@ -1435,7 +1466,7 @@ public class EditPageActivationTests
             next.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
             Assert.True(await next.OpenModAsync(root));
 
-            Assert.StartsWith("Saved ", next.EditPage.Status);
+            Assert.Matches(SavedPicture, next.EditPage.Status);
             Assert.Contains(next.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1470,7 +1501,7 @@ public class EditPageActivationTests
             next.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
             Assert.True(await next.OpenModAsync(root));
 
-            Assert.StartsWith("Saved ", next.EditPage.Status);
+            Assert.Matches(SavedPicture, next.EditPage.Status);
             Assert.Single(next.ProjectDocument.Session!.Snapshot().EditDefinitions);
             return 0;
         });
@@ -1554,7 +1585,7 @@ public class EditPageActivationTests
             vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
             vm.SubjectModelWarmCompleted(replanBuild: false);
 
-            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Matches(SavedPicture, vm.EditPage.Status);
             Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1576,8 +1607,7 @@ public class EditPageActivationTests
 
             TestImages.WritePng(ingress.Outbound, g: 44);
             vm.ScanPictureSaves();
-            Assert.Equal("Couldn't apply the image editor's save: " + MainWindowViewModel.PictureMapRemoved,
-                status.Value);
+            Assert.Equal(Strings.PictureSaveApplyFailed(Strings.PictureMapRemoved), status.Value);
 
             status.Report("unchanged");
             vm.ScanPictureSaves();
@@ -1599,9 +1629,9 @@ public class EditPageActivationTests
 
             TestImages.WritePng(ingress.Outbound, g: 33);
 
-            for (int i = 0; i < 200 && !status.Value.StartsWith("Saved ", StringComparison.Ordinal); i++)
+            for (int i = 0; i < 200 && !SavedPicture.IsMatch(status.Value); i++)
                 await Task.Delay(50);
-            Assert.True(status.Value.StartsWith("Saved ", StringComparison.Ordinal), status.Value);
+            Assert.Matches(SavedPicture, status.Value);
             Assert.Contains(vm.ProjectDocument.Session!.Snapshot().ProjectAssets,
                 asset => asset.Kind == ProjectAssetKind.Picture);
             return 0;
@@ -1625,7 +1655,7 @@ public class EditPageActivationTests
             TestImages.WritePng(ingress.Outbound, g: 22);
             Assert.True(await vm.OpenModAsync(moved));
 
-            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Matches(SavedPicture, vm.EditPage.Status);
             return 0;
         });
     }
@@ -1652,7 +1682,7 @@ public class EditPageActivationTests
             vm.SubjectModels.GetOrBuild(Character, GoldenOutfit, OneUse);
             Assert.True(await vm.OpenModAsync(root));
 
-            Assert.True(vm.EditPage.Status.StartsWith("Saved "), vm.EditPage.Status);
+            Assert.Matches(SavedPicture, vm.EditPage.Status);
             return 0;
         });
     }
@@ -1677,7 +1707,7 @@ public class EditPageActivationTests
             TestImages.WritePng(ingress.Outbound, g: 91);
             Assert.True(await vm.OpenModAsync(root));
 
-            Assert.Contains(ProjectAssetIngress.EditMovedWhileOpen.TrimEnd('.'), vm.EditPage.Status);
+            Assert.Contains(CoreStrings.SessionEditMovedWhileOpen.TrimEnd('.'), vm.EditPage.Status);
             return 0;
         });
     }
@@ -1696,9 +1726,9 @@ public class EditPageActivationTests
 
             TestImages.WritePng(ingress.Outbound, g: 12);
 
-            for (int i = 0; i < 200 && vm.EditPage.Status != MainWindowViewModel.PictureSaveForMissingMod; i++)
+            for (int i = 0; i < 200 && vm.EditPage.Status != Strings.PictureSaveForMissingMod; i++)
                 await Task.Delay(50);
-            Assert.Equal(MainWindowViewModel.PictureSaveForMissingMod, vm.EditPage.Status);
+            Assert.Equal(Strings.PictureSaveForMissingMod, vm.EditPage.Status);
             return 0;
         });
     }
@@ -1723,7 +1753,7 @@ public class EditPageActivationTests
             {
                 var status = new ImmediateProgress();
                 Assert.False((await ((IEditPageShell)vm).OpenPictureAsync(card.Slot, status)).Launched);
-                Assert.Equal(MainWindowViewModel.RoundTripIdNotSaved("the image editor"), status.Value);
+                Assert.Equal(MainWindowViewModel.RoundTripIdNotSaved(blender: false), status.Value);
             }
             finally { File.SetAttributes(manifest, FileAttributes.Normal); }
             return 0;
@@ -2099,37 +2129,42 @@ public class EditPageActivationTests
     }
 
     [Theory]
-    [InlineData("disk full", "Stopped while saving the file sent back from Blender: disk full. Nothing was changed.")]
-    [InlineData("The game is using these files.", "Stopped while saving the file sent back from Blender: The game is using these files. Nothing was changed.")]
-    public void A_publish_failure_says_nothing_was_changed(string reason, string expected) =>
-        Assert.Equal(expected, MainWindowViewModel.BlenderPublishFailure(reason));
+    [InlineData("disk full", "disk full")]
+    [InlineData("The file is locked.", "The file is locked")]
+    public void A_publish_failure_says_nothing_was_changed(string reason, string shown) =>
+        Assert.Equal(Strings.BlenderPublishFailure(shown), MainWindowViewModel.BlenderPublishFailure(reason));
 
     /// <summary>A return whose mod was closed while it waited names that mod and says when it lands.</summary>
-    [Theory]
-    [InlineData("Vesna casual",
-        "Blender sent back changes for 'Vesna casual'. Open 'Vesna casual' to apply them.")]
-    [InlineData(MainWindowViewModel.UntitledMod,
-        "Blender sent back changes for 'untitled mod'. Open 'untitled mod' to apply them.")]
-    public void A_return_for_a_closed_mod_names_it(string mod, string expected) =>
-        Assert.Equal(expected, MainWindowViewModel.BlenderReturnModClosed(mod));
+    [Fact]
+    public void A_return_for_a_closed_mod_names_it()
+    {
+        foreach (string mod in new[] { "Vesna casual", Strings.UntitledModDisplay })
+            Assert.Equal(Strings.BlenderReturnModClosed(mod), MainWindowViewModel.BlenderReturnModClosed(mod));
+    }
+
+    /// <summary>The base colour card's label, which the map confirmations open with.</summary>
+    private static string BaseColorLabel => Remold.Core.Textures.TextureMap.SlotLabel(TargetInputKind.BaseColor, null);
 
     /// <summary>The two lines a return's own progress is told in. Running work takes the single ellipsis
     /// character, and both name the action rather than the transport behind it.</summary>
     [Fact]
     public void A_returns_own_lines_are_the_words_the_page_uses()
     {
-        Assert.Equal("Applying the file sent back from Blender…", MainWindowViewModel.BlenderReturnApplying);
-        Assert.Equal("Blender sent back no changes.", MainWindowViewModel.BlenderReturnNoChanges);
+        Assert.EndsWith("…", Strings.BlenderReturnApplying);
     }
 
-    [Theory]
-    [InlineData(1, 1, 0, "Blender sent back 1 edit and 1 changed image.")]
-    [InlineData(2, 3, 1, "Blender sent back 2 edits and 3 changed images · 1 unchanged part.")]
-    [InlineData(0, 0, 1, "Blender sent back no changes · 1 unchanged part.")]
-    [InlineData(1, 0, 2, "Blender sent back 1 edit and 0 changed images · 2 unchanged parts.")]
-    public void A_returns_final_count_line_includes_unchanged_parts(int edits, int images, int unchanged,
-        string expected) =>
-        Assert.Equal(expected, MainWindowViewModel.BlenderReturnCounts(edits, images, unchanged));
+    [Fact]
+    public void A_returns_final_count_line_includes_unchanged_parts()
+    {
+        Assert.Equal(Strings.BlenderReturnSummary(Strings.BlenderSentBack_One_One(1, 1)),
+            MainWindowViewModel.BlenderReturnCounts(1, 1, 0));
+        Assert.Equal(Strings.BlenderReturnSummaryUnchanged(Strings.BlenderSentBack_Other_Other(2, 3),
+            Strings.BlenderUnchangedParts_One(1)), MainWindowViewModel.BlenderReturnCounts(2, 3, 1));
+        Assert.Equal(Strings.BlenderReturnSummaryUnchanged(Strings.BlenderSentBackNothing,
+            Strings.BlenderUnchangedParts_One(1)), MainWindowViewModel.BlenderReturnCounts(0, 0, 1));
+        Assert.Equal(Strings.BlenderReturnSummaryUnchanged(Strings.BlenderSentBack_One_Other(1, 0),
+            Strings.BlenderUnchangedParts_Other(2)), MainWindowViewModel.BlenderReturnCounts(1, 0, 2));
+    }
 
     /// <summary>A mod on the older project format, opened with no game files to convert it against. The
     /// conversion is the only support that format has, so the open FAILS and the workspace is left exactly
@@ -2166,7 +2201,7 @@ public class EditPageActivationTests
     {
         var vm = new MainWindowViewModel(startLoad: false);
         AuthorPart(vm);
-        vm.SelectedStep = "② Edit";
+        vm.SelectedStep = WorkflowStep.Edit;
         Assert.True(vm.EditPage.HasNodes);
 
         vm.NewMod();

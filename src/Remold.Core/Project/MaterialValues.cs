@@ -57,6 +57,10 @@ public sealed record MaterialValueField(
 {
     public int Floats => Kind == MaterialValueKind.Color ? 4 : 1;
 
+    /// <summary>The name a screen shows for this value, in the UI language. <see cref="Label"/> stays the
+    /// English name, because a project records it as the value's asset label and matches on it.</summary>
+    public string DisplayLabel => MaterialValueCatalog.DisplayLabel(Semantic) ?? Label;
+
     public int? OffsetIn(int byteWidth) => byteWidth switch
     {
         544 => Offset544,
@@ -187,6 +191,58 @@ public static class MaterialValueCatalog
 
     public static MaterialValueField? Field(string semantic) =>
         FieldBySemantic.TryGetValue(semantic, out var field) ? field : null;
+
+    /// <summary>A field's on-screen name from the string catalog, or null for a semantic outside
+    /// <see cref="Fields"/>. Read on every call, so a name always follows the UI language in force.</summary>
+    internal static string? DisplayLabel(string semantic) => semantic switch
+    {
+        "_BaseColor" => CoreStrings.ShadingValueBaseColor,
+        "_UseRampMap" => CoreStrings.ShadingValueUseRampMap,
+        "_StockingCenterColor" => CoreStrings.ShadingValueStockingCenterColor,
+        "_StockingFalloffColor" => CoreStrings.ShadingValueStockingFalloffColor,
+        "_UseGIFlatten" => CoreStrings.ShadingValueUseGIFlatten,
+        "_AnisotropicGXX" => CoreStrings.ShadingValueAnisotropicGXX,
+        "_Anisotropy" => CoreStrings.ShadingValueAnisotropy,
+        "_AnisotropyShift" => CoreStrings.ShadingValueAnisotropyShift,
+        "_DetailAlbedoIntensity" => CoreStrings.ShadingValueDetailAlbedoIntensity,
+        "_DetailNormalIntensity" => CoreStrings.ShadingValueDetailNormalIntensity,
+        "_GlitterDensity" => CoreStrings.ShadingValueGlitterDensity,
+        "_GlitterRimIntensity" => CoreStrings.ShadingValueGlitterRimIntensity,
+        "_GlitterSpecIntensity" => CoreStrings.ShadingValueGlitterSpecIntensity,
+        "_InsideBaseColor" => CoreStrings.ShadingValueInsideBaseColor,
+        "_ReflectionFresnelF0" => CoreStrings.ShadingValueReflectionFresnelF0,
+        "_ReflectionIntensity" => CoreStrings.ShadingValueReflectionIntensity,
+        "_StockingFalloffPower" => CoreStrings.ShadingValueStockingFalloffPower,
+        "_UseGlitter" => CoreStrings.ShadingValueUseGlitter,
+        "_AdditionalLightShadow" => CoreStrings.ShadingValueAdditionalLightShadow,
+        "_BaseInsideLerp" => CoreStrings.ShadingValueBaseInsideLerp,
+        "_BlendSmoothness" => CoreStrings.ShadingValueBlendSmoothness,
+        "_BlendTex_ST" => CoreStrings.ShadingValueBlendTexST,
+        "_DetailAlbedo_ST" => CoreStrings.ShadingValueDetailAlbedoST,
+        "_DetailAlphaIntensity" => CoreStrings.ShadingValueDetailAlphaIntensity,
+        "_DetailAlphaMode" => CoreStrings.ShadingValueDetailAlphaMode,
+        "_DetailRMIntensity" => CoreStrings.ShadingValueDetailRMIntensity,
+        "_FakeIntensity" => CoreStrings.ShadingValueFakeIntensity,
+        "_GlitterCurvature" => CoreStrings.ShadingValueGlitterCurvature,
+        "_GlitterMetallic" => CoreStrings.ShadingValueGlitterMetallic,
+        "_GlitterRimFalloff" => CoreStrings.ShadingValueGlitterRimFalloff,
+        "_GlitterRimMax" => CoreStrings.ShadingValueGlitterRimMax,
+        "_GlitterRimMin" => CoreStrings.ShadingValueGlitterRimMin,
+        "_GlitterRoughness" => CoreStrings.ShadingValueGlitterRoughness,
+        "_GlitterSpeed" => CoreStrings.ShadingValueGlitterSpeed,
+        "_GlitterViewWeight" => CoreStrings.ShadingValueGlitterViewWeight,
+        "_InsideColorBias" => CoreStrings.ShadingValueInsideColorBias,
+        "_InsideColorContrast" => CoreStrings.ShadingValueInsideColorContrast,
+        "_InsideHeightBias" => CoreStrings.ShadingValueInsideHeightBias,
+        "_InsideHeightContrast" => CoreStrings.ShadingValueInsideHeightContrast,
+        "_MatcapIntensity" => CoreStrings.ShadingValueMatcapIntensity,
+        "_MatcapRimPower" => CoreStrings.ShadingValueMatcapRimPower,
+        "_PreMulAlpha" => CoreStrings.ShadingValuePreMulAlpha,
+        "_RMOTex_ST" => CoreStrings.ShadingValueRMOTexST,
+        "_UseMatcapRef" => CoreStrings.ShadingValueUseMatcapRef,
+        "_UseSpecularUV2" => CoreStrings.ShadingValueUseSpecularUV2,
+        _ => null,
+    };
 
     private static readonly IReadOnlyDictionary<string, int> NoSupportedValues
         = ReadOnly(new Dictionary<string, int>(StringComparer.Ordinal));
@@ -514,13 +570,13 @@ public sealed class MaterialFamilyValueReader : IMaterialGameValueReader
         if (!string.Equals(semantic, MaterialValueSemantics.UseGiFlatten, StringComparison.Ordinal))
             return new MaterialGameValueResolution(BuildPlanVerdict.Unsupported, null,
                 Array.Empty<MaterialCarrierState>(),
-                $"material family resolution does not support '{semantic}'");
+                CoreStrings.PlanReasonFamilyUnsupported(semantic));
         string? sourceFamily = MaterialFamilyClassifier.Family(sourceSlot.Material?.Name);
         string? carrierFamily = MaterialFamilyClassifier.Family(carrierSlot.Material?.Name);
         if (sourceFamily is null || carrierFamily is null)
             return new MaterialGameValueResolution(BuildPlanVerdict.Unresolved, null,
                 Array.Empty<MaterialCarrierState>(),
-                "an exact current-install material has no family name");
+                CoreStrings.PlanReasonNoFamilyName);
 
         bool sourceFlatten = MaterialFamilyClassifier.UsesGiFlatten(sourceFamily);
         bool carrierFlatten = MaterialFamilyClassifier.UsesGiFlatten(carrierFamily);
@@ -604,8 +660,7 @@ public static class MaterialValueBuildSupport
             return Guard("the material-value patch has no render contracts");
         var policy = MaterialValueCatalog.Classify(semantic, renderPlan.Contracts);
         if (policy.Class == MaterialValueClass.DynamicLive)
-            return Block(BuildPlanVerdict.Unsupported,
-                "this value changes while the game runs, so it cannot be set to a fixed one");
+            return Block(BuildPlanVerdict.Unsupported, CoreStrings.PlanReasonValueChangesAtRuntime);
         if (policy.Class == MaterialValueClass.Unsupported)
             return CannotSet(policy.Reason);
 
@@ -646,8 +701,8 @@ public static class MaterialValueBuildSupport
 
         if (!TryValues(semantic, encoded, out float[] values, out string canonical))
             return Block(BuildPlanVerdict.Unsupported,
-                $"'{MaterialValueCatalog.Field(semantic)?.Label ?? semantic}' cannot be set to "
-                + $"{encoded}");
+                CoreStrings.PlanReasonCannotSetTo(MaterialValueCatalog.Field(semantic)?.DisplayLabel ?? semantic,
+                    encoded));
 
         var patches = new List<(RenderContract Contract, MaterialConstantBufferPatch Patch)>();
         foreach (var contract in renderPlan.Contracts)
@@ -703,14 +758,14 @@ public static class MaterialValueBuildSupport
         // verdict stands as it was and only the wording moves to the log.
         BuildOperationResolution Guard(string detail,
             BuildPlanVerdict verdict = BuildPlanVerdict.Conflict) =>
-            Block(verdict, AuthoredBuildPlanner.InternalGuard, detail);
+            Block(verdict, CoreStrings.PlanInternalGuard, detail);
 
         // Every way a shader can fail to take this value is one thing to the modder: this material's
         // shader will not carry it here. Which contract, which layout and which declaration disagreed is
         // the catalog's account of the install, and it goes to the log under the same line.
         BuildOperationResolution CannotSet(string detail) => Block(BuildPlanVerdict.Unsupported,
-            $"'{MaterialValueCatalog.Field(semantic)?.Label ?? semantic}' cannot be set on this "
-            + "material's shader", detail);
+            CoreStrings.PlanReasonCannotSetOnShader(MaterialValueCatalog.Field(semantic)?.DisplayLabel ?? semantic),
+            detail);
     }
 
     /// <summary>Parse one authored value string for its field: one finite float, or four space- or

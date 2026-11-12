@@ -184,8 +184,7 @@ public sealed partial class AuthoredEditSession
                 && slot.MaterialSlotIndex == materialSlotIndex)
                 .OrderBy(slot => slot.Id, StringComparer.Ordinal).ToList();
             if (slots.Count == 0)
-                throw new AuthoredRefusalException(
-                    $"Material {materialSlotIndex} draws without a toon ramp, so one cannot be set here.");
+                throw new AuthoredRefusalException(CoreStrings.SessionNoRampToSet(materialSlotIndex));
             return slots[0].Id;
         }
     }
@@ -213,7 +212,7 @@ public sealed partial class AuthoredEditSession
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(resolvePart);
         var resolved = resolvePart(Clone(target))
-            ?? throw new AuthoredRefusalException(PartNotInstalled);
+            ?? throw new AuthoredRefusalException(CoreStrings.SessionPartNotInstalled);
         Change(project => EnsurePartSlots(project, target, resolved));
         // Draw shape is live-install evidence, deliberately absent from JSON. An already-slotted project
         // can therefore have no serialized change for this read; refresh the committed project's transient
@@ -306,13 +305,13 @@ public sealed partial class AuthoredEditSession
             if (existing is not null) return existing.Id;
         }
         var resolved = resolvePart(Clone(target))
-            ?? throw new AuthoredRefusalException(PartNotInstalled);
+            ?? throw new AuthoredRefusalException(CoreStrings.SessionPartNotInstalled);
         var material = (resolved.Materials ?? Array.Empty<LegacyResolvedMaterial>())
             .FirstOrDefault(candidate => candidate.MaterialSlotIndex == materialSlotIndex)
-            ?? throw new AuthoredRefusalException($"This part has no material {materialSlotIndex}.");
-        RequireExact(material.Material, $"material {materialSlotIndex}");
-        RequireExact(resolved.Renderer, "");
-        RequireExact(resolved.Mesh, "mesh");
+            ?? throw new AuthoredRefusalException(CoreStrings.SessionNoMaterial(materialSlotIndex));
+        RequireExact(material.Material, () => CoreStrings.SessionPartMaterialNotFound(materialSlotIndex));
+        RequireExact(resolved.Renderer, () => CoreStrings.SessionPartNotFound);
+        RequireExact(resolved.Mesh, () => CoreStrings.SessionPartMeshNotFound);
         string minted = "";
         Change(project =>
         {
@@ -330,10 +329,10 @@ public sealed partial class AuthoredEditSession
         if (existing is not null) return existing.Id;
         var material = knownMaterial ?? (resolved.Materials ?? Array.Empty<LegacyResolvedMaterial>())
             .FirstOrDefault(candidate => candidate.MaterialSlotIndex == materialSlotIndex)
-            ?? throw new AuthoredRefusalException($"This part has no material {materialSlotIndex}.");
-        RequireExact(material.Material, $"material {materialSlotIndex}");
-        RequireExact(resolved.Renderer, "");
-        RequireExact(resolved.Mesh, "mesh");
+            ?? throw new AuthoredRefusalException(CoreStrings.SessionNoMaterial(materialSlotIndex));
+        RequireExact(material.Material, () => CoreStrings.SessionPartMaterialNotFound(materialSlotIndex));
+        RequireExact(resolved.Renderer, () => CoreStrings.SessionPartNotFound);
+        RequireExact(resolved.Mesh, () => CoreStrings.SessionPartMeshNotFound);
         string id = MintId("slot", project.TargetSlots.Select(slot => slot.Id));
         project.TargetSlots.Add(new TargetSlot
         {
@@ -371,8 +370,8 @@ public sealed partial class AuthoredEditSession
     private static List<TargetSlot> GameSlots(TargetPart target, LegacyResolvedPart resolved)
     {
         var slots = new List<TargetSlot>();
-        RequireExact(resolved.Renderer, "");
-        RequireExact(resolved.Mesh, "mesh");
+        RequireExact(resolved.Renderer, () => CoreStrings.SessionPartNotFound);
+        RequireExact(resolved.Mesh, () => CoreStrings.SessionPartMeshNotFound);
         slots.Add(new TargetSlot
         {
             Part = Clone(target),
@@ -390,13 +389,13 @@ public sealed partial class AuthoredEditSession
                 if (!IsTextureInput(texture.Input)) continue;
                 if (texture.Input == TargetInputKind.Texture
                     && string.IsNullOrWhiteSpace(texture.ShaderProperty))
-                    throw new AuthoredRefusalException($"Material {material.MaterialSlotIndex} uses a "
-                        + "texture this app cannot name, so the part cannot be opened.");
+                    throw new AuthoredRefusalException(CoreStrings.SessionUnnamedTexture(material.MaterialSlotIndex));
                 string identity = !string.IsNullOrWhiteSpace(texture.ShaderProperty)
                     ? texture.ShaderProperty!
                     : "\u001f" + texture.Input;
                 if (!inputs.Add(identity)) continue;
-                RequireExact(material.Material, $"material {material.MaterialSlotIndex}");
+                RequireExact(material.Material,
+                    () => CoreStrings.SessionPartMaterialNotFound(material.MaterialSlotIndex));
                 slots.Add(new TargetSlot
                 {
                     Part = Clone(target),
@@ -423,36 +422,17 @@ public sealed partial class AuthoredEditSession
         TargetInputKind.BaseColor or TargetInputKind.Normal or TargetInputKind.Rmo
         or TargetInputKind.Blend or TargetInputKind.Ramp or TargetInputKind.Texture;
 
-    /// <summary>What a command says when the current game files do not have the part it was asked to record
-    /// against. The sentence names the state rather than the address the model finds the part by: every
-    /// surface it reaches already stands on the part — the row it is kept on, and the status line after a
-    /// click on that row.</summary>
-    internal const string PartNotInstalled =
-        "This part isn't in the current game files, so there is nowhere to record its values.";
-
-    /// <summary>The same gap on the other side of a copy, where the values are read rather than
-    /// recorded.</summary>
-    internal const string SourcePartNotInstalled =
-        "The part these values come from isn't in the current game files, so they cannot be read.";
-
-    /// <summary>What a command says when the project holds no places for the part at all — nothing has
-    /// opened it, and the game files could not answer for it either. <paramref name="what"/> is what was
-    /// being added, in the modder's own words.</summary>
-    internal static string NowhereToRecord(string what) =>
-        $"This part has nowhere to record {what}. Load the game files, then try again.";
-
     /// <summary>Refuse a route the install cannot name one object for. The adapter reports the same gap as
     /// blocking migration; here there is no report to carry it, so it is said out loud instead of minting a
     /// slot nothing can be bound at.</summary>
-    /// <param name="what">Which of the part's things is missing, in the modder's own words. Empty where the
-    /// part itself is what the game files cannot pin down.</param>
-    private static void RequireExact(GameAssetRef value, string what)
+    /// <param name="refusal">The sentence naming which of the part's things is missing.</param>
+    /// <summary>Refuses a reference the install did not identify exactly. The refusal is formatted only when
+    /// it is thrown.</summary>
+    private static void RequireExact(GameAssetRef value, Func<string> refusal)
     {
         if (string.IsNullOrWhiteSpace(value.GameBuild) || string.IsNullOrWhiteSpace(value.LogicalBundle)
             || value.PathId == 0)
-            throw new AuthoredRefusalException(what.Length == 0
-                ? "Couldn't find this part in the current game files."
-                : $"Couldn't find this part's {what} in the current game files.");
+            throw new AuthoredRefusalException(refusal());
     }
 
     /// <summary>Add one content edit to a part, fresh from vanilla: every game slot the part addresses asks
@@ -485,7 +465,7 @@ public sealed partial class AuthoredEditSession
         string id = MintId("edit", project.EditDefinitions.Select(edit => edit.Id));
         var slots = ContentSlotRoutes(project, target);
         if (slots.Count == 0)
-            throw new AuthoredRefusalException(NowhereToRecord("an edit"));
+            throw new AuthoredRefusalException(CoreStrings.SessionNowhereToRecordEdit);
         var copies = MintSlotCopyIds(project, slots.Where(slot =>
                 !(slot.Domain == TargetSlotDomain.Game
                     && slot.Input == TargetInputKind.MaterialValue)
@@ -522,8 +502,7 @@ public sealed partial class AuthoredEditSession
         {
             var source = RequiredEdit(project, editDefinitionId);
             if (source.Kind != EditDefinitionKind.Content)
-                throw new AuthoredRefusalException(
-                    "This edit hides the part, and a part has only one of those.");
+                throw new AuthoredRefusalException(CoreStrings.SessionOneHidePerPart);
             id = MintId("edit", project.EditDefinitions.Select(edit => edit.Id));
             var slots = project.TargetSlots.ToDictionary(slot => slot.Id, StringComparer.Ordinal);
             var slotIds = MintSlotCopyIds(project, source.Bindings
@@ -572,8 +551,7 @@ public sealed partial class AuthoredEditSession
             && other.Target.SameAs(edit.Target)
             && string.Equals(other.Label.Trim(), requested, StringComparison.OrdinalIgnoreCase));
         if (collision is not null)
-            throw new AuthoredRefusalException(
-                $"“{collision.Label}” is already the name of another edit for this part.");
+            throw new AuthoredRefusalException(CoreStrings.SessionEditNameTaken(collision.Label));
         edit.Label = requested;
     });
 
@@ -597,8 +575,7 @@ public sealed partial class AuthoredEditSession
             !string.Equals(other.Id, edit.Id, StringComparison.Ordinal)
             && other.Bindings.Any(binding => binding.SourceSlot is { } from && exclusive.Contains(from.SlotId)));
         if (borrower is not null)
-            throw new AuthoredRefusalException($"'{edit.Label}' cannot be deleted while "
-                + $"'{borrower.Label}' takes a value from it.");
+            throw new AuthoredRefusalException(CoreStrings.SessionEditLentOut(edit.Label, borrower.Label));
 
         project.EditDefinitions.Remove(edit);
         project.TargetSlots.RemoveAll(slot => exclusive.Contains(slot.Id));
@@ -665,7 +642,7 @@ public sealed partial class AuthoredEditSession
                 .ThenBy(slot => slot.Mesh is null ? 1 : 0)
                 .ThenBy(slot => slot.Id, StringComparer.Ordinal)
                 .FirstOrDefault()
-                ?? throw new AuthoredRefusalException(NowhereToRecord("a hide"));
+                ?? throw new AuthoredRefusalException(CoreStrings.SessionNowhereToRecordHide);
             string editId = Id("edit");
             string slotId = Id("slot");
             hide = new EditDefinition
@@ -673,7 +650,7 @@ public sealed partial class AuthoredEditSession
                 Id = editId,
                 Kind = EditDefinitionKind.Hide,
                 Target = Clone(target),
-                Label = "Hidden",
+                Label = CoreStrings.DefaultHideName,
                 Bindings = new List<Binding>
                 {
                     new() { SlotId = slotId, Kind = BindingKind.Hidden },
@@ -1179,7 +1156,7 @@ public sealed partial class AuthoredEditSession
         /// route needs to EXIST — every one of them is an overwrite of a snapshot the transport already
         /// has, so a reopen still finds what it needs — and the baseline it advances, left unadvanced,
         /// makes the next save from the same open editor refuse with the sentence for exactly that state
-        /// (<see cref="ProjectAssetIngress.EditMovedWhileOpen"/>), which tells the modder to open it
+        /// (<see cref="CoreStrings.SessionEditMovedWhileOpen"/>), which tells the modder to open it
         /// again.</para></summary>
         public void Complete()
         {
@@ -1610,7 +1587,9 @@ public sealed partial class AuthoredEditSession
         || project.EditDefinitions.Any(edit => edit.Target.SameAs(part));
 
     /// <summary>The name a new content edit is given when the caller supplies none: the next one up from
-    /// however many the part already has, moved past a name the user has already typed onto one of them.</summary>
+    /// however many the part already has, moved past a name the user has already typed onto one of them. The
+    /// name is minted in the UI language and is the edit's own from then on, as a typed name would be: a
+    /// project keeps the names it was given whatever language it is opened under.</summary>
     public static string NewEditLabel(AuthoredProject project, TargetPart target, string? label)
     {
         var siblings = project.EditDefinitions
@@ -1619,7 +1598,10 @@ public sealed partial class AuthoredEditSession
         string requested = label?.Trim() ?? "";
         if (requested.Length > 0 && !taken.Contains(requested)) return requested;
         for (int n = siblings.Count + 1; ; n++)
-            if (taken.Add($"Edit {n}")) return $"Edit {n}";
+        {
+            string name = CoreStrings.DefaultEditName(n);
+            if (taken.Add(name)) return name;
+        }
     }
 
     /// <summary>The name an existing edit falls back to when its own is cleared: where it sits among the
@@ -1628,7 +1610,7 @@ public sealed partial class AuthoredEditSession
     /// clearing its own, which is the one way two of a part's edits could end up called the same thing.</summary>
     private static string DefaultEditLabel(AuthoredProject project, EditDefinition edit)
     {
-        if (edit.Kind == EditDefinitionKind.Hide) return "Hidden";
+        if (edit.Kind == EditDefinitionKind.Hide) return CoreStrings.DefaultHideName;
         var siblings = project.EditDefinitions
             .Where(other => other.Kind == EditDefinitionKind.Content && other.Target.SameAs(edit.Target))
             .ToList();
@@ -1636,7 +1618,10 @@ public sealed partial class AuthoredEditSession
         var taken = siblings.Where(other => !string.Equals(other.Id, edit.Id, StringComparison.Ordinal))
             .Select(other => other.Label).ToHashSet(StringComparer.OrdinalIgnoreCase);
         for (int n = position + 1; ; n++)
-            if (!taken.Contains($"Edit {n}")) return $"Edit {n}";
+        {
+            string name = CoreStrings.DefaultEditName(n);
+            if (!taken.Contains(name)) return name;
+        }
     }
 
     /// <summary>The first <c>prefix-NNNN</c> id nothing in <paramref name="taken"/> holds, in the format the
@@ -2059,7 +2044,7 @@ public static class ProjectAssetIngress
         if (!string.Equals(BindingIdentity(binding), expectedBinding, StringComparison.Ordinal))
             throw recordedBindingIdentity is null
                 ? new InvalidOperationException("the exact slot changed after this Blender transport opened")
-                : new AuthoredRefusalException(EditMovedWhileOpen);
+                : new AuthoredRefusalException(CoreStrings.SessionEditMovedWhileOpen);
 
         string identity = "";
         if (expectedAsset is not null)
@@ -2125,17 +2110,6 @@ public static class ProjectAssetIngress
         string? sourceEditDefinitionId = null, string? sourceSlotId = null) =>
         $"{(int)kind}\u001f{projectAssetId}\u001f{sourceEditDefinitionId}\u001f{sourceSlotId}";
 
-    /// <summary>What a save coming back from an outside program says when the app moved the place it was
-    /// going to land while that program held it — a revert, another edit's answer, a return from Blender.
-    /// The modder's own act, and the way through it is to open the file again.</summary>
-    internal const string EditMovedWhileOpen =
-        "This edit changed in Doll Remolding Lab while it was open elsewhere. Open it again, then save.";
-
-    /// <summary>The twin on the FILE rather than the place: what the outside program started from is not
-    /// what the project holds any more.</summary>
-    internal const string EditFileMovedWhileOpen =
-        "This edit's file changed in Doll Remolding Lab while it was open elsewhere. Open it again, "
-        + "then save.";
 
     internal static void RequireUnchangedBinding(AuthoredProject project,
         ProjectAssetIngressSession session)
@@ -2149,7 +2123,7 @@ public static class ProjectAssetIngress
                 $"edit '{session.EditDefinitionId}' has no binding for slot '{session.SlotId}'");
         if (!string.Equals(BindingIdentity(binding), session.StartingBindingIdentity,
                 StringComparison.Ordinal))
-            throw new AuthoredRefusalException(EditMovedWhileOpen);
+            throw new AuthoredRefusalException(CoreStrings.SessionEditMovedWhileOpen);
     }
 
     internal static void RequireUnchangedSource(AuthoredProject project,
@@ -2163,7 +2137,7 @@ public static class ProjectAssetIngress
         string canonical = Resolve(project, asset.File);
         if (!File.Exists(canonical) || !string.Equals(FileIdentity(canonical), session.StartingIdentity,
                 StringComparison.Ordinal))
-            throw new AuthoredRefusalException(EditFileMovedWhileOpen);
+            throw new AuthoredRefusalException(CoreStrings.SessionEditFileMovedWhileOpen);
     }
 
     /// <summary>The common decoded-image normalization used by editor saves, drops and Import.</summary>

@@ -94,4 +94,22 @@ public class TextureMapTests
     {
         Assert.Equal(expected, EditMapCardVm.LabelInSentence(label));
     }
+
+    /// <summary>The on-screen names read the catalog, and in English they are the fixed names a project
+    /// records, so the two vocabularies cannot drift apart.</summary>
+    [Fact]
+    public void Every_display_label_is_the_fixed_label_in_english()
+    {
+        foreach (string property in TextureMap.ShaderPropertyLabels.Keys.Append("_SomethingTex"))
+            Assert.Equal(TextureMap.PropertyLabel(property), TextureMap.DisplayPropertyLabel(property));
+        foreach (var input in System.Enum.GetValues<TargetInputKind>())
+        {
+            Assert.Equal(TextureMap.SlotLabel(input, null), TextureMap.DisplaySlotLabel(input, null));
+            Assert.Equal(TextureMap.SlotLabel(input, "_DetailMask"), TextureMap.DisplaySlotLabel(input, "_DetailMask"));
+        }
+        foreach (string suffix in new[] { "d", "da", "n", "rmo", "spc", "trans", "emi", "e", "zz" })
+            Assert.Equal(TextureMap.Label("x_" + suffix), TextureMap.DisplayLabel("x_" + suffix));
+        foreach (var field in MaterialValueCatalog.Fields)
+            Assert.Equal(field.Label, field.DisplayLabel);
+    }
 }

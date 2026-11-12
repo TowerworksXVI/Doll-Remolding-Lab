@@ -6,6 +6,7 @@ using System.Numerics;
 using AssetsTools.NET;
 using AssetsTools.NET.Extra;
 using Remold.Core.Project;
+using Remold.Core.Text;
 
 namespace Remold.Core.Mesh;
 
@@ -196,8 +197,9 @@ public static class MeshApply
         // Only a narrow target reduces, so a reduction always means vertices were crushed onto fewer bones
         // than the author weighted them to — deformation the author can see and act on, not compile detail.
         if (reducedVerts > 0)
-            built.Warnings.Add($"{reducedVerts} vertex(es) had more than {targetWidth} bone influence(s). " +
-                               $"They were reduced to the strongest {targetWidth} and renormalized.");
+            built.Warnings.Add(Catalog.Plural(reducedVerts,
+                CoreStrings.MeshReducedInfluences_One(reducedVerts, targetWidth),
+                CoreStrings.MeshReducedInfluences_Other(reducedVerts, targetWidth)));
         return built;
     }
 
@@ -650,7 +652,7 @@ public static class MeshApply
     /// <summary>Flag vertices that will deform badly: influence sum &lt; 0.5 collapses to the bind pose. The
     /// per-vertex BlendWeight width is derived from <paramref name="vertexCount"/> — a narrow skin (dim 1–3,
     /// real in the corpus) would be mis-summed by a hard-coded 4.</summary>
-    private static List<string> WeightHealth(Dictionary<string, float[]> arrays, int vertexCount)
+    internal static List<string> WeightHealth(Dictionary<string, float[]> arrays, int vertexCount)
     {
         var outp = new List<string>();
         if (!arrays.TryGetValue("BlendWeight", out var bw) || bw.Length == 0 || vertexCount <= 0) return outp;
@@ -664,8 +666,8 @@ public static class MeshApply
             if (sum < 0.5f) bad++;
         }
         if (bad > 0)
-            outp.Add($"{bad} vertex(es) have almost no weight (under 0.5 in total). They will collapse " +
-                     "to the bind pose. Paint weights on them.");
+            outp.Add(Catalog.Plural(bad, CoreStrings.MeshWeightlessVertices_One(bad),
+                CoreStrings.MeshWeightlessVertices_Other(bad)));
         return outp;
     }
 
@@ -722,19 +724,26 @@ public static class MeshApply
         public int Vertices { get; }
         public int Bones { get; }
 
-        public OffSkeletonWeightException(int vertices, int bones) : base(Describe("the new mesh", vertices, bones))
+        public OffSkeletonWeightException(int vertices, int bones) : base((vertices == 1, bones == 1) switch
+        {
+            (true, true) => CoreStrings.OffSkeletonNewMeshVertexBone(vertices, bones),
+            (true, false) => CoreStrings.OffSkeletonNewMeshVertexBones(vertices, bones),
+            (false, true) => CoreStrings.OffSkeletonNewMeshVerticesBone(vertices, bones),
+            (false, false) => CoreStrings.OffSkeletonNewMeshVerticesBones(vertices, bones),
+        })
         {
             Vertices = vertices;
             Bones = bones;
         }
 
         /// <summary>The refusal worded for the edit on <paramref name="mesh"/>.</summary>
-        public string For(string mesh) => Describe($"the mesh edit on '{mesh}'", Vertices, Bones);
-
-        private static string Describe(string subject, int vertices, int bones) =>
-            $"{subject} has {vertices} {(vertices == 1 ? "vertex" : "vertices")} weighted to {bones} " +
-            $"{(bones == 1 ? "bone" : "bones")} this item doesn't have. Open the edit in Blender, run Check " +
-            "Mesh, and send it again";
+        public string For(string mesh) => (Vertices == 1, Bones == 1) switch
+        {
+            (true, true) => CoreStrings.OffSkeletonEditVertexBone(mesh, Vertices, Bones),
+            (true, false) => CoreStrings.OffSkeletonEditVertexBones(mesh, Vertices, Bones),
+            (false, true) => CoreStrings.OffSkeletonEditVerticesBone(mesh, Vertices, Bones),
+            (false, false) => CoreStrings.OffSkeletonEditVerticesBones(mesh, Vertices, Bones),
+        };
     }
 
     // ---- outline bake (vertex Color) ----
@@ -767,9 +776,7 @@ public static class MeshApply
 
         // Can't encode a direction without position + normal + tangent. The nearest-original fill ships,
         // which is stale for edited geometry, so say so rather than pass it off as a bake.
-        const string noFrame = "The outline couldn't be recomputed: the mesh has no normals or tangents. " +
-                               "It keeps the original mesh's outline instead. Export with normals and " +
-                               "tangents (Send to Lab does) for a correct outline.";
+        string noFrame = CoreStrings.MeshOutlineNotRecomputed;
         if (!arrays.TryGetValue("Normal", out var nrm) || !arrays.TryGetValue("Tangent", out var tan)
             || !arrays.TryGetValue("Vertex", out var pos))
             return noFrame;

@@ -25,7 +25,7 @@ public sealed class AboutWindow : Window
 {
     private AboutWindow(AboutInfo info)
     {
-        Title = "About Doll Remolding Lab";
+        Title = Strings.AboutTitle;
         Width = 480;
         SizeToContent = SizeToContent.Height;
         CanResize = false;
@@ -36,13 +36,13 @@ public sealed class AboutWindow : Window
 
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Margin = new Thickness(0, 4, 0, 0) };
         int row = 0;
-        Fact(grid, ref row, "Version", info.AppVersion);
-        Fact(grid, ref row, "Project file version", info.ProjectSchema.ToString());
-        Fact(grid, ref row, "Settings", info.SettingsPath);
-        Fact(grid, ref row, "Projects folder", info.LibraryRoot);
-        Fact(grid, ref row, "Game folder", string.IsNullOrEmpty(info.GamePath) ? "not located" : info.GamePath!);
+        Fact(grid, ref row, Strings.AboutVersion, info.AppVersion);
+        Fact(grid, ref row, Strings.AboutProjectSchema, info.ProjectSchema.ToString());
+        Fact(grid, ref row, Strings.AboutSettings, info.SettingsPath);
+        Fact(grid, ref row, Strings.SettingsProjectsLabel, info.LibraryRoot);
+        Fact(grid, ref row, Strings.SettingsGameLabel, string.IsNullOrEmpty(info.GamePath) ? Strings.AboutGameNotLocated : info.GamePath!);
 
-        var ok = new Button { Content = "Close", IsDefault = true, IsCancel = true, Padding = new Thickness(16, 6) };
+        var ok = new Button { Content = Strings.CloseButton, IsDefault = true, IsCancel = true, Padding = new Thickness(16, 6) };
         ok.Click += (_, _) => Close();
 
         Content = new StackPanel
@@ -51,10 +51,10 @@ public sealed class AboutWindow : Window
             Spacing = 12,
             Children =
             {
-                new TextBlock { Text = "Doll Remolding Lab", FontWeight = FontWeight.Bold, FontSize = 16 },
+                new TextBlock { Text = Strings.AppName, FontWeight = FontWeight.Bold, FontSize = 16 },
                 new TextBlock
                 {
-                    Text = "Make mods for GIRLS' FRONTLINE 2: EXILIUM.",
+                    Text = Strings.AboutTagline,
                     TextWrapping = TextWrapping.Wrap, Foreground = Subtext(),
                 },
                 grid,

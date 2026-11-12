@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Remold.Core.Workbench;
 using Xunit;
 
@@ -37,8 +38,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
 
         var plan = AuthoredBuildPlanner.Plan(project, new Backend());
 
-        const string conflict = "Key group 'Body options' has no key. This blocks the build. "
-            + "Give it a key, or delete the group.";
+        string conflict = CoreStrings.PlanKeylessGroupLabeled("Body options");
         Assert.Equal(conflict, Assert.Single(plan.Conflicts));
         Assert.Equal(new[] { "key-empty" }, plan.IssueGroupIds[conflict]);
         Assert.Empty(plan.IssueEditIds[conflict]);
@@ -56,8 +56,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
 
         var plan = AuthoredBuildPlanner.Plan(project, new Backend());
 
-        const string conflict = "Unnamed key group has no key. This blocks the build. "
-            + "Give it a key, or delete the group.";
+        string conflict = CoreStrings.PlanKeylessGroupUnnamed(CoreStrings.PlacementUnnamedGroup);
         Assert.Equal(conflict, Assert.Single(plan.Conflicts));
         Assert.Equal(new[] { "key-a", "key-b" }, plan.IssueGroupIds[conflict]);
     }
@@ -156,8 +155,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
         Assert.DoesNotContain(plan.Bindings, binding => binding.EditDefinitionId == "edit-long"
             && binding.AuthoredSlot.Id == "slot-old-stock-picture");
-        Assert.Contains("Long body replaces the part's mesh, so its changes to the original textures "
-            + "will not take effect. A replacement uses this edit's own maps instead.", plan.Warnings);
+        Assert.Contains(CoreStrings.PlanReplaceDropsTextureChanges("Long body"), plan.Warnings);
 
         var execution = AuthoredBuildExecution.Create(project, plan);
         var replacement = Assert.Single(execution.Work,
@@ -667,7 +665,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         var plan = AuthoredBuildPlanner.Plan(project, backend);
 
         Assert.False(plan.CanBuild);
-        Assert.Contains(plan.Conflicts, conflict => conflict == AuthoredBuildPlanner.InternalGuard);
+        Assert.Contains(plan.Conflicts, conflict => conflict == CoreStrings.PlanInternalGuard);
         Assert.Contains(plan.Diagnostics, line => line.Contains(
             "incompatible render contracts", StringComparison.Ordinal));
     }
@@ -689,7 +687,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         Assert.False(plan.CanBuild);
         Assert.Contains(plan.Diagnostics, line => line.Contains(
             "Included output file", StringComparison.Ordinal));
-        string conflict = Assert.Single(plan.Conflicts, line => line == AuthoredBuildPlanner.InternalGuard);
+        string conflict = Assert.Single(plan.Conflicts, line => line == CoreStrings.PlanInternalGuard);
         // The line is about the edits whose bindings claim the file. A blocked build whose line marks no
         // row leaves the modder to find the edit by reading a file path.
         Assert.Equal(new[] { "edit-long" }, plan.IssueEditIds[conflict]);
@@ -721,7 +719,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         Assert.False(plan.CanBuild);
         Assert.Contains(plan.Diagnostics, line => line.Contains("Blocked consumer",
             StringComparison.Ordinal));
-        var blocked = plan.Conflicts.Where(line => line == AuthoredBuildPlanner.InternalGuard).ToList();
+        var blocked = plan.Conflicts.Where(line => line == CoreStrings.PlanInternalGuard).ToList();
         Assert.NotEmpty(blocked);
         Assert.All(blocked, line => Assert.Equal(new[] { "edit-long" }, plan.IssueEditIds[line]));
     }
@@ -808,7 +806,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
 
         var ramp = plan.Bindings.Single(b => b.AuthoredSlot.Input == TargetInputKind.Ramp);
         Assert.Equal(BuildPlanVerdict.Unsupported, ramp.Decision.Verdict);
-        Assert.Contains("keeps the original, so there is nothing to copy", ramp.Decision.Reason);
+        Assert.Equal(CoreStrings.PlanReasonNothingToCopy, ramp.Decision.Reason);
         Assert.DoesNotContain(backend.BindingRequests, request => request.RowId == ramp.RowId);
     }
 
@@ -1424,8 +1422,8 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         var plan = AuthoredBuildPlanner.Plan(project, new AuthoredBuildPlannerTests.Backend());
 
         Assert.False(plan.CanBuild);
-        Assert.Contains(plan.Conflicts, conflict => conflict.Contains(
-            "mesh replacements are active at once", StringComparison.Ordinal));
+        Assert.Contains(plan.Conflicts, conflict => CatalogShape.Of(
+            CoreStrings.PlanMeshReplacementsAtOnce(2, CatalogShape.Any)).IsMatch(conflict));
     }
 
     [Fact]
@@ -1478,7 +1476,7 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         var result = backend.ResolveSlot(slot);
 
         Assert.Equal(BuildPlanVerdict.Unresolved, result.Verdict);
-        Assert.Contains("materials on the lod1 level of detail cannot be changed", result.Reason);
+        Assert.Contains(CoreStrings.PlanReasonTierMaterialsFixed("lod1"), result.Reason);
     }
 
     [Fact]
@@ -1613,9 +1611,9 @@ public sealed class AuthoredBuildPlannerTests : IDisposable
         if (blocked)
         {
             Assert.Equal(BuildPlanVerdict.Unsupported, operation.Decision.Verdict);
-            Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, operation.Decision.Reason);
+            Assert.Equal(CoreStrings.PlanReasonSharedDraw, operation.Decision.Reason);
             Assert.True(operation.Decision.BlocksBuild);
-            Assert.Equal(ProductionAuthoredBuildBackend.SharedDrawCause, backend.StockDrawBlock(current));
+            Assert.Equal(CoreStrings.PlanReasonSharedDraw, backend.StockDrawBlock(current));
         }
         else
         {

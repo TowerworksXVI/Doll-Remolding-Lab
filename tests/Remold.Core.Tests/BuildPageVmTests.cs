@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -14,6 +15,7 @@ using Remold.App.Views;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Remold.Core.Tests.Support;
+using Remold.Core.Text;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -150,6 +152,10 @@ public class BuildPageVmTests
         await vm.ReplanAsync();
         return (vm, session, shell);
     }
+
+    /// <summary>A page over <paramref name="project"/> settled on its opening plan, for the facts another class
+    /// pins under another UI language. The install names each part by its renderer slot's third word.</summary>
+    internal static async Task<BuildPageVm> PageOver(AuthoredProject project) => (await Page(project)).Vm;
 
     /// <summary>Every board change refreshes the page, and the preview picture must survive that: the
     /// bitmap is re-decoded only when the picture's own content stamp changed, or a checkbox click blanks
@@ -453,13 +459,15 @@ public class BuildPageVmTests
         var document = XDocument.Load(Path.Combine(app, "Views", "BuildPageView.axaml"));
         XNamespace ui = "https://github.com/avaloniaui";
         var checkbox = Assert.Single(document.Descendants(ui + "CheckBox"), element =>
-            (string?)element.Attribute("Content") == "Editable by others");
+            (string?)element.Attribute("Content") == "{x:Static t:Strings.BuildEditableByOthers}");
 
-        Assert.Equal("Lets anyone import this mod to edit or repair it. Without it, the mod can only be "
-                + "rebuilt from your project.",
-            (string?)checkbox.Attribute("ToolTip.Tip"));
-        Assert.Contains("Content = \"New mods are editable by others\"",
+        Assert.Equal("{x:Static t:Strings.BuildEditableByOthersTip}", (string?)checkbox.Attribute("ToolTip.Tip"));
+        Assert.Contains("Content = Strings.SettingsEditableCheck,",
             File.ReadAllText(Path.Combine(app, "Views", "SettingsWindow.cs")), StringComparison.Ordinal);
+        Assert.Equal("Editable by others", Strings.BuildEditableByOthers);
+        Assert.Equal("Lets anyone import this mod to edit or repair it. Without it, the mod can only be "
+                + "rebuilt from your project.", Strings.BuildEditableByOthersTip);
+        Assert.Equal("New mods are editable by others", Strings.SettingsEditableCheck);
     }
 
     [Fact]
@@ -515,8 +523,8 @@ public class BuildPageVmTests
     {
         var (vm, _, _) = await Page(AuthoredEditFixtures.Golden());
 
-        Assert.Equal(new[] { BuildPageVm.NotUsedChip }, Edit(vm, "edit-short").PlacementChips);
-        Assert.StartsWith(BuildPageVm.NotUsedChip, EditNodeVm.NotUsedYet, StringComparison.Ordinal);
+        Assert.Equal(new[] { Strings.BuildNotUsedChip }, Edit(vm, "edit-short").PlacementChips);
+        Assert.StartsWith(Strings.BuildNotUsedChip, Strings.EditNotUsedYet, StringComparison.Ordinal);
     }
 
     /// <summary>The ⚠ over the Edits list is about the rows under it. A warning that marks no row — a
@@ -619,7 +627,7 @@ public class BuildPageVmTests
 
         vm.DropEdit("edit-short", "key-9999", "state-0001");
 
-        Assert.Equal($"Couldn't {BuildPageVm.ChangeAction}.", vm.Status);
+        Assert.Equal(CoreStrings.CouldntAction(Strings.Action_MakeThatChange), vm.Status);
         Assert.DoesNotContain("key-9999", vm.Status, StringComparison.Ordinal);
         Assert.Equal(new[] { "edit-long" },
             session.Snapshot().KeyGroups.Single().States[0].ActiveEditIds);
@@ -657,7 +665,7 @@ public class BuildPageVmTests
         string hideId = Assert.Single(project.EditDefinitions,
             edit => edit.Kind == EditDefinitionKind.Hide).Id;
         Assert.Equal(1, project.KeyGroups.Single().States[0].ActiveEditIds.Count(id => id == hideId));
-        Assert.Equal("Hidden is already used in F6 · State 1.", vm.Status);
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Hidden", "F6 · State 1"), vm.Status);
     }
 
     // ---- the board's gestures: what a drag and a drop actually do to the session ----
@@ -696,7 +704,8 @@ public class BuildPageVmTests
         // One content answer per part per place: the edit already sitting there gave up its seat.
         Assert.Equal(new[] { "edit-long" }, states[1].ActiveEditIds);
         // The line names where it went and what it unseated: a replaced answer is not a silent loss.
-        Assert.Equal("Moved Long body to F6 · State 2. Short body is no longer used there.", vm.Status);
+        Assert.Equal(Strings.BuildMovedTo("Long body", "F6 · " + CoreStrings.PlacementStateNumbered(2)) + " "
+            + Strings.BuildNoLongerUsedThere("Short body"), vm.Status);
     }
 
     [UiFact]
@@ -732,7 +741,7 @@ public class BuildPageVmTests
 
         vm.DropToken("edit-long", "key-0001", "state-0001", "key-0002", "state-0002");
 
-        Assert.Equal("Long body is already there.", vm.Status);
+        Assert.Equal(Strings.BuildAlreadyThere("Long body"), vm.Status);
         Assert.Equal(new[] { "edit-long" }, session.Snapshot().KeyGroups[0].States[0].ActiveEditIds);
     }
 
@@ -776,7 +785,8 @@ public class BuildPageVmTests
         Assert.Equal(1, changes);
         Assert.Equal(new[] { "edit-short" },
             session.Snapshot().KeyGroups.Single().States[0].ActiveEditIds);
-        Assert.Equal("Added Short body to F6 · State 1. Long body is no longer used there.", vm.Status);
+        Assert.Equal(Strings.BuildAddedTo("Short body", "F6 · " + CoreStrings.PlacementStateNumbered(1)) + " "
+            + Strings.BuildNoLongerUsedThere("Long body"), vm.Status);
     }
 
     /// <summary>A placement that displaced nothing says nothing about displacement.</summary>
@@ -787,7 +797,7 @@ public class BuildPageVmTests
 
         vm.DropEdit("edit-long", "key-0001", "state-0002");
 
-        Assert.Equal("Added Long body to F6 · State 2.", vm.Status);
+        Assert.Equal(Strings.BuildAddedTo("Long body", "F6 · " + CoreStrings.PlacementStateNumbered(2)), vm.Status);
     }
 
     /// <summary>What the cursor asks while a drag is still in the air. An edit used in two states dragged
@@ -815,7 +825,8 @@ public class BuildPageVmTests
         Assert.Contains("F6 · Coat off",
             Edit(vm, "edit-long").UseIn.Select(choice => choice.Label));
         vm.DropEdit("edit-long", "key-0001", "state-0002");
-        Assert.Equal("Added Long body to F6 · Coat off. Short body is no longer used there.", vm.Status);
+        Assert.Equal(Strings.BuildAddedTo("Long body", "F6 · Coat off") + " "
+            + Strings.BuildNoLongerUsedThere("Short body"), vm.Status);
     }
 
     /// <summary>The board sleeps while a build runs: a tick that cannot land cannot leave a box ticked for
@@ -857,7 +868,7 @@ public class BuildPageVmTests
 
         vm.DropEdit("edit-long", "key-0001", "state-0001");
 
-        Assert.Equal("Long body is already there.", vm.Status);
+        Assert.Equal(Strings.BuildAlreadyThere("Long body"), vm.Status);
         Assert.Equal(new[] { "edit-long" },
             session.Snapshot().KeyGroups.Single().States[0].ActiveEditIds);
     }
@@ -1034,7 +1045,7 @@ public class BuildPageVmTests
         Assert.False(plan.CanBuild);
         var row = Assert.Single(vm.BlockedRows);
         Assert.Equal(renderReason, row.RawMessage);
-        Assert.Equal("Cannot build Long body on body: " + renderReason, row.Message);
+        Assert.Equal(Strings.BuildCannotBuildOnPart("Long body", "body", renderReason), row.Message);
         Assert.DoesNotContain(decisionReason, row.Message, StringComparison.Ordinal);
     }
 
@@ -1049,19 +1060,20 @@ public class BuildPageVmTests
         var row = Assert.Single(vm.BlockedRows);
         Assert.Equal(reason, token.Warning);
         Assert.Equal(reason, Edit(vm, "edit-long").Warning);
-        Assert.Equal("Cannot build Long body on body: " + reason, row.Message);
+        Assert.Equal(Strings.BuildCannotBuildOnPart("Long body", "body", reason), row.Message);
         Assert.True(vm.ShowBlockedVerdict);
         Assert.False(vm.ShowFooterVerdict);
         Assert.Null(vm.StatusTip);
 
-        Assert.Equal("Body options · State 1", Assert.Single(row.Placements).Label);
+        Assert.Equal("Body options · " + CoreStrings.PlacementStateNumbered(1), Assert.Single(row.Placements).Label);
         row.Placements[0].FocusCommand.Execute(null);
         Assert.Equal(BuildMarkedTarget.State(vm.Groups.Single().Id, vm.Groups.Single().States[0].Id),
             vm.MarkedTarget);
         Assert.True(vm.Groups.Single().States[0].IsMarked);
         Assert.Equal(1, MarkedCardCount(vm));
         Assert.Equal("state-0001", vm.FocusTarget);
-        Assert.Equal("Showing Body options · State 1.", vm.Status);
+        // the status line completes the sentence with a period
+        Assert.Equal(Strings.BuildShowing("Body options · " + CoreStrings.PlacementStateNumbered(1)) + ".", vm.Status);
         Assert.Equal(vm.Status, vm.StatusTip);
     }
 
@@ -1122,36 +1134,40 @@ public class BuildPageVmTests
     {
         const string reason = "The existing reason stays intact.";
 
-        Assert.Equal("Cannot build Long body on body: " + reason,
+        Assert.Equal(Strings.BuildCannotBuildOnPart("Long body", "body", reason),
             BuildIssueAttribution.Blocking(reason,
                 new[] { new BuildIssueOwner("edit-long", "Long body", "body") }));
-        Assert.Equal("Cannot build Long body and Short body on body: " + reason,
+        Assert.Equal(Strings.BuildCannotBuildOnPart(Catalog.List(new[] { "Long body", "Short body" }), "body", reason),
             BuildIssueAttribution.Blocking(reason, new[]
             {
                 new BuildIssueOwner("edit-long", "Long body", "body"),
                 new BuildIssueOwner("edit-short", "Short body", "body"),
             }));
-        Assert.Equal("Cannot build Long body on body and Warm hat on hat: " + reason,
+        Assert.Equal(Strings.BuildCannotBuildList(Catalog.List(new[]
+            {
+                Strings.BuildEditOnPart("Long body", "body"), Strings.BuildEditOnPart("Warm hat", "hat"),
+            }), reason),
             BuildIssueAttribution.Blocking(reason, new[]
             {
                 new BuildIssueOwner("edit-long", "Long body", "body"),
                 new BuildIssueOwner("edit-hat", "Warm hat", "hat"),
             }));
-        Assert.Equal("Cannot build Long body and Long body on body: " + reason,
+        Assert.Equal(Strings.BuildCannotBuildOnPart(Catalog.List(new[] { "Long body", "Long body" }), "body", reason),
             BuildIssueAttribution.Blocking(reason, new[]
             {
                 new BuildIssueOwner("edit-long", "Long body", "body"),
                 new BuildIssueOwner("edit-short", "Long body", "body"),
                 new BuildIssueOwner("edit-short", "Long body", "body"),
             }));
-        Assert.Equal("Cannot build Long body and 2 more: " + reason,
+        Assert.Equal(Strings.BuildCannotBuildAndMore_Other("Long body", 2, reason),
             BuildIssueAttribution.BlockingSummary(reason, new[]
             {
                 new BuildIssueOwner("edit-long", "Long body", "body"),
                 new BuildIssueOwner("edit-short", "Short body", "body"),
                 new BuildIssueOwner("edit-hat", "Warm hat", "hat"),
             }));
-        Assert.Equal("Cannot build Long body on body: Missing evidence.",
+        // a reason without its period is completed with one
+        Assert.Equal(Strings.BuildCannotBuildOnPart("Long body", "body", "Missing evidence") + ".",
             BuildIssueAttribution.Blocking("Missing evidence",
                 new[] { new BuildIssueOwner("edit-long", "Long body", "body") }));
     }
@@ -1166,18 +1182,17 @@ public class BuildPageVmTests
         Assert.False(plan.CanBuild);
         var row = Assert.Single(vm.BlockedRows);
         Assert.Equal(reason, row.RawMessage);
-        Assert.Equal("Cannot build Long body on body: " + reason, row.Message);
+        Assert.Equal(Strings.BuildCannotBuildOnPart("Long body", "body", reason), row.Message);
         Assert.Equal(row.Message, vm.PrimaryBlockedMessage);
         Assert.Equal(row.Message, vm.BuildDisabledReason);
-        Assert.Equal("Body options · State 1", Assert.Single(row.Placements).Label);
+        Assert.Equal("Body options · " + CoreStrings.PlacementStateNumbered(1), Assert.Single(row.Placements).Label);
         Assert.Equal(row.Placements, vm.PrimaryBlockedPlacements);
     }
 
     [UiFact]
     public async Task Keyless_group_blockers_keep_the_group_text_and_have_an_exact_group_chip()
     {
-        const string named = "Key group 'Body options' has no key. This blocks the build. "
-            + "Give it a key, or delete the group.";
+        string named = CoreStrings.PlanKeylessGroupLabeled("Body options");
         var namedPlan = new AuthoredBuildPlan
         {
             Conflicts = new[] { named },
@@ -1193,8 +1208,7 @@ public class BuildPageVmTests
         Assert.Equal("Body options", namedRow.Placements[0].Label);
         Assert.Equal(3, namedRow.Placements.Count);
 
-        const string unnamed = "Unnamed key group has no key. This blocks the build. "
-            + "Give it a key, or delete the group.";
+        string unnamed = CoreStrings.PlanKeylessGroupUnnamed(CoreStrings.PlacementUnnamedGroup);
         var empty = EmptyStates();
         empty.KeyGroups[0].Key = null;
         empty.KeyGroups[0].Label = null;
@@ -1208,7 +1222,7 @@ public class BuildPageVmTests
 
         var unnamedRow = Assert.Single(unnamedVm.BlockedRows);
         Assert.Equal(unnamed, unnamedRow.Message);
-        Assert.Equal("Unnamed key group", Assert.Single(unnamedRow.Placements).Label);
+        Assert.Equal(CoreStrings.PlacementUnnamedGroup, Assert.Single(unnamedRow.Placements).Label);
         Assert.Equal("group:key-0001", unnamedRow.Placements[0].Target);
     }
 
@@ -1226,8 +1240,8 @@ public class BuildPageVmTests
         await vm.BuildCommand.ExecuteAsync(null);
         Assert.Equal("test-mod", vm.BuiltPackage);
         Assert.Equal(@"C:\published\test-mod", vm.FolderTip);
-        Assert.Equal("Built test-mod.", vm.Footer.Text);
-        Assert.Equal("Warnings 1 · Info 1", vm.DiagnosticCounts);
+        Assert.Equal(Strings.BuildBuilt("test-mod"), vm.Footer.Text);
+        Assert.Equal(Strings.BuildCountWarnings(1) + " · " + Strings.BuildCountInfo(1), vm.DiagnosticCounts);
         Assert.True(vm.HasWarningDiagnosticsOnly);
 
         const string conflict = "Long body and Short body can be active together.";
@@ -1239,17 +1253,18 @@ public class BuildPageVmTests
         });
         await vm.ReplanAsync();
 
-        Assert.Equal("Blocked 1 · Warnings 2 · Info 1", vm.DiagnosticCounts);
+        Assert.Equal(string.Join(" · ", Strings.BuildCountBlocked(1), Strings.BuildCountWarnings(2),
+            Strings.BuildCountInfo(1)), vm.DiagnosticCounts);
         Assert.Equal(1, vm.BlockedCount);
         Assert.Equal(2, vm.WarningCount);
         Assert.Equal(1, vm.InfoCount);
         Assert.False(vm.HasWarningDiagnosticsOnly);
-        Assert.Equal("Blocked 1", vm.BlockedSectionHeader);
-        Assert.Equal("Warnings 2", vm.WarningSectionHeader);
-        Assert.Equal("Info 1", vm.InfoSectionHeader);
+        Assert.Equal(Strings.BuildCountBlocked(1), vm.BlockedSectionHeader);
+        Assert.Equal(Strings.BuildCountWarnings(2), vm.WarningSectionHeader);
+        Assert.Equal(Strings.BuildCountInfo(1), vm.InfoSectionHeader);
         Assert.Equal(2, vm.PrimaryBlocked!.Placements.Count);
         Assert.Single(vm.PrimaryBlockedPlacements);
-        Assert.Equal("Cannot build Long body and 1 more: " + conflict, vm.PrimaryBlockedSummary);
+        Assert.Equal(Strings.BuildCannotBuildAndMore_One("Long body", 1, conflict), vm.PrimaryBlockedSummary);
         Assert.Equal(vm.PrimaryBlockedMessage, vm.BuildDisabledReason);
         Assert.DoesNotContain("Something is blocking", vm.BuildDisabledReason, StringComparison.Ordinal);
     }
@@ -1277,7 +1292,7 @@ public class BuildPageVmTests
         Assert.False(vm.HasBuildLog);
         Assert.Equal("", vm.BuiltPackage);
         Assert.Equal("", vm.LastBuildDir);
-        Assert.Equal(BuildGate.NothingAuthored, vm.Footer.Text);
+        Assert.Equal(Strings.BuildNothingAuthored, vm.Footer.Text);
         Assert.Contains(nameof(BuildPageVm.HasLastBuild), changed);
         Assert.Contains(nameof(BuildPageVm.HasBuildZip), changed);
         Assert.Contains(nameof(BuildPageVm.HasBuildLog), changed);
@@ -1290,10 +1305,11 @@ public class BuildPageVmTests
 
         await vm.Groups.Single().DeleteCommand.ExecuteAsync(null);
 
-        Assert.Equal("Delete Body options?", shell.LastConfirmTitle);
-        Assert.Equal("This removes 2 uses of edits. Long body and Short body become unused."
-            + "\n\nThis cannot be undone.", shell.LastConfirmBody);
-        Assert.Equal("Delete", shell.LastConfirmLabel);
+        Assert.Equal(Strings.BuildDeleteGroupTitle("Body options"), shell.LastConfirmTitle);
+        Assert.Equal(Strings.BuildDeleteGroupUses_Other(2) + " "
+            + Strings.BuildDeleteGroupUnused_Other(Catalog.List(new[] { "Long body", "Short body" }))
+            + "\n\n" + Strings.CannotBeUndone, shell.LastConfirmBody);
+        Assert.Equal(Strings.BuildDeleteGroup, shell.LastConfirmLabel);
         Assert.True(shell.LastConfirmDangerous);
         Assert.Empty(session.Snapshot().KeyGroups);
         Assert.Equal(2, session.Snapshot().EditDefinitions.Count);
@@ -1316,14 +1332,15 @@ public class BuildPageVmTests
         var longToken = vm.Groups.Single().States[0].Tokens.Single();
         var shortToken = vm.Groups.Single().States[1].Tokens.Single();
         Assert.Equal(conflict + "\n" + warning, longToken.Warning);
-        const string attributed =
-            "Cannot build Long body and Short body on body: Long body and Short body can be active together.";
+        string attributed = Strings.BuildCannotBuildOnPart(Catalog.List(new[] { "Long body", "Short body" }),
+            "body", conflict);
         Assert.Equal(conflict, shortToken.Warning);
         Assert.Contains(conflict, Edit(vm, "edit-long").Warning);
         var row = vm.Issues.Single(issue => issue.RawMessage == conflict);
         Assert.Equal(attributed, row.Message);
         Assert.Equal(2, row.Placements.Count);
-        Assert.All(row.Placements, chip => Assert.StartsWith("Body options · State ", chip.Label));
+        Assert.All(row.Placements, chip => Assert.Matches(
+            CatalogShape.Of("Body options · " + CoreStrings.PlacementStateNumbered(CatalogShape.Any)), chip.Label));
         Assert.Equal(attributed, vm.BuildDisabledReason);
     }
 
@@ -1340,15 +1357,15 @@ public class BuildPageVmTests
 
         await vm.BuildCommand.ExecuteAsync(null);
 
-        Assert.Equal(new[] { BuildWarningSource.LastBuildLead, "Run warning.", "Live warning." }, vm.Warnings);
+        Assert.Equal(new[] { Strings.BuildLastBuildLead, "Run warning.", "Live warning." }, vm.Warnings);
         Assert.Equal(new[] { "One disclosure." }, vm.Infos);
         Assert.Equal(BuildFooterState.Built, vm.Footer.State);
-        Assert.Equal("Built test-mod.", vm.Footer.Text);
+        Assert.Equal(Strings.BuildBuilt("test-mod"), vm.Footer.Text);
         Assert.False(vm.BuildResultStale);
 
         session.RenameEdit("edit-long", "Longer body");
         Assert.True(vm.BuildResultStale);
-        Assert.Equal("Build again to include the latest changes.", vm.BuildAgainLine);
+        Assert.Equal(Strings.BuildAgain, vm.BuildAgainLine);
         Assert.Equal(1, shell.RunCalls);
     }
 
@@ -1373,7 +1390,7 @@ public class BuildPageVmTests
         Assert.Equal(conflict, warning.Message);
         Assert.Equal(1, vm.BlockedCount);
         Assert.Equal(1, vm.WarningCount);
-        Assert.Equal("Blocked 1 · Warnings 1", vm.DiagnosticCounts);
+        Assert.Equal(Strings.BuildCountBlocked(1) + " · " + Strings.BuildCountWarnings(1), vm.DiagnosticCounts);
     }
 
     [UiFact]
@@ -1423,7 +1440,7 @@ public class BuildPageVmTests
         for (int i = 0; !vm.IsWorkInFlight && i < 100; i++) await Task.Yield();
         Assert.True(vm.IsWorkInFlight);
         vm.Groups.Single().Key = "F9";
-        Assert.Equal(BuildPageVm.BuildRunningReason, vm.Status);
+        Assert.Equal(Strings.BuildRunning, vm.Status);
 
         hold.SetResult();
         await run;
@@ -1436,8 +1453,8 @@ public class BuildPageVmTests
     {
         var (vm, _, _) = await Page(Keyed(), shell => shell.WholeModKey = "f6");
 
-        Assert.Equal("Same key as Body options. They switch together.", vm.WholeModKeyCollisionTip);
-        Assert.Equal("Same key as the whole mod. They switch together.", vm.Groups.Single().CollisionTip);
+        Assert.Equal(Strings.KeySameAs("Body options") + " " + Strings.KeysSwitchTogether, vm.WholeModKeyCollisionTip);
+        Assert.Equal(Strings.KeySameAs(Strings.KeyCollisionWholeMod) + " " + Strings.KeysSwitchTogether, vm.Groups.Single().CollisionTip);
     }
 
     [UiFact]
@@ -1447,17 +1464,17 @@ public class BuildPageVmTests
 
         vm.Groups.Single().States[1].Shortcut = "F8";
         Assert.Equal("F8", session.Snapshot().KeyGroups.Single().States[1].Shortcut);
-        Assert.Equal("Shortcut set to F8.", vm.Status);
+        Assert.Equal(Strings.BuildShortcutSet("F8"), vm.Status);
 
         vm.Groups.Single().States[0].Shortcut = "F6";
-        Assert.Equal("Key F6 already switches this key group. Pick another key for the shortcut.", vm.Status);
+        Assert.Equal(CoreStrings.KeyGroupShortcutIsGroupKey("F6"), vm.Status);
         Assert.Null(session.Snapshot().KeyGroups.Single().States[0].Shortcut);
         Assert.Null(vm.Groups.Single().States[0].Shortcut);
         Assert.Equal("F8", vm.Groups.Single().States[1].Shortcut);
 
         vm.Groups.Single().States[1].Shortcut = null;
         Assert.Null(session.Snapshot().KeyGroups.Single().States[1].Shortcut);
-        Assert.Equal("Shortcut cleared.", vm.Status);
+        Assert.Equal(Strings.BuildShortcutCleared, vm.Status);
     }
 
     /// <summary>One shortcut on states of two groups is the feature working, so neither warns. A shortcut
@@ -1482,10 +1499,10 @@ public class BuildPageVmTests
 
         Assert.False(body.States[0].HasCollision);
         Assert.False(other.States[1].HasCollision);
-        Assert.Equal("Same key as Body options. One press does both.", other.States[0].CollisionTip);
-        Assert.Equal("Same key as Key F7 · State 1. One press does both.", body.CollisionTip);
-        Assert.Equal("Same key as the whole mod. One press does both.", body.States[1].CollisionTip);
-        Assert.Equal("Same key as Body options · State 2. One press does both.", vm.WholeModKeyCollisionTip);
+        Assert.Equal(Strings.KeySameAs("Body options") + " " + Strings.KeysOnePressBoth, other.States[0].CollisionTip);
+        Assert.Equal(Strings.KeySameAs("Key F7 · State 1") + " " + Strings.KeysOnePressBoth, body.CollisionTip);
+        Assert.Equal(Strings.KeySameAs(Strings.KeyCollisionWholeMod) + " " + Strings.KeysOnePressBoth, body.States[1].CollisionTip);
+        Assert.Equal(Strings.KeySameAs("Body options · State 2") + " " + Strings.KeysOnePressBoth, vm.WholeModKeyCollisionTip);
     }
 
     [UiFact]
@@ -1493,14 +1510,14 @@ public class BuildPageVmTests
     {
         var (unset, _, _) = await Page(AuthoredEditFixtures.Golden(), shell =>
             shell.Loader = new BuildLoaderState(null, false, null, default));
-        Assert.Equal("Set 3DMigoto path…", unset.LoaderButtonLabel);
-        Assert.Equal(InstallGate.SetLoader, unset.LoaderButtonTip);
+        Assert.Equal(Strings.BuildSetLoaderPath, unset.LoaderButtonLabel);
+        Assert.Equal(Strings.InstallSetLoader, unset.LoaderButtonTip);
 
         const string missing = @"C:\moved\3DMigoto Loader.exe";
         var (set, _, _) = await Page(AuthoredEditFixtures.Golden(), shell =>
             shell.Loader = new BuildLoaderState(missing, false, null, default));
-        Assert.Equal("Fix 3DMigoto path…", set.LoaderButtonLabel);
-        Assert.Equal(LoaderGate.LoaderNotFound(missing), set.LoaderButtonTip);
+        Assert.Equal(Strings.BuildFixLoaderPath, set.LoaderButtonLabel);
+        Assert.Equal(Strings.LoaderNotFound(missing), set.LoaderButtonTip);
     }
 
     /// <summary>The window shell's four sentences about a missing artifact are written for the person
@@ -1514,7 +1531,7 @@ public class BuildPageVmTests
 
         var refusal = Assert.Throws<AuthoredRefusalException>(() =>
             window.OpenArtifact(BuildArtifactKind.Folder, missing));
-        Assert.Equal("The build folder is gone. Build again.", refusal.Message);
+        Assert.Equal(Strings.BuildFolderGone, refusal.Message);
 
         var (vm, _, shell) = await Page(AuthoredEditFixtures.Golden());
         shell.OpenFailure = refusal;
@@ -1522,7 +1539,7 @@ public class BuildPageVmTests
 
         vm.OpenFolderCommand.Execute(null);
 
-        Assert.Equal("The build folder is gone. Build again.", vm.Status);
+        Assert.Equal(Strings.BuildFolderGone, vm.Status);
     }
 
     [UiFact]
@@ -1535,7 +1552,7 @@ public class BuildPageVmTests
 
         Assert.Equal(1, shell.InstallCalls);
         Assert.Equal(BuildFooterState.Notice, vm.Footer.State);
-        Assert.Equal("Installed test-mod to the Mods folder.", vm.Footer.Text);
+        Assert.Equal(Strings.InstallDone("test-mod"), vm.Footer.Text);
         Assert.True(vm.HasLastBuild);
         Assert.True(vm.HasLastInstall);
         Assert.Equal(@"C:\3dmigoto\Mods\test-mod", vm.InstalledFolderTip);
@@ -1563,14 +1580,14 @@ public class BuildPageVmTests
         shell.InstallHold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task installing = vm.InstallCommand.ExecuteAsync(null);
         Assert.Equal(BuildFooterState.Running, vm.Footer.State);
-        Assert.Equal("Installing…", vm.Footer.Text);
+        Assert.Equal(Strings.BuildInstalling, vm.Footer.Text);
         Assert.True(vm.ShowFooterVerdict);
         Assert.False(vm.ShowBlockedVerdict);
 
         shell.InstallHold.SetResult();
         await installing;
         Assert.Equal(BuildFooterState.Notice, vm.Footer.State);
-        Assert.Equal("Installed test-mod to the Mods folder.", vm.Footer.Text);
+        Assert.Equal(Strings.InstallDone("test-mod"), vm.Footer.Text);
         Assert.True(vm.ShowFooterVerdict);
         Assert.False(vm.ShowBlockedVerdict);
     }
@@ -1752,24 +1769,24 @@ public class BuildPageVmTests
         var unplaced = new AuthoredEditSession(unplacedProject).Outline();
         var good = new AuthoredBuildPlan();
 
-        Assert.Equal(BuildGate.GameUnavailable,
-            BuildGate.Reason(new BuildPlanningResult(GameUnavailable: BuildGate.GameUnavailable), placed, null));
+        Assert.Equal(GameFilesGate.Unavailable,
+            BuildGate.Reason(new BuildPlanningResult(GameUnavailable: GameFilesGate.Unavailable), placed, null));
         Assert.Equal("Planning failed.",
             BuildGate.Reason(new BuildPlanningResult(Failure: "Planning failed."), placed, null));
-        Assert.Equal(BuildGate.NothingAuthored,
+        Assert.Equal(Strings.BuildNothingAuthored,
             BuildGate.Reason(new BuildPlanningResult(good),
                 new AuthoredEditSession(new AuthoredProject()).Outline(), null));
-        Assert.Equal(BuildGate.NothingPlaced, BuildGate.Reason(new BuildPlanningResult(good), unplaced, null));
+        Assert.Equal(Strings.BuildNothingPlaced, BuildGate.Reason(new BuildPlanningResult(good), unplaced, null));
         Assert.Equal("A visible conflict.", BuildGate.Reason(new BuildPlanningResult(
             new AuthoredBuildPlan { Conflicts = new[] { "A visible conflict." } }), placed,
             "A visible conflict."));
-        Assert.Equal(BuildGate.UnnamedPlanBlocker, BuildGate.Reason(new BuildPlanningResult(
+        Assert.Equal(Strings.BuildUnnamedPlanBlocker, BuildGate.Reason(new BuildPlanningResult(
             new AuthoredBuildPlan { Conflicts = new[] { "An unprojected conflict." } }), placed, null));
         Assert.Null(BuildGate.Reason(new BuildPlanningResult(good), placed, null));
 
         var hookless = UsableLoader with { Ini = new MigotoIniFacts(true, true, false) };
-        Assert.Equal(InstallGate.NoBuild, InstallGate.Reason(false, hookless));
-        Assert.Equal(LoaderGate.NoTextureHook, InstallGate.Reason(true, hookless));
+        Assert.Equal(Strings.InstallNoBuild, InstallGate.Reason(false, hookless));
+        Assert.Equal(Strings.LoaderNoTextureHook, InstallGate.Reason(true, hookless));
         Assert.Null(InstallGate.Reason(true, UsableLoader));
     }
 
@@ -1778,7 +1795,7 @@ public class BuildPageVmTests
     {
         var (vm, _, _) = await Page(Keyed());
         Assert.All(vm.Groups.Single().States, state => Assert.False(state.CanRemove));
-        Assert.Contains("Delete the group instead", vm.Groups.Single().States[0].RemoveTip);
+        Assert.Equal(CoreStrings.KeyGroupTwoStateFloor, vm.Groups.Single().States[0].RemoveTip);
 
         vm.Groups.Single().AddStateCommand.Execute(null);
         await vm.ReplanAsync();
@@ -1795,11 +1812,11 @@ public class BuildPageVmTests
         Edit(vm, "edit-long").MakeKeyCommand.Execute(null);
         await vm.ReplanAsync();
 
-        Assert.Equal(new[] { "Unnamed key group · 1" }, Edit(vm, "edit-long").PlacementChips);
-        Assert.Equal("Unnamed key group", vm.Groups.Single().DisplayName);
+        Assert.Equal(new[] { CoreStrings.PlacementUnnamedGroup + " · 1" }, Edit(vm, "edit-long").PlacementChips);
+        Assert.Equal(CoreStrings.PlacementUnnamedGroup, vm.Groups.Single().DisplayName);
         var choice = Edit(vm, "edit-long").UseIn.Single(row =>
-            row.GroupId == vm.Groups.Single().Id && row.Label.EndsWith("State 1", StringComparison.Ordinal));
-        Assert.StartsWith("Unnamed key group", choice.Label);
+            row.GroupId == vm.Groups.Single().Id && row.StateId == vm.Groups.Single().States[0].Id);
+        Assert.Equal(CoreStrings.PlacementUnnamedGroup + " · " + CoreStrings.PlacementStateNumbered(1), choice.Label);
     }
 
     [Fact]
@@ -1840,7 +1857,7 @@ public class BuildPageVmTests
             State(TargetInputKind.Ramp, BindingKind.ProjectAsset, "asset-b", ProjectAssetKind.Ramp),
         }));
         // …and a shading-values edit carries no image at all, so it is counted as shading, never as "1 image"
-        Assert.Equal("1 shading value", BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
+        Assert.Equal(Strings.ChangeSummaryValues_One(1), BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
         {
             State(TargetInputKind.Geometry, BindingKind.TargetGameValue),
             State(TargetInputKind.MaterialValue, BindingKind.ProjectAsset, "asset-values",
@@ -1848,7 +1865,7 @@ public class BuildPageVmTests
         }));
         // A value COPIED from another material carries no project asset at all, so the count is read off
         // the slot rather than the asset — otherwise a copy is invisible on this line.
-        Assert.Equal("mesh · 2 shading values", BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
+        Assert.Equal(Strings.ChangeSummaryMesh + " · " + Strings.ChangeSummaryValues_Other(2), BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
         {
             State(TargetInputKind.Geometry, BindingKind.ProjectAsset, "asset-mesh",
                 ProjectAssetKind.Geometry),
@@ -1863,7 +1880,7 @@ public class BuildPageVmTests
             State(TargetInputKind.MaterialValue, BindingKind.TargetGameValue),
         }));
         // The line stays at counts grain and never names which value or which map moved.
-        Assert.Equal("1 image · 1 ramp · 1 shading value", BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
+        Assert.Equal(Strings.ChangeSummaryImages_One(1) + " · " + Strings.ChangeSummaryRamps_One(1) + " · " + Strings.ChangeSummaryValues_One(1), BuildPageVm.ChangeSummary(EditDefinitionKind.Content, new[]
         {
             State(TargetInputKind.BaseColor, BindingKind.ProjectAsset, "asset-a"),
             State(TargetInputKind.Ramp, BindingKind.ProjectAsset, "asset-b", ProjectAssetKind.Ramp),

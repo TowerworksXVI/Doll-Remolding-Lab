@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -7,6 +8,7 @@ using System.Threading.Tasks;
 using Remold.App.ViewModels;
 using Remold.App.ViewModels.EditPage;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Remold.Core.Textures;
 using Xunit;
 
@@ -292,7 +294,7 @@ public class EditPageVmTests
         public int ShadingReadCalls;
         public EditShadingRead? PeekShading(TargetPart part, int materialSlotIndex,
             GameAssetRef? material = null) => ShadingPending ? null
-                : ShadingReadFailure is not null ? new(null, "Couldn't read this material's effects.")
+                : ShadingReadFailure is not null ? new(null, Strings.ShadingEffectsUnreadable)
                 : new(ShadingInfo);
 
         public Task<EditShadingInfo?> ReadShadingAsync(TargetPart part, int materialSlotIndex,
@@ -449,6 +451,12 @@ public class EditPageVmTests
         return (vm, shell);
     }
 
+    /// <summary>A page over <paramref name="session"/> whose install names every part
+    /// <paramref name="token"/>, and that page's body row, for the facts another class pins under another UI
+    /// language.</summary>
+    internal static EditNodeVm BodyRowNamed(AuthoredEditSession session, string token) =>
+        PartRow(On(session, shell => shell.Token = _ => token).Vm);
+
     private static EditNodeVm Subject(EditPageVm vm) => Assert.Single(vm.Nodes);
 
     private static EditNodeVm PartRow(EditPageVm vm) =>
@@ -567,7 +575,7 @@ public class EditPageVmTests
 
             var again = ShadingRow(vm, "edit-long");
             Assert.True(again.IsEdited);
-            Assert.Equal("2 values set", again.Summary);
+            Assert.Equal(Strings.ShadingValuesSet_Other(2), again.Summary);
             Assert.Equal("0", again.AuthoredValues["_UseGIFlatten"]);
             Assert.Equal("2.5", again.AuthoredValues["_Anisotropy"]);
 
@@ -595,7 +603,7 @@ public class EditPageVmTests
             s.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0,
                 "hair · mat0", new[]
                 {
-                    new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0"),
+                    new EditShadingCopyRow("_UseGIFlatten", CoreStrings.ShadingValueUseGIFlatten, "1", "0"),
                 });
         });
         using var folder = new ShadingTestFolder(session);
@@ -636,9 +644,9 @@ public class EditPageVmTests
                 "hair material", new[]
                 {
                     new EditShadingCopyRow(MaterialValueSemantics.UseGiFlatten,
-                        "Skin lighting", "1", "0"),
+                        CoreStrings.ShadingValueUseGIFlatten, "1", "0"),
                     new EditShadingCopyRow("_StockingCenterColor",
-                        "Stocking centre colour", "0 0 0 1", "1 1 1 1"),
+                        CoreStrings.ShadingValueStockingCenterColor, "0 0 0 1", "1 1 1 1"),
                 });
         });
 
@@ -681,7 +689,7 @@ public class EditPageVmTests
 
         Assert.Equal(0, shell.ConfirmCalls);
         Assert.Equal(before, session.Revision);
-        Assert.Equal(EditPageVm.ShadingAlreadyMatches, vm.Status);
+        Assert.Equal(Strings.ShadingAlreadyMatches, vm.Status);
     }
 
     [Fact]
@@ -691,7 +699,7 @@ public class EditPageVmTests
         {
             candidate.Resolve = part => Installed(part);
             candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
-                new[] { new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0") },
+                new[] { new EditShadingCopyRow("_UseGIFlatten", CoreStrings.ShadingValueUseGIFlatten, "1", "0") },
                 EffectsToDisable: new[] { "detail" },
                 EffectOperations: Array.Empty<MaterialEffectOperation>());
         });
@@ -700,7 +708,7 @@ public class EditPageVmTests
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
         Assert.Equal(revision, session.Revision);
         Assert.False(ShadingRow(vm, "edit-long").IsEdited);
-        Assert.Contains("cannot be disabled", vm.Status);
+        Assert.Matches(CatalogShape.Within(CoreStrings.EffectCannotBeDisabled(CatalogShape.Any)), vm.Status);
     }
 
     [Fact]
@@ -712,23 +720,25 @@ public class EditPageVmTests
             candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
                 new[]
                 {
-                    new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "1", "0"),
-                    new EditShadingCopyRow("_StockingCenterColor", "Stocking centre colour", "1 1 1 1", null),
+                    new EditShadingCopyRow("_UseGIFlatten", CoreStrings.ShadingValueUseGIFlatten, "1", "0"),
+                    new EditShadingCopyRow("_StockingCenterColor", CoreStrings.ShadingValueStockingCenterColor, "1 1 1 1", null),
                 },
-                SourceMaterialName: "hair_faceuber", SkippedUnreadable: new[] { "Glitter density" },
+                SourceMaterialName: "hair_faceuber", SkippedUnreadable: new[] { CoreStrings.ShadingValueGlitterDensity },
                 EffectsCompared: false);
         });
         using var folder = new ShadingTestFolder(session);
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
-        Assert.Contains("Copies 1 shading value. Returns 1 value to the original.", shell.LastConfirmBody);
-        Assert.Contains("Leaves Glitter density unchanged", shell.LastConfirmBody);
-        Assert.Contains(EditPageVm.EffectsNotCompared, shell.LastConfirmBody);
+        Assert.Contains(Strings.EditCopyCopiesValues_One(1) + " " + Strings.EditCopyReturnsValues_One(1),
+            shell.LastConfirmBody);
+        Assert.Contains(Strings.EditCopyLeavesUnchanged_One(CoreStrings.ShadingValueGlitterDensity),
+            shell.LastConfirmBody);
+        Assert.Contains(Strings.ShadingEffectsNotCompared, shell.LastConfirmBody);
         Assert.DoesNotContain("_StockingCenterColor", ShadingRow(vm, "edit-long").AuthoredValues.Keys);
         Assert.NotNull(shell.LastShadingCopyAuthored);
         var row = ShadingRow(vm, "edit-long");
         Assert.Equal("0", row.AuthoredValues["_UseGIFlatten"]);
         Assert.Equal("hair_faceuber", row.CopiedFrom);
-        Assert.Contains("copied from 'hair_faceuber'", row.Summary);
+        Assert.Contains(Strings.ShadingCopiedFrom("hair_faceuber"), row.Summary);
         var definition = session.Snapshot().EditDefinitions.Single(edit => edit.Id == "edit-long");
         var copy = Assert.Single(definition.CopiedMaterialShading!);
         Assert.Equal(0, copy.MaterialSlotIndex);
@@ -745,12 +755,13 @@ public class EditPageVmTests
         {
             candidate.Resolve = part => Installed(part);
             candidate.ShadingSource = new EditShadingSource(AuthoredEditFixtures.Hair, 0, "hair material",
-                new[] { new EditShadingCopyRow("_UseGIFlatten", "Skin lighting", "0", "0") },
-                SourceOnlyEffects: new[] { "Internal volume" });
+                new[] { new EditShadingCopyRow("_UseGIFlatten", CoreStrings.ShadingValueUseGIFlatten, "0", "0") },
+                SourceOnlyEffects: new[] { CoreStrings.ShadingEffectInternalVolume });
         });
         using var folder = new ShadingTestFolder(session);
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
-        Assert.Contains("Internal volume", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditCopySourceEffectsUnusable(CoreStrings.ShadingEffectInternalVolume),
+            shell.LastConfirmBody);
         Assert.Equal("0", ShadingRow(vm, "edit-long").AuthoredValues["_UseGIFlatten"]);
     }
 
@@ -764,14 +775,14 @@ public class EditPageVmTests
         });
         var node = PartRow(vm).Children.Single(candidate => candidate.EditDefinitionId == "edit-long");
         await vm.LoadPreviewsAsync(node);
-        Assert.Contains("Couldn't read", node.MapGroups[0].Shading!.EffectsNote);
+        Assert.Equal(Strings.ShadingEffectsUnreadable, node.MapGroups[0].Shading!.EffectsNote);
         await vm.LoadPreviewsAsync(node);
         vm.Enter();
         Assert.Equal(0, shell.ShadingReadCalls);
-        Assert.Contains("Couldn't read", ShadingRow(vm, "edit-long").EffectsNote);
+        Assert.Equal(Strings.ShadingEffectsUnreadable, ShadingRow(vm, "edit-long").EffectsNote);
         shell.ShadingReadFailure = null;
         shell.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
-            new[] { new EditShadingEffect("stocking", "Stocking tint") },
+            new[] { new EditShadingEffect("stocking", CoreStrings.ShadingEffectStocking) },
             FixtureOperations("stocking"));
         vm.Rebuild(); // the outfit read has published its replacement answer
         Assert.Equal(0, shell.ShadingReadCalls);
@@ -786,7 +797,7 @@ public class EditPageVmTests
         {
             candidate.Resolve = part => Installed(part);
             candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
-                new[] { new EditShadingEffect("stocking", "Stocking tint") },
+                new[] { new EditShadingEffect("stocking", CoreStrings.ShadingEffectStocking) },
                 FixtureOperations("stocking"));
         });
 
@@ -813,13 +824,13 @@ public class EditPageVmTests
             candidate.Resolve = part => Installed(part);
             candidate.ShadingPending = true;
         });
-        Assert.Equal("Reading material effects…", ShadingRow(vm, "edit-long").EffectsNote);
+        Assert.Equal(Strings.ShadingEffectsReading, ShadingRow(vm, "edit-long").EffectsNote);
         var node = PartRow(vm).Children.Single(candidate => candidate.EditDefinitionId == "edit-long");
         await vm.LoadPreviewsAsync(node);
         Assert.Equal(0, shell.ShadingReadCalls);
 
         shell.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
-            new[] { new EditShadingEffect("stocking", "Stocking tint") });
+            new[] { new EditShadingEffect("stocking", CoreStrings.ShadingEffectStocking) });
         shell.ShadingPending = false;
         vm.Rebuild();
 
@@ -835,7 +846,7 @@ public class EditPageVmTests
         {
             candidate.Resolve = part => Installed(part);
             candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(),
-                new[] { new EditShadingEffect("stocking", "Stocking tint") },
+                new[] { new EditShadingEffect("stocking", CoreStrings.ShadingEffectStocking) },
                 FixtureOperations("stocking"));
         });
         using var folder = new ShadingTestFolder(session);
@@ -861,7 +872,7 @@ public class EditPageVmTests
             candidate.Resolve = part => Installed(part);
             candidate.ShadingInfo = new EditShadingInfo(Array.Empty<EditShadingField>(), new[]
             {
-                new EditShadingEffect("internal-volume", "Internal volume"),
+                new EditShadingEffect("internal-volume", CoreStrings.ShadingEffectInternalVolume),
                 new EditShadingEffect("matcap", "Matcap", ParentId: "internal-volume"),
             }, FixtureOperations("internal-volume", "matcap"));
             candidate.ShadingEdits = new[] { new EditShadingValueEdit("_UseGIFlatten", "1") };
@@ -895,25 +906,25 @@ public class EditPageVmTests
 
         shell.ShadingEditFailure = new InvalidOperationException("fixture failure");
         await vm.EditShadingValuesCommand.ExecuteAsync(row);
-        Assert.Equal(EditPageVm.EditShadingValuesFailed, vm.Status);
+        Assert.Equal(Strings.ShadingValuesOpenFailed, vm.Status);
 
         shell.ShadingCopyFailure = new InvalidOperationException("fixture failure");
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(row);
-        Assert.Equal(EditPageVm.CopyShadingFailed, vm.Status);
+        Assert.Equal(Strings.ShadingCopyFailed, vm.Status);
 
         // A material whose shader has nothing to set is the fifth outcome of the same button, and it
         // speaks on the same line as the other four rather than raising a modal to be dismissed.
         shell.ShadingEditFailure = new EditShadingFailureException(
-            MainWindowViewModel.NoAdjustableValues);
+            Strings.ShadingNoAdjustableValues);
         int asked = shell.ConfirmCalls;
         await vm.EditShadingValuesCommand.ExecuteAsync(row);
-        Assert.Equal(MainWindowViewModel.NoAdjustableValues, vm.Status);
+        Assert.Equal(Strings.ShadingNoAdjustableValues, vm.Status);
         Assert.Equal(asked, shell.ConfirmCalls);
 
         shell.ShadingCopyFailure = new EditShadingFailureException(
-            MainWindowViewModel.NoAdjustableValues);
+            Strings.ShadingNoAdjustableValues);
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(row);
-        Assert.Equal(MainWindowViewModel.NoAdjustableValues, vm.Status);
+        Assert.Equal(Strings.ShadingNoAdjustableValues, vm.Status);
         Assert.Equal(asked, shell.ConfirmCalls);
     }
 
@@ -987,7 +998,7 @@ public class EditPageVmTests
         Assert.Equal("0", ShadingRow(vm, edit.Id).AuthoredValues[MaterialValueSemantics.UseGiFlatten]);
         Assert.True(ShadingRow(vm, edit.Id).ShowsRevert);
         Assert.True(shell.LastShadingAddsFirstEdit);
-        Assert.Equal("Added Edit 1. Used in Always.", vm.Status);
+        Assert.Equal(Strings.EditAdded("Edit 1") + " " + Strings.EditUsedInAlways, vm.Status);
     }
 
     [Fact]
@@ -1000,7 +1011,7 @@ public class EditPageVmTests
                 "hair · mat0", new[]
                 {
                     new EditShadingCopyRow(MaterialValueSemantics.UseGiFlatten,
-                        "Skin lighting", "1", "0"),
+                        CoreStrings.ShadingValueUseGIFlatten, "1", "0"),
                 });
         });
 
@@ -1011,8 +1022,8 @@ public class EditPageVmTests
         Assert.True(Assert.Single(edit.Placements).IsAlways);
         Assert.Equal(edit.Id, vm.SelectedNode!.EditDefinitionId);
         Assert.Equal("0", ShadingRow(vm, edit.Id).AuthoredValues[MaterialValueSemantics.UseGiFlatten]);
-        Assert.Contains(EditPageVm.AddsFirstEdit, shell.LastConfirmBody);
-        Assert.Equal("Added Edit 1. Used in Always.", vm.Status);
+        Assert.Contains(Strings.EditAddsFirstEdit, shell.LastConfirmBody);
+        Assert.Equal(Strings.EditAdded("Edit 1") + " " + Strings.EditUsedInAlways, vm.Status);
     }
 
     [Fact]
@@ -1028,7 +1039,7 @@ public class EditPageVmTests
         await vm.EditShadingValuesCommand.ExecuteAsync(await BareShadingRow(vm));
 
         Assert.Empty(EditsFor(session));
-        Assert.Equal(EditPageVm.ShadingMatchesOriginal, vm.Status);
+        Assert.Equal(Strings.ShadingMatchesOriginal, vm.Status);
     }
 
     [Theory]
@@ -1076,11 +1087,11 @@ public class EditPageVmTests
 
         await vm.EditShadingValuesCommand.ExecuteAsync(row);
 
-        Assert.Equal(EditPageVm.ShadingInstallUnavailable, vm.Status);
+        Assert.Equal(Strings.ShadingInstallUnavailable, vm.Status);
 
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(row);
 
-        Assert.Equal(EditPageVm.ShadingInstallUnavailable, vm.Status);
+        Assert.Equal(Strings.ShadingInstallUnavailable, vm.Status);
     }
 
     [Fact]
@@ -1089,40 +1100,42 @@ public class EditPageVmTests
         var (vm, session, shell) = Page(TextureOnly(), s =>
         {
             s.Resolve = part => Installed(part);
-            s.ShadingCopyFailure = new EditShadingFailureException(
-                EditPageVm.ShadingSourceUnreadable);
+            s.ShadingCopyFailure = new EditShadingFailureException(UnreadableSource);
         });
         long before = session.Revision;
 
         await vm.CopyShadingFromMaterialCommand.ExecuteAsync(ShadingRow(vm, "edit-long"));
 
         Assert.Equal(before, session.Revision);
-        Assert.Equal(EditPageVm.ShadingSourceUnreadable, vm.Status);
-        Assert.NotEqual(EditPageVm.ShadingAlreadyMatches, vm.Status);
+        Assert.Equal(UnreadableSource, vm.Status);
+        Assert.NotEqual(Strings.ShadingAlreadyMatches, vm.Status);
     }
+
+    /// <summary>The fixture shell's own failure text for a shading source it cannot read.</summary>
+    private const string UnreadableSource = "fixture: the chosen material's shading values did not read";
 
     [Fact]
     public void A_failed_source_read_is_named_as_left_alone_not_an_empty_match()
     {
         var info = new EditShadingInfo(new[]
         {
-            new EditShadingField(MaterialValueSemantics.UseGiFlatten, "Skin lighting",
+            new EditShadingField(MaterialValueSemantics.UseGiFlatten, CoreStrings.ShadingValueUseGIFlatten,
                 MaterialValueKind.Float, 0, 1, "1"),
         });
         var source = new EditShadingInfo(new[] { info.Fields[0] with { OriginalValue = null } });
         var read = MainWindowViewModel.ReadShadingCopyRows(info, source);
         Assert.Empty(read.Rows);
-        Assert.Equal("Skin lighting", Assert.Single(read.SkippedUnreadable));
+        Assert.Equal(info.Fields[0].Label, Assert.Single(read.SkippedUnreadable));
     }
 
     [Fact]
     public void Copy_leaves_a_shared_original_alone_unless_the_edit_already_sets_it()
     {
-        var field = new EditShadingField("_UseGIFlatten", "Skin lighting",
+        var field = new EditShadingField("_UseGIFlatten", CoreStrings.ShadingValueUseGIFlatten,
             MaterialValueKind.Float, 0, 1, "1");
         var target = new EditShadingInfo(new[] { field });
         var source = new EditShadingInfo(new[] { field, new EditShadingField("_Anisotropy",
-            "Hair highlight", MaterialValueKind.Float, 0, 5, "3") });
+            CoreStrings.ShadingValueAnisotropy, MaterialValueKind.Float, 0, 5, "3") });
         Assert.Empty(MainWindowViewModel.ReadShadingCopyRows(target, source).Rows);
 
         var returned = Assert.Single(MainWindowViewModel.ReadShadingCopyRows(target, source,
@@ -1133,7 +1146,7 @@ public class EditPageVmTests
         var unreadable = MainWindowViewModel.ReadShadingCopyRows(target,
             new EditShadingInfo(new[] { field with { OriginalValue = null } }));
         Assert.Empty(unreadable.Rows);
-        Assert.Equal("Skin lighting", Assert.Single(unreadable.SkippedUnreadable));
+        Assert.Equal(field.Label, Assert.Single(unreadable.SkippedUnreadable));
 
         // a field the target's drawn programs never read is not copied, and the editor shows it only
         // when the edit already sets it
@@ -1423,7 +1436,7 @@ public class EditPageVmTests
         vm.SelectPart(AuthoredEditFixtures.Part("c_vesna_ghost_lod0"), "ghost");
 
         Assert.Same(standing, vm.SelectedNode);
-        Assert.Equal("ghost isn't in this list.", vm.Status);
+        Assert.Equal(Strings.EditNotInList("ghost"), vm.Status);
     }
 
     // ---- what the pane says when there is no intent to draw ----
@@ -1496,14 +1509,14 @@ public class EditPageVmTests
 
         var hide = Assert.Single(session.Outline().Edits, edit => edit.Kind == EditDefinitionKind.Hide);
         Assert.True(hide.Placements.Single().IsAlways);
-        Assert.Equal("Added Hidden. Used in Always.", vm.Status);
+        Assert.Equal(Strings.EditAdded("Hidden") + " " + Strings.EditUsedInAlways, vm.Status);
     }
 
     [Fact]
     public void A_picked_subject_with_no_install_says_why_rather_than_reading_as_an_empty_mod()
     {
         var (vm, _) = On(Picked(),
-            s => s.Install = new EditInstallState(Unavailable: MainWindowViewModel.EditGameUnavailable));
+            s => s.Install = new EditInstallState(Unavailable: GameFilesGate.Unavailable));
 
         // The subject is in the mod, so the empty-mod sentence would be a lie; what is missing is the
         // install that names its parts, and the tree-level line is what says so.
@@ -1700,8 +1713,8 @@ public class EditPageVmTests
         var part = PartRow(vm);
 
         Assert.All(part.Children, row => Assert.Equal("", row.Detail));
-        Assert.Equal("edit 1 of 2 on c_vesna_body_lod0", part.Children[0].InspectorDetail);
-        Assert.Equal("edit 2 of 2 on c_vesna_body_lod0", part.Children[1].InspectorDetail);
+        Assert.Equal(Strings.EditPositionOn(1, 2, "c_vesna_body_lod0"), part.Children[0].InspectorDetail);
+        Assert.Equal(Strings.EditPositionOn(2, 2, "c_vesna_body_lod0"), part.Children[1].InspectorDetail);
         Assert.DoesNotContain("F6", part.Children.SelectMany(row => new[] { row.Detail, row.InspectorDetail }));
         Assert.DoesNotContain("F7", part.Children.SelectMany(row => new[] { row.Detail, row.InspectorDetail }));
     }
@@ -1729,7 +1742,7 @@ public class EditPageVmTests
         var hide = Assert.Single(PartRow(vm).Children);
         Assert.Equal("∅", hide.Glyph);
         Assert.True(hide.IsHideEdit);
-        Assert.Equal("hides this part", hide.Detail);
+        Assert.Equal(Strings.EditHidesThisPart, hide.Detail);
         Assert.Empty(hide.MapGroups);
         // No materials, no material rows: a hide binds visibility and nothing else.
         Assert.Empty(hide.Children);
@@ -1852,7 +1865,7 @@ public class EditPageVmTests
         Assert.True(Body.SameAs(shell.LastBlenderPart!));
         Assert.Null(shell.LastBlenderEdit);
         Assert.False(shell.LastWithReferences);
-        Assert.Equal("Opens the original part on its own, without the item's other parts.",
+        Assert.Equal(Strings.EditOpenInBlenderPartTip,
             PartRow(vm).OpenInBlenderHint);
     }
 
@@ -1869,13 +1882,13 @@ public class EditPageVmTests
         Assert.True(Body.SameAs(shell.LastBlenderPart!));
         Assert.True(shell.LastWithReferences);
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
-        Assert.Equal("Opens this edit with the item's other parts for reference.",
+        Assert.Equal(Strings.EditOpenWithRefsEditTip,
             edit.OpenWithReferencesHint);
     }
 
     // ---- the mesh-edit gate ----
 
-    private const string MeshBlocked = "This mesh uses expressions and cannot be edited in Blender.";
+    private static readonly string MeshBlocked = CoreStrings.MeshEditExpressions;
 
     [Fact]
     public async Task A_blocked_mesh_refuses_the_blender_open_without_minting_an_edit()
@@ -1976,7 +1989,7 @@ public class EditPageVmTests
         Assert.Contains(first.Id, session.Snapshot().Always);
         Assert.Equal("", PartRow(vm).Children[0].Detail);
         // The two outcomes say what happened, which is not the same thing twice.
-        Assert.Equal("Added Edit 1. Used in Always.", vm.Status);
+        Assert.Equal(Strings.EditAdded("Edit 1") + " " + Strings.EditUsedInAlways, vm.Status);
 
         vm.NewEditCommand.Execute(PartRow(vm));
         var edits = EditsFor(session);
@@ -1984,7 +1997,7 @@ public class EditPageVmTests
         Assert.Contains(edits[0].Id, session.Snapshot().Always);
         Assert.DoesNotContain(edits[1].Id, session.Snapshot().Always);
         Assert.Equal("", PartRow(vm).Children[1].Detail);
-        Assert.Equal($"Added Edit 2. {EditNodeVm.NotUsedYet} {EditPageVm.PlaceItInBuild}", vm.Status);
+        Assert.Equal($"Added Edit 2. {Strings.EditNotUsedYet} {Strings.EditPlaceItInBuild}", vm.Status);
     }
 
     [Fact]
@@ -2008,7 +2021,7 @@ public class EditPageVmTests
         vm.NewEditCommand.Execute(PartRow(vm));
 
         Assert.Empty(EditsFor(session));
-        Assert.Equal("Couldn't find this part in the current game files.", vm.Status);
+        Assert.Equal(CoreStrings.SessionPartNotFound, vm.Status);
         Assert.DoesNotContain(Body.RendererSlot, vm.Status);
         // The sentence stays on the row after the status line moves on.
         Assert.Equal(vm.Status, PartRow(vm).Problem);
@@ -2092,14 +2105,14 @@ public class EditPageVmTests
         Assert.Contains("Long body", shell.LastConfirmTitle);
         Assert.Equal("Revert", shell.LastConfirmLabel);
         Assert.True(shell.LastConfirmDangerous);
-        Assert.Contains("This cannot be undone.", shell.LastConfirmBody);
-        Assert.Contains("Its maps are kept.", shell.LastConfirmBody);
+        Assert.Contains(Strings.CannotBeUndone, shell.LastConfirmBody);
+        Assert.Contains(Strings.EditRevertMeshBody("Long body"), shell.LastConfirmBody);
 
         Assert.Equal(BindingKind.TargetGameValue,
             session.Slots("edit-long").Single(s => s.Slot.Id == "slot-geometry").Binding.Kind);
         var reverted = PartRow(vm).Children[0];
         Assert.False(reverted.CanRevertMesh);
-        Assert.Equal("Nothing to revert yet", reverted.RevertMeshHint);
+        Assert.Equal(Strings.NothingToRevert, reverted.RevertMeshHint);
         // The maps it binds are untouched: only geometry went back.
         Assert.Equal(BindingKind.ProjectAsset,
             session.Slots("edit-long").Single(s => s.Slot.Id == "slot-ramp").Binding.Kind);
@@ -2137,7 +2150,7 @@ public class EditPageVmTests
         Assert.True(hide.Placements.Single().IsAlways);
         // It coexists with the content edits rather than destroying them.
         Assert.Equal(2, edits.Count(e => e.Kind == EditDefinitionKind.Content));
-        Assert.Equal("Added Hidden. Used in Always.", vm.Status);
+        Assert.Equal(Strings.EditAdded("Hidden") + " " + Strings.EditUsedInAlways, vm.Status);
 
         var (answered, answeredSession, _) = Page(AuthoredEditFixtures.Golden());
         answered.HidePartCommand.Execute(PartRow(answered));
@@ -2158,7 +2171,7 @@ public class EditPageVmTests
         vm.HidePartCommand.Execute(PartRow(vm));
         vm.HidePartCommand.Execute(PartRow(vm));
 
-        Assert.Equal("Hidden already exists. Used in Always.", vm.Status);
+        Assert.Equal(Strings.EditAlreadyExists("Hidden") + " " + Strings.EditUsedInAlways, vm.Status);
         var hide = Assert.Single(session.Snapshot().EditDefinitions,
             edit => edit.Kind == EditDefinitionKind.Hide);
         Assert.Equal(1, session.Snapshot().Always.Count(id => id == hide.Id));
@@ -2178,7 +2191,7 @@ public class EditPageVmTests
         Assert.Empty(hide.Placements);
         // What it says: added, not used yet, and where to put it. What it never says: the group that
         // claimed the part, or any id.
-        Assert.Equal($"Added Hidden. {EditNodeVm.NotUsedYet} {EditPageVm.PlaceItInBuild}", vm.Status);
+        Assert.Equal($"Added Hidden. {Strings.EditNotUsedYet} {Strings.EditPlaceItInBuild}", vm.Status);
         Assert.DoesNotContain("F6", vm.Status);
         Assert.DoesNotContain(group, vm.Status);
         Assert.Equal(hide.Id, vm.SelectedNode!.EditDefinitionId);
@@ -2201,8 +2214,8 @@ public class EditPageVmTests
     [Fact]
     public void A_hide_edits_inspector_explains_deletion_without_a_build_handoff()
     {
-        Assert.Contains("Deleting this edit shows the part again.", EditNodeVm.HideExplanation);
-        Assert.DoesNotContain("③ Build", EditNodeVm.HideExplanation);
+        Assert.Contains("Deleting this edit shows the part again.", Strings.EditHideExplanation);
+        Assert.DoesNotContain("③ Build", Strings.EditHideExplanation);
     }
 
     // ---- rename ----
@@ -2287,12 +2300,12 @@ public class EditPageVmTests
         Assert.Equal(1, shell.ConfirmCalls);
         Assert.Contains("Long body", shell.LastConfirmTitle);
         Assert.Equal("Delete", shell.LastConfirmLabel);
-        Assert.Contains("This edit is used in Always.", shell.LastConfirmBody);
-        Assert.Contains("This cannot be undone.", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditDeleteUsedInAlways, shell.LastConfirmBody);
+        Assert.Contains(Strings.CannotBeUndone, shell.LastConfirmBody);
 
         Assert.DoesNotContain("edit-long", session.Snapshot().Always);
         Assert.Equal(new[] { "Short body" }, EditsFor(session).Select(e => e.Label));
-        Assert.Equal("Deleted Long body.", vm.Status);
+        Assert.Equal(Strings.EditDeleted("Long body"), vm.Status);
     }
 
     [Fact]
@@ -2304,7 +2317,7 @@ public class EditPageVmTests
 
         await vm.DeleteEditCommand.ExecuteAsync(PartRow(vm).Children[0]);
 
-        Assert.Contains("This edit is used in 1 state.", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditDeleteUsedInStates_One(1), shell.LastConfirmBody);
         // Declined: the confirm asked before anything happened, and nothing did.
         Assert.Equal(2, EditsFor(session).Count);
     }
@@ -2321,7 +2334,7 @@ public class EditPageVmTests
         await vm.DeleteEditCommand.ExecuteAsync(PartRow(vm).Children.Single(row =>
             row.EditDefinitionId == "edit-long"));
 
-        Assert.Contains("This edit is used in 2 states.", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditDeleteUsedInStates_Other(2), shell.LastConfirmBody);
         Assert.Equal(2, vm.PlacementCount("edit-long"));
     }
 
@@ -2332,7 +2345,7 @@ public class EditPageVmTests
 
         await vm.DeleteEditCommand.ExecuteAsync(PartRow(vm).Children[1]);
 
-        Assert.Contains("This edit isn't used anywhere.", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditDeleteUnused, shell.LastConfirmBody);
     }
 
     [Fact]
@@ -2358,7 +2371,7 @@ public class EditPageVmTests
         var set = Assert.Single(group.Sets);
         Assert.False(set.HasLabel);
         var card = Assert.Single(group.Cards);
-        Assert.Equal("Toon ramp", card.MapLabel);
+        Assert.Equal(TextureMap.SlotLabel(TargetInputKind.Ramp, null), card.MapLabel);
         Assert.True(card.IsRamp);
         Assert.True(card.IsGameSlot);
         Assert.True(card.HasEditBadge);            // the mod owns what this slot binds
@@ -2366,7 +2379,7 @@ public class EditPageVmTests
         // A ramp is picked, not painted: no Open, no UV guide.
         Assert.False(card.CanOpen);
         Assert.False(card.CanOpenUvGuide);
-        Assert.Equal(RampCardState.PickedCaption, card.RampState.Caption);
+        Assert.Equal(Strings.RampCardChosen, card.RampState.Caption);
     }
 
     [Fact]
@@ -2384,7 +2397,7 @@ public class EditPageVmTests
         Assert.Equal("asset-0123456789abcdef0123456789abcdef.dds", card.BoundFileName);
         Assert.Equal("Sunset ramp", card.TextureName);
         Assert.DoesNotContain("asset-", card.TextureName);
-        Assert.Equal(RampCardState.PickedCaption, card.RampState.Caption);
+        Assert.Equal(Strings.RampCardChosen, card.RampState.Caption);
 
         var malformed = new EditMapCardVm(card.Slot, BindingKind.ProjectAsset, asset.File,
             boundLabel: "   ");
@@ -2452,7 +2465,7 @@ public class EditPageVmTests
         // a replacement's own card DOES offer the guide: it draws from the edit's mesh, so the islands
         // are the layout the paint actually lands on
         Assert.True(own.CanOpenUvGuide);
-        Assert.Contains("Use Revert mesh", own.RevertHint);
+        Assert.Equal(Strings.MapBelongsToReplacement, own.RevertHint);
     }
 
     [Fact]
@@ -2514,7 +2527,7 @@ public class EditPageVmTests
         var card = Card(vm, "slot-owned-2");
         Assert.True(card.IsBlanked);
         Assert.False(card.CanOpen);
-        Assert.Equal(EditMapCardVm.BlankedSlotNotEditable, card.OpenHint);
+        Assert.Equal(Strings.MapBlankedNotEditable, card.OpenHint);
     }
 
     /// <summary>A game-domain ramp card's answers: any bound asset is a pick — the schema records a ramp's
@@ -2526,7 +2539,7 @@ public class EditPageVmTests
         var session = new AuthoredEditSession(TextureOnly());
         var (vm, _) = On(session);
         var picked = PartRow(vm).Children[0].MapGroups[0].Cards[0];
-        Assert.Equal(RampCardState.PickedCaption, picked.RampState.Caption);
+        Assert.Equal(Strings.RampCardChosen, picked.RampState.Caption);
 
         var sourcedAsset = new ProjectAsset
         {
@@ -2545,12 +2558,12 @@ public class EditPageVmTests
         sourcedSession.ChooseProjectAsset("edit-long", "slot-ramp", sourcedAsset.Id);
         var (sourcedVm, _) = On(sourcedSession);
         var sourced = PartRow(sourcedVm).Children[0].MapGroups[0].Cards[0];
-        Assert.Equal(RampCardState.PickedCaption, sourced.RampState.Caption);
+        Assert.Equal(Strings.RampCardChosen, sourced.RampState.Caption);
 
         session.ChooseTargetGameValue("edit-long", "slot-ramp");
         var (bareVm, _) = On(session);
         var bare = PartRow(bareVm).Children[0].MapGroups[0].Cards[0];
-        Assert.Equal(RampCardState.VanillaCaption, bare.RampState.Caption);
+        Assert.Equal("", bare.RampState.Caption);
         Assert.False(bare.RampState.HasRecord);
     }
 
@@ -2565,27 +2578,27 @@ public class EditPageVmTests
         var project = ReplacementRampProject();
         var (vm, session, _) = Page(project, shell => shell.Resolve = part => Installed(part));
         var card = OwnRampCard(vm);
-        Assert.Equal(RampCardState.VanillaCaption, card.RampState.Caption);
+        Assert.Equal("", card.RampState.Caption);
         Assert.False(card.RampState.HasRecord);
         Assert.False(card.CanRevertRamp);
-        Assert.Equal("Nothing to revert yet", card.RevertRampHint);
+        Assert.Equal(Strings.NothingToRevert, card.RevertRampHint);
 
         session.ChooseSourceSlot("edit-long", "slot-ramp-own", "slot-ramp");
         var (keptVm, _) = On(session, shell => shell.Resolve = part => Installed(part));
         var kept = OwnRampCard(keptVm);
-        Assert.Equal(RampCardState.KeptCaption, kept.RampState.Caption);
+        Assert.Equal(Strings.RampCardKept, kept.RampState.Caption);
         Assert.False(kept.RampState.IsOwned);
         Assert.False(kept.HasEditBadge);
         // The ramp state line is the answer; the origin line would only say it a second time.
         Assert.Null(kept.OriginNote);
         Assert.True(kept.RampState.HasRecord);
         Assert.True(kept.CanRevertRamp);
-        Assert.Equal(EditMapCardVm.TakeBackRampChoice, kept.RevertRampHint);
+        Assert.Equal(Strings.RampTakeBackChoice, kept.RevertRampHint);
 
         keptVm.RevertRampCommand.Execute(kept);
         Assert.Equal(BindingKind.InheritedLiveCarrier,
             session.Slots("edit-long").Single(s => s.Slot.Id == "slot-ramp-own").Binding.Kind);
-        Assert.Contains("the original part's toon ramp", keptVm.Status);
+        Assert.Equal(Strings.RampChoiceCleared, keptVm.Status);
     }
 
     /// <summary>Golden, with the replacement's own ramp slot beside the part's game one — the shape a
@@ -2678,7 +2691,7 @@ public class EditPageVmTests
 
         Assert.Equal(BindingKind.TargetGameValue,
             session.Slots("edit-long").Single(s => s.Slot.Id == "slot-ramp").Binding.Kind);
-        Assert.Equal(EditPageVm.KeptGameOwnRamp, vm.Status);
+        Assert.Equal(Strings.RampKeptGameOwn, vm.Status);
         Assert.Equal(1, shell.ProjectChangedCalls);
         // The other edit's answer for the same route is untouched.
         Assert.Equal(BindingKind.ProjectAsset,
@@ -2708,7 +2721,7 @@ public class EditPageVmTests
         var named = session.Snapshot().TargetSlots.Single(s => s.Id == binding.SourceSlot.SlotId);
         Assert.Equal(TargetSlotDomain.Game, named.Domain);
         Assert.Equal(TargetInputKind.Ramp, named.Input);
-        Assert.Equal(EditPageVm.KeptGameOwnRamp, vm.Status);
+        Assert.Equal(Strings.RampKeptGameOwn, vm.Status);
         // The card now reads as the recorded opt-out rather than as a slot nobody answered.
         var after = PartRow(vm).Children[0].MapGroups.SelectMany(g => g.Cards)
             .Single(c => c.IsRamp && !c.IsGameSlot);
@@ -2777,12 +2790,12 @@ public class EditPageVmTests
         Assert.Contains(".png", vm.Status);
 
         await vm.HandleDropAsync(new[] { "a.png", "b.png" }, card);
-        Assert.Contains("one .png", vm.Status);
+        Assert.Equal(Strings.EditDropOnePng, vm.Status);
 
         vm.SelectedNode = PartRow(vm).Children[0];
         await vm.HandleDropAsync(new[] { "a.png" }, null);
         // Cards are on screen, so the card is what the line names.
-        Assert.Equal(EditPageVm.NoDropTarget, vm.Status);
+        Assert.Equal(Strings.EditDropOnMapCard, vm.Status);
         Assert.Contains("map card", vm.Status);
 
         Assert.Null(shell.LastDropSlot);
@@ -2798,17 +2811,17 @@ public class EditPageVmTests
 
         vm.SelectedNode = null;
         await vm.HandleDropAsync(new[] { "a.png" }, null);
-        Assert.Equal(EditPageVm.SelectAPart, vm.Status);
+        Assert.Equal(Strings.EditDropSelectPart, vm.Status);
 
         vm.SelectedNode = Subject(vm);
         await vm.HandleDropAsync(new[] { "a.png" }, null);
-        Assert.Equal(EditPageVm.SelectAPart, vm.Status);
+        Assert.Equal(Strings.EditDropSelectPart, vm.Status);
 
         // A part with edits shows its overview, not cards: the edit under it is where the maps are.
         vm.SelectedNode = PartRow(vm);
         Assert.False(PartRow(vm).HasMapGroups);
         await vm.HandleDropAsync(new[] { "a.png" }, null);
-        Assert.Equal(EditPageVm.SelectAnEdit, vm.Status);
+        Assert.Equal(Strings.EditDropSelectEdit, vm.Status);
 
         // A hide edit has no maps by construction and its own panel says so; a sentence here would be the
         // third place one fact is stated, on the surface that holds it for the shortest time.
@@ -2831,7 +2844,7 @@ public class EditPageVmTests
 
         await vm.HandleDropAsync(new[] { @"C:\in\dropped.png" }, ramp);
 
-        Assert.Contains(EditMapCardVm.RampNotAnImage, vm.Status);
+        Assert.Contains(Strings.MapRampNotAnImage, vm.Status);
         // The slot's kind is asked BEFORE anything is decoded or published.
         Assert.Null(shell.LastDropSlot);
     }
@@ -2872,7 +2885,7 @@ public class EditPageVmTests
         var first = page.DropOnCardAsync(slowCard, @"C:\in\a.png");
         Assert.False(page.CanAcceptDrop(slowCard));
         await page.DropOnCardAsync(slowCard, @"C:\in\b.png");
-        Assert.Equal(Remold.App.ViewModels.BlenderGate.Busy, page.Status);
+        Assert.Equal(Strings.BlenderBusy, page.Status);
 
         gate.SetResult(null);
         await first;
@@ -2905,7 +2918,7 @@ public class EditPageVmTests
         var (vm, session, shell) = Page(Bare());
         string before = AuthoredProjectSerializer.Serialize(session.Snapshot());
         var subject = Subject(vm);
-        Assert.Equal("Each part opens from its active or first edit; parts without edits open from stock.",
+        Assert.Equal(Strings.EditOpenAllFirstEditTip,
             subject.OpenAllFirstEditHint);
 
         switch (verb)
@@ -2950,7 +2963,7 @@ public class EditPageVmTests
         Assert.True(subject.IsBusy);
         Assert.True(PartRow(vm).IsBusy);
         vm.NewEditCommand.Execute(PartRow(vm));
-        Assert.Equal(BlenderGate.Busy, vm.Status);
+        Assert.Equal(Strings.BlenderBusy, vm.Status);
         Assert.Empty(EditsFor(session));
 
         shell.SubjectHold!.SetResult();
@@ -2983,7 +2996,7 @@ public class EditPageVmTests
 
         await vm.OpenSubjectInBlenderCommand.ExecuteAsync(Subject(vm));
 
-        Assert.Equal("Couldn't open this item's parts in Blender.", vm.Status);
+        Assert.Equal(CoreStrings.CouldntAction(Strings.Action_OpenItemPartsInBlender), vm.Status);
         Assert.DoesNotContain(BreakingSubjectShell.Internals, vm.Status);
     }
 
@@ -3193,7 +3206,7 @@ public class EditPageVmTests
         Assert.All(paintable, card => Assert.True(card.ShowsMapActions));
         Assert.All(paintable, card => Assert.True(card.CanOpen));
         Assert.All(paintable, card => Assert.Equal("Open", card.OpenButtonLabel));
-        Assert.All(paintable, card => Assert.Equal(EditMapCardVm.FirstEditOpenHint, card.OpenHint));
+        Assert.All(paintable, card => Assert.Equal(Strings.MapOpenFirstEditTip, card.OpenHint));
         Assert.All(paintable, card => Assert.False(card.CanRevert));
         Assert.All(paintable, card => Assert.True(card.CanOpenUvGuide));
         // A button that could only ever refuse is not drawn at all: this part has no edit for Revert to take
@@ -3201,16 +3214,16 @@ public class EditPageVmTests
         Assert.All(cards, card => Assert.False(card.ShowsRevert));
         Assert.All(paintable, card => Assert.True(card.CanBrowse));
         Assert.All(paintable, card =>
-            Assert.Equal("Add an edit and replace this map with a .png", card.BrowseHint));
+            Assert.Equal(Strings.MapBrowseFirstEditTip, card.BrowseHint));
         Assert.All(cards.Where(card => card.IsRamp), card =>
         {
             Assert.False(card.ShowsMapActions);
             Assert.True(card.CanChooseRamp);
-            Assert.Equal("Choose…", card.ChooseRampButtonLabel);
-            Assert.Equal("Choose the toon ramp for this material; applying adds an edit", card.ChooseRampHint);
+            Assert.Equal(Strings.RampChoose, card.ChooseRampButtonLabel);
+            Assert.Equal(Strings.RampChooseFirstEditTip, card.ChooseRampHint);
         });
         Assert.True(PartRow(vm).ShowsOriginalMaps);
-        Assert.Equal("Original maps", PartRow(vm).OriginalMapsLabel);
+        Assert.Equal(Strings.EditOriginalMaps, PartRow(vm).OriginalMapsLabel);
         Assert.Null(PartRow(vm).OriginalsNote);
         // The base colour and the toon ramp keep an edit's own card order inside their material.
         Assert.Equal(new[] { TargetInputKind.BaseColor, TargetInputKind.Ramp },
@@ -3477,7 +3490,7 @@ public class EditPageVmTests
 
         await vm.HandleDropAsync(new[] { @"C:\in\ramp.dds" }, ramp);
 
-        Assert.Equal(EditMapCardVm.RampNotAnImage, vm.Status);
+        Assert.Equal(Strings.MapRampNotAnImage, vm.Status);
         Assert.Contains("Choose", vm.Status);
         Assert.Empty(EditsFor(session));
         Assert.Null(shell.LastDropSlot);
@@ -3490,7 +3503,7 @@ public class EditPageVmTests
     [Fact]
     public async Task A_gate_blocked_bare_part_shows_the_same_cards_and_no_instruction_it_refuses()
     {
-        const string refusal = "This mesh uses expressions and cannot be edited in Blender.";
+        string refusal = CoreStrings.MeshEditExpressions;
         var (vm, _, _) = Page(Bare(), s =>
         {
             s.Resolve = part => Installed(part);
@@ -3517,6 +3530,7 @@ public class EditPageVmTests
     [Fact]
     public async Task A_hidden_part_says_so_on_its_row_bare_or_edited_and_on_each_edit_row()
     {
+        string note = Strings.EditHiddenPartShrunk + " " + Strings.EditHiddenPartPosition;
         var (bare, _, _) = Page(Bare(), s =>
         {
             s.Resolve = part => Installed(part);
@@ -3524,7 +3538,7 @@ public class EditPageVmTests
         });
         bare.SelectedNode = PartRow(bare);
         for (int i = 0; i < 200 && !PartRow(bare).StartsHidden; i++) await Task.Delay(5);
-        Assert.Equal(EditNodeVm.HiddenPartNote, PartRow(bare).PartRefusal);
+        Assert.Equal(note, PartRow(bare).PartRefusal);
         Assert.True(PartRow(bare).HasPartRefusal);
         Assert.True(PartRow(bare).CanOpenInBlender);
 
@@ -3537,14 +3551,11 @@ public class EditPageVmTests
         for (int i = 0; i < 200 && !PartRow(edited).StartsHidden; i++) await Task.Delay(5);
         var part = PartRow(edited);
         Assert.False(part.IsBarePart);
-        Assert.Equal(EditNodeVm.HiddenPartNote, part.PartRefusal);
+        Assert.Equal(note, part.PartRefusal);
         var edits = part.Children.Where(child => child.IsContentEdit).ToList();
         Assert.NotEmpty(edits);
-        Assert.All(edits, row => Assert.Equal(EditNodeVm.HiddenPartNote, row.PartRefusal));
+        Assert.All(edits, row => Assert.Equal(note, row.PartRefusal));
         Assert.True(edits.All(row => row.CanOpenInBlender));
-        Assert.Equal("This part starts shrunk or off screen. Its position in Blender will not match the game.",
-            EditNodeVm.HiddenPartNote);
-        Assert.Equal("This part starts shrunk or off screen.", EditNodeVm.HiddenPartShrunk);
 
         // a hide edit has no Blender opens, so its row says nothing about how the part opens there
         edited.HidePartCommand.Execute(part);
@@ -3560,8 +3571,8 @@ public class EditPageVmTests
     [Fact]
     public async Task A_hidden_part_the_gate_blocks_says_the_gate_first_on_every_row_and_only_that_it_starts_shrunk()
     {
-        const string refusal = "This mesh uses expressions and cannot be edited in Blender.";
-        string expected = refusal + "\n" + EditNodeVm.HiddenPartShrunk;
+        string refusal = CoreStrings.MeshEditExpressions;
+        string expected = refusal + "\n" + Strings.EditHiddenPartShrunk;
         var (vm, _, _) = Page(Bare(), s =>
         {
             s.Resolve = part => Installed(part);
@@ -3609,12 +3620,12 @@ public class EditPageVmTests
 
         var borrowed = Card(vm, "slot-owned-2");
         Assert.Equal(BindingKind.SourceSlot, borrowed.Binding);
-        Assert.Equal(EditMapCardVm.SharedWithAnotherMap, borrowed.OriginNote);
+        Assert.Equal(Strings.MapSharedWithAnotherMap, borrowed.OriginNote);
         Assert.True(borrowed.ShowsOwnedOrigin);
         Assert.True(borrowed.HasEditBadge);
         Assert.False(borrowed.ShowsGameTextureName);
         // The line the mod's own work never gets to wear: nothing here came in with the mesh.
-        Assert.NotEqual(EditMapCardVm.ReplacementOrigin, borrowed.OriginNote);
+        Assert.NotEqual(Strings.MapReplacementOrigin, borrowed.OriginNote);
     }
 
     // ---- the shared-original boundary ----
@@ -3700,16 +3711,16 @@ public class EditPageVmTests
         Assert.Equal(2, card.SharingUses);
         Assert.True(card.ShowsDropTarget);
         Assert.True(vm.CanAcceptDrop(card));
-        Assert.Equal("Original maps", PartRow(vm).OriginalMapsLabel);
+        Assert.Equal(Strings.EditOriginalMaps, PartRow(vm).OriginalMapsLabel);
 
         await vm.HandleDropAsync(new[] { @"C:\in\dropped.png" }, card);
 
         Assert.Empty(EditsFor(session));
         Assert.Equal(1, shell.ConfirmCalls);
-        Assert.Equal("Apply dropped.png?", shell.LastConfirmTitle);
-        Assert.Equal($"dropped.png becomes this part's base color on {card.Slot.MaterialName}. "
-            + "This adds the part's first edit.\n\nThis outfit draws this original map in 2 places. "
-            + "The edit changes all of them.", shell.LastConfirmBody);
+        Assert.Equal(Strings.EditApplyTitle("dropped.png"), shell.LastConfirmTitle);
+        Assert.Equal(Strings.ApplyImageBecomesMap("dropped.png", Strings.MapOnMaterial(
+                EditMapCardVm.LabelInSentence(CoreStrings.MapBaseColor), card.Slot.MaterialName))
+            + " " + Strings.EditAddsFirstEdit + "\n\n" + Strings.MapSharedConsequence(2), shell.LastConfirmBody);
         Assert.Equal("Apply", shell.LastConfirmLabel);
         Assert.Null(shell.LastDropSlot);
     }
@@ -3734,7 +3745,7 @@ public class EditPageVmTests
         Assert.Equal(EditTextureSharing.Private, ramp.Sharing);
         Assert.Null(ramp.DropHint);   // and not the shared sentence, which is what it used to hover
         Assert.True(ramp.CanChooseRamp);
-        Assert.Equal("Choose the toon ramp for this material", ramp.ChooseRampHint);
+        Assert.Equal(Strings.RampChooseTip, ramp.ChooseRampHint);
     }
 
     /// <summary>An item nothing has read yet cannot say how far an edit to one of its stock textures would
@@ -3820,7 +3831,7 @@ public class EditPageVmTests
         Assert.False(card.ShowsDropTarget);
         Assert.True(vm.CanAcceptDrop(card));
         Assert.Equal(GameFilesGate.SubjectReading, card.DropHint);
-        Assert.Equal("Original maps", PartRow(vm).OriginalMapsLabel);
+        Assert.Equal(Strings.EditOriginalMaps, PartRow(vm).OriginalMapsLabel);
 
         await vm.HandleDropAsync(new[] { @"C:\in\dropped.png" }, card);
 
@@ -3831,17 +3842,18 @@ public class EditPageVmTests
     }
 
     [Theory]
-    [InlineData(EditSubjectRead.Unavailable, EditTextureSharing.Unavailable,
-        "Original maps · game files unavailable",
-        "Game files unavailable. Use Tools · Locate game…, then Tools · Rescan game files.")]
-    [InlineData(EditSubjectRead.Reading, EditTextureSharing.Unknown,
-        "Original maps · still being read", "This item is still being read. Try again in a moment.")]
-    [InlineData(EditSubjectRead.Unreadable, EditTextureSharing.Unreadable,
-        "Original maps · couldn't be read",
-        "This item couldn't be read from the game files. Use Tools · Rescan game files to try again.")]
+    [InlineData(EditSubjectRead.Unavailable, EditTextureSharing.Unavailable)]
+    [InlineData(EditSubjectRead.Reading, EditTextureSharing.Unknown)]
+    [InlineData(EditSubjectRead.Unreadable, EditTextureSharing.Unreadable)]
     public void A_bare_parts_heading_and_UV_button_state_each_install_gate(
-        EditSubjectRead read, EditTextureSharing sharing, string heading, string gate)
+        EditSubjectRead read, EditTextureSharing sharing)
     {
+        var (heading, gate) = read switch
+        {
+            EditSubjectRead.Unavailable => (Strings.EditOriginalMapsUnavailable, CoreStrings.GameFilesUnavailable),
+            EditSubjectRead.Reading => (Strings.EditOriginalMapsReading, CoreStrings.SubjectStillReading),
+            _ => (Strings.EditOriginalMapsUnreadable, CoreStrings.SubjectUnreadable),
+        };
         var (vm, _, _) = Page(Bare(), shell =>
         {
             shell.Resolve = part => Installed(part);
@@ -3924,7 +3936,7 @@ public class EditPageVmTests
             // What it is, and what it says it is.
             Assert.Equal(EditCardRole.StandIn, card.Role);
             Assert.True(card.IsOriginal);
-            Assert.Equal(EditMapCardVm.StandInOrigin, card.OriginNote);
+            Assert.Equal(Strings.MapStandInOrigin, card.OriginNote);
             Assert.True(card.ShowsQuietOrigin);
             Assert.False(card.ShowsMapActions);
             // The islands would be the ORIGINAL mesh's, under paint meant for the replacement.
@@ -3933,7 +3945,7 @@ public class EditPageVmTests
             Assert.False(vm.CanAcceptDrop(card));
 
             await vm.HandleDropAsync(new[] { @"C:\in\dropped.png" }, card);
-            Assert.Contains(EditMapCardVm.StandInNotDroppable, vm.Status);
+            Assert.Contains(Strings.MapStandInNotDroppable, vm.Status);
             Assert.Null(shell.LastDropSlot);
             Assert.Equal(0, shell.ConfirmCalls);
 
@@ -3941,8 +3953,8 @@ public class EditPageVmTests
             var plan = AuthoredBuildPlanner.Plan(project, new AuthoredBuildPlannerTests.Backend());
             Assert.DoesNotContain(plan.Bindings, binding => binding.EditDefinitionId == "edit-long"
                 && binding.AuthoredSlot.Id == "slot-old-stock-picture");
-            Assert.Contains(plan.Warnings, warning =>
-                warning.Contains("will not take effect", StringComparison.Ordinal));
+            Assert.Contains(plan.Warnings,
+                CatalogShape.Of(CoreStrings.PlanReplaceDropsTextureChanges(CatalogShape.Any)).IsMatch);
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
@@ -3964,13 +3976,13 @@ public class EditPageVmTests
 
         card.SetThumb(null, "256\u00d716", authorable: false);
 
-        Assert.Equal(EditMapCardVm.FloatFormat, card.SharingRefusal);
+        Assert.Equal(Strings.MapFloatFormat, card.SharingRefusal);
         Assert.False(card.ShowsDropTarget);
         Assert.False(card.CanBrowse);
         Assert.False(card.CanOpen);
-        Assert.Equal(EditMapCardVm.FloatFormat, card.DropHint);
-        Assert.Equal(EditMapCardVm.FloatFormat, card.BrowseHint);
-        Assert.Equal(EditMapCardVm.FloatFormat, card.OpenHint);
+        Assert.Equal(Strings.MapFloatFormat, card.DropHint);
+        Assert.Equal(Strings.MapFloatFormat, card.BrowseHint);
+        Assert.Equal(Strings.MapFloatFormat, card.OpenHint);
     }
 
     // ---- the drop confirm says when the picture is not the map's size ----
@@ -4000,14 +4012,15 @@ public class EditPageVmTests
             await vm.HandleDropAsync(new[] { dropped }, card);
 
             Assert.Equal(1, shell.ConfirmCalls);
-            Assert.Contains("4\u00d74, the map is 4096\u00d74096. It still applies; UVs stretch it to fit.",
+            Assert.Contains(Strings.MapSizeNote(4, 4, 4096, 4096),
                 shell.LastConfirmBody);
 
             card.SetThumb(null, "4\u00d74");
             await vm.HandleDropAsync(new[] { dropped }, card);
 
             Assert.Equal(2, shell.ConfirmCalls);
-            Assert.DoesNotContain("the map is", shell.LastConfirmBody);
+            Assert.DoesNotMatch(CatalogShape.Within(Strings.MapSizeNote(CatalogShape.Any, CatalogShape.Any,
+                CatalogShape.Any, CatalogShape.Any)), shell.LastConfirmBody);
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
@@ -4035,7 +4048,7 @@ public class EditPageVmTests
         Assert.Contains("dropped.png", shell.LastConfirmTitle);
         // The question names the act, never an edit the project does not have.
         Assert.DoesNotContain("Edit 1", shell.LastConfirmBody);
-        Assert.Contains("first edit", shell.LastConfirmBody);
+        Assert.Contains(Strings.EditAddsFirstEdit, shell.LastConfirmBody);
         Assert.Equal("Apply", shell.LastConfirmLabel);
         Assert.Empty(EditsFor(session));
         Assert.Null(shell.LastDropSlot);
@@ -4065,15 +4078,15 @@ public class EditPageVmTests
         Assert.Equal(1, shell.ConfirmCalls);
         Assert.True(shell.LastDropConfirmed);
         Assert.Equal(new EditTextureSharingOffer(EditTextureSharing.Shared, 2), shell.LastDropOffered);
-        Assert.Contains("This outfit draws this original map in 2 places. The edit changes all of them.",
+        Assert.Contains(Strings.MapSharedConsequence(2),
             shell.LastConfirmBody);
         Assert.Empty(EditsFor(session));
         Assert.Equal(1, shell.LastDropSlot!.MaterialSlotIndex);
         // The question and the result call the map the same thing — and BOTH name the material it lands
         // on, or a part with two materials raises one identical dialog for either of its base colours.
-        Assert.Contains("base color", shell.LastConfirmBody);
         string material = shell.LastDropSlot.MaterialName!;
-        Assert.Contains(material, shell.LastConfirmBody);
+        Assert.Contains(Strings.MapOnMaterial(EditMapCardVm.LabelInSentence(CoreStrings.MapBaseColor), material),
+            shell.LastConfirmBody);
         Assert.DoesNotContain(other, shell.LastConfirmBody);
     }
 
@@ -4126,7 +4139,7 @@ public class EditPageVmTests
 
         await vm.BrowseCardCommand.ExecuteAsync(card);
 
-        Assert.Equal("Only a .png can replace a map.", vm.Status);
+        Assert.Equal(Strings.EditDropOnlyPng, vm.Status);
         Assert.Empty(EditsFor(session));
     }
 
@@ -4186,7 +4199,7 @@ public class EditPageVmTests
         var (missing, _, _) = Page(Bare(), s => s.Resolve = _ => null);
         for (int i = 0; i < 200 && PartRow(missing).OriginalsNote is null; i++) await Task.Delay(5);
         Assert.Empty(PartRow(missing).MapGroups);
-        Assert.Equal(EditNodeVm.OriginalsNotInstalled, PartRow(missing).OriginalsNote);
+        Assert.Equal(Strings.EditOriginalsNotInstalled, PartRow(missing).OriginalsNote);
         Assert.False(PartRow(missing).IsReadingOriginals);
 
         // The install has the part and the material, and nothing readable under it.
@@ -4199,7 +4212,7 @@ public class EditPageVmTests
         var group = Assert.Single(PartRow(empty).MapGroups);
         Assert.Equal("mat0", group.Title);
         Assert.Empty(group.Cards);
-        Assert.Equal(EditMapGroupVm.NoMapsRead, group.Note);
+        Assert.Equal(Strings.MaterialNoMapsRead, group.Note);
         Assert.Null(PartRow(empty).OriginalsNote);
     }
 
@@ -4216,8 +4229,9 @@ public class EditPageVmTests
         }, cards.Select(card => card.Slot.ShaderProperty));
         Assert.Equal(new[]
         {
-            "Base color", "Normal map", "RMO map", "Effect map", "Toon ramp",
-            "Detail color", "Detail mask", "Mask", "Vertex Anim Noise",
+            CoreStrings.MapBaseColor, CoreStrings.MapNormal, CoreStrings.MapRmo, CoreStrings.MapEffect,
+            CoreStrings.MapToonRamp, CoreStrings.MapDetailColor, CoreStrings.MapDetailMask, CoreStrings.MapMask,
+            "Vertex Anim Noise",
         }, cards.Select(card => card.MapLabel));
         Assert.Equal(2, cards.Count(card => card.Slot.Input == TargetInputKind.Texture
             && card.Slot.ShaderProperty is "_DetailAlbedo" or "_DetailMask"));
@@ -4268,9 +4282,9 @@ public class EditPageVmTests
             cards.Select(card => card.Slot.ShaderProperty));
         Assert.DoesNotContain(cards, card => card.Slot.Input == TargetInputKind.Normal);
         var effect = cards.Single(card => card.Slot.Input == TargetInputKind.Blend);
-        Assert.Equal("Effect map", effect.MapLabel);
+        Assert.Equal(TextureMap.SlotLabel(TargetInputKind.Blend, "_BlendTex"), effect.MapLabel);
         Assert.Equal("UV1", effect.UvButtonLabel);
-        Assert.Equal("Opens a UV guide for this map: a white wireframe of the second UV set (UV1) it uses",
+        Assert.Equal(Strings.MapUvSecondSetTip(1),
             effect.UvHint);
         Assert.Equal("UV", cards.Single(card => card.Slot.Input == TargetInputKind.BaseColor).UvButtonLabel);
     }
@@ -4286,13 +4300,13 @@ public class EditPageVmTests
 
         var surplus = PartRow(vm).Children[0].MapGroups.Single(group => group.Title == "mat1");
         var card = surplus.Cards.Single(candidate => candidate.Slot.Input == TargetInputKind.BaseColor);
-        Assert.Equal(EditMapCardVm.NoDrawableCarrier, card.OriginNote);
-        Assert.Equal(EditMapCardVm.NoDrawableCarrier, card.OpenHint);
+        Assert.Equal(Strings.MapNoDrawableCarrier, card.OriginNote);
+        Assert.Equal(Strings.MapNoDrawableCarrier, card.OpenHint);
         Assert.False(card.CanOpen);
 
         await vm.HandleDropAsync(new[] { @"C:\in\surplus.png" }, card);
 
-        Assert.Equal(EditMapCardVm.NoDrawableCarrier, vm.Status);
+        Assert.Equal(Strings.MapNoDrawableCarrier, vm.Status);
         Assert.Null(shell.LastDropSlot);
     }
 
@@ -4306,12 +4320,12 @@ public class EditPageVmTests
             .Single(group => group.Title == "mat1").Cards.Single(candidate => candidate.IsRamp);
 
         Assert.Equal(EditCardRole.Edited, ramp.Role);
-        Assert.Equal(EditMapCardVm.NoDrawableCarrier, ramp.ChooseRampHint);
+        Assert.Equal(Strings.MapNoDrawableCarrier, ramp.ChooseRampHint);
         Assert.False(ramp.CanChooseRamp);
 
         await vm.ChooseRampCommand.ExecuteAsync(ramp);
 
-        Assert.Equal(EditMapCardVm.NoDrawableCarrier, vm.Status);
+        Assert.Equal(Strings.MapNoDrawableCarrier, vm.Status);
         Assert.Null(shell.LastRampSlot);
     }
 
@@ -4350,7 +4364,7 @@ public class EditPageVmTests
             .Single(state => state.Slot.Id == card.Slot.SlotId).Binding.SourceSlot!.SlotId;
         Assert.Equal(session.GameRampSlot(Body, 1), recorded);
         Assert.NotEqual(session.GameRampSlot(Body, 0), recorded);
-        Assert.Equal(EditPageVm.KeptGameOwnRamp, vm.Status);
+        Assert.Equal(Strings.RampKeptGameOwn, vm.Status);
     }
 
     /// <summary>A curated refusal thrown by the ramp routes reaches the screen as it is. Those sentences are
@@ -4426,7 +4440,7 @@ public class EditPageVmTests
 
         vm2.NewEditCommand.Execute(PartRow(vm2));
 
-        Assert.Equal("Couldn't find this part in the current game files.", vm2.Status);
+        Assert.Equal(CoreStrings.SessionPartNotFound, vm2.Status);
         Assert.Equal(0, shell2.ProjectChangedCalls);
         Assert.Empty(PartRow(vm2).Children);
     }
@@ -4440,7 +4454,7 @@ public class EditPageVmTests
 
         await vm.DeleteEditCommand.ExecuteAsync(PartRow(vm).Children[0]);
 
-        Assert.Contains("cannot be deleted while", vm.Status);
+        Assert.Matches(CatalogShape.Of(CoreStrings.SessionEditLentOut(CatalogShape.Any, CatalogShape.Any)), vm.Status);
         Assert.Empty(session.Snapshot().Always);
         Assert.Equal(0, shell.ProjectChangedCalls);
     }
@@ -4485,7 +4499,7 @@ public class EditPageVmTests
 
         await vm.OpenInBlenderCommand.ExecuteAsync(PartRow(vm));
         Assert.Equal(1, shell.BlenderCalls);
-        Assert.Equal(Remold.App.ViewModels.BlenderGate.Busy, vm.Status);
+        Assert.Equal(Strings.BlenderBusy, vm.Status);
 
         gate.SetResult();
         await running;
@@ -4590,7 +4604,7 @@ public class EditPageVmTests
         // The badge rolls up so a collapsed branch shows one; the sentence stays where the fix is.
         Assert.Null(subject.Problem);
         Assert.False(subject.HasProblem);
-        Assert.Equal(EditNodeVm.UnderThisRow, subject.ProblemBadgeTip);
+        Assert.Equal(Strings.EditProblemUnder, subject.ProblemBadgeTip);
         Assert.Equal(PartRow(vm).Problem, PartRow(vm).ProblemBadgeTip);
     }
 
@@ -4716,7 +4730,7 @@ public class EditPageVmTests
         Assert.True(card.IsThumbFailed);
         Assert.Equal("textures/skin.png", card.MissingFile);
         Assert.True(card.HasMissingFile);
-        Assert.Equal(EditMapCardVm.MissingTile, card.ThumbNote);
+        Assert.Equal(Strings.MapMissingTile, card.ThumbNote);
         Assert.Equal(EditMapCardVm.MapFileMissing("textures/skin.png"), card.MissingNote);
         Assert.False(card.HasPreviewCause);
     }
@@ -4734,7 +4748,7 @@ public class EditPageVmTests
         var card = edit.MapGroups[0].Cards[0];
         Assert.True(card.IsThumbFailed);
         Assert.False(card.HasMissingFile);
-        Assert.Equal(EditMapCardVm.NoPreviewTile, card.ThumbNote);
+        Assert.Equal(Strings.MapNoPreview, card.ThumbNote);
         Assert.Null(card.MissingNote);
     }
 
@@ -4757,7 +4771,7 @@ public class EditPageVmTests
         Assert.True(shell.MapPreviewCalls > asked);
         Assert.False(card.HasMissingFile);
         Assert.Null(card.MissingNote);
-        Assert.Equal(EditMapCardVm.NoPreviewTile, card.ThumbNote);
+        Assert.Equal(Strings.MapNoPreview, card.ThumbNote);
     }
 
     [Fact]
@@ -4932,8 +4946,8 @@ public class EditPageVmTests
             : Installed(part));
         for (int i = 0; i < 200 && PartRow(vm).OriginalsNote is null; i++) await Task.Delay(5);
 
-        Assert.Equal(EditNodeVm.OriginalsReadFailed, PartRow(vm).OriginalsNote);
-        Assert.NotEqual(EditNodeVm.OriginalsNotInstalled, PartRow(vm).OriginalsNote);
+        Assert.Equal(Strings.EditOriginalsReadFailed, PartRow(vm).OriginalsNote);
+        Assert.NotEqual(Strings.EditOriginalsNotInstalled, PartRow(vm).OriginalsNote);
         Assert.False(PartRow(vm).IsReadingOriginals);
 
         // A redraw does not ask again: the failure is settled, or every redraw would fail and redraw.
@@ -4945,7 +4959,7 @@ public class EditPageVmTests
         // otherwise walk into.
         vm.SelectedNode = PartRow(vm);
         for (int i = 0; i < 200 && PartRow(vm).OriginalsNote is null; i++) await Task.Delay(5);
-        Assert.Equal(EditNodeVm.OriginalsReadFailed, PartRow(vm).OriginalsNote);
+        Assert.Equal(Strings.EditOriginalsReadFailed, PartRow(vm).OriginalsNote);
         Assert.True(shell.AsyncResolveCalls > asked);   // the arrival itself asked once
 
         // …and once the game lets go, coming back to the row shows the maps.
@@ -4966,14 +4980,14 @@ public class EditPageVmTests
     {
         var (vm, _, shell) = Page(Bare(), s => s.Resolve = _ => null);
         for (int i = 0; i < 200 && PartRow(vm).OriginalsNote is null; i++) await Task.Delay(5);
-        Assert.Equal(EditNodeVm.OriginalsNotInstalled, PartRow(vm).OriginalsNote);
+        Assert.Equal(Strings.EditOriginalsNotInstalled, PartRow(vm).OriginalsNote);
 
         int asked = shell.AsyncResolveCalls;
         vm.SelectedNode = Subject(vm);
         vm.SelectedNode = PartRow(vm);
 
         Assert.Equal(asked, shell.AsyncResolveCalls);
-        Assert.Equal(EditNodeVm.OriginalsNotInstalled, PartRow(vm).OriginalsNote);
+        Assert.Equal(Strings.EditOriginalsNotInstalled, PartRow(vm).OriginalsNote);
     }
 
     /// <summary>A drop while that read is still running answers with the app's own wait sentence. It used to
@@ -5011,11 +5025,11 @@ public class EditPageVmTests
 
         Assert.Contains(".png", card.DropHint);
         Assert.DoesNotContain(".png", card.OpenHint);
-        Assert.Equal("Original maps", PartRow(vm).OriginalMapsLabel);
+        Assert.Equal(Strings.EditOriginalMaps, PartRow(vm).OriginalMapsLabel);
 
         await vm.HandleDropAsync(new[] { @"C:\in\photo.jpg" }, card);
 
-        Assert.Equal("Only a .png can replace a map.", vm.Status);
+        Assert.Equal(Strings.EditDropOnlyPng, vm.Status);
     }
 
     // ---- the subject a sentence names ----
@@ -5029,7 +5043,7 @@ public class EditPageVmTests
 
         vm.SelectSubject("Ghost", "GhostSSR01");
 
-        Assert.Equal($"{shell.SubjectLabel("Ghost", "GhostSSR01")} isn't in this list.", vm.Status);
+        Assert.Equal(Strings.EditNotInList(shell.SubjectLabel("Ghost", "GhostSSR01")), vm.Status);
         Assert.DoesNotContain("GhostSSR01", vm.Status);
     }
 
@@ -5078,26 +5092,26 @@ public class EditPageVmTests
         var busy = ShadingRow(vm, "edit-long");
         Assert.True(busy.IsBusy);
         Assert.False(busy.CanRevert);
-        Assert.Equal(BlenderGate.Busy, busy.CopyFromMaterialHint);
-        Assert.Equal(BlenderGate.Busy, busy.EditValuesHint);
+        Assert.Equal(Strings.BlenderBusy, busy.CopyFromMaterialHint);
+        Assert.Equal(Strings.BlenderBusy, busy.EditValuesHint);
         // Revert has nothing to revert on this row, and says THAT rather than the wait — the map card's
         // own ordering: a line promising "try again" is never shown for a click that will never work.
-        Assert.Equal(EditMapCardVm.NothingToRevert, busy.RevertHint);
+        Assert.Equal(Strings.NothingToRevert, busy.RevertHint);
 
         await vm.EditShadingValuesCommand.ExecuteAsync(busy);
         Assert.Null(shell.LastShadingAuthored);   // no dialog was opened
-        Assert.Equal(BlenderGate.Busy, vm.Status);
+        Assert.Equal(Strings.BlenderBusy, vm.Status);
 
         shell.BlenderHold!.SetResult();
         await open;
 
         var free = ShadingRow(vm, "edit-long");
         Assert.False(free.IsBusy);
-        Assert.NotEqual(BlenderGate.Busy, free.EditValuesHint);
-        Assert.NotEqual(BlenderGate.Busy, free.CopyFromMaterialHint);
+        Assert.NotEqual(Strings.BlenderBusy, free.EditValuesHint);
+        Assert.NotEqual(Strings.BlenderBusy, free.CopyFromMaterialHint);
         // Nothing is set on this row, so Revert stays off either way.
         Assert.False(free.CanRevert);
-        Assert.Equal(EditMapCardVm.NothingToRevert, free.RevertHint);
+        Assert.Equal(Strings.NothingToRevert, free.RevertHint);
     }
 
     /// <summary>＋ New edit and Hide are disabled by the same gate as their four neighbours, so they answer
@@ -5110,19 +5124,19 @@ public class EditPageVmTests
             s.Resolve = part => Installed(part);
             s.BlenderHold = new TaskCompletionSource();
         });
-        Assert.NotEqual(BlenderGate.Busy, PartRow(vm).NewEditHint);
+        Assert.NotEqual(Strings.BlenderBusy, PartRow(vm).NewEditHint);
 
         var open = vm.OpenInBlenderCommand.ExecuteAsync(PartRow(vm));
 
         Assert.True(PartRow(vm).IsBusy);
-        Assert.Equal(BlenderGate.Busy, PartRow(vm).NewEditHint);
-        Assert.Equal(BlenderGate.Busy, PartRow(vm).HidePartHint);
+        Assert.Equal(Strings.BlenderBusy, PartRow(vm).NewEditHint);
+        Assert.Equal(Strings.BlenderBusy, PartRow(vm).HidePartHint);
 
         shell.BlenderHold!.SetResult();
         await open;
 
         Assert.False(PartRow(vm).IsBusy);
-        Assert.NotEqual(BlenderGate.Busy, PartRow(vm).NewEditHint);
+        Assert.NotEqual(Strings.BlenderBusy, PartRow(vm).NewEditHint);
     }
 
     // ---- work started somewhere else, said in the page's own convention ----
@@ -5144,8 +5158,8 @@ public class EditPageVmTests
         var held = vm.HoldSubjects(new[] { (Body.Subject, Body.Outfit) });
 
         Assert.True(Subject(vm).IsBusy);
-        Assert.Equal(BlenderGate.Busy, Subject(vm).OpenAllHint);
-        Assert.Equal(BlenderGate.Busy, Subject(vm).OpenAllFirstEditHint);
+        Assert.Equal(Strings.BlenderBusy, Subject(vm).OpenAllHint);
+        Assert.Equal(Strings.BlenderBusy, Subject(vm).OpenAllFirstEditHint);
         // Everything under the subject waits on it, exactly as it does under the subject's own Open.
         Assert.True(PartRow(vm).IsBusy);
         Assert.False(PartRow(vm).CanOpenInBlender);
@@ -5154,7 +5168,7 @@ public class EditPageVmTests
         // words a second click on any of these verbs gets.
         await vm.OpenSubjectInBlenderCommand.ExecuteAsync(Subject(vm));
         Assert.Empty(shell.SubjectVerbs);
-        Assert.Equal(BlenderGate.Busy, vm.Status);
+        Assert.Equal(Strings.BlenderBusy, vm.Status);
 
         // A second hold over the same subject takes nothing, so releasing it releases nothing: only what a
         // hold actually took comes back, or one return ending would clear another's gate.

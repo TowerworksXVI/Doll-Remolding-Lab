@@ -30,16 +30,9 @@ public sealed class KeyCaptureButton : Button
 
     /// <summary>What the field shows when no key is bound.</summary>
     public static readonly StyledProperty<string> EmptyLabelProperty =
-        AvaloniaProperty.Register<KeyCaptureButton, string>(nameof(EmptyLabel), "No key");
+        AvaloniaProperty.Register<KeyCaptureButton, string>(nameof(EmptyLabel), Strings.KeyNone);
 
-    /// <summary>What the field shows while it is armed and waiting for a key.</summary>
-    private const string CapturingLabel = "Press a key";
-
-    /// <summary>What the field shows after a key with no name an ini line accepts. The binding is
-    /// unchanged; the field says so instead of appearing to have ignored the press.</summary>
-    internal const string UnnamedKeyLabel = "That key can't be bound.";
-
-    /// <summary>How long <see cref="UnnamedKeyLabel"/> stands before the field returns to its binding.</summary>
+    /// <summary>How long <see cref="Strings.KeyUnnamed"/> stands before the field returns to its binding.</summary>
     private static readonly TimeSpan FlashFor = TimeSpan.FromSeconds(2);
 
     private bool _capturing;
@@ -128,7 +121,7 @@ public sealed class KeyCaptureButton : Button
         // a key with no token an ini line accepts leaves the binding ALONE — writing null here would read
         // as "cleared" and quietly drop a key the modder had already set
         if (Token(e.Key, e.KeyModifiers) is { } token) BoundKey = token;
-        else { Flash(UnnamedKeyLabel); return; }
+        else { Flash(Strings.KeyUnnamed); return; }
         UpdateContent();
     }
 
@@ -173,7 +166,7 @@ public sealed class KeyCaptureButton : Button
         _flashTimer?.Stop();
         Classes.Set("capturing", _capturing);
         // the binding holds the ini token; the field shows the keycap's own reading of it
-        if (_capturing) Show(CapturingLabel, empty: false);
+        if (_capturing) Show(Strings.KeyCapturing, empty: false);
         else if (ModKeys.Display(BoundKey) is { Length: > 0 } key) Show(key, empty: false);
         else Show(EmptyLabel, empty: true);
     }

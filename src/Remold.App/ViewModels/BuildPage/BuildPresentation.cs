@@ -1,3 +1,4 @@
+using Remold.Core.Text;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -27,71 +28,56 @@ public sealed record BuildFooter(BuildFooterState State, string Glyph, string Le
     public bool IsAlarm => State is BuildFooterState.Failed or BuildFooterState.Blocked;
 
     public static BuildFooter Idle { get; } = new(BuildFooterState.Idle, "", "", "");
-    public static BuildFooter Planning { get; } = new(BuildFooterState.Planning, "◌", "", "Checking…");
-    public static BuildFooter Ready(int placements, int keys) => new(BuildFooterState.Ready, "✓", "Ready:",
-        $"{placements} edit{(placements == 1 ? "" : "s")} in use · {keys} key{(keys == 1 ? "" : "s")}");
+    public static BuildFooter Planning { get; } = new(BuildFooterState.Planning, "◌", "", Strings.BuildChecking);
+    public static BuildFooter Ready(int placements, int keys) => new(BuildFooterState.Ready, "✓", Strings.BuildReadyLead,
+        Catalog.Plural(placements, Strings.BuildReadyEdits_One(placements), Strings.BuildReadyEdits_Other(placements))
+        + " · " + Catalog.Plural(keys, Strings.BuildReadyKeys_One(keys), Strings.BuildReadyKeys_Other(keys)));
     public static BuildFooter Running(string line) => new(BuildFooterState.Running, "◌", "", line);
-    public static BuildFooter Built(string package) => new(BuildFooterState.Built, "✓", "", $"Built {package}.");
-    public static BuildFooter Failed(string reason) => new(BuildFooterState.Failed, "✗", "Build stopped:",
+    public static BuildFooter Built(string package) => new(BuildFooterState.Built, "✓", "", Strings.BuildBuilt(package));
+    public static BuildFooter Failed(string reason) => new(BuildFooterState.Failed, "✗", Strings.BuildStoppedLead,
         End(reason));
     public static BuildFooter Blocked(string reason) => new(BuildFooterState.Blocked, "✗", "", End(reason));
     public static BuildFooter Notice(string line) => new(BuildFooterState.Notice, "✓", "", End(line));
 
-    internal static string End(string line)
-    {
-        string value = line.TrimEnd();
-        return value.Length == 0 || value.EndsWith('.') || value.EndsWith('!') || value.EndsWith('?')
-            ? value : value + ".";
-    }
+    /// <summary>The line closed as a sentence in the UI language (<see cref="Catalog.Sentence"/>): a line that
+    /// already ends one in either script, an ellipsis included, is left as it is.</summary>
+    internal static string End(string line) => Catalog.Sentence(line);
 }
 
 /// <summary>The completed build and live plan warning lists share a box. An identical live sentence replaces
-/// its run copy; only older facts retain the lead-in.</summary>
+/// its run copy; only older facts retain the lead-in, which is the one line marked as a heading.</summary>
 public static class BuildWarningSource
 {
-    public const string LastBuildLead = "From the last build:";
-
-    public static IReadOnlyList<string> Merge(IReadOnlyList<string>? run, IReadOnlyList<string> live)
+    public static IReadOnlyList<(string Line, bool IsHeading)> Merge(IReadOnlyList<string>? run,
+        IReadOnlyList<string> live)
     {
         var current = live.Where(line => !string.IsNullOrWhiteSpace(line))
             .Distinct(StringComparer.Ordinal).ToList();
         var older = (run ?? Array.Empty<string>()).Where(line => !string.IsNullOrWhiteSpace(line))
             .Distinct(StringComparer.Ordinal).Where(line => !current.Contains(line, StringComparer.Ordinal))
             .ToList();
-        if (older.Count == 0) return current;
-        return new[] { LastBuildLead }.Concat(older).Concat(current).ToArray();
+        if (older.Count == 0) return current.Select(line => (line, false)).ToArray();
+        return new[] { (Strings.BuildLastBuildLead, true) }.Concat(older.Concat(current).Select(line => (line, false)))
+            .ToArray();
     }
 }
 
 /// <summary>ONE ordered Build gate. The page displays this same answer on the disabled button and footer.</summary>
 public static class BuildGate
 {
-    /// <summary>The app's one sentence for an install that is not loaded.</summary>
-    public const string GameUnavailable = Remold.Core.GameFilesGate.Unavailable;
-    public const string NothingAuthored = "Nothing to build yet. Add an edit in ② Edit.";
-    public const string NothingPlaced =
-        "No edits are used yet. Add an edit to Always or to a state of a key group.";
-    public const string Ready = "Build the mod folder and a zip for sharing.";
-    public const string UnnamedPlanBlocker =
-        "Cannot build this mod. Doll Remolding Lab did not say what stops it.";
-
-    /// <summary>What a failed run says when it came back with no sentence of its own. The failure is still
-    /// reported: silence would read as a build that simply did nothing.</summary>
-    public const string UnnamedFailure = "Doll Remolding Lab did not say why.";
-
     public static string? Reason(BuildPlanningResult planning, AuthoredEditOutline? outline,
         string? firstPlanBlocker)
     {
         if (planning.GameUnavailable is not null) return planning.GameUnavailable;
         if (planning.Failure is not null) return planning.Failure;
-        if (outline is null || outline.Edits.Count == 0) return NothingAuthored;
+        if (outline is null || outline.Edits.Count == 0) return Strings.BuildNothingAuthored;
         int placements = outline.Always.Count + outline.Groups.Sum(group =>
             group.States.Sum(state => state.ActiveEditIds.Count));
-        if (placements == 0) return NothingPlaced;
+        if (placements == 0) return Strings.BuildNothingPlaced;
         if (planning.Plan is null) return BuildFooter.Planning.Text;
         if (!planning.Plan.CanBuild)
             return !string.IsNullOrWhiteSpace(firstPlanBlocker) ? firstPlanBlocker
-                : UnnamedPlanBlocker;
+                : Strings.BuildUnnamedPlanBlocker;
         return null;
     }
 }
@@ -107,12 +93,12 @@ public static class BuildIssueAttribution
         var rows = Owners(owners);
         if (rows.Count == 0) return reason;
         if (rows.Count == 1)
-            return BuildFooter.End($"Cannot build {rows[0].Edit} on {rows[0].Part}: {reason}");
+            return BuildFooter.End(Strings.BuildCannotBuildOnPart(rows[0].Edit, rows[0].Part, reason));
         if (rows.Select(row => row.Part).Distinct(StringComparer.Ordinal).Count() == 1)
-            return BuildFooter.End($"Cannot build {KeyCollisions.NameList(rows.Select(row => row.Edit).ToList())} "
-                + $"on {rows[0].Part}: {reason}");
-        return BuildFooter.End($"Cannot build {KeyCollisions.NameList(rows.Select(row => $"{row.Edit} on {row.Part}").ToList())}: "
-            + reason);
+            return BuildFooter.End(Strings.BuildCannotBuildOnPart(
+                Catalog.List(rows.Select(row => row.Edit).ToList()), rows[0].Part, reason));
+        return BuildFooter.End(Strings.BuildCannotBuildList(
+            Catalog.List(rows.Select(row => Strings.BuildEditOnPart(row.Edit, row.Part)).ToList()), reason));
     }
 
     /// <summary>Row 3's width-bounded form. The flyout and other diagnostic surfaces keep
@@ -121,30 +107,27 @@ public static class BuildIssueAttribution
     {
         var rows = Owners(owners);
         return rows.Count <= 1 ? Blocking(reason, rows)
-            : BuildFooter.End($"Cannot build {rows[0].Edit} and {rows.Count - 1} more: {reason}");
+            : BuildFooter.End(Catalog.Plural(rows.Count - 1,
+                Strings.BuildCannotBuildAndMore_One(rows[0].Edit, rows.Count - 1, reason),
+                Strings.BuildCannotBuildAndMore_Other(rows[0].Edit, rows.Count - 1, reason)));
     }
 
     private static IReadOnlyList<BuildIssueOwner> Owners(IReadOnlyList<BuildIssueOwner> owners) =>
         owners.DistinctBy(owner => owner.EditDefinitionId, StringComparer.Ordinal).ToList();
 }
 
-/// <summary>ONE ordered Install gate. Loader sentences come from <see cref="LoaderGate"/>, including the
+/// <summary>ONE ordered Install gate. Loader sentences are the catalog's Loader entries, including the
 /// hookless-host block shared with Settings and the status bar.</summary>
 public static class InstallGate
 {
-    public const string NoBuild = "Build the mod first.";
-    public const string Ready = "Copy the built folder into the loader's Mods folder.";
-    public const string SetLoader =
-        "Select the loader exe: 3DMigoto Loader.exe, or SSMT's per-game Run.exe.";
-
     public static string? Reason(bool hasBuild, BuildLoaderState loader)
     {
-        if (!hasBuild) return NoBuild;
-        if (string.IsNullOrWhiteSpace(loader.LoaderExe)) return LoaderGate.NoLoader;
-        if (!loader.LoaderExists) return LoaderGate.LoaderNotFound(loader.LoaderExe);
-        if (loader.ModsFolder is null) return LoaderGate.NoModsFolder(loader.LoaderExe);
-        if (!loader.Ini.Found) return LoaderGate.NoLoaderIni(loader.LoaderExe);
-        if (!loader.Ini.HasTextureHook) return LoaderGate.NoTextureHook;
+        if (!hasBuild) return Strings.InstallNoBuild;
+        if (string.IsNullOrWhiteSpace(loader.LoaderExe)) return Strings.LoaderNotSet;
+        if (!loader.LoaderExists) return Strings.LoaderNotFound(loader.LoaderExe);
+        if (loader.ModsFolder is null) return Strings.LoaderNoModsFolder(loader.LoaderExe);
+        if (!loader.Ini.Found) return Strings.LoaderNoIni(loader.LoaderExe);
+        if (!loader.Ini.HasTextureHook) return Strings.LoaderNoTextureHook;
         return null;
     }
 }
@@ -154,8 +137,6 @@ public static class InstallGate
 /// shortcuts never warn about each other; a shortcut on a group key or the whole-mod key does.</summary>
 public static class KeyCollisions
 {
-    public const string WholeModLabel = "the whole mod";
-
     public sealed record Entry(string Identity, string Label, string? Key, bool Shortcut = false);
 
     public static IReadOnlyDictionary<string, string> Tips(IEnumerable<Entry> entries)
@@ -173,19 +154,14 @@ public static class KeyCollisions
                 if (clashes.Count == 0) continue;
                 var others = clashes.Select(other => other.Label).Distinct(StringComparer.Ordinal).ToList();
                 bool jumps = row.Shortcut || clashes.Any(other => other.Shortcut);
-                tips[row.Identity] = $"Same key as {NameList(others)}. "
-                    + (!jumps ? "They switch together."
-                        : others.Count == 1 ? "One press does both." : "One press does all of them.");
+                tips[row.Identity] = Strings.KeySameAs(NameList(others)) + " "
+                    + (!jumps ? Strings.KeysSwitchTogether
+                        : others.Count == 1 ? Strings.KeysOnePressBoth : Strings.KeysOnePressAll);
             }
         }
         return tips;
     }
 
-    internal static string NameList(IReadOnlyList<string> names) => names.Count switch
-    {
-        0 => "another control",
-        1 => names[0],
-        2 => names[0] + " and " + names[1],
-        _ => string.Join(", ", names.Take(names.Count - 1)) + " and " + names[^1],
-    };
+    internal static string NameList(IReadOnlyList<string> names) =>
+        names.Count == 0 ? Strings.KeyAnotherControl : Catalog.List(names);
 }

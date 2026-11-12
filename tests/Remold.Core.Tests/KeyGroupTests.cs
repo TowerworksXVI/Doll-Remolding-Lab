@@ -95,7 +95,7 @@ public sealed class KeyGroupTests
             new("three", "edit-long")));
 
         Assert.Empty(AuthoredProjectValidator.Errors(project));
-        Assert.Equal("F6 switches nothing.", Assert.Single(AuthoredProjectValidator.Warnings(project)));
+        Assert.Equal(CoreStrings.PlanGroupSwitchesNothing("F6"), Assert.Single(AuthoredProjectValidator.Warnings(project)));
     }
 
     [Fact]
@@ -114,7 +114,7 @@ public sealed class KeyGroupTests
 
         string warning = Assert.Single(AuthoredProjectValidator.Warnings(project));
 
-        Assert.Equal("Unnamed key group switches nothing.", warning);
+        Assert.Equal(CoreStrings.PlanGroupSwitchesNothing(CoreStrings.PlacementUnnamedGroup), warning);
         Assert.DoesNotContain("key-0042", warning);
     }
 

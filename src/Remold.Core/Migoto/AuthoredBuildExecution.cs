@@ -207,9 +207,9 @@ public sealed class AuthoredBuildExecution
         // what happened; the account rides the exception into the build log.
         if (!plan.CanBuild)
             throw BuildLogDiagnostics.Attach(
-                new AuthoredRefusalException("this mod isn't ready to build yet"), BlockedReasons(plan));
+                new AuthoredRefusalException(CoreStrings.BuildNotReady), BlockedReasons(plan));
         if (project.RootDir is null)
-            throw new AuthoredRefusalException("this mod hasn't been saved yet. Save it, then build");
+            throw new AuthoredRefusalException(CoreStrings.BuildNotSaved);
 
         var work = new List<BuildWorkItem>();
         var ramps = new List<StockRampPick>();

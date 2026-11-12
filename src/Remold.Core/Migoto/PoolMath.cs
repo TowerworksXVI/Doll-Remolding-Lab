@@ -266,8 +266,15 @@ public static class PoolMath
     /// weighted to it, ranked by that weight with a vertex-index tie-break — the emitted operator bytes are
     /// a contract, so the pick must be fully deterministic. The pick is the highest-weight candidate
     /// followed by a greedy farthest-point spread in bind space: rank alone clusters on a seam and loses
-    /// rank-4 support. Returned ascending; the set, not the order, matters.</summary>
-    public static int[] SelectAnchorRows(double[,] p, double[,] w, int[,] bi, int bone, int k)
+    /// rank-4 support. Returned ascending; the set, not the order, matters.
+    ///
+    /// <para>The spread runs over a POOL of the ranked candidates. With no <paramref name="weightFloor"/>
+    /// the pool is the 4·k best-weighted. With one it is every candidate weighted at least that fraction of
+    /// the best weight (never fewer than k): a bone's best-weighted vertices can all lie on one thin band
+    /// of a region it carries in every direction, and anchors on a band state the bone's motion across the
+    /// band only through the band's own thickness.</para></summary>
+    public static int[] SelectAnchorRows(double[,] p, double[,] w, int[,] bi, int bone, int k,
+        double? weightFloor = null)
     {
         int n = p.GetLength(0);
         var cand = new List<(double W, int V)>();
@@ -279,8 +286,15 @@ public static class PoolMath
         }
         if (cand.Count == 0) return Array.Empty<int>();
         cand.Sort((a, b) => a.W != b.W ? b.W.CompareTo(a.W) : a.V.CompareTo(b.V));
-        int pool = Math.Min(cand.Count, 4 * k);   // spread over the top-weighted candidates only
         int take = Math.Min(cand.Count, k);
+        int pool = Math.Min(cand.Count, 4 * k);   // spread over the top-weighted candidates only
+        if (weightFloor is { } floor)
+        {
+            double least = floor * cand[0].W;
+            int reach = 0;
+            while (reach < cand.Count && cand[reach].W >= least) reach++;
+            pool = Math.Max(take, reach);
+        }
         var used = new bool[pool];
         var minD = new double[pool];
         var sel = new List<int>(take) { cand[0].V };
@@ -303,6 +317,44 @@ public static class PoolMath
         }
         sel.Sort();
         return sel.ToArray();
+    }
+
+    /// <summary>How many times a bone's operator rows multiply the rounding already in the posed vertices
+    /// they read, on its way to a vertex the bone carries: the largest, over the mesh's vertices weighted to
+    /// <paramref name="bone"/>, of that weight times the length of the vertex's bind position applied to the
+    /// rows. A posed coordinate carries its own float rounding, independent vertex to vertex, so a row
+    /// whose coefficients are large and cancel hands that rounding on enlarged, afresh each frame. 1 is a
+    /// vertex read straight back; the pose-free companion of the left-inverse defect, which is blind to
+    /// it. <paramref name="rows"/> are the bone's four rows as shipped (float32).</summary>
+    public static double RowGain(double[,] p, double[,] w, int[,] bi, int bone, double[][] rows)
+    {
+        // |x·R|² = x (R Rᵀ) xᵀ: the 4×4 Gram of the rows, once, instead of the row width per vertex
+        var gram = new double[4, 4];
+        int width = rows[0].Length;
+        for (int a = 0; a < 4; a++)
+            for (int b = a; b < 4; b++)
+            {
+                double acc = 0;
+                for (int t = 0; t < width; t++) acc += (double)(float)rows[a][t] * (float)rows[b][t];
+                gram[a, b] = gram[b, a] = acc;
+            }
+        int n = p.GetLength(0);
+        double worst = 0;
+        var x = new double[4];
+        x[3] = 1;
+        for (int v = 0; v < n; v++)
+        {
+            double wb = 0;
+            for (int j = 0; j < 4; j++) if (bi[v, j] == bone && w[v, j] > wb) wb = w[v, j];
+            if (wb <= 0) continue;
+            for (int j = 0; j < 3; j++) x[j] = p[v, j];
+            double q = 0;
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++) q += x[a] * gram[a, b] * x[b];
+            double g = wb * Math.Sqrt(Math.Max(q, 0));
+            if (g > worst || double.IsNaN(g)) worst = g;
+        }
+        return worst;
     }
 
     static double Dist2(double[,] p, int a, int b)

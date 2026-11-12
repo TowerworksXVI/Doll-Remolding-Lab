@@ -81,29 +81,24 @@ public static class PartSkinGate
     /// <summary>The collapsed-points refusal as the ② Edit page says it — one home beside
     /// <see cref="EditRefusal"/> for the disabled opens' hover reason and the refused click's status
     /// line.</summary>
-    public const string CollapsedBillboardRefusal =
-        "This mesh is drawn from collapsed points and cannot be edited in Blender.";
+    public static string CollapsedBillboardRefusal => CoreStrings.MeshEditCollapsedPoints;
 
     /// <summary>The refusal as the ② Edit page says it: the disabled opens' hover reason and the refused
     /// click's status line, one home so the two cannot drift apart. One short sentence — the live map,
     /// shading and Hide controls beside it already show what the part still takes.</summary>
     public static string EditRefusal(StreamDump.SkinRefusal refusal) => refusal switch
     {
-        StreamDump.SkinRefusal.BlendShapes =>
-            "This mesh uses expressions and cannot be edited in Blender.",
-        StreamDump.SkinRefusal.SpringRig =>
-            "This mesh moves on the game's spring bones and cannot be edited in Blender.",
-        _ => "This mesh's skin is in a shape that cannot be edited in Blender.",
+        StreamDump.SkinRefusal.BlendShapes => CoreStrings.MeshEditExpressions,
+        StreamDump.SkinRefusal.SpringRig => CoreStrings.MeshEditSpringBones,
+        _ => CoreStrings.MeshEditUnreadableSkin,
     };
 
     /// <summary>The refusal as a Build plan verdict reason: the ③ Blocked box renders it beside the edit it
     /// names, so it states the fact about the original mesh rather than pointing at buttons.</summary>
     public static string PlanRefusal(StreamDump.SkinRefusal refusal) => refusal switch
     {
-        StreamDump.SkinRefusal.BlendShapes =>
-            "the original mesh uses expressions, so its shape cannot be replaced",
-        StreamDump.SkinRefusal.SpringRig =>
-            "the original mesh moves on the game's own spring bones, so its shape cannot be replaced",
-        _ => "the original mesh's skin is stored in a shape replacement cannot read",
+        StreamDump.SkinRefusal.BlendShapes => CoreStrings.PlanReasonExpressions,
+        StreamDump.SkinRefusal.SpringRig => CoreStrings.PlanReasonSpringBones,
+        _ => CoreStrings.PlanReasonUnreadableSkin,
     };
 }

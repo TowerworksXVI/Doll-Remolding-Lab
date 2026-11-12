@@ -78,11 +78,8 @@ public sealed partial class RampPickRowVm : ObservableObject
     public bool IsBound { get; init; }
 
     /// <summary>The mark the bound row carries beside its source.</summary>
-    public string BoundNote => IsBound ? BoundLabel : "";
+    public string BoundNote => IsBound ? Strings.RampPickerInUse : "";
     public bool HasBoundNote => IsBound;
-
-    /// <summary>What the bound row is marked with.</summary>
-    public const string BoundLabel = "· in use";
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasThumb))]
@@ -176,10 +173,6 @@ public sealed partial class RampPickerVm : ObservableObject
     /// the line that explains the emptiness and this one would misread it as a mod with no ramps.</summary>
     public bool HasNoRows => !IsLoading && Rows.Count == 0 && LoadNote is null;
 
-    /// <summary>What an empty list says. Import is still on the footer, so the line reports the state
-    /// rather than sending the modder anywhere.</summary>
-    public const string NoRowsLine = "No toon ramps were found.";
-
     [ObservableProperty] private string _filter = "";
 
     /// <summary>What the read could not reach: dropped candidates, an outfit that wouldn't resolve, or the
@@ -191,10 +184,6 @@ public sealed partial class RampPickerVm : ObservableObject
     private string? _loadNote;
 
     public bool HasLoadNote => LoadNote is not null;
-
-    /// <summary>What the whole read failing says. Distinct from a clean empty list, which reports a mod
-    /// with no ramps rather than a read that never landed.</summary>
-    public const string LoadFailedNote = "Couldn't read the toon ramps from this install.";
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanApply))]
@@ -219,7 +208,7 @@ public sealed partial class RampPickerVm : ObservableObject
     /// <summary>The line one landed export reports. Names the file — the modder chose where it went, so the
     /// folder is not news.</summary>
     internal static string ExportedLine(string path) =>
-        $"✓ Exported {System.IO.Path.GetFileName(path)}";
+        Strings.RampPickerExported(System.IO.Path.GetFileName(path));
 
     public bool CanApply => Selected is not null;
 
@@ -244,7 +233,7 @@ public sealed partial class RampPickerVm : ObservableObject
                 }
             }
             catch (OperationCanceledException) { return; }
-            catch (Exception) { LoadNote = LoadFailedNote; }
+            catch (Exception) { LoadNote = Strings.RampPickerLoadFailed; }
             IsLoading = false;
             OnPropertyChanged(nameof(HasNoRows));
             Selected ??= Rows.FirstOrDefault(r => r.IsBound)
@@ -254,7 +243,7 @@ public sealed partial class RampPickerVm : ObservableObject
         RampPickLoad load;
         try { load = await _load(_cts.Token); }
         catch (OperationCanceledException) { return; }
-        catch (Exception) { load = new RampPickLoad(Array.Empty<RampPickRowVm>(), LoadFailedNote); }
+        catch (Exception) { load = new RampPickLoad(Array.Empty<RampPickRowVm>(), Strings.RampPickerLoadFailed); }
         var rows = load.Rows;
         // The window can have closed while the read ran, and the read decodes a strip per row: the rows land
         // on nothing, and their native bitmaps would be leaked by the Dispose that already ran.
@@ -339,7 +328,7 @@ public sealed partial class RampPickerVm : ObservableObject
         {
             Choice = new RampChoice(null, null, path),
             Title = System.IO.Path.GetFileName(path),
-            Source = ImportedSource,
+            Source = Strings.RampPickerImportedSource,
             Dimensions = $"{Core.Migoto.RampConversion.RampWidth}×{Core.Migoto.RampConversion.RampHeight}",
         };
         row.Settled(SafePreview(path));
@@ -347,10 +336,6 @@ public sealed partial class RampPickerVm : ObservableObject
         ApplyFilter();
         Selected = row;
     }
-
-    /// <summary>What an imported row says it came from. Not a subject and not a bundle: a file the modder
-    /// chose.</summary>
-    public const string ImportedSource = "imported file";
 
     private static Bitmap? SafePreview(string path)
     {

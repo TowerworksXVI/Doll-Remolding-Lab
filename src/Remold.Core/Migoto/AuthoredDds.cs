@@ -4,6 +4,7 @@ using Remold.Core.Textures;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using Remold.Core.Text;
 
 namespace Remold.Core.Migoto;
 
@@ -59,7 +60,7 @@ public static class AuthoredDds
     {
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException(
-                $"'{Path.GetFileName(sourcePath)}' is missing from the mod folder", sourcePath);
+                CoreStrings.ModFolderFileMissing(Path.GetFileName(sourcePath)), sourcePath);
         if (IsPassthrough(sourcePath))
         {
             // the extension is only the author's claim: a renamed PNG would ship as a container nothing can
@@ -79,14 +80,14 @@ public static class AuthoredDds
         }
         if (cached is not null && TryServe(cached, destPath))
         {
-            log?.Invoke($"texture cache: reusing {Path.GetFileName(sourcePath)}");
+            log?.Invoke(CoreStrings.BuildTextureCacheReuse(Path.GetFileName(sourcePath)));
             return;
         }
 
         using var image = Image.Load<Rgba32>(sourcePath);
         image.Mutate(x => x.Flip(FlipMode.Vertical));
         int w = image.Width, h = image.Height;
-        log?.Invoke($"Encoding {Path.GetFileName(sourcePath)} ({w}×{h})…");
+        log?.Invoke(CoreStrings.BuildEncodingTexture(Path.GetFileName(sourcePath), w, h));
         var pixels = new byte[w * h * 4];
         image.CopyPixelDataTo(pixels);
 
@@ -114,7 +115,7 @@ public static class AuthoredDds
     {
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException(
-                $"'{Path.GetFileName(sourcePath)}' is missing from the mod folder", sourcePath);
+                CoreStrings.ModFolderFileMissing(Path.GetFileName(sourcePath)), sourcePath);
         using var s = File.OpenRead(sourcePath);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
     }

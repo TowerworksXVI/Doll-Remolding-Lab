@@ -66,10 +66,12 @@ public sealed class ConfirmWindow : Window
 
     /// <summary>Show the confirmation modally over <paramref name="owner"/>; resolves to true if confirmed.</summary>
     public static Task<bool> Show(Window owner, string title, string message,
-        string confirmLabel = "OK", string cancelLabel = "Cancel", bool danger = false) =>
-        new ConfirmWindow(title, message, confirmLabel, cancelLabel, danger).ShowDialog<bool>(owner);
+        string? confirmLabel = null, string? cancelLabel = null, bool danger = false) =>
+        new ConfirmWindow(title, message, confirmLabel ?? Strings.Ok, cancelLabel ?? Strings.Cancel, danger)
+            .ShowDialog<bool>(owner);
 
     /// <summary>An OK-only NOTICE: a single-button dialog for a failure the user only has to acknowledge.</summary>
-    public static Task<bool> Notice(Window owner, string title, string message, string okLabel = "OK") =>
-        new ConfirmWindow(title, message, okLabel, cancelLabel: null, danger: false).ShowDialog<bool>(owner);
+    public static Task<bool> Notice(Window owner, string title, string message, string? okLabel = null) =>
+        new ConfirmWindow(title, message, okLabel ?? Strings.Ok, cancelLabel: null, danger: false)
+            .ShowDialog<bool>(owner);
 }

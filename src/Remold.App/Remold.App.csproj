@@ -11,9 +11,14 @@
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- The About dialog reports Assembly.GetName().Version, so these are what a user quotes in a
          bug report; keep all three in step with Core's. -->
-    <Version>0.5.0</Version>
-    <AssemblyVersion>0.5.0.0</AssemblyVersion>
-    <FileVersion>0.5.0.0</FileVersion>
+    <Version>0.5.1</Version>
+    <AssemblyVersion>0.5.1.0</AssemblyVersion>
+    <FileVersion>0.5.1.0</FileVersion>
+    <NeutralLanguage>en</NeutralLanguage>
+    <!-- The string catalog resx sits beside its generated accessor of the same name, and by default the
+         SDK would name the resource after that class. Folder-based names keep the base name the
+         accessor reads (Remold.App.Text.Strings) fixed by where the resx lives. -->
+    <EmbeddedResourceUseDependentUponConvention>false</EmbeddedResourceUseDependentUponConvention>
   </PropertyGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets\icon.ico" />

@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -121,8 +122,8 @@ public class RiggedGlbPrewarmTests
         });
         await vm.RiggedGlbPrewarmTask;
 
-        Assert.Equal(MainWindowViewModel.RiggedGlbPrewarmUnavailable, vm.BackgroundStatus.Text);
-        Assert.Equal(MainWindowViewModel.RiggedGlbPrewarmUnavailableDetail, vm.BackgroundStatus.Detail);
+        Assert.Equal(Strings.PrewarmUnavailable, vm.BackgroundStatus.Text);
+        Assert.Equal(Strings.PrewarmUnavailableTip, vm.BackgroundStatus.Detail);
         Assert.Equal("verb-owned status", vm.EditPage.Status);
         Assert.Equal(revision, vm.EditSession.Revision);
         Assert.Equal(saves, vm.ProjectSaves);
@@ -274,9 +275,9 @@ public class RiggedGlbPrewarmTests
         await vm.RiggedGlbPrewarmTask;
 
         using (vm.BeginInteractiveRiggedGlbOpen())
-            Assert.Equal(MainWindowViewModel.RiggedGlbPrewarmUnavailable, vm.BackgroundStatus.Text);
+            Assert.Equal(Strings.PrewarmUnavailable, vm.BackgroundStatus.Text);
 
-        Assert.Equal(MainWindowViewModel.RiggedGlbPrewarmUnavailable, vm.BackgroundStatus.Text);
+        Assert.Equal(Strings.PrewarmUnavailable, vm.BackgroundStatus.Text);
     }
 
     [Fact]
@@ -305,12 +306,12 @@ public class RiggedGlbPrewarmTests
             new SharingProgress(9, 10, Delta: true), sharingFailed: true,
             riggedGlbPrewarm: progress, riggedGlbPrewarmFailed: false);
 
-        Assert.Equal("Preparing parts… 2/7", facet.Text);
-        Assert.Equal(MainWindowViewModel.RiggedGlbPrewarmTip, facet.Detail);
+        Assert.Equal(Strings.PrewarmLine(2, 7), facet.Text);
+        Assert.Equal(Strings.PrewarmTip, facet.Detail);
         Assert.Contains("2/7", facet.Tip, StringComparison.Ordinal);
 
         var failed = MainWindowViewModel.BackgroundFacet(null, sharingFailed: false,
             riggedGlbPrewarm: null, riggedGlbPrewarmFailed: true);
-        Assert.Equal("Blender opens will be slower", failed.Text);
+        Assert.Equal(Strings.PrewarmUnavailable, failed.Text);
     }
 }

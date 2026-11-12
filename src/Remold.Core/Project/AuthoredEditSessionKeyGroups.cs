@@ -10,8 +10,7 @@ public sealed partial class AuthoredEditSession
     /// <summary>Why a key group refuses to lose a state, in the words the Build page also greys its remove
     /// button with. One sentence, one home: the page states the rule before the click and the command
     /// states it after, and the two cannot drift apart.</summary>
-    public const string TwoStateFloor =
-        "A key needs two states to switch between. Delete the group instead.";
+    public static string TwoStateFloor => CoreStrings.KeyGroupTwoStateFloor;
 
     /// <summary>Create a two-state group with the picked edit active in the first state. An Always placement
     /// of that edit moves into the group so the new key can affect it.</summary>
@@ -67,8 +66,7 @@ public sealed partial class AuthoredEditSession
         if (normalized is not null)
         {
             if (ModKeys.SameKey(group.Key, normalized))
-                throw new AuthoredRefusalException($"Key {ModKeys.Display(normalized)} already switches "
-                    + "this key group. Pick another key for the shortcut.");
+                throw new AuthoredRefusalException(CoreStrings.KeyGroupShortcutIsGroupKey(ModKeys.Display(normalized)));
             RefuseOwnShortcut(group, normalized, state);
         }
         state.Shortcut = normalized;
@@ -323,21 +321,21 @@ public sealed partial class AuthoredEditSession
     private static void AddPlacement(List<string> placements, EditDefinition edit, string at)
     {
         if (placements.Contains(edit.Id, StringComparer.Ordinal))
-            throw new AuthoredRefusalException($"{EditName(edit)} is already used in {at}.");
+            throw new AuthoredRefusalException(CoreStrings.KeyGroupEditAlreadyUsed(EditName(edit), at));
         placements.Add(edit.Id);
     }
 
     private static void RemovePlacement(List<string> placements, EditDefinition edit, string at)
     {
         if (placements.RemoveAll(id => string.Equals(id, edit.Id, StringComparison.Ordinal)) == 0)
-            throw new AuthoredRefusalException($"{EditName(edit)} isn't used in {at}.");
+            throw new AuthoredRefusalException(CoreStrings.KeyGroupEditNotUsed(EditName(edit), at));
     }
 
     /// <summary>What a refusal calls an edit: the name the modder gave it, and the part's name behind an
     /// edit that has none.</summary>
     private static string EditName(EditDefinition edit) =>
         !string.IsNullOrWhiteSpace(edit.Label) ? edit.Label.Trim()
-        : $"the edit on {edit.Target.RendererSlot}";
+        : CoreStrings.KeyGroupEditOnPart(edit.Target.RendererSlot);
 
     private static (List<string> List, string Name) PlacementList(AuthoredProject project,
         string? groupId, string? stateId)
@@ -380,7 +378,7 @@ public sealed partial class AuthoredEditSession
     {
         if (string.IsNullOrWhiteSpace(key)) return null;
         return ModKeys.Normalize(key)
-            ?? throw new AuthoredRefusalException($"{key} cannot be used as a toggle key.");
+            ?? throw new AuthoredRefusalException(CoreStrings.KeyGroupKeyUnusable(key));
     }
 
     private static void RefuseSharedKey(AuthoredProject project, string key, string? exceptGroupId)
@@ -391,9 +389,9 @@ public sealed partial class AuthoredEditSession
         // Named by its label rather than by GroupName: the holder holds THIS key, so naming it by the key
         // would answer the question with the question.
         if (holder is not null)
-            throw new AuthoredRefusalException($"Key {key} is already used by "
-                + (!string.IsNullOrWhiteSpace(holder.Label) ? holder.Label.Trim() : "another key group")
-                + ".");
+            throw new AuthoredRefusalException(!string.IsNullOrWhiteSpace(holder.Label)
+                ? CoreStrings.KeyGroupKeyTakenByGroup(key, holder.Label.Trim())
+                : CoreStrings.KeyGroupKeyTakenByAnotherGroup(key));
     }
 
     /// <summary>Refuse a key one of the group's states already jumps to, other than
@@ -403,8 +401,8 @@ public sealed partial class AuthoredEditSession
         var holder = group.States.FirstOrDefault(state => !ReferenceEquals(state, except)
             && ModKeys.SameKey(state.Shortcut, key));
         if (holder is not null)
-            throw new AuthoredRefusalException($"Key {ModKeys.Display(key)} is already the shortcut for "
-                + $"{PlacementNames.State(group, holder)}. Pick another key.");
+            throw new AuthoredRefusalException(CoreStrings.KeyGroupShortcutTaken(ModKeys.Display(key),
+                PlacementNames.State(group, holder)));
     }
 
     private static string? Trimmed(string? value) =>

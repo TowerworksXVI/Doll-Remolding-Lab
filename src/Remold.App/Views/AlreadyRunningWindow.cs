@@ -13,14 +13,14 @@ public sealed class AlreadyRunningWindow : Window
 {
     public AlreadyRunningWindow()
     {
-        Title = "Doll Remolding Lab";
+        Title = Strings.AppName;
         SizeToContent = SizeToContent.WidthAndHeight;
         CanResize = false;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         if (Application.Current?.TryFindResource("HudBgBrush", out var bg) == true && bg is IBrush b)
             Background = b;
 
-        var close = new Button { Content = "Close", IsDefault = true, Padding = new Thickness(20, 6) };
+        var close = new Button { Content = Strings.CloseButton, IsDefault = true, Padding = new Thickness(20, 6) };
         close.Click += (_, _) => Close();
 
         Content = new StackPanel
@@ -31,7 +31,7 @@ public sealed class AlreadyRunningWindow : Window
             {
                 new TextBlock
                 {
-                    Text = "Doll Remolding Lab is already running.",
+                    Text = Strings.AlreadyRunning,
                     Foreground = Res("HudTextBrush") ?? Brushes.White,
                 },
                 new StackPanel

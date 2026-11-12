@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -76,7 +77,7 @@ public sealed class MaterialShadingCacheTests
         var first = cache.GetOrRead(Material());
 
         Assert.Null(first.Info);
-        Assert.Equal(MaterialShadingCache.ReadFailure, first.Problem);
+        Assert.Equal(Strings.ShadingUnreadable, first.Problem);
         Assert.Same(first, cache.Peek(Material()));
         Assert.Same(first, cache.GetOrRead(Material("SHARED.BUNDLE")));
         Assert.Equal(1, calls);
@@ -194,7 +195,7 @@ public sealed class MaterialShadingCacheTests
         vm.SubjectModels.GetOrBuild(CharacterName, OutfitStem, () => new SubjectModel(
             CharacterName, OutfitStem, SubjectSource.Prefab, Array.Empty<SubjectPart>(),
             Skeleton: null, Problems: Array.Empty<string>()));
-        Assert.Equal(MaterialShadingCache.ReadFailure, vm.PeekShading(Part(), 0)?.Problem);
+        Assert.Equal(Strings.ShadingUnreadable, vm.PeekShading(Part(), 0)?.Problem);
         Assert.Equal(0, reads);
     }
 

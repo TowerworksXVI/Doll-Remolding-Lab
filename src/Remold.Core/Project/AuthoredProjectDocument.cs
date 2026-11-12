@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Remold.Core.Text;
 
 namespace Remold.Core.Project;
 
@@ -43,10 +44,9 @@ public sealed class AuthoredProjectDocument
 
     /// <summary>What an open says when a schema-1 mod cannot be converted because the game files it has to
     /// be re-anchored against are not loaded. User error, not a defect: the remedy is the install, said in
-    /// the app's own words for that state (<see cref="GameFilesGate.Unavailable"/>).</summary>
-    public const string NoInstall =
-        "This mod uses an older project format and has to be updated before it opens. "
-        + GameFilesGate.Unavailable;
+    /// the same words as <see cref="GameFilesGate.Unavailable"/>, held as one catalog entry so the two
+    /// sentences are translated together.</summary>
+    public static string NoInstall => CoreStrings.ProjectOlderFormatNoInstall;
 
     /// <summary>A fresh untitled project, authored from its first keystroke. A new mod has no released past
     /// to convert, so there is nothing to adapt and its first save writes the current schema.</summary>
@@ -72,7 +72,7 @@ public sealed class AuthoredProjectDocument
             throw new InvalidDataException(schema > AuthoredProject.CurrentSchema
                 ? AuthoredProjectSerializer.NewerProject(AuthoredProjectSerializer.ModNameOf(
                     Directory.Exists(path) ? ModProject.ManifestPathFor(path) : path))
-                : AuthoredProjectSerializer.DamagedProject);
+                : CoreStrings.ProjectDamaged);
         if (resolvePart is null) throw new InvalidDataException(NoInstall);
 
         var adaptation = LegacyProjectAdapter.Adapt(ModProject.Load(path), resolvePart, rosterSlots);
@@ -114,12 +114,22 @@ public sealed class AuthoredProjectDocument
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         string cause = blocking.Where(item => item.DetailIsForTheScreen).Select(item => item.Detail)
             .FirstOrDefault(detail => !string.IsNullOrWhiteSpace(detail)) ?? "";
-        string said = parts.Count == 0
-            ? "Couldn't update it." + (cause.Length == 0 ? "" : $" {Sentence(cause)}")
-            : "Couldn't update these parts of it: " + string.Join(", ", parts.Take(3))
-              + (parts.Count > 3 ? $", and {parts.Count - 3} more" : "") + "."
-              + (cause.Length == 0 ? "" : $" {Sentence(cause)}");
-        return "This mod uses an older project format and has to be updated before it opens. " + said;
+        string named = string.Join(CoreStrings.ListSeparator, parts.Take(3));
+        int unnamed = parts.Count - 3;
+        if (cause.Length == 0)
+            return parts.Count == 0 ? CoreStrings.ProjectOlderFormatCouldntUpdate
+                : unnamed <= 0 ? CoreStrings.ProjectOlderFormatCouldntUpdateParts(named)
+                : Catalog.Plural(unnamed, CoreStrings.ProjectOlderFormatCouldntUpdatePartsAndMore_One(named, unnamed),
+                    CoreStrings.ProjectOlderFormatCouldntUpdatePartsAndMore_Other(named, unnamed));
+        // An exception's own message can be a clause without its period; in English it is made a sentence,
+        // and in any other language it is closed with that language's sentence end, its case left as the
+        // translation's.
+        string because = Catalog.CurrentTag == Catalog.English ? Sentence(cause) : Catalog.Sentence(cause);
+        return parts.Count == 0 ? CoreStrings.ProjectOlderFormatCouldntUpdateCause(because)
+            : unnamed <= 0 ? CoreStrings.ProjectOlderFormatCouldntUpdatePartsCause(named, because)
+            : Catalog.Plural(unnamed,
+                CoreStrings.ProjectOlderFormatCouldntUpdatePartsAndMoreCause_One(named, unnamed, because),
+                CoreStrings.ProjectOlderFormatCouldntUpdatePartsAndMoreCause_Other(named, unnamed, because));
     }
 
     /// <summary>One blocking item's scope as a PART name, or null where it names no part: the conversion

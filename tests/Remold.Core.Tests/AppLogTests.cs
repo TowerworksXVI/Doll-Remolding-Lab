@@ -20,13 +20,14 @@ public class AppLogTests
             File.WriteAllText(Path.Combine(root, "app.log"), "last run's content\n");
             AppLog.RootOverride = root;
 
-            AppLog.Write("Couldn't save the mod", new IOException("disk full"));
+            const string what = "Couldn't save the mod";
+            AppLog.Write(what, new IOException("disk full"));
             AppLog.Write("Settings couldn't be saved", "The write failed.");
 
             Assert.Equal("last run's content\n", File.ReadAllText(Path.Combine(root, "app.log.prev")));
             string log = File.ReadAllText(Path.Combine(root, "app.log"));
             Assert.StartsWith("===== Doll Remolding Lab ", log);
-            Assert.Contains("Couldn't save the mod", log);
+            Assert.Contains(what, log);
             Assert.Contains("IOException", log);      // the technical half the screen line leaves out
             Assert.Contains("disk full", log);
             Assert.Contains("Settings couldn't be saved", log);

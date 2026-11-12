@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Threading;
+using Remold.Core.Text;
 
 namespace Remold.Core.Project;
 
@@ -48,8 +49,8 @@ public static class ModInstall
         /// <summary>One sentence naming the state the Mods folder is in.</summary>
         public string FolderState { get; }
 
-        public const string FolderUntouched = "The Mods folder is unchanged.";
-        public const string PreviousRestored = "The previous install is back in place.";
+        public static string FolderUntouched => CoreStrings.InstallFolderUntouched;
+        public static string PreviousRestored => CoreStrings.InstallPreviousRestored;
     }
 
     /// <summary>What one folder in the Mods tree is to this build: an unrelated mod on the same hashes, or an
@@ -177,28 +178,19 @@ public static class ModInstall
     /// consequence — the choice itself is the dialog's two buttons.</summary>
     public static string ConflictBody(IReadOnlyList<string> folders)
     {
-        string verb = folders.Count == 1 ? "changes" : "change";
-        return $"{NameList(folders)} already {verb} some of the same files. "
-            + "Two mods changing the same thing may not show correctly in game.";
+        string named = Catalog.List(folders);
+        return Catalog.Plural(folders.Count, CoreStrings.InstallConflictBody_One(named),
+            CoreStrings.InstallConflictBody_Other(named));
     }
 
     /// <summary>The confirm title for an older version of this same mod under its own folder name.</summary>
     public static string PriorVersionTitle(IReadOnlyList<string> folders) =>
-        $"Replace the installed {NameList(folders)}?";
+        CoreStrings.InstallReplacePriorTitle(Catalog.List(folders));
 
     /// <summary>The confirm body for an older version of this same mod. It is removed only AFTER the new
     /// folder is in place, so a failed install never costs the modder the copy they had.</summary>
-    public static string PriorVersionBody(IReadOnlyList<string> folders) => folders.Count == 1
-        ? "This is an older version of the same mod. It is removed after the new one installs."
-        : "These are older versions of the same mod. They are removed after the new one installs.";
-
-    /// <summary>"a", "a and b", "a, b and c" — a readable list inside one sentence.</summary>
-    private static string NameList(IReadOnlyList<string> names) => names.Count switch
-    {
-        0 => "",
-        1 => names[0],
-        _ => string.Join(", ", names.Take(names.Count - 1)) + " and " + names[^1],
-    };
+    public static string PriorVersionBody(IReadOnlyList<string> folders) => Catalog.Plural(folders.Count,
+        CoreStrings.InstallReplacePriorBody_One, CoreStrings.InstallReplacePriorBody_Other);
 
     /// <summary>Copy <paramref name="builtDir"/> into <paramref name="modsRoot"/> under its own folder name,
     /// replacing a same-named folder. The replaced folder is renamed aside for the length of the swap and
@@ -244,7 +236,7 @@ public static class ModInstall
             catch
             {
                 throw new InstallFailedException(e.Message,
-                    $"The previous install is in {SidelinePrefix + name}. Move it back manually.", e);
+                    CoreStrings.InstallPreviousLeftAside(SidelinePrefix + name), e);
             }
             throw new InstallFailedException(e.Message, InstallFailedException.PreviousRestored, e);
         }

@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -695,9 +696,9 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void The_floor_pass_and_the_delta_read_differently()
     {
-        Assert.Equal("Checking assets… 3/506",
+        Assert.Equal(Strings.SharingCheckingProgress(3, 506),
             MainWindowViewModel.BackgroundWorkLine(new SharingProgress(3, 506, Delta: false)));
-        Assert.Equal("Updating assets… 1/4",
+        Assert.Equal(Strings.SharingUpdatingProgress(1, 4),
             MainWindowViewModel.BackgroundWorkLine(new SharingProgress(1, 4, Delta: true)));
     }
 
@@ -710,9 +711,9 @@ public class SharingSeedTests : IDisposable
             new SharingProgress(12, 38, Delta: true), sharingFailed: false);
         Assert.Equal(MainWindowViewModel.BackgroundWorkLine(new SharingProgress(12, 38, Delta: true)),
             facet.Text);
-        Assert.Equal("Updating assets… 12/38", facet.Text);
+        Assert.Equal(Strings.SharingUpdatingProgress(12, 38), facet.Text);
         Assert.Equal("", facet.Glyph);
-        Assert.Equal(MainWindowViewModel.SharingCellTip, facet.Detail);
+        Assert.Equal(Strings.SharingCellTip, facet.Detail);
     }
 
     [Fact]
@@ -720,9 +721,8 @@ public class SharingSeedTests : IDisposable
     {
         var facet = MainWindowViewModel.BackgroundFacet(null, sharingFailed: true);
         Assert.Equal("⚠", facet.Glyph);
-        Assert.Equal("Shared assets not checked", facet.Text);
-        Assert.Equal("Edits may also change other outfits that share the same textures or meshes. "
-            + "Use Tools · Rescan game files to try again.", facet.Detail);
+        Assert.Equal(Strings.SharingUnmeasured, facet.Text);
+        Assert.Equal(Strings.SharingUnmeasuredDetail, facet.Detail);
     }
 
     // ---- what a width-capped cell's tooltip carries -----------------------------------------------
@@ -754,7 +754,7 @@ public class SharingSeedTests : IDisposable
         var progress = new SharingProgress(12, 38, Delta: true);
         var facet = MainWindowViewModel.BackgroundFacet(progress, sharingFailed: false);
         Assert.Equal(MainWindowViewModel.BackgroundWorkLine(progress) + "\n"
-            + MainWindowViewModel.SharingCellTip, facet.Tip);
+            + Strings.SharingCellTip, facet.Tip);
         Assert.Contains("12/38", facet.Tip, StringComparison.Ordinal);
     }
 
@@ -762,8 +762,8 @@ public class SharingSeedTests : IDisposable
     public void A_failed_passs_tooltip_carries_its_label_and_its_remedy()
     {
         var facet = MainWindowViewModel.BackgroundFacet(null, sharingFailed: true);
-        Assert.Equal(MainWindowViewModel.SharingUnmeasured + "\n"
-            + MainWindowViewModel.SharingUnmeasuredDetail, facet.Tip);
+        Assert.Equal(Strings.SharingUnmeasured + "\n"
+            + Strings.SharingUnmeasuredDetail, facet.Tip);
     }
 
     [Fact]
@@ -772,7 +772,7 @@ public class SharingSeedTests : IDisposable
         Assert.Equal(StatusFacet.None.Text,
             MainWindowViewModel.BackgroundFacet(null, sharingFailed: false).Text);
         // and a new pass over the failure's ground outranks it: work in flight is the newer answer
-        Assert.Equal("Checking assets… 0/9", MainWindowViewModel.BackgroundFacet(
+        Assert.Equal(Strings.SharingCheckingProgress(0, 9), MainWindowViewModel.BackgroundFacet(
             new SharingProgress(0, 9, Delta: false), sharingFailed: true).Text);
     }
 
@@ -927,8 +927,8 @@ public class SharingSeedTests : IDisposable
     [Fact]
     public void A_search_that_matched_nothing_says_so()
     {
-        Assert.Equal("No match for 'zzz'.", MainWindowViewModel.NoMatchLine("zzz", shown: 0));
-        Assert.Equal("No match for 'zzz'.", MainWindowViewModel.NoMatchLine("  zzz  ", shown: 0));
+        Assert.Equal(Strings.PickNoMatch("zzz"), MainWindowViewModel.NoMatchLine("zzz", shown: 0));
+        Assert.Equal(Strings.PickNoMatch("zzz"), MainWindowViewModel.NoMatchLine("  zzz  ", shown: 0));
         Assert.Equal("", MainWindowViewModel.NoMatchLine("zzz", shown: 3));
         // an empty list with nothing searched is the tab's own empty state, not a dead-ended search
         Assert.Equal("", MainWindowViewModel.NoMatchLine("", shown: 0));
@@ -941,7 +941,6 @@ public class SharingSeedTests : IDisposable
     {
         // The filter is otherwise invisible: an enemy the modder can name is simply not in the list, and a
         // hole with no explanation reads as a missing feature.
-        Assert.Equal("Enemies that reuse a character's meshes are listed under that character.",
-            MainWindowViewModel.EnemyDoorNote);
+        Assert.Equal(Strings.PickEnemyReuseNote, new MainWindowViewModel(startLoad: false).EnemiesNoMatchNote);
     }
 }

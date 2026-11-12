@@ -1,0 +1,1794 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="BlenderEmissiveSourceMissing" xml:space="preserve">
+    <value>找不到用于自发光遮罩的{0}。RMO贴图已保存，但不含自发光遮罩。</value>
+  </data>
+  <data name="BlenderEmissiveSourceUnreadable" xml:space="preserve">
+    <value>无法读取用于自发光遮罩的{0}。RMO贴图已保存，但不含自发光遮罩。（{1}）</value>
+  </data>
+  <data name="BlenderGenericImageBaseColor" xml:space="preserve">
+    <value>基础色图片</value>
+  </data>
+  <data name="BlenderGenericImageNormal" xml:space="preserve">
+    <value>法线贴图图片</value>
+  </data>
+  <data name="BlenderGenericImageRmo" xml:space="preserve">
+    <value>RMO贴图图片</value>
+  </data>
+  <data name="BlenderIgnoredAlreadyEdited" xml:space="preserve">
+    <value>已忽略来自Blender的{0}：{1}已有编辑过的{2}图片。</value>
+  </data>
+  <data name="BlenderIgnoredAmbiguousSlot" xml:space="preserve">
+    <value>已忽略来自Blender的{0}：{1}有{2}个{3}槽，而该图片未链接到其中任何一个。</value>
+  </data>
+  <data name="BlenderIgnoredDuplicate" xml:space="preserve">
+    <value>已忽略来自Blender的重复{0}：其贴图槽已有图片。</value>
+  </data>
+  <data name="BlenderIgnoredNoSlot" xml:space="preserve">
+    <value>已忽略来自Blender的{0}：{1}没有{2}槽。</value>
+  </data>
+  <data name="BlenderIgnoredNoSubmesh" xml:space="preserve">
+    <value>已忽略来自Blender的{0}：材质{1}不在任何子网格上。</value>
+  </data>
+  <data name="BlenderIgnoredUnlinked" xml:space="preserve">
+    <value>已忽略来自Blender的{0}：它未链接到贴图槽。</value>
+  </data>
+  <data name="BlenderIgnoredUnsentSlot" xml:space="preserve">
+    <value>已忽略来自Blender的{0}（{1}）：本次打开的文件中没有该贴图槽。</value>
+  </data>
+  <data name="BlenderMaterialNamed" xml:space="preserve">
+    <value>“{0}”</value>
+  </data>
+  <data name="BlenderMaterialNumbered" xml:space="preserve">
+    <value>材质{0}</value>
+  </data>
+  <data name="BlenderPictureDropped" xml:space="preserve">
+    <value>{1}上的{0}从Blender传回时没有图片。为该贴图槽设置的图片不再使用。</value>
+  </data>
+  <data name="BlenderSidecarDuplicatePart" xml:space="preserve">
+    <value>发送时附带的文件多次列出部件“{0}”，且大小写不同。</value>
+  </data>
+  <data name="BlenderUnchangedNotSent" xml:space="preserve">
+    <value>{1}上的{0}传回时标记为未更改，但它不是本次发送的图片。从Doll Remolding Lab重新打开该部件并再次发送</value>
+  </data>
+  <data name="BuildAmbiguousMaterials" xml:space="preserve">
+    <value>“{0}”：此部件在游戏文件中有多种原始材质配置。此修改按最常见的一种生成；在其他配置上，颜色可能出现在错误的位置。</value>
+  </data>
+  <data name="BuildAnchorMapUnreadable" xml:space="preserve">
+    <value>无法读取“{2}”的原始{0}贴图“{1}”。编辑后的{0}贴图可能显示错误的颜色。</value>
+  </data>
+  <data name="BuildAnchorMapsDisagree" xml:space="preserve">
+    <value>“{1}”的原始{0}贴图互不一致。“{2}”为{3}，“{4}”为{5}，因此编辑后的{0}按{3}写入，在替换“{4}”的位置会显示错误的颜色。</value>
+  </data>
+  <data name="BuildAssembling" xml:space="preserve">
+    <value>正在组装Mod文件…</value>
+  </data>
+  <data name="BuildAssetNotSupported" xml:space="preserve">
+    <value>“{0}”不是受支持的资源</value>
+  </data>
+  <data name="BuildCantBeReplaced" xml:space="preserve">
+    <value>无法替换“{0}”：{1}。移除此网格修改</value>
+  </data>
+  <data name="BuildClaimantsNotTellableApart" xml:space="preserve">
+    <value>游戏中无法区分“{0}”和“{1}”，因此无法生成此网格修改</value>
+  </data>
+  <data name="BuildColorFamilyLinear" xml:space="preserve">
+    <value>线性</value>
+  </data>
+  <data name="BuildColorFamilySrgb" xml:space="preserve">
+    <value>sRGB</value>
+  </data>
+  <data name="BuildDetailLevelClosest" xml:space="preserve">
+    <value>最接近的LOD</value>
+  </data>
+  <data name="BuildDetailLevelFurthest" xml:space="preserve">
+    <value>最远的LOD</value>
+  </data>
+  <data name="BuildDetailLevelLower" xml:space="preserve">
+    <value>较低的LOD</value>
+  </data>
+  <data name="BuildDetailLevelMiddle" xml:space="preserve">
+    <value>中间的LOD</value>
+  </data>
+  <data name="BuildDone" xml:space="preserve">
+    <value>已生成{0}。</value>
+  </data>
+  <data name="BuildDrawnAsOtherPart" xml:space="preserve">
+    <value>“{0}”的新网格未使用该部件会移动的任何骨骼，因此它作为“{1}”的一部分绘制，并显示该部件的原始材质。要使用所编辑部件自己的材质，将新网格的权重绑定到“{0}”会移动的骨骼。</value>
+  </data>
+  <data name="BuildEditTwinOfMesh" xml:space="preserve">
+    <value>游戏中无法区分“{0}”和“{1}”，更改其中一个会同时更改另一个。无法生成此网格修改</value>
+  </data>
+  <data name="BuildEditedMapUnappliedBaseColor" xml:space="preserve">
+    <value>无法在“{0}”上应用编辑后的基础色贴图。找不到可替换的原始基础色贴图。</value>
+  </data>
+  <data name="BuildEditedMapUnappliedEffect" xml:space="preserve">
+    <value>无法在“{0}”上应用编辑后的效果贴图。找不到可替换的原始效果贴图。</value>
+  </data>
+  <data name="BuildEditedMapUnappliedNormal" xml:space="preserve">
+    <value>无法在“{0}”上应用编辑后的法线贴图。找不到可替换的原始法线贴图。</value>
+  </data>
+  <data name="BuildEditedMapUnappliedRamp" xml:space="preserve">
+    <value>无法在“{0}”上应用编辑后的渐变贴图。找不到可替换的原始渐变贴图。</value>
+  </data>
+  <data name="BuildEditedMapUnappliedRmo" xml:space="preserve">
+    <value>无法在“{0}”上应用编辑后的RMO贴图。找不到可替换的原始RMO贴图。</value>
+  </data>
+  <data name="BuildEncodingTexture" xml:space="preserve">
+    <value>正在编码{0}（{1}×{2}）…</value>
+  </data>
+  <data name="BuildFileOfMesh" xml:space="preserve">
+    <value>{0}：{1}</value>
+  </data>
+  <data name="BuildFilesMissing" xml:space="preserve">
+    <value>Mod文件夹中缺少以下文件：{0}</value>
+  </data>
+  <data name="BuildFittingLayout" xml:space="preserve">
+    <value>正在将{0}适配到游戏的网格布局…</value>
+  </data>
+  <data name="BuildFittingShared" xml:space="preserve">
+    <value>正在将{0}适配到共用骨架…</value>
+  </data>
+  <data name="BuildGameFilesNoLongerHoldMesh" xml:space="preserve">
+    <value>游戏文件中已没有网格“{0}”。重新扫描，然后再次生成</value>
+  </data>
+  <data name="BuildHideAlsoHides" xml:space="preserve">
+    <value>隐藏“{0}”也会隐藏“{1}”，因为无法区分二者的绘制。</value>
+  </data>
+  <data name="BuildHideAndCapture" xml:space="preserve">
+    <value>“{0}”被一个按键组隐藏，同时又被此衣装上的一项替换捕获。一次绘制只能对应一个覆盖段，因此无法同时生成两者。移除其中之一</value>
+  </data>
+  <data name="BuildHideNothingCarries" xml:space="preserve">
+    <value>“{0}”被一个按键组隐藏，但此次生成中没有任何内容实现该隐藏：没有替换汇集该部件，此安装也不渲染它的任何LOD来放置开关。替换该部件，或移除该隐藏</value>
+  </data>
+  <data name="BuildHideOnSiblings" xml:space="preserve">
+    <value>“{0}”也由{1}绘制，并与{2}同时出现在画面上。隐藏同样作用于它们。</value>
+  </data>
+  <data name="BuildHideSharedDrawn" xml:space="preserve">
+    <value>“{0}”也由{1}绘制。隐藏在{2}出现在画面上时生效。</value>
+  </data>
+  <data name="BuildHideTextureOnlyNoTier" xml:space="preserve">
+    <value>“{0}”被一个按键组隐藏，而它唯一的更改是贴图修改。这需要对该部件自身的绘制加开关，但此安装不渲染它的任何LOD来放置开关。替换该部件，或移除该隐藏</value>
+  </data>
+  <data name="BuildKeepsOriginalMap" xml:space="preserve">
+    <value>“{0}”保留了一张此Mod在别处编辑过的原始贴图。没有编辑贴图的子网格保留原始图片。</value>
+  </data>
+  <data name="BuildMapKindBaseColor" xml:space="preserve">
+    <value>基础色</value>
+  </data>
+  <data name="BuildMapKindEffect" xml:space="preserve">
+    <value>效果</value>
+  </data>
+  <data name="BuildMapKindEffectMap" xml:space="preserve">
+    <value>效果贴图</value>
+  </data>
+  <data name="BuildMapKindNormal" xml:space="preserve">
+    <value>法线</value>
+  </data>
+  <data name="BuildMapKindRmo" xml:space="preserve">
+    <value>RMO</value>
+  </data>
+  <data name="BuildMaterialLacksMap" xml:space="preserve">
+    <value>“{2}”的子网格{1}上的材质“{0}”没有{3}贴图，因此编辑后的贴图无处可替换，已跳过。</value>
+  </data>
+  <data name="BuildMaterialNamed" xml:space="preserve">
+    <value>“{0}”</value>
+  </data>
+  <data name="BuildMaterialNumbered" xml:space="preserve">
+    <value>材质{0}</value>
+  </data>
+  <data name="BuildModKeyCycles" xml:space="preserve">
+    <value>按键“{0}”开关整个Mod，同时还循环切换一个按键组的{1}个状态。整个Mod的按键用于开关Mod；循环切换多个状态的按键需要单独的按键</value>
+  </data>
+  <data name="BuildNoOwnMesh" xml:space="preserve">
+    <value>{0}没有自己的网格，因此Mod无法判断它何时出现在画面上。对其共用网格的修改在这些网格绘制的任何地方都会生效。</value>
+  </data>
+  <data name="BuildNotReady" xml:space="preserve">
+    <value>此Mod尚未准备好生成</value>
+  </data>
+  <data name="BuildNotSaved" xml:space="preserve">
+    <value>此Mod尚未保存。先保存，再生成</value>
+  </data>
+  <data name="BuildNothingSentBack" xml:space="preserve">
+    <value>“{0}”上的网格修改尚未从Blender传回任何内容</value>
+  </data>
+  <data name="BuildNothingSurvived" xml:space="preserve">
+    <value>没有可生成的内容：此Mod的每项更改在此安装上都被搁置。上方的警告说明了是哪些以及原因</value>
+  </data>
+  <data name="BuildNothingToBuild" xml:space="preserve">
+    <value>没有可生成的内容。没有编辑过的网格、编辑过的贴图、选择的渐变贴图、着色更改或隐藏的网格</value>
+  </data>
+  <data name="BuildOriginalMapUnmatched" xml:space="preserve">
+    <value>无法将“{1}”上的原始贴图“{0}”匹配到贴图槽。部分编辑过的贴图可能不会在游戏中显示。</value>
+  </data>
+  <data name="BuildOriginalMeshChanged" xml:space="preserve">
+    <value>自此修改从Blender传回以来，“{0}”的原始网格已发生变化，因此新网格可能不会出现在Blender中显示的位置。</value>
+  </data>
+  <data name="BuildOutfitNotInstalled" xml:space="preserve">
+    <value>当前游戏安装中没有“{0} · {1}”。重新扫描，然后再次生成</value>
+  </data>
+  <data name="BuildPartNameTwoMeshes" xml:space="preserve">
+    <value>两项网格修改对不同的网格（“{1}”和“{2}”）使用了同一部件名“{0}”，因此不能放在同一个Mod中。移除其中一项网格修改</value>
+  </data>
+  <data name="BuildPartNeededAlone" xml:space="preserve">
+    <value>游戏中无法区分“{0}”和“{1}”，而此网格修改需要单独处理“{0}”。无法生成</value>
+  </data>
+  <data name="BuildPartNotInInstall" xml:space="preserve">
+    <value>在当前游戏安装中，“{0}”不是“{1} · {2}”的部件。重新扫描，然后再次生成</value>
+  </data>
+  <data name="BuildPartNotInOutfit" xml:space="preserve">
+    <value>“{0}”已不再是{1} · {2}的部件。自制作此修改以来，游戏可能已发生变化</value>
+  </data>
+  <data name="BuildPictureFileNameShared" xml:space="preserve">
+    <value>此Mod中有两张图片使用同一文件名“{0}”。重命名其中一张，然后再次生成</value>
+  </data>
+  <data name="BuildPictureNoMaterial" xml:space="preserve">
+    <value>无法应用“{1}”上的{0}。已安装的网格没有对应此图片的材质。刷新该部件，或不使用此图片。</value>
+  </data>
+  <data name="BuildPictureNoRegisters" xml:space="preserve">
+    <value>无法应用“{1}”上的{0}。{2}没有测得的贴图寄存器覆盖数据。更新本程序的游戏数据，或不使用此图片。</value>
+  </data>
+  <data name="BuildPictureSlotGone" xml:space="preserve">
+    <value>无法应用“{1}”上的{0}。已安装的材质不再绑定{2}。刷新该部件，或不使用此图片。</value>
+  </data>
+  <data name="BuildPictureUnmatched" xml:space="preserve">
+    <value>无法将“{1}”上的{0}匹配到贴图槽，因此该图片可能不会在游戏中显示。</value>
+  </data>
+  <data name="BuildPictureUnsafe" xml:space="preserve">
+    <value>无法安全地更改“{1}”上的{0}。{2}没有测得的贴图寄存器覆盖数据。更新本程序的游戏数据，或不使用此图片。</value>
+  </data>
+  <data name="BuildPositionUnreadable" xml:space="preserve">
+    <value>无法读取“{0}”为在Blender中居中打开而移动到的位置。新网格按Blender中显示的位置生成。</value>
+  </data>
+  <data name="BuildRampCantBeBuilt" xml:space="preserve">
+    <value>无法生成在“{0}” · {1}上选择的渐变贴图：{2}</value>
+  </data>
+  <data name="BuildRampMaterialGone" xml:space="preserve">
+    <value>无法生成在“{0}” · “{1}”上选择的渐变贴图：该部件已没有此材质。重新扫描，然后重新选择渐变贴图</value>
+  </data>
+  <data name="BuildRampOnSiblings" xml:space="preserve">
+    <value>“{0}”所在的网格也由{1}绘制，并与{2}同时出现在画面上。此渐变贴图同样为它们着色。</value>
+  </data>
+  <data name="BuildRampPickAmbiguous" xml:space="preserve">
+    <value>无法生成在“{0}” · “{1}”上选择的渐变贴图：无法将它与此Mod更改的另一张贴图区分开。移除该选择，或将这两项更改分别生成为不同的Mod</value>
+  </data>
+  <data name="BuildRampPickUnreadable" xml:space="preserve">
+    <value>无法生成在“{0}” · “{1}”上选择的渐变贴图：{2}</value>
+  </data>
+  <data name="BuildRampPickUnrecognized" xml:space="preserve">
+    <value>无法生成在“{0}” · “{1}”上选择的渐变贴图：游戏中无法识别它自己的渐变贴图。移除该选择，或在其他材质上选择渐变贴图</value>
+  </data>
+  <data name="BuildRampSharedMesh" xml:space="preserve">
+    <value>“{0}”所在的网格与{1}共用。{2}出现在画面上时，它们的网格也使用此渐变贴图着色。</value>
+  </data>
+  <data name="BuildRampUnbuildable" xml:space="preserve">
+    <value>无法生成子网格{0}上的渐变贴图：{1}</value>
+  </data>
+  <data name="BuildReadingMesh" xml:space="preserve">
+    <value>正在读取{0}的网格…</value>
+  </data>
+  <data name="BuildReasonNoDraw" xml:space="preserve">
+    <value>“{0}”在任何LOD上都不绘制该材质。移除此更改</value>
+  </data>
+  <data name="BuildReasonTierOrderDiffers" xml:space="preserve">
+    <value>“{0}”的两个LOD绘制同一网格时材质顺序不同，因此无法将更改限定在此材质上</value>
+  </data>
+  <data name="BuildReasonTwins" xml:space="preserve">
+    <value>游戏中无法区分“{0}”和“{1}”，更改其中一个会同时更改另一个</value>
+  </data>
+  <data name="BuildReplacementOnSiblings" xml:space="preserve">
+    <value>“{0}”也由{1}穿着，并与{2}同时出现在画面上。替换同样显示在它们身上。</value>
+  </data>
+  <data name="BuildReplacementSharesMeshes" xml:space="preserve">
+    <value>“{0}”与{1}共用网格。替换在{2}出现在画面上时生效。</value>
+  </data>
+  <data name="BuildReplacementsShareMesh" xml:space="preserve">
+    <value>“{0}”和“{1}”替换它们共用的同一个网格，但只有一个替换能显示。移除其中一项网格修改，或用同一个按键切换它们</value>
+  </data>
+  <data name="BuildRestPoseUnapplied" xml:space="preserve">
+    <value>无法应用为“{0}”记录的静置姿态，因此生成新网格时不使用它。</value>
+  </data>
+  <data name="BuildShadingCantBeBuilt" xml:space="preserve">
+    <value>无法生成“{0}” · {1}上的着色更改：{2}</value>
+  </data>
+  <data name="BuildShadingOnSiblings" xml:space="preserve">
+    <value>“{0}”所在的网格也由{1}绘制，并与{2}同时出现在画面上。此着色更改同样作用于它们。</value>
+  </data>
+  <data name="BuildShadingSharedMesh" xml:space="preserve">
+    <value>“{0}”所在的网格与{1}共用。{2}出现在画面上时，此着色更改同样作用于它们的网格。</value>
+  </data>
+  <data name="BuildSharingUnmeasured" xml:space="preserve">
+    <value>尚未测量共用的网格和贴图。每项修改在游戏中其网格或贴图绘制的任何地方都会生效。</value>
+  </data>
+  <data name="BuildSharingUnmeasuredFor" xml:space="preserve">
+    <value>尚未测量{0}的共用网格和贴图。它的修改在游戏中这些网格和贴图绘制的任何地方都会生效。</value>
+  </data>
+  <data name="BuildSlotDataNoRamp" xml:space="preserve">
+    <value>无法生成“{0}”上的渐变贴图：本程序的贴图槽数据中没有渐变贴图槽。重新安装本程序以恢复数据</value>
+  </data>
+  <data name="BuildSlotDataUnreadable" xml:space="preserve">
+    <value>本程序无法读取其贴图槽数据。替换后的网格上部分贴图不会显示，但网格替换本身仍然有效。重新安装本程序以恢复数据。</value>
+  </data>
+  <data name="BuildSpringBonesUnreplaceable" xml:space="preserve">
+    <value>无法替换“{0}”：它由游戏自身的弹簧骨骼驱动。移除此网格修改</value>
+  </data>
+  <data name="BuildStockMaterialUnused" xml:space="preserve">
+    <value>“{0}”在{2}上不使用{1}。对{1}的更改在该LOD上不会显示。</value>
+  </data>
+  <data name="BuildStockMaterialsUnreadable" xml:space="preserve">
+    <value>无法读取“{0}”在{1}上使用哪些材质。对{2}的更改在那里不会显示。重新扫描，然后再次生成。</value>
+  </data>
+  <data name="BuildTextureCacheReuse" xml:space="preserve">
+    <value>贴图缓存：复用{0}</value>
+  </data>
+  <data name="BuildTextureEditBadSubmesh" xml:space="preserve">
+    <value>“{0}”上的贴图修改指定了子网格{1}，但该子网格不存在</value>
+  </data>
+  <data name="BuildTextureEditNoMaterial" xml:space="preserve">
+    <value>“{0}”上的贴图修改没有可处理的材质，因此没有可替换的原始贴图</value>
+  </data>
+  <data name="BuildTextureEditNoPictures" xml:space="preserve">
+    <value>“{0}”上的贴图修改还没有图片</value>
+  </data>
+  <data name="BuildTextureOnSiblings" xml:space="preserve">
+    <value>“{0}”所在的网格也由{1}绘制，并与{2}同时出现在画面上。此修改同样显示在它们身上。</value>
+  </data>
+  <data name="BuildTextureSetSubmeshOutOfRange" xml:space="preserve">
+    <value>“{0}”上的一组贴图指定了子网格{1}，但新网格只有{2}个子网格</value>
+  </data>
+  <data name="BuildTextureSharedMesh" xml:space="preserve">
+    <value>“{0}”所在的网格与{1}共用。{2}出现在画面上时，它们的网格也显示此修改。</value>
+  </data>
+  <data name="BuildTierKeepsOriginal" xml:space="preserve">
+    <value>游戏中无法将“{0}”与“{1}”区分开，因此它保留原始网格。</value>
+  </data>
+  <data name="BuildTierNoPlace" xml:space="preserve">
+    <value>在{0}上，“{1}”没有位置绘制新网格中使用{2}的部分，因此该部分不会在此LOD绘制。</value>
+  </data>
+  <data name="BuildTierTwinGuarded" xml:space="preserve">
+    <value>在{0}上，游戏中无法将“{1}”与另一个网格区分开，因此新网格的每个部分都保留它在那里原来所用的原始材质。其中一些可能显示在错误的材质下。</value>
+  </data>
+  <data name="BuildTierUnprepared" xml:space="preserve">
+    <value>无法准备“{0}”：{1}。它保留原始网格。</value>
+  </data>
+  <data name="BuildTwinBaseColorRepainted" xml:space="preserve">
+    <value>“{0}”和“{1}”只能通过“{0}”的基础色区分，而此Mod会重绘该基础色。重绘后二者都无法识别，因此无法生成此Mod</value>
+  </data>
+  <data name="BuildTwinBaseColorShared" xml:space="preserve">
+    <value>“{0}”使用的基础色正是区分“{1}”的那一张，而此Mod会重绘它。重绘也会改变“{0}”，因此无法生成此Mod</value>
+  </data>
+  <data name="BuildTwoPicturesOneTexture" xml:space="preserve">
+    <value>“{2}”上的{0}和{1}更改同一张原始贴图“{3}”，无法通过此途径使用两张不同的图片。为两个槽使用同一张图片，或让其中一个保持不变。</value>
+  </data>
+  <data name="BuildTwoTextureSets" xml:space="preserve">
+    <value>“{0}”上的网格修改为子网格{1}设置了两组贴图</value>
+  </data>
+  <data name="BuildUnplacedBonesSkeletons" xml:space="preserve">
+    <value>无法生成“{0}”：新网格的权重绑定在只有“{1}”使用的骨骼上。“{1}”和“{0}”由不同的骨架驱动，而游戏文件没有说明二者的关系。在Blender中移除这些权重</value>
+  </data>
+  <data name="BuildUnplacedBonesSource" xml:space="preserve">
+    <value>无法生成“{0}”：新网格的权重绑定在只有“{1}”使用的骨骼上。游戏文件没有说明“{1}”相对于“{0}”的位置。在Blender中移除这些权重</value>
+  </data>
+  <data name="BuildUnplacedBonesTarget" xml:space="preserve">
+    <value>无法生成“{0}”：新网格的权重绑定在只有其他部件使用的骨骼上。游戏文件没有说明“{0}”在其骨架中的位置，因此无法放置这些骨骼。在Blender中将新网格的权重绑定到“{0}”使用的骨骼，或移除这些权重</value>
+  </data>
+  <data name="CouldntAction" xml:space="preserve">
+    <value>无法{0}。</value>
+  </data>
+  <data name="CouldntActionCause" xml:space="preserve">
+    <value>无法{0}：{1}</value>
+  </data>
+  <data name="CuratedBarracks" xml:space="preserve">
+    <value>主菜单背景</value>
+  </data>
+  <data name="CuratedCommanderFemale" xml:space="preserve">
+    <value>指挥官（女）</value>
+  </data>
+  <data name="CuratedCommanderMale" xml:space="preserve">
+    <value>指挥官（男）</value>
+  </data>
+  <data name="CuratedCrewDeck" xml:space="preserve">
+    <value>活动层</value>
+  </data>
+  <data name="CuratedNeutral" xml:space="preserve">
+    <value>NPC通用</value>
+  </data>
+  <data name="CuratedSkinDisplay" xml:space="preserve">
+    <value>{0}{1}</value>
+  </data>
+  <data name="CuratedSkinNumber" xml:space="preserve">
+    <value>{0}</value>
+  </data>
+  <data name="DefaultEditName" xml:space="preserve">
+    <value>修改{0}</value>
+  </data>
+  <data name="DefaultHideName" xml:space="preserve">
+    <value>隐藏</value>
+  </data>
+  <data name="EffectCannotBeDisabled" xml:space="preserve">
+    <value>无法在此材质上停用{0}。</value>
+  </data>
+  <data name="EmitterDrawTagCollision" xml:space="preserve">
+    <value>{0}和{1}得出相同的绘制标签（{2}）。绘制判定无法区分二者。{3}</value>
+  </data>
+  <data name="EmitterEditOn" xml:space="preserve">
+    <value>{0}上的修改</value>
+  </data>
+  <data name="EmitterFixLeaveEither" xml:space="preserve">
+    <value>将{0}或{1}排除在生成之外。</value>
+  </data>
+  <data name="EmitterFixLeaveOneMeshEdit" xml:space="preserve">
+    <value>将两项网格修改之一排除在生成之外。</value>
+  </data>
+  <data name="EmitterFixLeaveOneRowTextures" xml:space="preserve">
+    <value>将其中一行的新贴图排除在生成之外。</value>
+  </data>
+  <data name="EmitterFixLeaveRowWithMesh" xml:space="preserve">
+    <value>将一行带有新网格的内容排除在生成之外。</value>
+  </data>
+  <data name="EmitterLodLabel" xml:space="preserve">
+    <value>LOD“{0}”</value>
+  </data>
+  <data name="EmitterLodOfPartLabel" xml:space="preserve">
+    <value>“{1}”的LOD“{0}”</value>
+  </data>
+  <data name="EmitterMergedTierWarning" xml:space="preserve">
+    <value>在较远的视距下，“{0}”不显示来自{1}的部分几何体。生成日志列出了相关骨骼。</value>
+  </data>
+  <data name="EmitterMeshBuffer" xml:space="preserve">
+    <value>网格缓冲区（{0}）</value>
+  </data>
+  <data name="EmitterMeshEditRow" xml:space="preserve">
+    <value>该网格修改</value>
+  </data>
+  <data name="EmitterMeshNamed" xml:space="preserve">
+    <value>网格{0}</value>
+  </data>
+  <data name="EmitterNewMeshOn" xml:space="preserve">
+    <value>{0}上的新网格</value>
+  </data>
+  <data name="EmitterNewTexturesOn" xml:space="preserve">
+    <value>{0}上的新贴图</value>
+  </data>
+  <data name="EmitterOneRowNewTextures" xml:space="preserve">
+    <value>其中一行的新贴图</value>
+  </data>
+  <data name="EmitterOwnersMore_One" xml:space="preserve">
+    <value>{0}、{1}和另外{2}个部件</value>
+  </data>
+  <data name="EmitterOwnersMore_Other" xml:space="preserve">
+    <value>{0}、{1}和另外{2}个部件</value>
+  </data>
+  <data name="EmitterOwnersTwo" xml:space="preserve">
+    <value>{0}和{1}</value>
+  </data>
+  <data name="EmitterRingTooLarge" xml:space="preserve">
+    <value>无法替换“{0}”：它随“{1}”移动，而“{1}”的顶点过多，无法跟随。移除此网格修改</value>
+  </data>
+  <data name="EmitterRowWithNewMesh" xml:space="preserve">
+    <value>一行带有新网格的内容</value>
+  </data>
+  <data name="EmitterSlotTagCollision" xml:space="preserve">
+    <value>原始贴图{0}和{1}得出相同的槽标签（{2}）。绘制探测无法区分二者。{3}</value>
+  </data>
+  <data name="EmitterStockTexture" xml:space="preserve">
+    <value>原始贴图{0}</value>
+  </data>
+  <data name="EmitterStreamAbsent" xml:space="preserve">
+    <value>无法生成{0}，因为它存储了原始部件没有的顶点数据。内部详情：替换中缺少数据流{1}。移除此网格修改</value>
+  </data>
+  <data name="EmitterStreamReshaped" xml:space="preserve">
+    <value>无法生成{0}，因为它存储了原始部件没有的顶点数据。内部详情：数据流{1}的布局不同，而游戏只接受一种布局。移除此网格修改</value>
+  </data>
+  <data name="EmitterStreamTranscode" xml:space="preserve">
+    <value>无法生成{0}，因为它存储了原始部件没有的顶点数据。内部详情：{1}。移除此网格修改</value>
+  </data>
+  <data name="EmitterTextureOnPart" xml:space="preserve">
+    <value>{1}上的{0}</value>
+  </data>
+  <data name="EmitterTierBonesMismatch" xml:space="preserve">
+    <value>无法生成“{1}”的LOD“{0}”，因为其记录的骨骼与几何体不匹配。内部详情：上游LOD行判定与并集之外的一根带权重骨骼不匹配。移除此网格修改</value>
+  </data>
+  <data name="EmitterTierMergedOwnerless" xml:space="preserve">
+    <value>无法生成“{1}”的LOD“{0}”，因为它在此LOD缺少来自另一个部件的几何体。内部详情：一条合并的LOD行判定没有所属部件。移除此网格修改</value>
+  </data>
+  <data name="EmitterTierTies_One" xml:space="preserve">
+    <value>在较远的视距下，“{0}”的动作不太自然：它的较低LOD的网格没有使用替换网格所用的{1}根骨骼。生成日志列出了相关骨骼。</value>
+  </data>
+  <data name="EmitterTierTies_Other" xml:space="preserve">
+    <value>在较远的视距下，“{0}”的动作不太自然：它的较低LOD的网格没有使用替换网格所用的{1}根骨骼。生成日志列出了相关骨骼。</value>
+  </data>
+  <data name="EmitterTiedBones_One" xml:space="preserve">
+    <value>在某些姿态下，“{0}”可能偏离原位：替换网格的权重绑定在{1}根无法从原始网格读出动作的骨骼上。在Blender中降低该骨骼上的权重。生成日志列出了相关骨骼。</value>
+  </data>
+  <data name="EmitterTiedBones_Other" xml:space="preserve">
+    <value>在某些姿态下，“{0}”可能偏离原位：替换网格的权重绑定在{1}根无法从原始网格读出动作的骨骼上。在Blender中降低这些骨骼上的权重。生成日志列出了相关骨骼。</value>
+  </data>
+  <data name="EmitterTierVerdictCount" xml:space="preserve">
+    <value>无法生成“{1}”的LOD“{0}”，因为其几何体使用了原始部件中没有的骨骼。内部详情：预期恰好一条上游LOD行判定，实际找到{2}条。移除此网格修改</value>
+  </data>
+  <data name="ExportBindPose" xml:space="preserve">
+    <value>{0}以绑定姿态打开：无法应用其静置姿态。</value>
+  </data>
+  <data name="ExportBoneOffArmature" xml:space="preserve">
+    <value>骨骼{0}不在骨架上：没有可用的静置姿态。</value>
+  </data>
+  <data name="ExportBonesMissingGameRunning" xml:space="preserve">
+    <value>{0}缺少骨骼：游戏正在使用其文件。</value>
+  </data>
+  <data name="ExportEditUnreadable" xml:space="preserve">
+    <value>无法读取{0}的修改。改为打开原始部件。</value>
+  </data>
+  <data name="ExportGeneratedBoneNames" xml:space="preserve">
+    <value>部分骨骼以自动生成的名称打开。</value>
+  </data>
+  <data name="ExportRigFailed" xml:space="preserve">
+    <value>无法为{0}创建骨骼绑定：{1}</value>
+  </data>
+  <data name="ExportUntextured" xml:space="preserve">
+    <value>{0}以无贴图方式打开：其材质未绑定任何贴图。</value>
+  </data>
+  <data name="ExportUvGuideFailed" xml:space="preserve">
+    <value>UV    {0}：{1}的参考图生成失败：{2}</value>
+  </data>
+  <data name="ExportUvGuideWritten" xml:space="preserve">
+    <value>UV    {0}：参考图 → textures/{1}（{2}×{3}，{4}个子网格）</value>
+  </data>
+  <data name="GameFilesUnavailable" xml:space="preserve">
+    <value>游戏文件不可用。使用“工具 · 定位游戏…”，然后使用“工具 · 重新扫描游戏文件”。</value>
+  </data>
+  <data name="GameFilesUnreadableAssemblyPrefab" xml:space="preserve">
+    <value>在此安装中无法读取组装预制体的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadableMesh" xml:space="preserve">
+    <value>在此安装中无法读取网格“{0}”的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadablePart" xml:space="preserve">
+    <value>在此安装中无法读取部件“{0}”的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadablePoolPart" xml:space="preserve">
+    <value>在此安装中无法读取汇集部件“{0}”的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadableRenderer" xml:space="preserve">
+    <value>在此安装中无法读取“{0}”渲染器的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadableStockTexture" xml:space="preserve">
+    <value>在此安装中无法读取原始贴图“{0}”的游戏文件</value>
+  </data>
+  <data name="GameFilesUnreadableTier" xml:space="preserve">
+    <value>在此安装中无法读取LOD“{0}”的游戏文件</value>
+  </data>
+  <data name="GameFolderDenied" xml:space="preserve">
+    <value>无法读取该文件夹（权限不足）。</value>
+  </data>
+  <data name="GameFolderIncomplete" xml:space="preserve">
+    <value>此文件夹缺少部分游戏文件，因此不是少女前线2：追放的安装文件夹（或是不完整的副本）。</value>
+  </data>
+  <data name="GameFolderLockedOrDenied" xml:space="preserve">
+    <value>无法读取该文件夹（被锁定或权限不足）。</value>
+  </data>
+  <data name="GameFolderNoAssetBundles" xml:space="preserve">
+    <value>此处找不到AssetBundles_Windows文件夹。选择游戏的安装文件夹。</value>
+  </data>
+  <data name="GameFolderNotGiven" xml:space="preserve">
+    <value>未指定文件夹。</value>
+  </data>
+  <data name="GameFolderNotRunYet" xml:space="preserve">
+    <value>此文件夹中还没有游戏文件。选择游戏的安装文件夹；如果游戏从未在本机上运行过，先启动一次游戏。</value>
+  </data>
+  <data name="GameFolderNotStandardLayout" xml:space="preserve">
+    <value>这不是少女前线2：追放的标准安装文件夹结构。</value>
+  </data>
+  <data name="ImportBuiltBeforeRepairData" xml:space="preserve">
+    <value>“{0}”不可编辑。它由版本{1}生成，只有其作者能重新生成。</value>
+  </data>
+  <data name="ImportBuiltWithoutRepairData" xml:space="preserve">
+    <value>“{0}”不可编辑。</value>
+  </data>
+  <data name="ImportFailed" xml:space="preserve">
+    <value>无法导入“{0}”：{1}。</value>
+  </data>
+  <data name="ImportMissingFile" xml:space="preserve">
+    <value>“{0}”缺少文件“{1}”。</value>
+  </data>
+  <data name="ImportMoreThanOneMod" xml:space="preserve">
+    <value>“{0}”包含多个Mod。一次导入一个。</value>
+  </data>
+  <data name="ImportNewerApp" xml:space="preserve">
+    <value>“{0}”由更新版本的Doll Remolding Lab生成。更新本程序后再导入。</value>
+  </data>
+  <data name="ImportNoModInZip" xml:space="preserve">
+    <value>“{0}”中不包含Mod。</value>
+  </data>
+  <data name="ImportNoRepairData" xml:space="preserve">
+    <value>“{0}”不可编辑，且没有说明由哪个版本生成。</value>
+  </data>
+  <data name="ImportNotAModFolder" xml:space="preserve">
+    <value>“{0}”不是Mod文件夹。</value>
+  </data>
+  <data name="ImportPreReleaseBuild" xml:space="preserve">
+    <value>“{0}”不可编辑。它由预发布版本生成，只有其作者能重新生成。</value>
+  </data>
+  <data name="ImportReasonCannotRebuild" xml:space="preserve">
+    <value>其中描述的内容本程序无法重新生成</value>
+  </data>
+  <data name="ImportReasonChangeNamesNoEdit" xml:space="preserve">
+    <value>“{0}”上的更改没有对应的修改，因此无法读回</value>
+  </data>
+  <data name="ImportReasonEscapingFile" xml:space="preserve">
+    <value>文件名“{0}”指向Mod之外</value>
+  </data>
+  <data name="ImportReasonFileTooShort" xml:space="preserve">
+    <value>“{0}”只有{1}字节，而记录需要{2}字节</value>
+  </data>
+  <data name="ImportReasonOldSchema" xml:space="preserve">
+    <value>其中注明的结构版本为{0}</value>
+  </data>
+  <data name="ImportReasonPartGone" xml:space="preserve">
+    <value>游戏文件中已没有此Mod隐藏的“{0}”</value>
+  </data>
+  <data name="ImportReasonRampEditUndescribed" xml:space="preserve">
+    <value>“{0}” · “{1}”上的渐变贴图属于记录中未描述的修改，而记录中该材质上没有渐变贴图</value>
+  </data>
+  <data name="ImportReasonRampKeyStateUnsaid" xml:space="preserve">
+    <value>“{0}” · “{1}”上的渐变贴图用于多个按键状态，而记录没有说明它属于哪一个</value>
+  </data>
+  <data name="ImportReasonRampKeyUndeclared" xml:space="preserve">
+    <value>“{0}” · “{1}”上的渐变贴图由该Mod的mod.ini中未声明的按键切换</value>
+  </data>
+  <data name="ImportReasonRampNamesNoEdit" xml:space="preserve">
+    <value>“{0}”上的渐变贴图没有对应的修改，因此无法读回</value>
+  </data>
+  <data name="ImportReasonRampStateMissing" xml:space="preserve">
+    <value>“{0}” · “{1}”上的渐变贴图用于其按键没有的状态</value>
+  </data>
+  <data name="ImportReasonRampStatesUnsaid" xml:space="preserve">
+    <value>“{0}” · “{1}”上的渐变贴图用于多个状态，而记录和Mod的mod.ini都没有说明是哪个</value>
+  </data>
+  <data name="ImportReasonTextureFormat" xml:space="preserve">
+    <value>“{0}”标记的贴图格式本程序无法读取</value>
+  </data>
+  <data name="ImportReasonUndescribedSourcePart" xml:space="preserve">
+    <value>“{0}”从其修复数据未描述的部件取值</value>
+  </data>
+  <data name="ImportReasonUnreadableRest" xml:space="preserve">
+    <value>无法读取为“{0}”记录的静置姿态</value>
+  </data>
+  <data name="ImportReasonUnrecordedRest" xml:space="preserve">
+    <value>“{0}”的新网格保存时没有包含其静置姿态</value>
+  </data>
+  <data name="ImportScanRunning" xml:space="preserve">
+    <value>正在读取游戏文件时无法导入Mod。扫描完成后再试。</value>
+  </data>
+  <data name="ImportUnreadable" xml:space="preserve">
+    <value>无法读取“{0}”：{1}。</value>
+  </data>
+  <data name="ImportZipUnreadable" xml:space="preserve">
+    <value>无法打开“{0}”：{1}。</value>
+  </data>
+  <data name="InstallConflictBody_One" xml:space="preserve">
+    <value>{0}已经更改了部分相同的文件。两个Mod更改同一内容时，游戏中可能无法正确显示。</value>
+  </data>
+  <data name="InstallConflictBody_Other" xml:space="preserve">
+    <value>{0}已经更改了部分相同的文件。两个Mod更改同一内容时，游戏中可能无法正确显示。</value>
+  </data>
+  <data name="InstallFolderUntouched" xml:space="preserve">
+    <value>Mods文件夹未更改。</value>
+  </data>
+  <data name="InstallPreviousLeftAside" xml:space="preserve">
+    <value>之前的安装位于{0}。手动将其移回。</value>
+  </data>
+  <data name="InstallPreviousRestored" xml:space="preserve">
+    <value>之前的安装已恢复原位。</value>
+  </data>
+  <data name="InstallReplacePriorBody_One" xml:space="preserve">
+    <value>这是同一Mod的旧版本。新版本安装后会将其移除。</value>
+  </data>
+  <data name="InstallReplacePriorBody_Other" xml:space="preserve">
+    <value>这些是同一Mod的旧版本。新版本安装后会将其移除。</value>
+  </data>
+  <data name="InstallReplacePriorTitle" xml:space="preserve">
+    <value>替换已安装的{0}？</value>
+  </data>
+  <data name="KeyGroupEditAlreadyUsed" xml:space="preserve">
+    <value>{0}已用于{1}。</value>
+  </data>
+  <data name="KeyGroupEditNotUsed" xml:space="preserve">
+    <value>{0}未用于{1}。</value>
+  </data>
+  <data name="KeyGroupEditOnPart" xml:space="preserve">
+    <value>{0}上的修改</value>
+  </data>
+  <data name="KeyGroupKeyTakenByAnotherGroup" xml:space="preserve">
+    <value>按键{0}已被另一个按键组使用。</value>
+  </data>
+  <data name="KeyGroupKeyTakenByGroup" xml:space="preserve">
+    <value>按键{0}已被{1}使用。</value>
+  </data>
+  <data name="KeyGroupKeyUnusable" xml:space="preserve">
+    <value>{0}不能用作切换键。</value>
+  </data>
+  <data name="KeyGroupShortcutIsGroupKey" xml:space="preserve">
+    <value>按键{0}已用于切换此按键组。为快捷键选择其他按键。</value>
+  </data>
+  <data name="KeyGroupShortcutTaken" xml:space="preserve">
+    <value>按键{0}已是{1}的快捷键。选择其他按键。</value>
+  </data>
+  <data name="KeyGroupTwoStateFloor" xml:space="preserve">
+    <value>按键至少需要两个状态才能切换。改为删除该按键组。</value>
+  </data>
+  <data name="LaunchedDirectlyNoAppManifest" xml:space="preserve">
+    <value>已直接启动游戏。这是Steam安装，但没有appmanifest指向其文件夹，因此无法应用防重复启动修复。</value>
+  </data>
+  <data name="ListAndMore_One" xml:space="preserve">
+    <value>{0}和另外{1}项</value>
+  </data>
+  <data name="ListAndMore_Other" xml:space="preserve">
+    <value>{0}和另外{1}项</value>
+  </data>
+  <data name="ListLastSeparator" xml:space="preserve">
+    <value>和</value>
+  </data>
+  <data name="ListSeparator" xml:space="preserve">
+    <value>、</value>
+  </data>
+  <data name="MapBaseColor" xml:space="preserve">
+    <value>基础色</value>
+  </data>
+  <data name="MapBaseColorAlpha" xml:space="preserve">
+    <value>基础色 + Alpha</value>
+  </data>
+  <data name="MapDetailColor" xml:space="preserve">
+    <value>细节颜色</value>
+  </data>
+  <data name="MapDetailMask" xml:space="preserve">
+    <value>细节遮罩</value>
+  </data>
+  <data name="MapDetailNormalRoughness" xml:space="preserve">
+    <value>细节法线和粗糙度</value>
+  </data>
+  <data name="MapEffect" xml:space="preserve">
+    <value>效果贴图</value>
+  </data>
+  <data name="MapEmission" xml:space="preserve">
+    <value>自发光</value>
+  </data>
+  <data name="MapGlitter" xml:space="preserve">
+    <value>闪光贴图</value>
+  </data>
+  <data name="MapMask" xml:space="preserve">
+    <value>遮罩</value>
+  </data>
+  <data name="MapMatcap" xml:space="preserve">
+    <value>Matcap</value>
+  </data>
+  <data name="MapMatcapNormal" xml:space="preserve">
+    <value>Matcap法线贴图</value>
+  </data>
+  <data name="MapNormal" xml:space="preserve">
+    <value>法线贴图</value>
+  </data>
+  <data name="MapRmo" xml:space="preserve">
+    <value>RMO贴图</value>
+  </data>
+  <data name="MapSmo" xml:space="preserve">
+    <value>SMO贴图</value>
+  </data>
+  <data name="MapSpecular" xml:space="preserve">
+    <value>高光</value>
+  </data>
+  <data name="MapSpecularMap" xml:space="preserve">
+    <value>高光贴图</value>
+  </data>
+  <data name="MapToonRamp" xml:space="preserve">
+    <value>渐变贴图</value>
+  </data>
+  <data name="MapTransparency" xml:space="preserve">
+    <value>透明度</value>
+  </data>
+  <data name="MapTurbulence" xml:space="preserve">
+    <value>扰动</value>
+  </data>
+  <data name="MeshEditCollapsedPoints" xml:space="preserve">
+    <value>此网格由折叠的点绘制，无法在Blender中编辑。</value>
+  </data>
+  <data name="MeshEditExpressions" xml:space="preserve">
+    <value>此网格使用表情，无法在Blender中编辑。</value>
+  </data>
+  <data name="MeshEditSpringBones" xml:space="preserve">
+    <value>此网格由游戏的弹簧骨骼驱动，无法在Blender中编辑。</value>
+  </data>
+  <data name="MeshEditUnreadableSkin" xml:space="preserve">
+    <value>此网格的蒙皮结构无法在Blender中编辑。</value>
+  </data>
+  <data name="MeshOutlineNotRecomputed" xml:space="preserve">
+    <value>无法重新计算描边：网格没有法线或切线，因此保留原始网格的描边。导出时包含法线和切线（“Send to Lab”会包含）即可得到正确的描边。</value>
+  </data>
+  <data name="MeshReducedInfluences_One" xml:space="preserve">
+    <value>{0}个顶点的骨骼影响超过{1}个。已缩减为最强的{1}个并重新归一化。</value>
+  </data>
+  <data name="MeshReducedInfluences_Other" xml:space="preserve">
+    <value>{0}个顶点的骨骼影响超过{1}个。已缩减为最强的{1}个并重新归一化。</value>
+  </data>
+  <data name="MeshVertexCountChange_One" xml:space="preserve">
+    <value>{0}个顶点（相比原始{1}）</value>
+  </data>
+  <data name="MeshVertexCountChange_Other" xml:space="preserve">
+    <value>{0}个顶点（相比原始{1}）</value>
+  </data>
+  <data name="MeshVertexCount_One" xml:space="preserve">
+    <value>{0}个顶点</value>
+  </data>
+  <data name="MeshVertexCount_Other" xml:space="preserve">
+    <value>{0}个顶点</value>
+  </data>
+  <data name="MeshWeightlessVertices_One" xml:space="preserve">
+    <value>{0}个顶点几乎没有权重（总计低于0.5）。它们会塌缩到绑定姿态。为它们绘制权重。</value>
+  </data>
+  <data name="MeshWeightlessVertices_Other" xml:space="preserve">
+    <value>{0}个顶点几乎没有权重（总计低于0.5）。它们会塌缩到绑定姿态。为它们绘制权重。</value>
+  </data>
+  <data name="MigrationCannotHideWhenOff" xml:space="preserve">
+    <value>{0}更改无法在其按键关闭时隐藏该部件，因此该部件改为恢复原样。</value>
+  </data>
+  <data name="MigrationCompareFailed" xml:space="preserve">
+    <value>无法将此修改与原始内容比较，因此将其保留为修改：{0}</value>
+  </data>
+  <data name="MigrationDuplicateKey" xml:space="preserve">
+    <value>此部件的{1}更改上设置了{0}个按键，Mod无法判断保留哪一个。</value>
+  </data>
+  <data name="MigrationDuplicateOffSwitch" xml:space="preserve">
+    <value>有{0}个条目关闭此部件的{1}更改，Mod无法判断保留哪一个。</value>
+  </data>
+  <data name="MigrationEditFileMissing" xml:space="preserve">
+    <value>此修改需要的一个文件在Mod文件夹中缺失，因此本程序无法判断它是否被编辑过。</value>
+  </data>
+  <data name="MigrationEmissiveKept" xml:space="preserve">
+    <value>已保留RMO贴图自带的自发光遮罩。</value>
+  </data>
+  <data name="MigrationEmissiveRebuilt" xml:space="preserve">
+    <value>已从原始贴图重建自发光遮罩。</value>
+  </data>
+  <data name="MigrationEmissiveUnrecorded" xml:space="preserve">
+    <value>RMO文件已保留，但Mod没有记录使用哪个自发光遮罩。</value>
+  </data>
+  <data name="MigrationFilesUnreadable" xml:space="preserve">
+    <value>无法读取Mod文件，因此使用了记录中的编辑情况（{0}）。</value>
+  </data>
+  <data name="MigrationKeepRampAnswered" xml:space="preserve">
+    <value>材质“{0}”已有选择的渐变贴图，因此已舍弃记录中“保留原始渐变贴图”的选择。</value>
+  </data>
+  <data name="MigrationKeepRampNoRamp" xml:space="preserve">
+    <value>在当前游戏文件中，此材质绘制时不使用渐变贴图，因此已舍弃记录中“保留原始渐变贴图”的选择。</value>
+  </data>
+  <data name="MigrationKeyStartDisagrees" xml:space="preserve">
+    <value>按键{0}上的各项更改对是否初始关闭不一致。一个按键就是一个开关，因此它们都初始开启。</value>
+  </data>
+  <data name="MigrationKeyUnusable" xml:space="preserve">
+    <value>{0}不能用作切换键。</value>
+  </data>
+  <data name="MigrationKindHide" xml:space="preserve">
+    <value>隐藏</value>
+  </data>
+  <data name="MigrationKindRamp" xml:space="preserve">
+    <value>渐变贴图</value>
+  </data>
+  <data name="MigrationKindReplace" xml:space="preserve">
+    <value>替换</value>
+  </data>
+  <data name="MigrationKindRetexture" xml:space="preserve">
+    <value>换贴图</value>
+  </data>
+  <data name="MigrationMapBecomesNeutral" xml:space="preserve">
+    <value>{0}被留空，而此子网格上的另一张图片已编辑，因此它变为中性贴图。</value>
+  </data>
+  <data name="MigrationMapCannotBeNeutral" xml:space="preserve">
+    <value>{0}无法设为中性值。</value>
+  </data>
+  <data name="MigrationMapUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别{0}。</value>
+  </data>
+  <data name="MigrationMaterialUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别材质{0}。</value>
+  </data>
+  <data name="MigrationMeshMoved" xml:space="preserve">
+    <value>此部件的游戏网格在游戏更新中已改变，Mod现在使用当前的网格。</value>
+  </data>
+  <data name="MigrationNamedTexture" xml:space="preserve">
+    <value>“{0}”</value>
+  </data>
+  <data name="MigrationNoOriginalFile" xml:space="preserve">
+    <value>没有记录原始文件，因此将其保留为修改。</value>
+  </data>
+  <data name="MigrationOrphanKey" xml:space="preserve">
+    <value>记录中有一个按键属于此Mod已不再有的{0}更改，已将其舍弃。</value>
+  </data>
+  <data name="MigrationOrphanOffSwitch" xml:space="preserve">
+    <value>记录中有一个关闭开关属于此Mod已不再有的{0}更改，已将其舍弃。</value>
+  </data>
+  <data name="MigrationOutfitHasNoParts" xml:space="preserve">
+    <value>当前游戏文件中此衣装没有部件，因此已舍弃其编辑过的贴图“{0}”。</value>
+  </data>
+  <data name="MigrationOutfitInferred" xml:space="preserve">
+    <value>此修改没有说明它属于哪个衣装，已按Mod唯一的衣装{0} / {1}读取。</value>
+  </data>
+  <data name="MigrationOutfitUnknown" xml:space="preserve">
+    <value>此修改没有说明它属于哪个衣装，而Mod有多个衣装。</value>
+  </data>
+  <data name="MigrationOutfitUnreadable" xml:space="preserve">
+    <value>无法从游戏文件中读取此衣装的部件：{0}</value>
+  </data>
+  <data name="MigrationPartDropped" xml:space="preserve">
+    <value>此部件已不在游戏文件中，已舍弃该条目。</value>
+  </data>
+  <data name="MigrationPartGone" xml:space="preserve">
+    <value>当前游戏文件中没有此部件。</value>
+  </data>
+  <data name="MigrationPartMeshUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别此部件的网格。</value>
+  </data>
+  <data name="MigrationPartUncheckable" xml:space="preserve">
+    <value>无法检查此部件是否使用编辑过的贴图：{0}</value>
+  </data>
+  <data name="MigrationPartUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别此部件。</value>
+  </data>
+  <data name="MigrationRampMaterialAmbiguous" xml:space="preserve">
+    <value>此部件有{0}个名为“{1}”的材质，因此无法放置所选的渐变贴图。</value>
+  </data>
+  <data name="MigrationRampMaterialGone" xml:space="preserve">
+    <value>选择渐变贴图时所用的材质“{0}”已不在当前游戏文件中。</value>
+  </data>
+  <data name="MigrationRampNoOriginal" xml:space="preserve">
+    <value>渐变贴图“{0}”在当前游戏文件中对应不到唯一的原始渐变贴图。它在Mod中的文件保持不变。</value>
+  </data>
+  <data name="MigrationRampNoSource" xml:space="preserve">
+    <value>所选的渐变贴图“{0}”没有说明它基于哪张原始渐变贴图制作。文件本身已保留。</value>
+  </data>
+  <data name="MigrationRampOnReplacedPart" xml:space="preserve">
+    <value>渐变贴图“{0}”是在此Mod替换的部件上选择的，因此已将其舍弃。替换网格有自己的渐变贴图。</value>
+  </data>
+  <data name="MigrationSplitFileGeometry" xml:space="preserve">
+    <value>这一个文件曾用于{0}张不同的游戏贴图（{1}）。现在它们在Mod中各自成为独立的几何体，编辑其中一个不再影响其他。</value>
+  </data>
+  <data name="MigrationSplitFileOther" xml:space="preserve">
+    <value>这一个文件曾用于{0}张不同的游戏贴图（{1}）。现在它们在Mod中各自成为独立的{2}，编辑其中一个不再影响其他。</value>
+  </data>
+  <data name="MigrationSplitFilePicture" xml:space="preserve">
+    <value>这一个文件曾用于{0}张不同的游戏贴图（{1}）。现在它们在Mod中各自成为独立的图片，编辑其中一张不再影响其他。</value>
+  </data>
+  <data name="MigrationSplitFileRamp" xml:space="preserve">
+    <value>这一个文件曾用于{0}张不同的游戏贴图（{1}）。现在它们在Mod中各自成为独立的渐变贴图，编辑其中一张不再影响其他。</value>
+  </data>
+  <data name="MigrationTextureMoved" xml:space="preserve">
+    <value>游戏的“{0}”贴图在游戏更新中已改变，Mod现在使用当前的贴图。</value>
+  </data>
+  <data name="MigrationTextureOnReplacedPart" xml:space="preserve">
+    <value>编辑过的贴图“{0}”不用于此Mod替换的部件，因为替换网格自己的贴图已覆盖它。</value>
+  </data>
+  <data name="MigrationTextureUnchangedMap" xml:space="preserve">
+    <value>“{0}”在此处用作{1}，而此Mod从未更改过它，因此已舍弃该修改。</value>
+  </data>
+  <data name="MigrationTextureUnused" xml:space="preserve">
+    <value>此编辑过的贴图没有被任何部件使用，因此已将其舍弃。</value>
+  </data>
+  <data name="MigrationTextureUnusedOnOutfit" xml:space="preserve">
+    <value>此衣装上已没有材质使用“{0}”，因此已舍弃该编辑过的贴图。</value>
+  </data>
+  <data name="MigrationTextureUnusedOnPart" xml:space="preserve">
+    <value>此部件上已没有材质使用“{0}”，因此已舍弃该编辑过的贴图。</value>
+  </data>
+  <data name="MigrationUnnamedTexture" xml:space="preserve">
+    <value>一张未命名的贴图</value>
+  </data>
+  <data name="MigrationValueConflict" xml:space="preserve">
+    <value>此部件的同一张贴图记录了两个不同的值，Mod无法判断保留哪一个。</value>
+  </data>
+  <data name="ModFolderFileMissing" xml:space="preserve">
+    <value>Mod文件夹中缺少“{0}”</value>
+  </data>
+  <data name="OffSkeletonEditVertexBone" xml:space="preserve">
+    <value>“{0}”上的网格修改有{1}个顶点的权重绑定在此对象没有的{2}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonEditVertexBones" xml:space="preserve">
+    <value>“{0}”上的网格修改有{1}个顶点的权重绑定在此对象没有的{2}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonEditVerticesBone" xml:space="preserve">
+    <value>“{0}”上的网格修改有{1}个顶点的权重绑定在此对象没有的{2}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonEditVerticesBones" xml:space="preserve">
+    <value>“{0}”上的网格修改有{1}个顶点的权重绑定在此对象没有的{2}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonNewMeshVertexBone" xml:space="preserve">
+    <value>新网格有{0}个顶点的权重绑定在此对象没有的{1}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonNewMeshVertexBones" xml:space="preserve">
+    <value>新网格有{0}个顶点的权重绑定在此对象没有的{1}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonNewMeshVerticesBone" xml:space="preserve">
+    <value>新网格有{0}个顶点的权重绑定在此对象没有的{1}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OffSkeletonNewMeshVerticesBones" xml:space="preserve">
+    <value>新网格有{0}个顶点的权重绑定在此对象没有的{1}根骨骼上。在Blender中打开该修改，运行“Check Mesh”，然后重新发送</value>
+  </data>
+  <data name="OutfitKindAlt" xml:space="preserve">
+    <value>换装</value>
+  </data>
+  <data name="OutfitKindBase" xml:space="preserve">
+    <value>默认</value>
+  </data>
+  <data name="OutfitKindDorm" xml:space="preserve">
+    <value>休息室</value>
+  </data>
+  <data name="OutfitKindSummon" xml:space="preserve">
+    <value>召唤物</value>
+  </data>
+  <data name="PartWordAcc" xml:space="preserve">
+    <value>饰品</value>
+  </data>
+  <data name="PartWordAccessory" xml:space="preserve">
+    <value>饰品</value>
+  </data>
+  <data name="PartWordAddon" xml:space="preserve">
+    <value>附加部件</value>
+  </data>
+  <data name="PartWordArm" xml:space="preserve">
+    <value>手臂</value>
+  </data>
+  <data name="PartWordArrow" xml:space="preserve">
+    <value>箭</value>
+  </data>
+  <data name="PartWordAxe" xml:space="preserve">
+    <value>斧头</value>
+  </data>
+  <data name="PartWordBag" xml:space="preserve">
+    <value>包</value>
+  </data>
+  <data name="PartWordBoby" xml:space="preserve">
+    <value>身体</value>
+  </data>
+  <data name="PartWordBody" xml:space="preserve">
+    <value>身体</value>
+  </data>
+  <data name="PartWordBomb" xml:space="preserve">
+    <value>炸弹</value>
+  </data>
+  <data name="PartWordBow" xml:space="preserve">
+    <value>弓</value>
+  </data>
+  <data name="PartWordBrow" xml:space="preserve">
+    <value>眉毛</value>
+  </data>
+  <data name="PartWordBullet" xml:space="preserve">
+    <value>子弹</value>
+  </data>
+  <data name="PartWordCloth" xml:space="preserve">
+    <value>衣物</value>
+  </data>
+  <data name="PartWordCoat" xml:space="preserve">
+    <value>外套</value>
+  </data>
+  <data name="PartWordCrystal" xml:space="preserve">
+    <value>水晶</value>
+  </data>
+  <data name="PartWordDorm" xml:space="preserve">
+    <value>休息室</value>
+  </data>
+  <data name="PartWordEffect" xml:space="preserve">
+    <value>特效</value>
+  </data>
+  <data name="PartWordExplosive" xml:space="preserve">
+    <value>炸药</value>
+  </data>
+  <data name="PartWordEye" xml:space="preserve">
+    <value>眼睛</value>
+  </data>
+  <data name="PartWordFace" xml:space="preserve">
+    <value>脸</value>
+  </data>
+  <data name="PartWordFight" xml:space="preserve">
+    <value>战斗</value>
+  </data>
+  <data name="PartWordFlag" xml:space="preserve">
+    <value>旗帜</value>
+  </data>
+  <data name="PartWordFlagon" xml:space="preserve">
+    <value>酒壶</value>
+  </data>
+  <data name="PartWordFlamethrower" xml:space="preserve">
+    <value>火焰喷射器</value>
+  </data>
+  <data name="PartWordFlashGrenade" xml:space="preserve">
+    <value>闪光弹</value>
+  </data>
+  <data name="PartWordFur" xml:space="preserve">
+    <value>毛皮</value>
+  </data>
+  <data name="PartWordGlasses" xml:space="preserve">
+    <value>眼镜</value>
+  </data>
+  <data name="PartWordGlove" xml:space="preserve">
+    <value>手套</value>
+  </data>
+  <data name="PartWordGoggles" xml:space="preserve">
+    <value>护目镜</value>
+  </data>
+  <data name="PartWordGrenade" xml:space="preserve">
+    <value>手榴弹</value>
+  </data>
+  <data name="PartWordGrip" xml:space="preserve">
+    <value>握把</value>
+  </data>
+  <data name="PartWordGun" xml:space="preserve">
+    <value>枪</value>
+  </data>
+  <data name="PartWordHair" xml:space="preserve">
+    <value>头发</value>
+  </data>
+  <data name="PartWordHand" xml:space="preserve">
+    <value>手</value>
+  </data>
+  <data name="PartWordHandcuffs" xml:space="preserve">
+    <value>手铐</value>
+  </data>
+  <data name="PartWordHat" xml:space="preserve">
+    <value>帽子</value>
+  </data>
+  <data name="PartWordHead" xml:space="preserve">
+    <value>头</value>
+  </data>
+  <data name="PartWordHelmet" xml:space="preserve">
+    <value>头盔</value>
+  </data>
+  <data name="PartWordHip" xml:space="preserve">
+    <value>臀部</value>
+  </data>
+  <data name="PartWordHorn" xml:space="preserve">
+    <value>角</value>
+  </data>
+  <data name="PartWordIntercom" xml:space="preserve">
+    <value>对讲机</value>
+  </data>
+  <data name="PartWordKnife" xml:space="preserve">
+    <value>刀</value>
+  </data>
+  <data name="PartWordLace" xml:space="preserve">
+    <value>蕾丝</value>
+  </data>
+  <data name="PartWordLandmine" xml:space="preserve">
+    <value>地雷</value>
+  </data>
+  <data name="PartWordLeft" xml:space="preserve">
+    <value>左</value>
+  </data>
+  <data name="PartWordLight" xml:space="preserve">
+    <value>战术灯</value>
+  </data>
+  <data name="PartWordLimbs" xml:space="preserve">
+    <value>四肢</value>
+  </data>
+  <data name="PartWordLogo" xml:space="preserve">
+    <value>标志</value>
+  </data>
+  <data name="PartWordLower" xml:space="preserve">
+    <value>下身</value>
+  </data>
+  <data name="PartWordMuzzle" xml:space="preserve">
+    <value>枪口</value>
+  </data>
+  <data name="PartWordNotepad" xml:space="preserve">
+    <value>记事本</value>
+  </data>
+  <data name="PartWordPeijian" xml:space="preserve">
+    <value>配件</value>
+  </data>
+  <data name="PartWordPistol" xml:space="preserve">
+    <value>手枪</value>
+  </data>
+  <data name="PartWordPlush" xml:space="preserve">
+    <value>毛绒</value>
+  </data>
+  <data name="PartWordProps" xml:space="preserve">
+    <value>道具</value>
+  </data>
+  <data name="PartWordQiang" xml:space="preserve">
+    <value>枪</value>
+  </data>
+  <data name="PartWordRight" xml:space="preserve">
+    <value>右</value>
+  </data>
+  <data name="PartWordShield" xml:space="preserve">
+    <value>盾牌</value>
+  </data>
+  <data name="PartWordShoes" xml:space="preserve">
+    <value>鞋</value>
+  </data>
+  <data name="PartWordSight" xml:space="preserve">
+    <value>瞄具</value>
+  </data>
+  <data name="PartWordSilencer" xml:space="preserve">
+    <value>消音器</value>
+  </data>
+  <data name="PartWordSkirt" xml:space="preserve">
+    <value>裙子</value>
+  </data>
+  <data name="PartWordSmoke" xml:space="preserve">
+    <value>烟雾</value>
+  </data>
+  <data name="PartWordSmokeGrenade" xml:space="preserve">
+    <value>烟雾弹</value>
+  </data>
+  <data name="PartWordSummon" xml:space="preserve">
+    <value>召唤物</value>
+  </data>
+  <data name="PartWordSword" xml:space="preserve">
+    <value>剑</value>
+  </data>
+  <data name="PartWordTail" xml:space="preserve">
+    <value>尾巴</value>
+  </data>
+  <data name="PartWordTeeth" xml:space="preserve">
+    <value>牙齿</value>
+  </data>
+  <data name="PartWordTongue" xml:space="preserve">
+    <value>舌头</value>
+  </data>
+  <data name="PartWordTruncheon" xml:space="preserve">
+    <value>警棍</value>
+  </data>
+  <data name="PartWordUpper" xml:space="preserve">
+    <value>上身</value>
+  </data>
+  <data name="PartWordWeapon" xml:space="preserve">
+    <value>武器</value>
+  </data>
+  <data name="PartWordWing" xml:space="preserve">
+    <value>翅膀</value>
+  </data>
+  <data name="PartWordWl" xml:space="preserve">
+    <value>武器模型</value>
+  </data>
+  <data name="PartWordWrench" xml:space="preserve">
+    <value>扳手</value>
+  </data>
+  <data name="PartWordXianglian" xml:space="preserve">
+    <value>项链</value>
+  </data>
+  <data name="PartWordXingxing" xml:space="preserve">
+    <value>星星</value>
+  </data>
+  <data name="PlacementAlways" xml:space="preserve">
+    <value>常驻</value>
+  </data>
+  <data name="PlacementStateNumbered" xml:space="preserve">
+    <value>状态{0}</value>
+  </data>
+  <data name="PlacementUnnamedGroup" xml:space="preserve">
+    <value>未命名按键组</value>
+  </data>
+  <data name="PlanActiveTogether" xml:space="preserve">
+    <value>{1}中的{0}与{3}中的{2}可能同时在{4}上生效。</value>
+  </data>
+  <data name="PlanConflictingValues" xml:space="preserve">
+    <value>“{0}”在同一材质上有相互冲突的值。将这些修改放到不同的按键状态，或让这些值一致。</value>
+  </data>
+  <data name="PlanEditHide" xml:space="preserve">
+    <value>该隐藏修改</value>
+  </data>
+  <data name="PlanEditUnnamed" xml:space="preserve">
+    <value>一项未命名的修改</value>
+  </data>
+  <data name="PlanGroupSwitchesNothing" xml:space="preserve">
+    <value>{0}没有切换任何内容。</value>
+  </data>
+  <data name="PlanInternalGuard" xml:space="preserve">
+    <value>Doll Remolding Lab无法确定如何生成此内容</value>
+  </data>
+  <data name="PlanKeylessGroupKeyed" xml:space="preserve">
+    <value>按键组{0}没有按键。这会阻止生成。为它设置按键，或删除该按键组。</value>
+  </data>
+  <data name="PlanKeylessGroupLabeled" xml:space="preserve">
+    <value>按键组“{0}”没有按键。这会阻止生成。为它设置按键，或删除该按键组。</value>
+  </data>
+  <data name="PlanKeylessGroupUnnamed" xml:space="preserve">
+    <value>{0}没有按键。这会阻止生成。为它设置按键，或删除该按键组。</value>
+  </data>
+  <data name="PlanMeshReplacementsAtOnce" xml:space="preserve">
+    <value>{1}上同时有{0}项网格替换生效。用一个按键在它们之间切换，或只保留其中一项。</value>
+  </data>
+  <data name="PlanNeverAppears" xml:space="preserve">
+    <value>{1}上的{0}永远不会出现在{2}中，因为{1}在那里被隐藏。</value>
+  </data>
+  <data name="PlanPlacesOrSeparator" xml:space="preserve">
+    <value>或</value>
+  </data>
+  <data name="PlanReasonCannotSetOnShader" xml:space="preserve">
+    <value>无法在此材质的着色器上设置“{0}”</value>
+  </data>
+  <data name="PlanReasonCannotSetTo" xml:space="preserve">
+    <value>无法将“{0}”设为{1}</value>
+  </data>
+  <data name="PlanReasonEffectNotDisableable" xml:space="preserve">
+    <value>此生成方式无法停用该效果</value>
+  </data>
+  <data name="PlanReasonExpressions" xml:space="preserve">
+    <value>原始网格使用表情，因此无法替换其形状</value>
+  </data>
+  <data name="PlanReasonFamilyUnsupported" xml:space="preserve">
+    <value>材质族解析不支持“{0}”</value>
+  </data>
+  <data name="PlanReasonManyMaps" xml:space="preserve">
+    <value>原始材质的{1}有{0}张贴图，因此生成时无法选择其中一张</value>
+  </data>
+  <data name="PlanReasonManyMaterials" xml:space="preserve">
+    <value>在当前游戏文件中，此部件在材质{1}处有{0}个材质</value>
+  </data>
+  <data name="PlanReasonManyRamps" xml:space="preserve">
+    <value>原始材质有{0}张渐变贴图，因此生成时无法选择其中一张</value>
+  </data>
+  <data name="PlanReasonManyTierMeshes" xml:space="preserve">
+    <value>在当前游戏文件中，此部件的{1}有{0}个网格</value>
+  </data>
+  <data name="PlanReasonManyWaysToHide" xml:space="preserve">
+    <value>Mod记录了{0}种隐藏此部件的方式，因此生成时无法选择其中一种</value>
+  </data>
+  <data name="PlanReasonMaterialGone" xml:space="preserve">
+    <value>当前游戏文件中没有该原始材质</value>
+  </data>
+  <data name="PlanReasonMaterialUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别材质{0}</value>
+  </data>
+  <data name="PlanReasonMeshUnidentified" xml:space="preserve">
+    <value>无法在当前游戏文件中识别此部件的网格</value>
+  </data>
+  <data name="PlanReasonMissingFromModFolder" xml:space="preserve">
+    <value>Mod文件夹中缺少“{0}”：{1}</value>
+  </data>
+  <data name="PlanReasonNoAdjustableValues" xml:space="preserve">
+    <value>此材质的着色器没有可调整的值</value>
+  </data>
+  <data name="PlanReasonNoFamilyName" xml:space="preserve">
+    <value>当前安装中对应的材质没有材质族名称</value>
+  </data>
+  <data name="PlanReasonNoMap" xml:space="preserve">
+    <value>在当前游戏文件中，原始材质没有{0}</value>
+  </data>
+  <data name="PlanReasonNoMaterial" xml:space="preserve">
+    <value>在当前游戏文件中，此部件没有材质{0}</value>
+  </data>
+  <data name="PlanReasonNoMeshToHide" xml:space="preserve">
+    <value>Mod没有为此部件记录网格，因此无法隐藏它</value>
+  </data>
+  <data name="PlanReasonNoRamp" xml:space="preserve">
+    <value>原始材质绘制时不使用渐变贴图，因此无法为它选择渐变贴图</value>
+  </data>
+  <data name="PlanReasonNoTier" xml:space="preserve">
+    <value>在当前游戏文件中，此部件没有{0}</value>
+  </data>
+  <data name="PlanReasonNotAuthorable" xml:space="preserve">
+    <value>“{0}”不是可编辑的着色参数</value>
+  </data>
+  <data name="PlanReasonNothingToCopy" xml:space="preserve">
+    <value>此值的复制来源槽保持原始，因此没有可复制的内容</value>
+  </data>
+  <data name="PlanReasonPartGone" xml:space="preserve">
+    <value>当前游戏文件中没有此部件</value>
+  </data>
+  <data name="PlanReasonPartUnreadable" xml:space="preserve">
+    <value>无法从游戏文件中读取此部件</value>
+  </data>
+  <data name="PlanReasonSaveFirst" xml:space="preserve">
+    <value>Mod保存后才能找到“{0}”。保存Mod，然后生成</value>
+  </data>
+  <data name="PlanReasonSharedDraw" xml:space="preserve">
+    <value>此部件在同一组面上绘制多个材质，因此更改其中一个会同时更改其他材质。替换该部件的网格以单独更改此材质，或移除此更改</value>
+  </data>
+  <data name="PlanReasonSourceNoMaterial" xml:space="preserve">
+    <value>来源槽在当前安装中没有对应的材质</value>
+  </data>
+  <data name="PlanReasonSourceStatesNothing" xml:space="preserve">
+    <value>来源材质“{0}”没有设置{1}；那里使用着色器默认值，无法复制</value>
+  </data>
+  <data name="PlanReasonSourceUnreadable" xml:space="preserve">
+    <value>无法从当前安装中读取对应的来源材质</value>
+  </data>
+  <data name="PlanReasonSpringBones" xml:space="preserve">
+    <value>原始网格由游戏自身的弹簧骨骼驱动，因此无法替换其形状</value>
+  </data>
+  <data name="PlanReasonTierMaterialsFixed" xml:space="preserve">
+    <value>无法更改{0}上的材质</value>
+  </data>
+  <data name="PlanReasonUnreadableSkin" xml:space="preserve">
+    <value>原始网格的蒙皮以替换功能无法读取的格式存储</value>
+  </data>
+  <data name="PlanReasonValueChangesAtRuntime" xml:space="preserve">
+    <value>此值在游戏运行时会变化，因此无法设为固定值</value>
+  </data>
+  <data name="PlanReasonValueNotBuildable" xml:space="preserve">
+    <value>此值无法生成到Mod中</value>
+  </data>
+  <data name="PlanRedundantInAlways" xml:space="preserve">
+    <value>{1}上的{0}已在常驻中，因此在{2}中使用它不会有任何变化。将它从常驻中移除，按键才能切换它。</value>
+  </data>
+  <data name="PlanReplaceDropsTextureChanges" xml:space="preserve">
+    <value>{0}替换了该部件的网格，因此它对原始贴图的更改不会生效。替换网格改用此修改自己的贴图。</value>
+  </data>
+  <data name="PlanShadingValueNoFaces" xml:space="preserve">
+    <value>{0}为材质{1}设置的着色参数不会生效：其替换网格中没有使用材质{1}的面。为该材质指定面，或移除此值。</value>
+  </data>
+  <data name="PoolDonorNoSkin" xml:space="preserve">
+    <value>来源网格没有蒙皮。先在Blender中将它的权重绑定到该衣装的参考骨架</value>
+  </data>
+  <data name="PoolNoKnownBone" xml:space="preserve">
+    <value>新网格的权重没有指向此对象拥有的任何骨骼</value>
+  </data>
+  <data name="PoolOnlyOtherOptions" xml:space="preserve">
+    <value>新网格只使用属于此对象其他衣装或场景选项的骨骼，因此它的任何部分都无法实现替换。将网格的权重重新绑定到此对象自身部件也会移动的骨骼上</value>
+  </data>
+  <data name="ProjectDamaged" xml:space="preserve">
+    <value>此Mod的项目文件已损坏，无法读取。</value>
+  </data>
+  <data name="ProjectMissing" xml:space="preserve">
+    <value>{0}处没有项目文件。</value>
+  </data>
+  <data name="ProjectNewer" xml:space="preserve">
+    <value>此Mod由更新版本的Doll Remolding Lab制作。更新本程序后再打开。</value>
+  </data>
+  <data name="ProjectNewerNamed" xml:space="preserve">
+    <value>“{0}”由更新版本的Doll Remolding Lab制作。更新本程序后再打开。</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdate" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新。</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdateCause" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新。{0}</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdateParts" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}。</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdatePartsAndMoreCause_One" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}，以及另外{1}个。{2}</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdatePartsAndMoreCause_Other" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}，以及另外{1}个。{2}</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdatePartsAndMore_One" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}，以及另外{1}个。</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdatePartsAndMore_Other" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}，以及另外{1}个。</value>
+  </data>
+  <data name="ProjectOlderFormatCouldntUpdatePartsCause" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。无法更新其中的以下部件：{0}。{1}</value>
+  </data>
+  <data name="ProjectOlderFormatNoInstall" xml:space="preserve">
+    <value>此Mod使用旧的项目格式，打开前需要更新。游戏文件不可用。使用“工具 · 定位游戏…”，然后使用“工具 · 重新扫描游戏文件”。</value>
+  </data>
+  <data name="RampInfo" xml:space="preserve">
+    <value>四个色带，每个四行：角色的着色曲线。预览经过色调映射以便显示，数值仍为浮点数。</value>
+  </data>
+  <data name="RampWrongSize" xml:space="preserve">
+    <value>{0}为{1}×{2}。渐变贴图应为{3}×{4}。</value>
+  </data>
+  <data name="SentenceEnd" xml:space="preserve">
+    <value>。</value>
+  </data>
+  <data name="SessionEditFileMovedWhileOpen" xml:space="preserve">
+    <value>此修改的文件在其他程序中打开期间，已在Doll Remolding Lab中被更改。重新打开它，然后保存。</value>
+  </data>
+  <data name="SessionEditLentOut" xml:space="preserve">
+    <value>“{1}”正在从“{0}”取值，因此无法删除“{0}”。</value>
+  </data>
+  <data name="SessionEditMovedWhileOpen" xml:space="preserve">
+    <value>此修改在其他程序中打开期间，已在Doll Remolding Lab中被更改。重新打开它，然后保存。</value>
+  </data>
+  <data name="SessionEditNameTaken" xml:space="preserve">
+    <value>“{0}”已是此部件另一项修改的名称。</value>
+  </data>
+  <data name="SessionNoMaterial" xml:space="preserve">
+    <value>此部件没有材质{0}。</value>
+  </data>
+  <data name="SessionNoRampToCopy" xml:space="preserve">
+    <value>材质{0}绘制时不使用渐变贴图，因此无法将渐变贴图复制到这里。</value>
+  </data>
+  <data name="SessionNoRampToSet" xml:space="preserve">
+    <value>材质{0}绘制时不使用渐变贴图，因此无法在这里设置渐变贴图。</value>
+  </data>
+  <data name="SessionNowhereToRecordEdit" xml:space="preserve">
+    <value>此部件没有可记录修改的位置。加载游戏文件，然后再试一次。</value>
+  </data>
+  <data name="SessionNowhereToRecordHide" xml:space="preserve">
+    <value>此部件没有可记录隐藏的位置。加载游戏文件，然后再试一次。</value>
+  </data>
+  <data name="SessionOneHidePerPart" xml:space="preserve">
+    <value>此修改会隐藏该部件，而一个部件只能有一项隐藏修改。</value>
+  </data>
+  <data name="SessionPartMaterialNotFound" xml:space="preserve">
+    <value>在当前游戏文件中找不到此部件的材质{0}。</value>
+  </data>
+  <data name="SessionPartMeshNotFound" xml:space="preserve">
+    <value>在当前游戏文件中找不到此部件的网格。</value>
+  </data>
+  <data name="SessionPartNotFound" xml:space="preserve">
+    <value>在当前游戏文件中找不到此部件。</value>
+  </data>
+  <data name="SessionPartNotInstalled" xml:space="preserve">
+    <value>当前游戏文件中没有此部件，因此没有位置记录它的值。</value>
+  </data>
+  <data name="SessionShadingAnswerElsewhere" xml:space="preserve">
+    <value>这组着色参数属于另一项修改。</value>
+  </data>
+  <data name="SessionSourcePartNotInstalled" xml:space="preserve">
+    <value>这些值来源的部件不在当前游戏文件中，因此无法读取。</value>
+  </data>
+  <data name="SessionUnnamedTexture" xml:space="preserve">
+    <value>材质{0}使用了本程序无法命名的贴图，因此无法打开该部件。</value>
+  </data>
+  <data name="ShadingEffectBodyAnisotropy" xml:space="preserve">
+    <value>身体各向异性</value>
+  </data>
+  <data name="ShadingEffectDetail" xml:space="preserve">
+    <value>细节</value>
+  </data>
+  <data name="ShadingEffectEyeAdd" xml:space="preserve">
+    <value>眼部叠加层</value>
+  </data>
+  <data name="ShadingEffectEyeMultiply" xml:space="preserve">
+    <value>眼部正片叠底层</value>
+  </data>
+  <data name="ShadingEffectFur" xml:space="preserve">
+    <value>毛发壳层</value>
+  </data>
+  <data name="ShadingEffectGlitter" xml:space="preserve">
+    <value>闪光</value>
+  </data>
+  <data name="ShadingEffectHairHighlight" xml:space="preserve">
+    <value>头发高光</value>
+  </data>
+  <data name="ShadingEffectInternalVolume" xml:space="preserve">
+    <value>内部体积</value>
+  </data>
+  <data name="ShadingEffectMatcap" xml:space="preserve">
+    <value>Matcap</value>
+  </data>
+  <data name="ShadingEffectOutline" xml:space="preserve">
+    <value>描边</value>
+  </data>
+  <data name="ShadingEffectStocking" xml:space="preserve">
+    <value>丝袜色调</value>
+  </data>
+  <data name="ShadingValueAdditionalLightShadow" xml:space="preserve">
+    <value>次光源阴影</value>
+  </data>
+  <data name="ShadingValueAnisotropicGXX" xml:space="preserve">
+    <value>拉伸高光（也会改变RMO的Alpha）</value>
+  </data>
+  <data name="ShadingValueAnisotropy" xml:space="preserve">
+    <value>拉伸高光强度</value>
+  </data>
+  <data name="ShadingValueAnisotropyShift" xml:space="preserve">
+    <value>拉伸高光位置</value>
+  </data>
+  <data name="ShadingValueBaseColor" xml:space="preserve">
+    <value>基础色</value>
+  </data>
+  <data name="ShadingValueBaseInsideLerp" xml:space="preserve">
+    <value>外侧/内侧颜色混合</value>
+  </data>
+  <data name="ShadingValueBlendSmoothness" xml:space="preserve">
+    <value>混合贴图平滑度</value>
+  </data>
+  <data name="ShadingValueBlendTexST" xml:space="preserve">
+    <value>混合贴图平铺和偏移</value>
+  </data>
+  <data name="ShadingValueDetailAlbedoIntensity" xml:space="preserve">
+    <value>细节颜色强度</value>
+  </data>
+  <data name="ShadingValueDetailAlbedoST" xml:space="preserve">
+    <value>细节贴图平铺和偏移</value>
+  </data>
+  <data name="ShadingValueDetailAlphaIntensity" xml:space="preserve">
+    <value>细节Alpha强度</value>
+  </data>
+  <data name="ShadingValueDetailAlphaMode" xml:space="preserve">
+    <value>细节Alpha模式</value>
+  </data>
+  <data name="ShadingValueDetailNormalIntensity" xml:space="preserve">
+    <value>细节法线强度</value>
+  </data>
+  <data name="ShadingValueDetailRMIntensity" xml:space="preserve">
+    <value>细节粗糙度强度</value>
+  </data>
+  <data name="ShadingValueFakeIntensity" xml:space="preserve">
+    <value>假光源强度</value>
+  </data>
+  <data name="ShadingValueGlitterCurvature" xml:space="preserve">
+    <value>闪光曲率响应</value>
+  </data>
+  <data name="ShadingValueGlitterDensity" xml:space="preserve">
+    <value>闪光密度</value>
+  </data>
+  <data name="ShadingValueGlitterMetallic" xml:space="preserve">
+    <value>闪光金属度</value>
+  </data>
+  <data name="ShadingValueGlitterRimFalloff" xml:space="preserve">
+    <value>闪光边缘衰减</value>
+  </data>
+  <data name="ShadingValueGlitterRimIntensity" xml:space="preserve">
+    <value>闪光边缘亮度</value>
+  </data>
+  <data name="ShadingValueGlitterRimMax" xml:space="preserve">
+    <value>闪光边缘范围最大值</value>
+  </data>
+  <data name="ShadingValueGlitterRimMin" xml:space="preserve">
+    <value>闪光边缘范围最小值</value>
+  </data>
+  <data name="ShadingValueGlitterRoughness" xml:space="preserve">
+    <value>闪光粗糙度</value>
+  </data>
+  <data name="ShadingValueGlitterSpecIntensity" xml:space="preserve">
+    <value>闪光亮光强度</value>
+  </data>
+  <data name="ShadingValueGlitterSpeed" xml:space="preserve">
+    <value>闪光闪烁速度</value>
+  </data>
+  <data name="ShadingValueGlitterViewWeight" xml:space="preserve">
+    <value>闪光角度响应</value>
+  </data>
+  <data name="ShadingValueInsideBaseColor" xml:space="preserve">
+    <value>内侧颜色</value>
+  </data>
+  <data name="ShadingValueInsideColorBias" xml:space="preserve">
+    <value>内侧颜色偏移</value>
+  </data>
+  <data name="ShadingValueInsideColorContrast" xml:space="preserve">
+    <value>内侧颜色对比度</value>
+  </data>
+  <data name="ShadingValueInsideHeightBias" xml:space="preserve">
+    <value>内侧高度偏移</value>
+  </data>
+  <data name="ShadingValueInsideHeightContrast" xml:space="preserve">
+    <value>内侧高度对比度</value>
+  </data>
+  <data name="ShadingValueMatcapIntensity" xml:space="preserve">
+    <value>Matcap强度</value>
+  </data>
+  <data name="ShadingValueMatcapRimPower" xml:space="preserve">
+    <value>Matcap边缘指数</value>
+  </data>
+  <data name="ShadingValuePreMulAlpha" xml:space="preserve">
+    <value>预乘Alpha开关</value>
+  </data>
+  <data name="ShadingValueRMOTexST" xml:space="preserve">
+    <value>RMO平铺和偏移</value>
+  </data>
+  <data name="ShadingValueReflectionFresnelF0" xml:space="preserve">
+    <value>基础反射率</value>
+  </data>
+  <data name="ShadingValueReflectionIntensity" xml:space="preserve">
+    <value>反射强度</value>
+  </data>
+  <data name="ShadingValueStockingCenterColor" xml:space="preserve">
+    <value>丝袜中心颜色</value>
+  </data>
+  <data name="ShadingValueStockingFalloffColor" xml:space="preserve">
+    <value>丝袜边缘颜色</value>
+  </data>
+  <data name="ShadingValueStockingFalloffPower" xml:space="preserve">
+    <value>丝袜边缘硬度</value>
+  </data>
+  <data name="ShadingValueUseGIFlatten" xml:space="preserve">
+    <value>皮肤光照</value>
+  </data>
+  <data name="ShadingValueUseGlitter" xml:space="preserve">
+    <value>闪光开关</value>
+  </data>
+  <data name="ShadingValueUseMatcapRef" xml:space="preserve">
+    <value>Matcap反射开关</value>
+  </data>
+  <data name="ShadingValueUseRampMap" xml:space="preserve">
+    <value>渐变贴图开关</value>
+  </data>
+  <data name="ShadingValueUseSpecularUV2" xml:space="preserve">
+    <value>UV2高光开关</value>
+  </data>
+  <data name="SkinReasonBlendShapes" xml:space="preserve">
+    <value>它有{0}个形态键，替换无法重现</value>
+  </data>
+  <data name="SkinReasonNoWeights" xml:space="preserve">
+    <value>它没有蒙皮权重</value>
+  </data>
+  <data name="SkinReasonUnreadableLayout" xml:space="preserve">
+    <value>它的蒙皮权重以本程序无法读取的格式存储</value>
+  </data>
+  <data name="SkinReasonWeightsUnread" xml:space="preserve">
+    <value>无法读取它的蒙皮权重</value>
+  </data>
+  <data name="SubjectStillReading" xml:space="preserve">
+    <value>仍在读取此对象。稍后再试。</value>
+  </data>
+  <data name="SubjectUnreadable" xml:space="preserve">
+    <value>无法从游戏文件中读取此对象。使用“工具 · 重新扫描游戏文件”重试。</value>
+  </data>
+  <data name="SupportTeamMember" xml:space="preserve">
+    <value>成员{0}</value>
+  </data>
+  <data name="SupportTeamWeapon" xml:space="preserve">
+    <value>武器</value>
+  </data>
+  <data name="TexCoordIgnored" xml:space="preserve">
+    <value>已忽略{1}上的UV{0}，因为该部件的游戏网格不支持此UV层。</value>
+  </data>
+  <data name="TexCoordListMany" xml:space="preserve">
+    <value>{0}和{1}</value>
+  </data>
+  <data name="TexCoordListTwo" xml:space="preserve">
+    <value>{0}和{1}</value>
+  </data>
+  <data name="TexCoordRestored" xml:space="preserve">
+    <value>已从该部件的游戏网格恢复{1}上的UV{0}，因为此UV层在Blender中被删除。</value>
+  </data>
+  <data name="TexCoordUneditableMissing" xml:space="preserve">
+    <value>{0}：由于缺少UV{2}，{1}无法在Blender中编辑。将保留游戏中的值。</value>
+  </data>
+  <data name="TexCoordUneditableNarrow_One" xml:space="preserve">
+    <value>{0}：由于UV{2}每个顶点只有{3}个值而不是至少两个，{1}无法在Blender中编辑。将保留游戏中的值。</value>
+  </data>
+  <data name="TexCoordUneditableNarrow_Other" xml:space="preserve">
+    <value>{0}：由于UV{2}每个顶点只有{3}个值而不是至少两个，{1}无法在Blender中编辑。将保留游戏中的值。</value>
+  </data>
+  <data name="UvGuideEditNoLayout" xml:space="preserve">
+    <value>此修改的网格没有UV布局，因此无法绘制UV参考图。</value>
+  </data>
+  <data name="UvGuideEditUnreadable" xml:space="preserve">
+    <value>无法读取此修改的网格，因此未绘制UV参考图。从Blender重新传回，或使用“还原网格”。</value>
+  </data>
+  <data name="UvGuideMeshesUnreadable" xml:space="preserve">
+    <value>无法从游戏中读取采样{0}的网格。重新扫描，然后再试一次。</value>
+  </data>
+  <data name="UvGuideNoLayout_One" xml:space="preserve">
+    <value>采样{0}的网格没有UV布局，因此无法绘制UV参考图。</value>
+  </data>
+  <data name="UvGuideNoLayout_Other" xml:space="preserve">
+    <value>采样{0}的网格没有UV布局，因此无法绘制UV参考图。</value>
+  </data>
+  <data name="UvGuideNoSampler" xml:space="preserve">
+    <value>此对象没有任何部件采样{0}。没有可绘制的内容。</value>
+  </data>
+  <data name="UvGuideNoSecondUv_One" xml:space="preserve">
+    <value>采样{0}的网格没有第二套UV，因此无法绘制UV1参考图。</value>
+  </data>
+  <data name="UvGuideNoSecondUv_Other" xml:space="preserve">
+    <value>采样{0}的网格没有第二套UV，因此无法绘制UV1参考图。</value>
+  </data>
+  <data name="WeaponBattlePassGroup" xml:space="preserve">
+    <value>战令</value>
+  </data>
+  <data name="WeaponPartsGroup" xml:space="preserve">
+    <value>配件 · {0}</value>
+  </data>
+  <data name="WeaponPartsOtherGroup" xml:space="preserve">
+    <value>配件 · 其他</value>
+  </data>
+  <data name="WeaponSkinsGroup" xml:space="preserve">
+    <value>涂装 · {0}</value>
+  </data>
+  <data name="WeaponTypeMelee" xml:space="preserve">
+    <value>近战</value>
+  </data>
+  <data name="WeaponTypeNumbered" xml:space="preserve">
+    <value>类型{0}</value>
+  </data>
+</root>

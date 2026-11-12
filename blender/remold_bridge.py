@@ -10,6 +10,10 @@ the N-panel sidebar (press N) with the live edit destinations, session notices, 
 picks up the exported `.glb` (+ a `.gf2send.json` write-complete sidecar). A first Send just goes; a
 Send that would replace an existing edit asks first, and every successful Send confirms with a popup.
 
+The panel and its messages show in Blender's language when the add-on has it (Simplified Chinese), then
+in the Lab's, which the Lab sets in `DRL_UI_LANGUAGE` when it launches Blender, then in English. The
+collection names below stay English in every language: a Send reads them.
+
 The scene is laid out so that attribution is visible in the outliner and survives a save:
 
     Scene Collection
@@ -88,6 +92,73 @@ import struct
 import tempfile
 import hashlib
 import textwrap
+import unicodedata
+
+
+# ---------------------------------------------------------------- UI language
+
+# The Lab's UI language tag, set on the Blender it launches.
+LAB_LANGUAGE_ENV = "DRL_UI_LANGUAGE"
+ENGLISH = "en"
+SIMPLIFIED_CHINESE = "zh-Hans"
+# The Lab's pseudolocale: every string in brackets, so a walk through the add-on shows any text left out.
+PSEUDO = "qps-ploc"
+
+# The language the add-on shows its text in. English until `gf2_apply_language` runs at launch.
+_LANGUAGE = {"tag": ENGLISH}
+
+
+def gf2_ui_language(blender_locale, blender_translates, lab_tag):
+    """The add-on's language: Blender's own when it shows a language the add-on has a table for, then the
+    Lab's, then English. Blender counts only while it translates its interface; English Blender has no
+    table to offer, so the Lab's language decides. `blender_locale` is Blender's locale identifier
+    (`zh_HANS`, or `zh_CN` before Blender 4.0)."""
+    locale = (blender_locale or "").split(".")[0].lower()
+    if blender_translates and locale in ("zh_hans", "zh_cn"):
+        return SIMPLIFIED_CHINESE
+    if lab_tag in (SIMPLIFIED_CHINESE, PSEUDO):
+        return lab_tag
+    return ENGLISH
+
+
+def gf2_apply_language():
+    """Settle the add-on's language for this Blender session, before any panel or operator registers."""
+    global _TARGET_FALLBACK_ITEMS
+    try:
+        locale = bpy.app.translations.locale
+        translates = bool(bpy.context.preferences.view.use_translate_interface)
+    except AttributeError:
+        locale, translates = "", False
+    _LANGUAGE["tag"] = gf2_ui_language(locale, translates, os.environ.get(LAB_LANGUAGE_ENV))
+    # Held at module level, as Blender's enum callback needs its strings kept alive.
+    _TARGET_FALLBACK_ITEMS = ((NEW_EDIT_TARGET, _t("New Edit"), ""),)
+
+
+def _t(text, **fields):
+    """`text`, an English message id, in the add-on's language, with `fields` filled in. A message the
+    table lacks shows in English; the unit suite checks that none is missing."""
+    tag = _LANGUAGE["tag"]
+    shown = _ZH_HANS.get(text, text) if tag == SIMPLIFIED_CHINESE else text
+    if fields:
+        shown = shown.format(**fields)
+    return "[" + shown + "]" if tag == PSEUDO else shown
+
+
+def _t_list(items):
+    """Items joined as a list in a sentence: `a, b` in English, `a、b` in Chinese."""
+    return ("、" if _LANGUAGE["tag"] == SIMPLIFIED_CHINESE else ", ").join(items)
+
+
+def _t_names(names):
+    """Names quoted and joined as a list: `'a', 'b'` in English, `“a”、“b”` in Chinese."""
+    if _LANGUAGE["tag"] == SIMPLIFIED_CHINESE:
+        return _t_list(f"“{name}”" for name in names)
+    return _t_list(f"'{name}'" for name in names)
+
+
+def _t_sentences(*sentences):
+    """Whole sentences joined into one message: a space between them in English, none in Chinese."""
+    return ("" if _LANGUAGE["tag"] == SIMPLIFIED_CHINESE else " ").join(sentences)
 
 
 # ---------------------------------------------------------------- collections carry the part
@@ -508,22 +579,22 @@ def _gf2_install_texture_transport(glb_path, imported_meshes):
             tex_coord = row.get("texCoord")
             if not _gf2_pin_texture_coordinate(mesh, material, node, tex_coord):
                 preview_warnings.append((
-                    f"'{row.get('property', 'texture')}' on '{gf2_label(mesh.name)}' could not use "
-                    f"TEXCOORD_{tex_coord}.",
-                    "The image was imported without a material preview."))
+                    _t("'{prop}' on '{part}' could not use TEXCOORD_{n}.",
+                       prop=row.get('property', 'texture'), part=gf2_label(mesh.name), n=tex_coord),
+                    _t("The image was imported without a material preview.")))
                 continue
         _gf2_connect_static_semantic(material, node, row.get("semantic"))
         installed += 1
     for name in missing:
         shown = gf2_label(name) if isinstance(name, str) else str(name)
         preview_warnings.append((
-            f"'{shown}' is not in this scene.",
-            "Its textures were not installed and cannot be edited here."))
+            _t("'{part}' is not in this scene.", part=shown),
+            _t("Its textures were not installed and cannot be edited here.")))
     for lead, detail in preview_warnings:
         print("GF2: " + lead + " " + detail)
     if preview_warnings:
         lines = [line for lead, detail in preview_warnings for line in ("⚠ " + lead, detail)]
-        _popup("Texture Preview Warnings", lines, 'INFO')
+        _popup(_t("Texture Preview Warnings"), lines, 'INFO')
     return installed
 
 
@@ -622,9 +693,10 @@ def _gf2_collect_standard_channels(meshes):
             for channel in _gf2_standard_image_channels(node):
                 if channel in claimed:
                     if claimed[channel] != image.name:
-                        warnings.append(f"Two pictures reach the {channel} channel on "
-                                        f"'{getattr(material, 'name', '')}'; "
-                                        f"'{claimed[channel]}' was sent.")
+                        warnings.append(_t("Two pictures reach the {channel} channel on '{material}'; "
+                                           "'{image}' was sent.", channel=channel,
+                                           material=getattr(material, 'name', ''),
+                                           image=claimed[channel]))
                 else:
                     fresh.append(channel)
             if not fresh:
@@ -633,8 +705,8 @@ def _gf2_collect_standard_channels(meshes):
                 png = _gf2_image_png(image)
             except (TypeError, ValueError, OSError, RuntimeError) as error:
                 print(f"GF2: could not carry {image.name} back: {error}")
-                warnings.append(f"'{image.name}' on '{getattr(material, 'name', '')}' could not be "
-                                "read and was not sent.")
+                warnings.append(_t("'{image}' on '{material}' could not be read and was not sent.",
+                                   image=image.name, material=getattr(material, 'name', '')))
                 continue
             for channel in fresh:
                 claimed[channel] = image.name
@@ -724,16 +796,23 @@ def _gf2_collect_texture_transport(meshes):
 
 def gf2_duplicate_tag_lines(duplicates):
     """One line per slot two nodes claimed, in the words of the send popup."""
-    return [f"Two nodes carry '{prop}' on '{material}' ({gf2_label(mesh)}); the first one was sent."
+    return [_t("Two nodes carry '{prop}' on '{material}' ({part}); the first one was sent.",
+               prop=prop, material=material, part=gf2_label(mesh))
             for prop, material, mesh in duplicates]
 
 # The two empty-scope refusals, shared by the checks and the send choke point so a scene the send
 # would refuse never reads as ready. Nothing attributed is a layout mistake; every part deliberately
-# emptied is a Hide with nothing left to send alongside it.
-NO_PART_MESH = (f"There are no part collections under {MOD_COLLECTION}, so a send carries nothing. "
+# emptied is a Hide with nothing left to send alongside it. Both are message ids: `gf2_empty_scope_line`
+# shows them in the add-on's language.
+NO_PART_MESH = ("There are no part collections under {mod}, so a send carries nothing. "
                 "Re-open the part from Doll Remolding Lab to recreate the part collections.")
 EVERY_PART_EMPTY = ("Every part collection is empty, so a send carries nothing. Move a mesh into "
                     "at least one part collection.")
+
+
+def gf2_empty_scope_line():
+    """The empty-scope refusal for the scene as it is: no part collection at all, or every one empty."""
+    return _t(EVERY_PART_EMPTY) if gf2_part_collections() else _t(NO_PART_MESH, mod=MOD_COLLECTION)
 
 
 def _ensure_collection(name, parent):
@@ -877,8 +956,8 @@ def gf2_bone_hashes(group_names):
 
 def gf2_hidden_mix_line(label):
     """The Send warning for a part weighted across a part the game starts shrunk and other parts."""
-    return (f"'{label}' has weights on a shrunk part's bones and on other bones. "
-            "In the game the two sets move apart.")
+    return _t("'{part}' has weights on a shrunk part's bones and on other bones. "
+              "In the game the two sets move apart.", part=label)
 
 
 def gf2_session_has_hidden_bones(session):
@@ -984,20 +1063,20 @@ def gf2_emptied_parts():
 
 def gf2_emptied_part_line(name):
     """The Check Mesh remedy for one part collection with no geometry."""
-    return (f"{gf2_label(name)} is emptied and sends as a hide. To keep the part, move a mesh back "
-            "into the collection.")
+    return _t("{part} is emptied and sends as a hide. To keep the part, move a mesh back "
+              "into the collection.", part=gf2_label(name))
 
 
 def gf2_emptied_part_confirm_line(name):
     """The terse confirmation and post-send line for an emptied part."""
-    return f"{gf2_label(name)} is emptied and sends as a hide."
+    return _t("{part} is emptied and sends as a hide.", part=gf2_label(name))
 
 
 def gf2_overwrite_warning(edit_labels):
     """The confirmation lead for selected edits that currently hold authored mesh work."""
     if not edit_labels:
         return None
-    return "Sending replaces the mesh work stored in " + ", ".join(edit_labels) + "."
+    return _t("Sending replaces the mesh work stored in {edits}.", edits=_t_list(edit_labels))
 
 
 def gf2_emptying_is_a_hide(session):
@@ -1363,7 +1442,7 @@ def _rebuild_target_rows(scene, session, previous=None, acknowledged_snapshot=No
     _TARGET_ITEM_REFS.clear()
     for spec in specs:
         items = tuple([(edit["id"], edit["label"], "") for edit in spec["edits"]]
-                      + [(NEW_EDIT_TARGET, "New Edit", "")])
+                      + [(NEW_EDIT_TARGET, _t("New Edit"), "")])
         _TARGET_ITEM_REFS[spec["part"]] = items
         row = rows.add()
         row.part_name = spec["part"]
@@ -1669,17 +1748,17 @@ def gf2_prepare_imported_alpha_materials(imported_objects, pre_existing_material
 
     warnings = []
     if missing_overlap:
-        warnings.append("These materials were switched to dithered transparency because Blender cannot "
-                        "control overlapping transparent surfaces: "
-                        + ", ".join(sorted(missing_overlap)) + ".")
+        warnings.append(_t("These materials were switched to dithered transparency because Blender cannot "
+                           "control overlapping transparent surfaces: {materials}.",
+                           materials=_t_list(sorted(missing_overlap))))
     if missing_alpha_link:
-        warnings.append("These materials were switched to dithered transparency because their alpha "
-                        "inputs could not be prepared: "
-                        + ", ".join(sorted(missing_alpha_link)) + ".")
+        warnings.append(_t("These materials were switched to dithered transparency because their alpha "
+                           "inputs could not be prepared: {materials}.",
+                           materials=_t_list(sorted(missing_alpha_link))))
     for warning in warnings:
         print("GF2: " + warning)
     if warnings:
-        _popup("Alpha Preview Warnings", ["⚠ " + warning for warning in warnings], 'INFO')
+        _popup(_t("Alpha Preview Warnings"), ["⚠ " + warning for warning in warnings], 'INFO')
     return {
         "blended": len(blended),
         "remapped": remapped,
@@ -1821,10 +1900,18 @@ def gf2_off_skeleton_groups(group_names, session_bones, other_bones):
 def gf2_off_skeleton_line(name, vertices, groups):
     """The blocking line for one mesh weighted to bones the session armature cannot carry into the game."""
     example = sorted(groups)[0]
-    return (f"{vertices} {'vertex' if vertices == 1 else 'vertices'} in '{name}' "
-            f"{'is' if vertices == 1 else 'are'} weighted to {len(groups)} "
-            f"{'bone' if len(groups) == 1 else 'bones'} this item does not have, such as '{example}'. "
-            f"Weight-paint those vertices to the bones of the armature in {MOD_COLLECTION}.")
+    bones = len(groups)
+    return _t_sentences(
+        _t(("{vertices} vertex in '{mesh}' is weighted to {bones} bone this item does not have, "
+            "such as '{example}'." if bones == 1 else
+            "{vertices} vertex in '{mesh}' is weighted to {bones} bones this item does not have, "
+            "such as '{example}'.") if vertices == 1 else
+           ("{vertices} vertices in '{mesh}' are weighted to {bones} bone this item does not have, "
+            "such as '{example}'." if bones == 1 else
+            "{vertices} vertices in '{mesh}' are weighted to {bones} bones this item does not have, "
+            "such as '{example}'."),
+           vertices=vertices, mesh=name, bones=bones, example=example),
+        _t("Weight-paint those vertices to the bones of the armature in {mod}.", mod=MOD_COLLECTION))
 
 
 def gf2_binding_line(name, others):
@@ -1832,11 +1919,12 @@ def gf2_binding_line(name, others):
     armatures that deform it instead; empty means none does."""
     target = f"{MOD_COLLECTION}/{ARMATURE_COLLECTION}"
     if not others:
-        return (f"'{name}' is not deformed by the armature in {target}, so Send would lose its weights. "
-                "Parent it to that armature (Ctrl+P, Armature Deform).")
-    listed = ", ".join(f"'{o}'" for o in others)
-    return (f"'{name}' is deformed by {listed} instead of the armature in {target}. Parent it to that "
-            f"armature (Ctrl+P, Armature Deform), then delete its Armature modifier for {listed}.")
+        return _t("'{mesh}' is not deformed by the armature in {target}, so Send would lose its weights. "
+                  "Parent it to that armature (Ctrl+P, Armature Deform).", mesh=name, target=target)
+    listed = _t_names(others)
+    return _t("'{mesh}' is deformed by {others} instead of the armature in {target}. Parent it to that "
+              "armature (Ctrl+P, Armature Deform), then delete its Armature modifier for {others}.",
+              mesh=name, others=listed, target=target)
 
 
 def _binding_others(obj, armature):
@@ -2241,21 +2329,22 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
     # names the part, and the app leaves that part's file alone. Everywhere else an empty scope means an
     # empty deliverable, and the send refuses rather than write one.
     if not mesh_objs and not (emptied and gf2_emptying_is_a_hide(session)):
-        raise RuntimeError("GF2: " + (EVERY_PART_EMPTY if gf2_part_collections() else NO_PART_MESH))
+        raise RuntimeError("GF2: " + gf2_empty_scope_line())
     # Same agreement rule as the empty-scope pair: the checks HARD on a diverged part name, and the
     # send refuses it, so the checkless headless route cannot ship a part the app has no target for.
     renamed = [p.name for p in gf2_part_collections()
                if isinstance(p.get(PART_MARKER), str) and p.name != p[PART_MARKER]]
     if renamed:
-        raise RuntimeError("GF2: renamed or suffixed part collection(s): " + ", ".join(renamed)
-                           + ". The mesh would ship as a part the app has no target for.")
+        raise RuntimeError("GF2: " + _t("renamed or suffixed part collection(s): {names}. The mesh would "
+                                        "ship as a part the app has no target for.",
+                                        names=_t_list(renamed)))
     # The skin checks HARD on the same two cases, refused here before the fill writes anything: the glTF
     # export would drop the skin, or move a weight onto a bone the game does not have.
     unskinned = gf2_unskinned_parts(session)
     skin_refusals = (gf2_binding_issues(mesh_objs, session_arm, unskinned)
                      + [line for _, line in gf2_off_skeleton_issues(mesh_objs, session_arm, unskinned)])
     if skin_refusals:
-        raise RuntimeError("GF2: " + " ".join(skin_refusals))
+        raise RuntimeError("GF2: " + _t_sentences(*skin_refusals))
     filled, still = gf2_fill_missing_weights(mesh_objs, session_arm, unskinned)
     if filled or still:
         print(f"GF2: auto-filled {filled} {'vertex' if filled == 1 else 'vertices'} from the skeleton"
@@ -2296,7 +2385,7 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
     image_format = next((p for p in properties if p.identifier == "export_image_format"), None)
     image_formats = {item.identifier for item in image_format.enum_items} if image_format is not None else set()
     if "NONE" not in image_formats:
-        raise RuntimeError("GF2: The running Blender version cannot export a geometry-only GLB.")
+        raise RuntimeError("GF2: " + _t("The running Blender version cannot export a geometry-only GLB."))
     opts = {k: v for k, v in want.items() if k in valid}
     dropped = [k for k in want if k not in valid]
     hidden = []
@@ -2326,8 +2415,9 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
         # dropped from a use_selection export without a word. Say so instead of sending a short mesh.
         missed = [o.name for o in shipping if not _is_selected(o)]
         if missed:
-            raise RuntimeError("GF2: Send cannot select the following objects for export: "
-                               f"{', '.join(missed)}. Re-enable the named collections in the outliner.")
+            raise RuntimeError("GF2: " + _t("Send cannot select the following objects for export: {names}. "
+                                            "Re-enable the named collections in the outliner.",
+                                            names=_t_list(missed)))
         saved_names = _apply_export_names(mesh_objs)
         bpy.ops.export_scene.gltf(**opts)
     finally:
@@ -2353,8 +2443,9 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
     if arms and any(o.vertex_groups for o in mesh_objs):
         with open(out_glb, "rb") as f:
             if b"JOINTS_0" not in f.read():
-                raise RuntimeError("GF2: the export dropped the skin because JOINTS_0 is absent from "
-                                   "the sent GLB. Sending would lose weights. Report the export failure.")
+                raise RuntimeError("GF2: " + _t("the export dropped the skin because JOINTS_0 is absent from "
+                                                "the sent GLB. Sending would lose weights. Report the export "
+                                                "failure."))
 
     # Blender computes tangents per mesh and gives up on the WHOLE mesh when any face is an n-gon,
     # logging it only to a console the modder cannot see. The app derives its own in that case, so the
@@ -2365,10 +2456,10 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
             if b"TANGENT" not in f.read():
                 print("GF2: no tangents in the sent GLB. Triangulate the mesh (Ctrl+T in Edit Mode) to "
                       "keep the authored surface detail.")
-                _popup("Sent Without Tangents",
-                       ["⚠ Blender could not compute tangents for the sent mesh.",
-                        "Normal map detail may shift.",
-                        "Triangulate the mesh (Ctrl+T in Edit Mode), then Send again."], 'INFO')
+                _popup(_t("Sent Without Tangents"),
+                       ["⚠ " + _t("Blender could not compute tangents for the sent mesh."),
+                        _t("Normal map detail may shift."),
+                        _t("Triangulate the mesh (Ctrl+T in Edit Mode), then Send again.")], 'INFO')
 
     # An option this Blender's glTF exporter does not carry was filtered out of the export above. The mesh
     # still ships; what it ships WITHOUT is only knowable here, so it is said where the send is read rather
@@ -2384,7 +2475,7 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
     if warning_lines:
         for line in warning_lines:
             print("GF2: " + line)
-        _popup("Sent With Warnings", ["⚠ " + line for line in warning_lines], 'INFO')
+        _popup(_t("Sent With Warnings"), ["⚠ " + line for line in warning_lines], 'INFO')
 
     # The sidecar is the write-complete sentinel (written last) that the watcher fires on, and it
     # carries the one intent the glb cannot express: which parts were emptied. An absent mesh is never
@@ -2405,8 +2496,8 @@ def gf2_send(out_dir, glb_path, edit_targets=None, hidden_mix_lines=None):
 def gf2_dropped_options_line(dropped):
     """The one wording for glTF export options the running Blender does not have. The send still stands —
     this names what it went out without, so an option lost to a version difference is visible."""
-    return "The running Blender version does not support these export options: " \
-        + ", ".join(sorted(dropped)) + "."
+    return _t("The running Blender version does not support these export options: {options}.",
+              options=_t_list(sorted(dropped)))
 
 
 # ---------------------------------------------------------------- pre-send sanity checks
@@ -2479,14 +2570,14 @@ def gf2_transform_warning(name, before, after, skinned):
     if not skinned:
         if any(_transform_differs(before.get(k), after.get(k))
                for k in ("location", "rotation", "scale")):
-            return ("SOFT", f"'{name}' has no skeleton. Object Mode position, rotation, and scale are "
-                            "dropped on Send. Apply the transform (Ctrl+A in Object Mode), or edit "
-                            "the geometry in Edit Mode.")
+            return ("SOFT", _t("'{mesh}' has no skeleton. Object Mode position, rotation, and scale are "
+                               "dropped on Send. Apply the transform (Ctrl+A in Object Mode), or edit "
+                               "the geometry in Edit Mode.", mesh=name))
         return None
     was, now = before.get("scale"), after.get("scale")
     if was is not None and now is not None and _mirrored(now) and not _mirrored(was):
-        return ("SOFT", f"'{name}' has a negative Object Mode scale. The mesh ships mirrored without "
-                        "flipped faces and renders inside-out.")
+        return ("SOFT", _t("'{mesh}' has a negative Object Mode scale. The mesh ships mirrored without "
+                           "flipped faces and renders inside-out.", mesh=name))
     return None
 
 
@@ -2509,50 +2600,55 @@ def _attribution_issues(mesh_objs):
     mod, ref = _mod_root(), _reference_root()
     parts = gf2_part_collections()
     part_names = {p.name for p in parts}
-    choices = ", ".join(p.name for p in parts)
+    choices = _t_list([p.name for p in parts])
     for o in mesh_objs:
         if not _in_tree(o, mod):
             if not _in_tree(o, ref):
-                issues.append(("HARD", f"'{o.name}' is outside {MOD_COLLECTION}"
-                                       + (f" and {REFERENCE_COLLECTION}" if ref is not None else "")
-                                       + ", so the object will not be sent. Move the object into a part "
-                                         "collection to include the object"
-                                       + (f", or into {REFERENCE_COLLECTION} to exclude the object."
-                                          if ref is not None else ".")))
+                issues.append(("HARD", _t("'{object}' is outside {mod} and {ref}, so the object will not be "
+                                          "sent. Move the object into a part collection to include the "
+                                          "object, or into {ref} to exclude the object." if ref is not None
+                                          else "'{object}' is outside {mod}, so the object will not be sent. "
+                                          "Move the object into a part collection to include the object.",
+                                          object=o.name, mod=MOD_COLLECTION, ref=REFERENCE_COLLECTION)))
             continue                     # Reference is scenery: no part to attribute, nothing to check
         part = _part_of(o)
         if part is None:
-            issues.append(("HARD", f"'{o.name}' is in {MOD_COLLECTION} but not in a part collection. "
-                                   + (f"Move the object into one of: {choices}." if choices else
-                                      f"Create a part collection under {MOD_COLLECTION} and move "
-                                      "the object.")))
+            issues.append(("HARD", _t_sentences(
+                _t("'{object}' is in {mod} but not in a part collection.", object=o.name, mod=MOD_COLLECTION),
+                _t("Move the object into one of: {choices}.", choices=choices) if choices else
+                _t("Create a part collection under {mod} and move the object.", mod=MOD_COLLECTION))))
         elif _base_name(o.name) != part.name and _base_name(o.name) in part_names:
-            issues.append(("SOFT", f"The {gf2_label(o.name)} mesh is in the {gf2_label(part.name)} "
-                                   f"collection and is sent as {gf2_label(part.name)}. Move it into "
-                                   f"{gf2_label(o.name)} if that is a mistake."))
+            issues.append(("SOFT", _t("The {mesh} mesh is in the {part} collection and is sent as {part}. "
+                                      "Move it into {mesh} if that is a mistake.",
+                                      mesh=gf2_label(o.name), part=gf2_label(part.name))))
     hidden_root = _shrunk_parts_root()
     if hidden_root is not None and _is_excluded(hidden_root):
-        issues.append(("HARD", f"'{SHRUNK_PARTS_COLLECTION}' is excluded from the view layer. The part "
-                               "meshes in it cannot be sent. Re-enable the collection in the outliner."))
+        issues.append(("HARD", _t("'{collection}' is excluded from the view layer. The part meshes in it "
+                                  "cannot be sent. Re-enable the collection in the outliner.",
+                                  collection=SHRUNK_PARTS_COLLECTION)))
     for part in parts:
         if _is_excluded(part):
-            issues.append(("HARD", f"'{part.name}' is excluded from the view layer. The part meshes "
-                                   "cannot be sent. Re-enable the collection in the outliner."))
+            issues.append(("HARD", _t("'{collection}' is excluded from the view layer. The part meshes "
+                                      "cannot be sent. Re-enable the collection in the outliner.",
+                                      collection=part.name)))
         wanted = part.get(PART_MARKER)
         if isinstance(wanted, str) and part.name != wanted:
             if _base_name(part.name) == wanted:
-                issues.append(("HARD", f"Another collection is already named '{wanted}', forcing the "
-                                       f"part collection to use '{part.name}', which cannot be sent. "
-                                       f"Rename or delete the other '{wanted}' collection, then re-import."))
+                issues.append(("HARD", _t("Another collection is already named '{wanted}', forcing the "
+                                          "part collection to use '{actual}', which cannot be sent. "
+                                          "Rename or delete the other '{wanted}' collection, then re-import.",
+                                          wanted=wanted, actual=part.name)))
             else:
-                issues.append(("HARD", f"The '{wanted}' collection was renamed to '{part.name}' and "
-                                       f"cannot be sent. Rename the collection back to '{wanted}'."))
+                issues.append(("HARD", _t("The '{wanted}' collection was renamed to '{actual}' and "
+                                          "cannot be sent. Rename the collection back to '{wanted}'.",
+                                          wanted=wanted, actual=part.name)))
         held = _part_meshes(part)
         if len(held) > 1:
-            issues.append(("HARD", f"The {gf2_label(part.name)} collection holds {len(held)} meshes: "
-                                   f"{', '.join(gf2_label(o.name) for o in held)}. A part sends as one "
-                                   "mesh. Join the meshes (select them, then Ctrl+J), or move the "
-                                   f"extras into {REFERENCE_COLLECTION}."))
+            issues.append(("HARD", _t("The {part} collection holds {count} meshes: {meshes}. A part sends "
+                                      "as one mesh. Join the meshes (select them, then Ctrl+J), or move "
+                                      "the extras into {ref}.", part=gf2_label(part.name), count=len(held),
+                                      meshes=_t_list([gf2_label(o.name) for o in held]),
+                                      ref=REFERENCE_COLLECTION)))
     return issues
 
 
@@ -2578,13 +2674,15 @@ def gf2_cheap_checks(mesh_objs, armature):
     # includes the one case where an empty scope is fine: a named-part session whose part was emptied on
     # purpose, already warned about above.
     if not shipping and not (gf2_emptied_parts() and gf2_emptying_is_a_hide(load_session())):
-        issues.append(("HARD", EVERY_PART_EMPTY if gf2_part_collections() else NO_PART_MESH))
+        issues.append(("HARD", gf2_empty_scope_line()))
     # HARD — a weighted scene with no session armature exports skinless; that payload is refused.
     weighted = [o for o in shipping if o.vertex_groups]
     if weighted and armature is None:
-        issues.append(("HARD", f"{len(weighted)} weighted part{'' if len(weighted) == 1 else 's'} but "
-                               f"no armature in {MOD_COLLECTION}, so Send would lose the skin. "
-                               f"Keep the skeleton in {MOD_COLLECTION}/{ARMATURE_COLLECTION}."))
+        issues.append(("HARD", _t("{count} weighted part but no armature in {mod}, so Send would lose "
+                                  "the skin. Keep the skeleton in {mod}/{armature}." if len(weighted) == 1
+                                  else "{count} weighted parts but no armature in {mod}, so Send would lose "
+                                  "the skin. Keep the skeleton in {mod}/{armature}.",
+                                  count=len(weighted), mod=MOD_COLLECTION, armature=ARMATURE_COLLECTION)))
     # HARD — a skinned mesh the session armature does not deform exports skinless or deforms apart from
     # what the viewport shows.
     unskinned = gf2_unskinned_parts(load_session())
@@ -2606,17 +2704,20 @@ def gf2_cheap_checks(mesh_objs, armature):
         # Slots appended after the imported ones are new submeshes the app takes; only the imported
         # slots have face ranges that a reorder, rename or removal would move.
         if old is not None and cur[:len(old)] != old:
-            issues.append(("SOFT", f"'{mo.name}' material slots changed since import, so face ranges "
-                                   "may now use different materials. Restore the imported slot order "
-                                   "if the change was not intended."))
+            issues.append(("SOFT", _t("'{mesh}' material slots changed since import, so face ranges "
+                                      "may now use different materials. Restore the imported slot order "
+                                      "if the change was not intended.", mesh=mo.name)))
     # SOFT — re-export keys off bone names; a renamed/removed bone breaks the weight compile.
     if base.get("bones") and armature is not None:
         cur_bones = set(b.name for b in armature.data.bones)
         gone = [b for b in base["bones"] if b not in cur_bones]
         if gone:
-            issues.append(("SOFT", f"{len(gone)} imported bone{'' if len(gone) == 1 else 's'} renamed "
-                                   f"or removed (for example, '{gone[0]}'). Weights on those bones are lost "
-                                   "on Send. Rename the bones, or undo the change."))
+            issues.append(("SOFT", _t("{count} imported bone renamed or removed (for example, '{example}'). "
+                                      "Weights on those bones are lost on Send. Rename the bones, or undo "
+                                      "the change." if len(gone) == 1 else
+                                      "{count} imported bones renamed or removed (for example, '{example}'). "
+                                      "Weights on those bones are lost on Send. Rename the bones, or undo "
+                                      "the change.", count=len(gone), example=gone[0])))
     return issues
 
 
@@ -2642,10 +2743,12 @@ def gf2_run_checks(mesh_objs, armature, hidden_mix=None):
     blockers = [line for _, line in off_skeleton]
     if unsolvable:
         total = sum(n for _, n in unsolvable)
-        named = ", ".join(f"'{n}'" for n, _ in unsolvable)
-        blockers.append(f"{total} {'vertex has' if total == 1 else 'vertices have'} no "
-                        f"weight in {named} and cannot be filled from the skeleton, so "
-                        "Send is blocked. Weight-paint or delete the affected vertices.")
+        named = _t_names([n for n, _ in unsolvable])
+        blockers.append(_t("{count} vertex has no weight in {meshes} and cannot be filled from the skeleton, "
+                           "so Send is blocked. Weight-paint or delete the affected vertices." if total == 1
+                           else "{count} vertices have no weight in {meshes} and cannot be filled from the "
+                           "skeleton, so Send is blocked. Weight-paint or delete the affected vertices.",
+                           count=total, meshes=named))
     lead = next((i for i, (sev, _) in enumerate(issues) if sev != "HARD"), len(issues))
     issues[lead:lead] = [("HARD", line) for line in blockers]
     # SOFT — weight across a part the game starts shrunk and other parts. It walks every vertex's weights,
@@ -2677,13 +2780,13 @@ def gf2_status_line(issues):
     hard = sum(1 for sev, _ in issues if sev == "HARD")
     soft = len(issues) - hard
     if not hard and not soft:
-        return "Ready to send"
+        return _t("Ready to send")
     bits = []
     if hard:
-        bits.append(f"{hard} blocking issue" + ("" if hard == 1 else "s"))
+        bits.append(_t("{count} blocking issue" if hard == 1 else "{count} blocking issues", count=hard))
     if soft:
-        bits.append(f"{soft} warning" + ("" if soft == 1 else "s"))
-    return " · ".join(bits) + " — click Check Mesh for details"
+        bits.append(_t("{count} warning" if soft == 1 else "{count} warnings", count=soft))
+    return _t("{counts} — click Check Mesh for details", counts=" · ".join(bits))
 
 
 _LABELS_CACHE = {"raw": None, "labels": {}}
@@ -2739,11 +2842,11 @@ def gf2_scope_lines(n_objects, n_verts, bakes_modifiers):
     """What the next Send carries, stated before it acts: a stray import reads as an unexpected count
     here rather than as an unexpected mesh in the built mod. Reference is not mentioned: it never
     ships, and a count of what is NOT sent is noise on every send."""
-    head = (f"{n_objects} object" + ("" if n_objects == 1 else "s")
-            + f" · {n_verts:,} " + ("vertex" if n_verts == 1 else "vertices"))
+    head = (_t("{count} object" if n_objects == 1 else "{count} objects", count=n_objects)
+            + " · " + _t("{count} vertex" if n_verts == 1 else "{count} vertices", count=f"{n_verts:,}"))
     lines = [head]
     if bakes_modifiers:
-        lines.append("Modifiers are baked on Send.")
+        lines.append(_t("Modifiers are baked on Send."))
     return lines
 
 
@@ -2805,10 +2908,64 @@ def gf2_panel_wrap_width(region_width, ui_scale=1.0):
 
 def gf2_wrapped_lines(text, width=48, lead=""):
     """Clipped-sidebar-safe label rows: the lead on the first wrapped line, matching indentation
-    after. Blender labels never wrap on their own — they ellipsize mid-sentence."""
-    wrapped = textwrap.wrap(text, width=max(12, width - len(lead)), break_long_words=False,
-                            break_on_hyphens=False) or [""]
+    after. Blender labels never wrap on their own — they ellipsize mid-sentence. Text with wide
+    characters (Chinese) wraps between them as well as at spaces; see `_gf2_wrap_wide`."""
+    room = max(12, width - len(lead))
+    if any(_gf2_is_wide(ch) for ch in text):
+        wrapped = _gf2_wrap_wide(text, room) or [""]
+    else:
+        wrapped = textwrap.wrap(text, width=room, break_long_words=False, break_on_hyphens=False) or [""]
     return [lead + wrapped[0]] + [" " * len(lead) + line for line in wrapped[1:]]
+
+
+# A line may not start with closing punctuation or end with opening punctuation.
+_GF2_NO_LINE_START = set("，。、：；？！）》」』”’…·,.:;?!)]")
+_GF2_NO_LINE_END = set("（《「『“‘([")
+
+
+def _gf2_is_wide(ch):
+    """A character a sidebar draws about two Latin letters wide: CJK ideographs and full-width forms."""
+    return unicodedata.east_asian_width(ch) in ("W", "F")
+
+
+def _gf2_text_width(text):
+    return sum(2 if _gf2_is_wide(ch) else 1 for ch in text)
+
+
+def _gf2_wrap_wide(text, width):
+    """Greedy wrap for text with wide characters, measured in Latin-letter columns. A break may fall at a
+    space or beside a wide character, never inside a run of Latin letters or digits (a name, `Ctrl+P`), and
+    never where `_GF2_NO_LINE_START` or `_GF2_NO_LINE_END` forbids. A run wider than a line keeps a line of
+    its own, as `textwrap` does with `break_long_words=False`."""
+    units, run = [], ""
+    for ch in text:
+        if ch == " " or _gf2_is_wide(ch):
+            if run:
+                units.append(run)
+                run = ""
+            units.append(ch)
+        else:
+            run += ch
+    if run:
+        units.append(run)
+    # Glue each unit that may not start a line to the one before it, and each that may not end a line to
+    # the one after it, so the greedy fill below never splits them.
+    glued = []
+    for unit in units:
+        if glued and (unit[0] in _GF2_NO_LINE_START or glued[-1][-1] in _GF2_NO_LINE_END):
+            glued[-1] += unit
+        else:
+            glued.append(unit)
+    lines, line = [], ""
+    for unit in glued:
+        if line and _gf2_text_width(line + unit.rstrip()) > width:
+            lines.append(line.rstrip())
+            line = unit.lstrip()
+        else:
+            line += unit
+    if line.strip():
+        lines.append(line.rstrip())
+    return lines
 
 
 def gf2_wrapped_notice_lines(notice, width=48):
@@ -2843,7 +3000,7 @@ def _refresh_live_status():
         text = gf2_status_line(gf2_cheap_checks(_scene_meshes(), _session_armature()))
     except Exception as e:
         print(f"GF2: live check failed: {e}")
-        text = UNREADABLE
+        text = _t(UNREADABLE)
     _LIVE["ran"] = time.monotonic()
     if text != _LIVE["text"]:
         _LIVE["text"] = text
@@ -2896,15 +3053,15 @@ def _register_session_refresh(glb_path):
 
 def _register_ui(glb_path, send_dir):
     class GF2_PG_target_row(bpy.types.PropertyGroup):
-        part_name: bpy.props.StringProperty(name="Part")
-        part_label: bpy.props.StringProperty(name="Part Label")
-        target: bpy.props.EnumProperty(name="Edit", items=_gf2_target_items)
-        new_name: bpy.props.StringProperty(name="Name")
+        part_name: bpy.props.StringProperty(name=_t("Part"))
+        part_label: bpy.props.StringProperty(name=_t("Part Label"))
+        target: bpy.props.EnumProperty(name=_t("Edit"), items=_gf2_target_items)
+        new_name: bpy.props.StringProperty(name=_t("Name"))
 
     bpy.utils.register_class(GF2_PG_target_row)
     bpy.types.Scene.gf2_target_rows = bpy.props.CollectionProperty(type=GF2_PG_target_row)
-    bpy.types.Scene.gf2_send_dir = bpy.props.StringProperty(name="Send Directory", default=send_dir or "")
-    bpy.types.Scene.gf2_glb_path = bpy.props.StringProperty(name="Source GLB", default=glb_path or "")
+    bpy.types.Scene.gf2_send_dir = bpy.props.StringProperty(name=_t("Send Directory"), default=send_dir or "")
+    bpy.types.Scene.gf2_glb_path = bpy.props.StringProperty(name=_t("Source GLB"), default=glb_path or "")
 
     def _scene_meshes_arm():
         # Every mesh in the scene (the attribution checks need the ones outside Mod too) paired with
@@ -2919,22 +3076,22 @@ def _register_ui(glb_path, send_dir):
 
     class GF2_OT_check(bpy.types.Operator):
         bl_idname = "gf2.check_mesh"
-        bl_label = "Check Mesh"
-        bl_description = "Run the pre-send checks without exporting"
+        bl_label = _t("Check Mesh")
+        bl_description = _t("Run the pre-send checks without exporting")
 
         def execute(self, ctx):
             meshes, arm = _scene_meshes_arm()
             issues = gf2_run_checks(meshes, arm)
             if not issues:
-                self.report({'INFO'}, "Ready to send")
-                _popup("Check Mesh", ["Ready to send."], 'CHECKMARK')
+                self.report({'INFO'}, _t("Ready to send"))
+                _popup(_t("Check Mesh"), [_t("Ready to send.")], 'CHECKMARK')
                 return {'FINISHED'}
             lines = []
             for sev, msg in issues:
                 print(f"GF2 {'BLOCK' if sev == 'HARD' else 'warn'}: {msg}")
                 lines.append(("✗ " if sev == "HARD" else "⚠ ") + msg)
             hard = sum(1 for sev, _ in issues if sev == "HARD")
-            _popup("Check Mesh", lines, 'ERROR' if hard else 'INFO')
+            _popup(_t("Check Mesh"), lines, 'ERROR' if hard else 'INFO')
             # The popup IS the surface. An {'ERROR'} report draws its own popup on top of it, so the
             # modder gets two overlapping boxes, the top one only pointing at the one it covers.
             self.report({'WARNING'}, gf2_status_line(issues))
@@ -2942,8 +3099,8 @@ def _register_ui(glb_path, send_dir):
 
     class GF2_OT_send(bpy.types.Operator):
         bl_idname = "gf2.send_to_lab"
-        bl_label = "Send to Lab"
-        bl_description = "Export the edited parts back to Doll Remolding Lab"
+        bl_label = _t("Send to Lab")
+        bl_description = _t("Export the edited parts back to Doll Remolding Lab")
 
         _soft = None
         _scope = None
@@ -2960,7 +3117,7 @@ def _register_ui(glb_path, send_dir):
             self._targets = gf2_send_target_map(
                 session, getattr(ctx.scene, "gf2_target_rows", ()), part_names)
             if not ctx.scene.gf2_send_dir:
-                self.report({'ERROR'}, "No send directory is set.")
+                self.report({'ERROR'}, _t("No send directory is set."))
                 return {'CANCELLED'}
             meshes, arm = _scene_meshes_arm()
             # read once: the checks list it, and the send is handed it rather than reading it again
@@ -2975,10 +3132,10 @@ def _register_ui(glb_path, send_dir):
             if hard:
                 for m in hard:
                     print(f"GF2 BLOCK: {m}")
-                _popup("Send Blocked", ["✗ " + m for m in hard]
-                       + ["", "Fix these, then Send again."], 'ERROR')
+                _popup(_t("Send Blocked"), ["✗ " + m for m in hard]
+                       + ["", _t("Fix these, then Send again.")], 'ERROR')
                 # WARNING, not ERROR: an ERROR report opens a second popup over the one just shown.
-                self.report({'WARNING'}, f"Send blocked. {len(hard)} to fix.")
+                self.report({'WARNING'}, _t("Send blocked. {count} to fix.", count=len(hard)))
                 return {'CANCELLED'}
             return None
 
@@ -3019,15 +3176,15 @@ def _register_ui(glb_path, send_dir):
             s = ctx.scene
             out = gf2_send(s.gf2_send_dir, s.gf2_glb_path, self._targets, hidden_mix_lines=self._mix)
             soft = self._soft
-            sent_line = f"Sent: {os.path.basename(out)}"
+            sent_line = _t("Sent: {file}", file=os.path.basename(out))
             emptied = [gf2_emptied_part_confirm_line(name) for name in (self._emptied or ())]
             if soft:
-                _popup("Sent With Warnings", ["⚠ " + m for m in soft] + emptied
+                _popup(_t("Sent With Warnings"), ["⚠ " + m for m in soft] + emptied
                        + ["", sent_line], 'INFO')
-                self.report({'WARNING'}, f"Sent with {len(soft)} warning(s). See the console.")
+                self.report({'WARNING'}, _t("Sent with {count} warning(s). See the console.", count=len(soft)))
             else:
                 # The status-bar report alone is easy to miss: confirm the export where the modder is looking.
-                _popup("Sent", emptied + ([""] if emptied else []) + [sent_line], 'INFO')
+                _popup(_t("Sent"), emptied + ([""] if emptied else []) + [sent_line], 'INFO')
                 self.report({'INFO'}, sent_line)
             return {'FINISHED'}
 
@@ -3059,21 +3216,21 @@ def _register_ui(glb_path, send_dir):
                     row.label(text=target.part_label)
                     row.prop(target, "target", text="")
                     if target.target == NEW_EDIT_TARGET:
-                        target_box.prop(target, "new_name", text="Name")
+                        target_box.prop(target, "new_name", text=_t("Name"))
                 has_reference_meshes = bool(_reference_meshes())
             except Exception as e:
                 print(f"GF2: panel state read failed: {e}")
-                col.label(text=UNREADABLE)
+                col.label(text=_t(UNREADABLE))
             col.operator("gf2.check_mesh", icon="CHECKMARK")
             col.operator("gf2.send_to_lab", icon="EXPORT")
-            for line in gf2_wrapped_lines(_LIVE["text"] or "Checking mesh…", wrap):
+            for line in gf2_wrapped_lines(_LIVE["text"] or _t("Checking mesh…"), wrap):
                 col.label(text=line)
             tips = col.box()
-            tip_lines = ["An unchanged part sends nothing.",
-                         "Deleting all of a part's geometry sends it as a hide."]
+            tip_lines = [_t("An unchanged part sends nothing."),
+                         _t("Deleting all of a part's geometry sends it as a hide.")]
             if has_reference_meshes:
-                tip_lines.append("Reference parts are shown for context and are not sent.")
-            tip_lines.append("The skeleton is hidden by default — unhide it to weight paint.")
+                tip_lines.append(_t("Reference parts are shown for context and are not sent."))
+            tip_lines.append(_t("The skeleton is hidden by default — unhide it to weight paint."))
             for tip in tip_lines:
                 for line in gf2_wrapped_lines(tip, wrap):
                     tips.label(text=line)
@@ -3084,6 +3241,193 @@ def _register_ui(glb_path, send_dir):
     _rebuild_target_rows(bpy.context.scene, load_session(), _scene_target_states(bpy.context.scene))
     _register_live_status()
     _register_session_refresh(glb_path)
+
+
+# ---------------------------------------------------------------- Simplified Chinese
+
+# Every message `_t` shows, keyed by its English id. Collection names (`Mod`, `Reference`, `Armature`,
+# `Shrunk Parts`), Blender key names and glTF identifiers stay as they are in both languages.
+_ZH_HANS = {
+    # panel and operators
+    "Check Mesh": "检查网格",
+    "Run the pre-send checks without exporting": "运行发送前检查，不导出",
+    "Send to Lab": "发送到Lab",
+    "Export the edited parts back to Doll Remolding Lab": "将编辑后的部件导出回Doll Remolding Lab",
+    "Part": "部件",
+    "Part Label": "部件标签",
+    "Edit": "修改",
+    "Name": "名称",
+    "Send Directory": "发送目录",
+    "Source GLB": "源GLB",
+    "New Edit": "新修改",
+    "⚠ Scene state unreadable": "⚠ 无法读取场景状态",
+    "Checking mesh…": "正在检查网格…",
+    "An unchanged part sends nothing.": "未更改的部件不会发送任何内容。",
+    "Deleting all of a part's geometry sends it as a hide.": "删除部件的全部几何体会将其作为隐藏发送。",
+    "Reference parts are shown for context and are not sent.": "参考部件仅作为参照显示，不会发送。",
+    "The skeleton is hidden by default — unhide it to weight paint.": "骨架默认隐藏，取消隐藏后即可绘制权重。",
+
+    # status line and scope
+    "Ready to send": "可以发送",
+    "Ready to send.": "可以发送。",
+    "{count} blocking issue": "{count}个阻止发送的问题",
+    "{count} blocking issues": "{count}个阻止发送的问题",
+    "{count} warning": "{count}个警告",
+    "{count} warnings": "{count}个警告",
+    "{counts} — click Check Mesh for details": "{counts}，点击“检查网格”查看详情",
+    "{count} object": "{count}个物体",
+    "{count} objects": "{count}个物体",
+    "{count} vertex": "{count}个顶点",
+    "{count} vertices": "{count}个顶点",
+    "Modifiers are baked on Send.": "发送时会应用修改器。",
+
+    # send results
+    "No send directory is set.": "未设置发送目录。",
+    "Send Blocked": "发送被阻止",
+    "Fix these, then Send again.": "修复这些问题，然后再次发送。",
+    "Send blocked. {count} to fix.": "发送被阻止。需修复{count}项。",
+    "Sent": "已发送",
+    "Sent: {file}": "已发送：{file}",
+    "Sent With Warnings": "已发送，有警告",
+    "Sent with {count} warning(s). See the console.": "已发送，有{count}个警告。详见控制台。",
+    "Sent Without Tangents": "已发送，无切线",
+    "Blender could not compute tangents for the sent mesh.": "Blender无法为发送的网格计算切线。",
+    "Normal map detail may shift.": "法线贴图细节可能会偏移。",
+    "Triangulate the mesh (Ctrl+T in Edit Mode), then Send again.":
+        "将网格三角化（编辑模式下按Ctrl+T），然后再次发送。",
+    "Sending replaces the mesh work stored in {edits}.": "发送会替换{edits}中已保存的网格改动。",
+    "{part} is emptied and sends as a hide.": "{part}已清空，将作为隐藏发送。",
+    "{part} is emptied and sends as a hide. To keep the part, move a mesh back into the collection.":
+        "{part}已清空，将作为隐藏发送。要保留该部件，将一个网格移回该集合。",
+    "The running Blender version does not support these export options: {options}.":
+        "当前运行的Blender版本不支持以下导出选项：{options}。",
+    "The running Blender version cannot export a geometry-only GLB.":
+        "当前运行的Blender版本无法导出仅含几何体的GLB。",
+    "Send cannot select the following objects for export: {names}. Re-enable the named collections in "
+    "the outliner.":
+        "发送无法选中以下要导出的物体：{names}。在大纲视图中重新启用这些物体所在的集合。",
+    "the export dropped the skin because JOINTS_0 is absent from the sent GLB. Sending would lose weights. "
+    "Report the export failure.":
+        "导出丢失了蒙皮，因为发送的GLB中没有JOINTS_0。发送会丢失权重。报告此导出失败。",
+    "renamed or suffixed part collection(s): {names}. The mesh would ship as a part the app has no target "
+    "for.":
+        "部件集合被重命名或添加了后缀：{names}。该网格会作为Doll Remolding Lab中没有对应目标的部件发送。",
+
+    # textures and alpha
+    "Texture Preview Warnings": "贴图预览警告",
+    "'{prop}' on '{part}' could not use TEXCOORD_{n}.": "“{part}”上的“{prop}”无法使用TEXCOORD_{n}。",
+    "The image was imported without a material preview.": "该图片已导入，但没有材质预览。",
+    "'{part}' is not in this scene.": "“{part}”不在此场景中。",
+    "Its textures were not installed and cannot be edited here.": "其贴图未安装，无法在此编辑。",
+    "Two pictures reach the {channel} channel on '{material}'; '{image}' was sent.":
+        "材质“{material}”的{channel}通道连接了两张图片，已发送“{image}”。",
+    "'{image}' on '{material}' could not be read and was not sent.":
+        "无法读取材质“{material}”上的“{image}”，未发送。",
+    "Two nodes carry '{prop}' on '{material}' ({part}); the first one was sent.":
+        "材质“{material}”（{part}）上有两个节点使用“{prop}”，已发送第一个。",
+    "Alpha Preview Warnings": "Alpha预览警告",
+    "These materials were switched to dithered transparency because Blender cannot control overlapping "
+    "transparent surfaces: {materials}.":
+        "以下材质已切换为抖动透明，因为Blender无法控制重叠的透明表面：{materials}。",
+    "These materials were switched to dithered transparency because their alpha inputs could not be "
+    "prepared: {materials}.":
+        "以下材质已切换为抖动透明，因为无法准备其Alpha输入：{materials}。",
+
+    # parts and collections
+    "There are no part collections under {mod}, so a send carries nothing. Re-open the part from Doll "
+    "Remolding Lab to recreate the part collections.":
+        "{mod}下没有部件集合，发送不会包含任何内容。从Doll Remolding Lab重新打开该部件以重建部件集合。",
+    "Every part collection is empty, so a send carries nothing. Move a mesh into at least one part "
+    "collection.":
+        "所有部件集合都是空的，发送不会包含任何内容。将一个网格移入至少一个部件集合。",
+    "'{object}' is outside {mod} and {ref}, so the object will not be sent. Move the object into a part "
+    "collection to include the object, or into {ref} to exclude the object.":
+        "“{object}”不在{mod}和{ref}中，因此不会发送该物体。将其移入部件集合即可包含，移入{ref}即可排除。",
+    "'{object}' is outside {mod}, so the object will not be sent. Move the object into a part collection "
+    "to include the object.":
+        "“{object}”不在{mod}中，因此不会发送该物体。将其移入部件集合即可包含。",
+    "'{object}' is in {mod} but not in a part collection.": "“{object}”在{mod}中，但不在部件集合中。",
+    "Move the object into one of: {choices}.": "将该物体移入以下集合之一：{choices}。",
+    "Create a part collection under {mod} and move the object.": "在{mod}下创建一个部件集合，并将该物体移入。",
+    "The {mesh} mesh is in the {part} collection and is sent as {part}. Move it into {mesh} if that is a "
+    "mistake.":
+        "{mesh}网格位于{part}集合中，将作为{part}发送。如果有误，将其移入{mesh}。",
+    "'{collection}' is excluded from the view layer. The part meshes in it cannot be sent. Re-enable the "
+    "collection in the outliner.":
+        "“{collection}”已从视图层中排除，其中的部件网格无法发送。在大纲视图中重新启用该集合。",
+    "'{collection}' is excluded from the view layer. The part meshes cannot be sent. Re-enable the "
+    "collection in the outliner.":
+        "“{collection}”已从视图层中排除，部件网格无法发送。在大纲视图中重新启用该集合。",
+    "Another collection is already named '{wanted}', forcing the part collection to use '{actual}', which "
+    "cannot be sent. Rename or delete the other '{wanted}' collection, then re-import.":
+        "已有另一个集合名为“{wanted}”，部件集合只能使用“{actual}”，因此无法发送。重命名或删除另一个"
+        "“{wanted}”集合，然后重新导入。",
+    "The '{wanted}' collection was renamed to '{actual}' and cannot be sent. Rename the collection back to "
+    "'{wanted}'.":
+        "“{wanted}”集合已被重命名为“{actual}”，无法发送。将该集合改回“{wanted}”。",
+    "The {part} collection holds {count} meshes: {meshes}. A part sends as one mesh. Join the meshes "
+    "(select them, then Ctrl+J), or move the extras into {ref}.":
+        "{part}集合包含{count}个网格：{meshes}。一个部件只能作为一个网格发送。合并这些网格（选中后按Ctrl+J），"
+        "或将多余的网格移入{ref}。",
+    "'{part}' has weights on a shrunk part's bones and on other bones. In the game the two sets move "
+    "apart.":
+        "“{part}”的权重同时位于缩小部件的骨骼和其他骨骼上。在游戏中这两组骨骼会分开移动。",
+
+    # skin and weights
+    "{count} weighted part but no armature in {mod}, so Send would lose the skin. Keep the skeleton in "
+    "{mod}/{armature}.":
+        "有{count}个带权重的部件，但{mod}中没有骨架，发送会丢失蒙皮。将骨架保留在{mod}/{armature}中。",
+    "{count} weighted parts but no armature in {mod}, so Send would lose the skin. Keep the skeleton in "
+    "{mod}/{armature}.":
+        "有{count}个带权重的部件，但{mod}中没有骨架，发送会丢失蒙皮。将骨架保留在{mod}/{armature}中。",
+    "'{mesh}' is not deformed by the armature in {target}, so Send would lose its weights. Parent it to "
+    "that armature (Ctrl+P, Armature Deform).":
+        "“{mesh}”未由{target}中的骨架变形，发送会丢失其权重。将其父级设为该骨架（Ctrl+P，骨架形变）。",
+    "'{mesh}' is deformed by {others} instead of the armature in {target}. Parent it to that armature "
+    "(Ctrl+P, Armature Deform), then delete its Armature modifier for {others}.":
+        "“{mesh}”由{others}变形，而不是{target}中的骨架。将其父级设为该骨架（Ctrl+P，骨架形变），然后删除其"
+        "针对{others}的骨架修改器。",
+    "{vertices} vertex in '{mesh}' is weighted to {bones} bone this item does not have, such as "
+    "'{example}'.":
+        "“{mesh}”中有{vertices}个顶点的权重位于此对象没有的{bones}根骨骼上，例如“{example}”。",
+    "{vertices} vertex in '{mesh}' is weighted to {bones} bones this item does not have, such as "
+    "'{example}'.":
+        "“{mesh}”中有{vertices}个顶点的权重位于此对象没有的{bones}根骨骼上，例如“{example}”。",
+    "{vertices} vertices in '{mesh}' are weighted to {bones} bone this item does not have, such as "
+    "'{example}'.":
+        "“{mesh}”中有{vertices}个顶点的权重位于此对象没有的{bones}根骨骼上，例如“{example}”。",
+    "{vertices} vertices in '{mesh}' are weighted to {bones} bones this item does not have, such as "
+    "'{example}'.":
+        "“{mesh}”中有{vertices}个顶点的权重位于此对象没有的{bones}根骨骼上，例如“{example}”。",
+    "Weight-paint those vertices to the bones of the armature in {mod}.":
+        "将这些顶点的权重绘制到{mod}中骨架的骨骼上。",
+    "{count} vertex has no weight in {meshes} and cannot be filled from the skeleton, so Send is blocked. "
+    "Weight-paint or delete the affected vertices.":
+        "{meshes}中有{count}个顶点没有权重，且无法根据骨架填充，因此发送被阻止。为这些顶点绘制权重，或将其删除。",
+    "{count} vertices have no weight in {meshes} and cannot be filled from the skeleton, so Send is "
+    "blocked. Weight-paint or delete the affected vertices.":
+        "{meshes}中有{count}个顶点没有权重，且无法根据骨架填充，因此发送被阻止。为这些顶点绘制权重，或将其删除。",
+    "{count} imported bone renamed or removed (for example, '{example}'). Weights on those bones are lost "
+    "on Send. Rename the bones, or undo the change.":
+        "有{count}根导入的骨骼被重命名或移除（例如“{example}”）。发送时这些骨骼上的权重会丢失。重命名这些骨骼，"
+        "或撤销更改。",
+    "{count} imported bones renamed or removed (for example, '{example}'). Weights on those bones are lost "
+    "on Send. Rename the bones, or undo the change.":
+        "有{count}根导入的骨骼被重命名或移除（例如“{example}”）。发送时这些骨骼上的权重会丢失。重命名这些骨骼，"
+        "或撤销更改。",
+
+    # transforms and slots
+    "'{mesh}' has no skeleton. Object Mode position, rotation, and scale are dropped on Send. Apply the "
+    "transform (Ctrl+A in Object Mode), or edit the geometry in Edit Mode.":
+        "“{mesh}”没有骨架。发送时会丢弃物体模式下的位置、旋转和缩放。应用变换（物体模式下按Ctrl+A），"
+        "或在编辑模式下编辑几何体。",
+    "'{mesh}' has a negative Object Mode scale. The mesh ships mirrored without flipped faces and renders "
+    "inside-out.":
+        "“{mesh}”在物体模式下的缩放为负值。网格会镜像发送但面未翻转，渲染时会内外颠倒。",
+    "'{mesh}' material slots changed since import, so face ranges may now use different materials. "
+    "Restore the imported slot order if the change was not intended.":
+        "“{mesh}”的材质槽在导入后已更改，面范围现在可能使用不同的材质。如果并非有意更改，恢复导入时的材质槽顺序。",
+}
 
 
 # ---------------------------------------------------------------- entry point
@@ -3100,6 +3444,7 @@ def main():
         send_to = args[args.index("--send-to") + 1]
     # positional send_dir (interactive launch): "<glb> <send_dir>"
     send_dir = args[1] if len(args) > 1 and not args[1].startswith("--") else (send_to or "")
+    gf2_apply_language()
 
     if send_to is not None:        # headless / no-op round-trip — must run synchronously (no event loop)
         if glb:

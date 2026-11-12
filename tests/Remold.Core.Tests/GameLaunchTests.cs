@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -29,19 +30,19 @@ public class GameLaunchTests
     [Fact]
     public void No_game_outranks_everything_else()
     {
-        Assert.Equal(LaunchGate.NoGame,
+        Assert.Equal(Strings.LaunchNoGame,
             LaunchGate.Reason(gameLocated: false, loaderExe: null, loaderExists: false));
         // even with the 3DMigoto half fully known, the game is still the first thing to settle
-        Assert.Equal(LaunchGate.NoGame,
+        Assert.Equal(Strings.LaunchNoGame,
             LaunchGate.Reason(false, @"C:\3dmigoto\3DMigoto Loader.exe", true));
     }
 
     [Fact]
     public void An_unset_or_missing_loader_reports_the_shared_loader_remedy()
     {
-        Assert.Equal(LoaderGate.NoLoader, LaunchGate.Reason(true, null, false));
-        Assert.Equal(LoaderGate.NoLoader, LaunchGate.Reason(true, "   ", false));
-        Assert.Equal(LoaderGate.LoaderNotFound(@"C:\gone\Run.exe"),
+        Assert.Equal(Strings.LoaderNotSet, LaunchGate.Reason(true, null, false));
+        Assert.Equal(Strings.LoaderNotSet, LaunchGate.Reason(true, "   ", false));
+        Assert.Equal(Strings.LoaderNotFound(@"C:\gone\Run.exe"),
             LaunchGate.Reason(true, @"C:\gone\Run.exe", false));
     }
 
@@ -63,8 +64,8 @@ public class GameLaunchTests
         var f = MainWindowViewModel.MigotoFacet(null, loaderExists: false, modsFolder: null, default);
 
         Assert.Equal("⚠", f.Glyph);
-        Assert.Contains("not set", f.Text);
-        Assert.Contains("Launch and Install", f.Detail);
+        Assert.Equal(Strings.StatusMigotoNotSet, f.Text);
+        Assert.Equal(Strings.StatusMigotoNotSetTip, f.Detail);
     }
 
     [Fact]
@@ -73,8 +74,7 @@ public class GameLaunchTests
         var f = MainWindowViewModel.MigotoFacet(@"C:\gone\Run.exe", loaderExists: false, modsFolder: null, default);
 
         Assert.Equal("⚠", f.Glyph);
-        Assert.Contains(@"C:\gone\Run.exe", f.Detail);
-        Assert.Contains("Launch and Install", f.Detail);
+        Assert.Equal(Strings.LoaderNotFound(@"C:\gone\Run.exe") + " " + Strings.MigotoLaunchAndInstallNeedIt, f.Detail);
     }
 
     [Fact]
@@ -84,9 +84,8 @@ public class GameLaunchTests
 
         Assert.Equal("⚠", f.Glyph);
         // the label says what the state costs; the Mods folder itself is named in the detail
-        Assert.Contains("can't install mods", f.Text);
-        Assert.Contains("Mods folder", f.Detail);
-        Assert.Contains("Launch still works", f.Detail);
+        Assert.Equal(Strings.StatusMigotoNoModsFolder, f.Text);
+        Assert.Equal(Strings.LoaderNoModsFolder(@"C:\tools\Run.exe") + " " + Strings.MigotoLaunchStillWorks, f.Detail);
     }
 
     [Fact]
@@ -447,7 +446,7 @@ public class GameLaunchTests
         var plan = GameLauncher.Resolve(root)!.Value;
         Assert.False(plan.ViaSteam);
         Assert.Equal(Path.Combine(root, "TestGame.exe"), plan.Target);
-        Assert.Contains("Steam install", plan.Note!);
+        Assert.Equal(CoreStrings.LaunchedDirectlyNoAppManifest, plan.Note);
     }
 
     [Fact]
@@ -559,8 +558,8 @@ public class GameLaunchTests
     [Fact]
     public void A_launch_that_started_nothing_does_not_claim_a_start_is_coming()
     {
-        Assert.Equal("Game is already running", MainWindowViewModel.GameAlreadyStartedLine.Text);
-        Assert.Equal("3DMigoto is starting the game", MainWindowViewModel.LoaderStartsGameLine.Text);
+        Assert.Equal(Strings.LaunchGameAlreadyUp, MainWindowViewModel.GameAlreadyStartedLine.Text);
+        Assert.Equal(Strings.LaunchMigotoStartsGame, MainWindowViewModel.LoaderStartsGameLine.Text);
     }
 
     // ---- a pid that dies right after appearing ---------------------------------
@@ -656,7 +655,7 @@ public class GameLaunchTests
         vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
             "another-warning", "another warning", "another warning detail"));
 
-        Assert.Equal("2 warnings", vm.NoticeStatus.Text);
+        Assert.Equal(Strings.NoticeCountWarnings(2), vm.NoticeStatus.Text);
 
         vm.MergeNoticeIntoCell(new MainWindowViewModel.NoticeMessage(
             "error", "error", "error detail",
@@ -692,9 +691,28 @@ public class GameLaunchTests
 
         vm.ReplaceLoadNotices(Array.Empty<MainWindowViewModel.NoticeMessage>());
 
-        Assert.Equal("Project updated", vm.NoticeStatus.Text);
+        Assert.Equal(Strings.ProjectUpdatedNotice, vm.NoticeStatus.Text);
         Assert.Equal("migration detail", vm.NoticeStatus.Detail);
         Assert.Equal("✓", vm.NoticeStatus.Glyph);
+    }
+
+    /// <summary>A support team list that could not be read is a load notice: the next load that reads it
+    /// takes the notice down with the rest of the previous load's.</summary>
+    [Fact]
+    public void A_later_load_clears_the_support_team_list_notice()
+    {
+        var vm = new MainWindowViewModel(startLoad: false);
+        vm.ReplaceLoadNotices(new[]
+        {
+            new MainWindowViewModel.NoticeMessage("game.support-team-list-unreadable",
+                Strings.SupportTeamListUnreadable, Strings.SupportTeamListUnreadableDetail, BulletWhenAlone: true),
+        });
+        Assert.Equal(Strings.SupportTeamListUnreadable, vm.NoticeStatus.Text);
+
+        vm.ReplaceLoadNotices(Array.Empty<MainWindowViewModel.NoticeMessage>());
+
+        Assert.False(vm.NoticeStatus.HasGlyph);
+        Assert.Equal("", vm.NoticeStatus.Text);
     }
 
     [Fact]
@@ -791,7 +809,7 @@ public class GameLaunchTests
         var vm = new MainWindowViewModel(startLoad: false)
         {
             IsScanning = false, GameRescanOffered = false, LaunchStatus = landed,
-            GameStatus = StatusFacet.Warn(MainWindowViewModel.GameRunningLabel),
+            GameStatus = StatusFacet.Warn(Strings.StatusGameRunning),
         };
 
         vm.WatchedGameExited(beforeWatch, landed);
@@ -826,19 +844,19 @@ public class GameLaunchTests
         var vm = new MainWindowViewModel(startLoad: false) { IsWatchingLaunchedGame = true };
 
         Assert.False(vm.CanLaunchGame);
-        Assert.Equal(MainWindowViewModel.GameAlreadyRunning, vm.LaunchDisabledReason);
-        Assert.Equal(MainWindowViewModel.GameAlreadyRunning, vm.LaunchButtonTip);
+        Assert.Equal(Strings.LaunchGameAlreadyRunning, vm.LaunchDisabledReason);
+        Assert.Equal(Strings.LaunchGameAlreadyRunning, vm.LaunchButtonTip);
 
         // and once the watch ends the button falls back to whatever the configuration gates say
         vm.IsWatchingLaunchedGame = false;
-        Assert.NotEqual(MainWindowViewModel.GameAlreadyRunning, vm.LaunchButtonTip);
+        Assert.NotEqual(Strings.LaunchGameAlreadyRunning, vm.LaunchButtonTip);
     }
 
     [Fact]
     public void A_running_game_says_on_the_cell_what_its_open_files_cost()
     {
         // the label alone reports the state; the tooltip is why a build or a preview may fail while it stands
-        var f = StatusFacet.Warn(MainWindowViewModel.GameRunningLabel, MainWindowViewModel.GameRunningDetail);
+        var f = StatusFacet.Warn(Strings.StatusGameRunning, Strings.StatusGameRunningTip);
 
         Assert.Equal("⚠", f.Glyph);
         Assert.Contains("Builds and previews may fail", f.Detail);

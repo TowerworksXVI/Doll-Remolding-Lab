@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using Remold.Core.Mesh;
+using Remold.Core.Tables;
 
 namespace Remold.Core.Project;
 
@@ -147,7 +148,7 @@ public interface IAuthoredBuildBackend
     BuildLifecycleResolution ResolveLifecycle(BuildLifecycleRequest request);
     BuildOperationResolution ResolveMaterialEffect(BuildMaterialEffectRequest request) =>
         new(BuildPlanDecision.Blocked(BuildPlanVerdict.Unsupported,
-            "this effect cannot be disabled by this build backend"), null);
+            CoreStrings.PlanReasonEffectNotDisableable), null);
 
     /// <summary>Why a change on this material cannot be kept to the game's own draws of it, or null when it
     /// can. Those draws are told apart from the part's other materials by their index range, and a part that
@@ -295,12 +296,6 @@ public sealed class AuthoredBuildPlan
 /// source lineage is resolved, and the backend is asked only after current-install slot identity exists.</summary>
 public static class AuthoredBuildPlanner
 {
-    /// <summary>What a plan line says when what went wrong is the planning itself: a backend that answered
-    /// with something the seam forbids, two emitted things claiming one identity. There is nothing in it a
-    /// modder made and nothing they can change, so the line says only that, and its account — the seam, the
-    /// slot, the id — goes to the log through <see cref="AuthoredBuildPlan.Diagnostics"/>. Written as a
-    /// clause because the page's own attribution puts "Cannot build ⟨edit⟩ on ⟨part⟩:" in front of it.</summary>
-    public const string InternalGuard = "Doll Remolding Lab couldn't work out how to build this";
 
     public static AuthoredBuildPlan Plan(AuthoredProject project, IAuthoredBuildBackend backend,
         CancellationToken cancellationToken = default)
@@ -566,17 +561,15 @@ public static class AuthoredBuildPlanner
             if (position >= 0 && (value.CurrentSlot?.DrawIndexCount == 0
                 || counts is not null && position >= counts.Length))
             {
-                string warning = $"{EditName(edit)}'s shading value for material {position} will not "
-                    + $"take effect: no faces in its replacement mesh use material {position}. Assign "
-                    + "faces to that material, or remove the value.";
+                string warning = CoreStrings.PlanShadingValueNoFaces(EditName(edit), position);
                 warnings.Add(warning);
                 owners.Own(warning, edit.Id);
-                dropped[value] = warning;
+                dropped[value] = NoFacesRecordReason(edit, position);
             }
         }
         return dropped.Count == 0 ? rows
-            : rows.Select(row => dropped.TryGetValue(row, out string? warning)
-                ? Drop(row, warning) : row).ToList();
+            : rows.Select(row => dropped.TryGetValue(row, out string? reason)
+                ? Drop(row, reason) : row).ToList();
 
         static PlannedBinding Drop(PlannedBinding row, string reason) => row with
         {
@@ -643,8 +636,7 @@ public static class AuthoredBuildPlanner
             .ToHashSet();
         if (pictures.Count == 0) return rows;
 
-        string warning = $"{EditName(edit)} replaces the part's mesh, so its changes to the original "
-            + "textures will not take effect. A replacement uses this edit's own maps instead.";
+        string warning = CoreStrings.PlanReplaceDropsTextureChanges(EditName(edit));
         warnings.Add(warning);
         owners.Own(warning, edit.Id);
         return rows.Where(row => !pictures.Contains(row)).ToList();
@@ -686,9 +678,8 @@ public static class AuthoredBuildPlanner
         foreach (var pair in placements.Where(pair => pair.Value.Any(placement => placement.Condition.IsAlways)))
             foreach (var redundant in pair.Value.Where(placement => !placement.Condition.IsAlways))
             {
-                string warning = $"{EditName(edits[pair.Key])} on {PartName(edits[pair.Key].Target)} is "
-                    + $"in Always, so using it in {redundant.Name} changes nothing. Remove it from Always "
-                    + "for the key to switch it.";
+                string warning = CoreStrings.PlanRedundantInAlways(EditName(edits[pair.Key]),
+                    ShownPartName(edits[pair.Key].Target), redundant.Name);
                 warnings.Add(warning);
                 owners.Own(warning, pair.Key);
             }
@@ -709,9 +700,8 @@ public static class AuthoredBuildPlanner
                 foreach (var placement in content.Placements)
                 {
                     if (!HiddenAt(placement, hides)) continue;
-                    string partName = PartName(content.Edit.Target);
-                    string warning = $"{EditName(content.Edit)} on {partName} never appears in "
-                        + $"{placement.Name} because {partName} is hidden there.";
+                    string partName = ShownPartName(content.Edit.Target);
+                    string warning = CoreStrings.PlanNeverAppears(EditName(content.Edit), partName, placement.Name);
                     warnings.Add(warning);
                     owners.Own(warning, content.Edit.Id);
                 }
@@ -738,9 +728,8 @@ public static class AuthoredBuildPlanner
                 for (int j = i + 1; j < rows.Count; j++)
                 {
                     if (rows[i].Gate.ProvablyExclusiveOf(rows[j].Gate)) continue;
-                    string conflict = $"{EditName(rows[i].Edit)} at {Places(rows[i])} and "
-                        + $"{EditName(rows[j].Edit)} at {Places(rows[j])} can be active together on "
-                        + $"{PartName(rows[i].Edit.Target)}.";
+                    string conflict = CoreStrings.PlanActiveTogether(EditName(rows[i].Edit), Places(rows[i]),
+                        EditName(rows[j].Edit), Places(rows[j]), ShownPartName(rows[i].Edit.Target));
                     conflicts.Add(conflict);
                     owners.Own(conflict, rows[i].Edit.Id, rows[j].Edit.Id);
                 }
@@ -748,31 +737,67 @@ public static class AuthoredBuildPlanner
         return conflicts;
 
         static string Places(EditActivation activation) =>
-            string.Join(" or ", activation.Placements.Select(placement => placement.Name));
+            string.Join(CoreStrings.PlanPlacesOrSeparator, activation.Placements.Select(placement => placement.Name));
     }
 
     private static string KeylessGroupConflict(KeyGroup group) =>
-        $"{KeyGroupSubject(group)} has no key. This blocks the build. Give it a key, or delete the group.";
+        !string.IsNullOrWhiteSpace(group.Label) ? CoreStrings.PlanKeylessGroupLabeled(group.Label.Trim())
+        : !string.IsNullOrWhiteSpace(group.Key) ? CoreStrings.PlanKeylessGroupKeyed(group.Key)
+        : CoreStrings.PlanKeylessGroupUnnamed(PlacementNames.UnnamedGroup);
 
-    private static string KeyGroupSubject(KeyGroup group) =>
-        !string.IsNullOrWhiteSpace(group.Label) ? $"Key group '{group.Label.Trim()}'"
-        : !string.IsNullOrWhiteSpace(group.Key) ? $"Key group {group.Key}"
-        : PlacementNames.UnnamedGroup;
+    /// <summary>The reason a dropped shading value's decision keeps, which a built mod's record writes: the
+    /// English sentence whatever the UI language, so the mod's files do not depend on it. The warning the
+    /// page shows is the catalogued sentence.</summary>
+    private static string NoFacesRecordReason(EditDefinition edit, int position)
+    {
+        string name = !string.IsNullOrWhiteSpace(edit.Label) ? edit.Label.Trim()
+            : edit.Kind == EditDefinitionKind.Hide ? "the hide edit" : "an unnamed edit";
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{name}'s shading value for material {position} will not take effect: no faces in its replacement "
+            + $"mesh use material {position}. Assign faces to that material, or remove the value.");
+    }
 
     private static string EditName(EditDefinition edit) =>
         !string.IsNullOrWhiteSpace(edit.Label) ? edit.Label.Trim()
-        : edit.Kind == EditDefinitionKind.Hide ? "the hide edit" : "an unnamed edit";
+        : edit.Kind == EditDefinitionKind.Hide ? CoreStrings.PlanEditHide : CoreStrings.PlanEditUnnamed;
 
-    /// <summary>What a plan line calls a part: the short name the rest of the app shows it under, which is
-    /// the renderer slot with the subject prefix and detail-level segment taken off. A slot name that does
-    /// not carry either is already short and is used whole rather than cut down by guess.</summary>
-    internal static string PartName(TargetPart part)
+    /// <summary>A part's short name for the plan's own records and the build log, lowercase: the renderer
+    /// slot with the subject prefix and detail-level segment taken off. A slot name that does not carry
+    /// either is already short and is used whole rather than cut down by guess. Plan lines and build
+    /// warnings name the part through <see cref="ShownPartName"/> or <see cref="ShownPartToken"/>
+    /// instead.</summary>
+    internal static string PartName(TargetPart part) =>
+        ShortSlot(part.RendererSlot)?.ToLowerInvariant() ?? part.RendererSlot;
+
+    /// <summary>The part's token as the ② Edit tree shows it, in the game's own case: the short slot name,
+    /// and a slot under the outfit's own <c>c_&lt;stem&gt;_slg_</c> mesh prefix loses the <c>slg</c> marker
+    /// with the rest of that prefix, as the tree's part token does. A slot under any other prefix keeps its
+    /// <c>slg</c> segment, as the tree keeps it for a summon whose meshes ship under another model family. A
+    /// mesh borrowed from another skin's family is the one shape the two still name differently: the tree
+    /// reads it against that family's own prefix, which this name cannot see. Not yet read in the UI
+    /// language; <see cref="ShownPartName"/> is.</summary>
+    internal static string ShownPartToken(TargetPart part)
     {
-        var segments = part.RendererSlot.Split('_');
+        string name = ShortSlot(part.RendererSlot) ?? part.RendererSlot;
+        bool ownPrefix = part.Outfit.Length > 0
+            && part.RendererSlot.StartsWith($"c_{part.Outfit}_slg_", StringComparison.OrdinalIgnoreCase);
+        if (ownPrefix && name.Length > 4 && name.StartsWith("slg_", StringComparison.OrdinalIgnoreCase))
+            name = name[4..];
+        return name;
+    }
+
+    /// <summary>What a plan line calls a part: <see cref="ShownPartToken"/> read in the UI language
+    /// (<see cref="PartNames"/>).</summary>
+    internal static string ShownPartName(TargetPart part) => PartNames.Display(ShownPartToken(part));
+
+    /// <summary>The renderer slot with the subject prefix and detail-level segment taken off, in the slot's
+    /// own case; null for a slot that carries neither.</summary>
+    private static string? ShortSlot(string rendererSlot)
+    {
+        var segments = rendererSlot.Split('_');
         int start = segments.Length >= 3 && segments[0].Length == 1 ? 2 : 0;
         var shortSegments = segments[start..].Where(segment => !Tier(segment)).ToArray();
-        return start == 0 && shortSegments.Length == segments.Length
-            ? part.RendererSlot : string.Join('_', shortSegments).ToLowerInvariant();
+        return start == 0 && shortSegments.Length == segments.Length ? null : string.Join('_', shortSegments);
 
         static bool Tier(string segment) => segment.Length > 3
             && segment.StartsWith("lod", StringComparison.OrdinalIgnoreCase)
@@ -846,14 +871,14 @@ public static class AuthoredBuildPlanner
         {
             return new PlannedBinding(rowId, edit.Id, authoredSlot, current.CurrentSlot, binding, value,
                 gate, new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Unsupported,
-                    "the slot this value is copied from keeps the original, so there is nothing to copy"),
+                    CoreStrings.PlanReasonNothingToCopy),
                     null));
         }
         if (value.ProjectAsset is { } asset && project.RootDir is null)
         {
             return new PlannedBinding(rowId, edit.Id, authoredSlot, current.CurrentSlot, binding, value,
                 gate, new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Unresolved,
-                    $"'{asset.Label}' cannot be found until the mod is saved. Save the mod, then build"),
+                    CoreStrings.PlanReasonSaveFirst(asset.Label)),
                     null));
         }
         if (value.ProjectAsset is { } rootedAsset && project.RootDir is { } root
@@ -862,7 +887,7 @@ public static class AuthoredBuildPlanner
         {
             return new PlannedBinding(rowId, edit.Id, authoredSlot, current.CurrentSlot, binding, value,
                 gate, new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Unresolved,
-                    $"'{rootedAsset.Label}' is missing from the mod folder: {rootedAsset.File}"), null));
+                    CoreStrings.PlanReasonMissingFromModFolder(rootedAsset.Label, rootedAsset.File)), null));
         }
 
         BuildOperationResolution resolution;
@@ -912,11 +937,10 @@ public static class AuthoredBuildPlanner
                 .ThenBy(s => s.Id, StringComparer.Ordinal).Take(1).ToList();
         if (candidates.Count == 0)
             return new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Unresolved,
-                "the mod records no mesh for this part, so it cannot be hidden"), null);
+                CoreStrings.PlanReasonNoMeshToHide), null);
         if (candidates.Count > 1)
             return new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Conflict,
-                $"the mod records {candidates.Count} ways to hide this part, so the build cannot "
-                + "choose one"), null);
+                CoreStrings.PlanReasonManyWaysToHide(candidates.Count)), null);
 
         var authored = candidates[0];
         var current = NormalizeSlot(backend.ResolveSlot(authored), authored, at);
@@ -983,17 +1007,20 @@ public static class AuthoredBuildPlanner
     }
 
     /// <summary>One internal-consistency verdict: the plain line the page states, and the account of what
-    /// actually disagreed, which only the log sees.</summary>
+    /// actually disagreed, which only the log sees. There is nothing in it a modder made and nothing they can
+    /// change, so the line says only that, and its account — the seam, the slot, the id — goes to the log
+    /// through <see cref="AuthoredBuildPlan.Diagnostics"/>. The line is a clause because the page's own
+    /// attribution puts "Cannot build ⟨edit⟩ on ⟨part⟩:" in front of it.</summary>
     private static BuildSlotResolution SlotGuard(TargetSlot? current, string detail) =>
-        new(BuildPlanVerdict.Conflict, current, InternalGuard, detail);
+        new(BuildPlanVerdict.Conflict, current, CoreStrings.PlanInternalGuard, detail);
 
     /// <inheritdoc cref="SlotGuard"/>
     private static BuildPlanDecision DecisionGuard(string detail) =>
-        BuildPlanDecision.Blocked(BuildPlanVerdict.Conflict, InternalGuard, detail);
+        BuildPlanDecision.Blocked(BuildPlanVerdict.Conflict, CoreStrings.PlanInternalGuard, detail);
 
     /// <inheritdoc cref="SlotGuard"/>
     private static BuildLifecycleResolution LifecycleGuard(BuildLifecyclePlan? plan, string detail) =>
-        new(BuildPlanVerdict.Conflict, plan, InternalGuard, detail);
+        new(BuildPlanVerdict.Conflict, plan, CoreStrings.PlanInternalGuard, detail);
 
     private static BuildSlotResolution NormalizeSlot(BuildSlotResolution? resolution,
         TargetSlot authoredSlot, string at)
@@ -1183,7 +1210,7 @@ public static class AuthoredBuildPlanner
         // same thing however many ways the plan reached it, and the rows it marks are still all of them.
         void GuardConflict(string detail, params string[] editIds)
         {
-            Conflict(InternalGuard, editIds);
+            Conflict(CoreStrings.PlanInternalGuard, editIds);
             diagnostics.Add(detail);
         }
 
@@ -1204,10 +1231,9 @@ public static class AuthoredBuildPlanner
             if (rows.All(left => rows.All(right => ReferenceEquals(left, right)
                     || left.Binding.Gate.ProvablyExclusiveOf(right.Binding.Gate))))
                 continue;
-            string claimed = string.Join(", ", rows.Select(row => PartName(row.Part.Target))
-                .Distinct(StringComparer.OrdinalIgnoreCase));
-            Conflict($"{rows.Count} mesh replacements are active at once on {claimed}. Use a key to "
-                + "switch between them, or remove all but one.",
+            string claimed = string.Join(CoreStrings.ListSeparator,
+                rows.Select(row => ShownPartName(row.Part.Target)).Distinct(StringComparer.OrdinalIgnoreCase));
+            Conflict(CoreStrings.PlanMeshReplacementsAtOnce(rows.Count, claimed),
                 rows.Select(row => row.Binding.EditDefinitionId).Distinct(StringComparer.Ordinal).ToArray());
         }
         foreach (var duplicate in emissions.GroupBy(e => e.Emission.Id, StringComparer.Ordinal)
@@ -1278,9 +1304,8 @@ public static class AuthoredBuildPlanner
             if (incompatible)
             {
                 var first = rows[0];
-                string field = MaterialValueCatalog.Field(first.Semantic)?.Label ?? first.Semantic;
-                Conflict($"'{field}' has conflicting values on the same material. Put the edits in "
-                    + "different key states, or make the values match.",
+                string field = MaterialValueCatalog.Field(first.Semantic)?.DisplayLabel ?? first.Semantic;
+                Conflict(CoreStrings.PlanConflictingValues(field),
                     EditsOf(rows.Select(row => row.Consumer).ToArray()));
             }
         }

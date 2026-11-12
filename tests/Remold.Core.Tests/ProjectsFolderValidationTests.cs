@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.IO;
 using System.Linq;
@@ -101,7 +102,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder($@"{drive}:\mods");
 
         Assert.False(check.Ok);
-        Assert.Equal("Not a writable folder. Select one the app can create files in.", check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     /// <summary>A path with a character no file system takes: the shape fails before any write is
@@ -143,7 +144,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(denied);
 
         Assert.False(check.Ok);
-        Assert.Equal("Not a writable folder. Select one the app can create files in.", check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     /// <summary>The same folder, one level down: the create succeeds — the deny covers files, not
@@ -187,7 +188,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(_root, mutate: false);
 
         Assert.True(check.Ok);
-        Assert.Equal(SettingsValidation.WritableFolder, check.Reason);
+        Assert.Equal(Strings.SettingsWritableFolder, check.Reason);
         Assert.Empty(check.Created);
         Assert.Empty(Directory.GetFileSystemEntries(_root));   // the probe is gone with it
     }
@@ -202,7 +203,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(fresh, mutate: false);
 
         Assert.True(check.Ok);
-        Assert.Equal(SettingsValidation.WillBeCreated, check.Reason);
+        Assert.Equal(Strings.SettingsWillBeCreated, check.Reason);
         Assert.Empty(check.Created);
         Assert.False(Directory.Exists(fresh));
         Assert.False(Directory.Exists(Path.Combine(_root, "nested")));
@@ -218,7 +219,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(path, mutate: false);
 
         Assert.False(check.Ok);
-        Assert.Equal(SettingsValidation.NotWritableFolder, check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     /// <summary>A file standing where the folder would go: no create lands on it, so it refuses rather than
@@ -232,7 +233,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(file, mutate: false);
 
         Assert.False(check.Ok);
-        Assert.Equal(SettingsValidation.NotWritableFolder, check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     /// <summary>A file with a folder path hung off it: the create fails somewhere above the leaf, and the walk
@@ -246,7 +247,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(Path.Combine(file, "library"), mutate: false);
 
         Assert.False(check.Ok);
-        Assert.Equal(SettingsValidation.NotWritableFolder, check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     [Fact]
@@ -271,7 +272,7 @@ public class ProjectsFolderValidationTests : IDisposable
         var check = SettingsValidation.ProjectsFolder(denied, mutate: false);
 
         Assert.False(check.Ok);
-        Assert.Equal(SettingsValidation.NotWritableFolder, check.Reason);
+        Assert.Equal(Strings.SettingsNotWritableFolder, check.Reason);
     }
 
     /// <summary>Deny THIS account the creation of files in <paramref name="dir"/> and everything under it,

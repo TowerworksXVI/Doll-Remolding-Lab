@@ -1,3 +1,4 @@
+using Remold.Core.Text;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -70,7 +71,7 @@ internal static class SessionRampRows
         return new RampPickRowVm
         {
             Choice = RampChoice.KeepOwn,
-            Title = candidate.Labels.FirstOrDefault() ?? "Default",
+            Title = candidate.Labels.FirstOrDefault() ?? Strings.RampRowDefault,
             SourcesTip = candidate.Labels.Count > 1 ? string.Join('\n', candidate.Labels.Skip(1)) : null,
             Dimensions = image is { } shown ? $"{shown.Width}×{shown.Height}" : "",
             IsOwn = true,
@@ -81,7 +82,7 @@ internal static class SessionRampRows
     private static RampPickRowVm Pending(SessionRampReadCandidate candidate) => new()
     {
         Choice = candidate.Choice,
-        Title = candidate.Labels.FirstOrDefault() ?? candidate.Choice.Texture ?? "Toon ramp",
+        Title = candidate.Labels.FirstOrDefault() ?? candidate.Choice.Texture ?? Strings.RampRowUnnamed,
         IsBound = true,
     };
 
@@ -90,8 +91,11 @@ internal static class SessionRampRows
         {
             Choice = choice,
             Title = labels.FirstOrDefault() ?? (choice.File is { } file
-                ? System.IO.Path.GetFileName(file) : choice.Texture ?? "Toon ramp"),
-            Source = labels.Count > 1 ? $"and {labels.Count - 1} more" : "",
+                ? System.IO.Path.GetFileName(file) : choice.Texture ?? Strings.RampRowUnnamed),
+            Source = labels.Count > 1
+                ? Catalog.Plural(labels.Count - 1, Strings.RampRowAndMore_One(labels.Count - 1),
+                    Strings.RampRowAndMore_Other(labels.Count - 1))
+                : "",
             SourcesTip = labels.Count > 1 ? string.Join('\n', labels) : null,
             Dimensions = $"{image.Width}×{image.Height}",
             IsBound = bound,

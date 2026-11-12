@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.IO;
 using System.Linq;
@@ -85,7 +86,7 @@ public class RecentModsRenameTests
         {
             Assert.False(Directory.Exists(dest));
             Assert.Equal(original, RootOf(vm));
-            Assert.StartsWith("Couldn't save a copy.", vm.EditPage.Status);
+            Assert.StartsWith(Strings.CouldntSaveCopy, vm.EditPage.Status);
         }
         finally
         {
@@ -109,14 +110,13 @@ public class RecentModsRenameTests
             Assert.Null(vm.TryAutoSaveProject());
 
             Assert.Equal(original, RootOf(vm));
-            Assert.Contains("Couldn't rename the mod folder to 'after-rename'", vm.NoticeStatus.Detail);
-            Assert.Contains("The mod is saved in 'before-rename'.", vm.NoticeStatus.Detail);
+            Assert.Contains(Strings.FolderNotRenamedDetail("after-rename", "before-rename"), vm.NoticeStatus.Detail);
         }
 
         Assert.Null(vm.TryAutoSaveProject());
 
         Assert.Equal("after-rename", Path.GetFileName(RootOf(vm)));
-        Assert.DoesNotContain("Couldn't rename the mod folder", vm.NoticeStatus.Detail);
+        Assert.DoesNotMatch(NotRenamed, vm.NoticeStatus.Detail);
     }
 
     /// <summary>Naming the mod back to its folder's name ends what the notice was about, so it goes.</summary>
@@ -132,15 +132,19 @@ public class RecentModsRenameTests
         {
             vm.PackageName = "After Rename";
             Assert.Null(vm.TryAutoSaveProject());
-            Assert.Contains("Couldn't rename the mod folder", vm.NoticeStatus.Detail);
+            Assert.Matches(NotRenamed, vm.NoticeStatus.Detail);
 
             vm.PackageName = "Before Rename";
             Assert.Null(vm.TryAutoSaveProject());
 
             Assert.Equal(original, RootOf(vm));
-            Assert.DoesNotContain("Couldn't rename the mod folder", vm.NoticeStatus.Detail);
+            Assert.DoesNotMatch(NotRenamed, vm.NoticeStatus.Detail);
         }
     }
+
+    /// <summary>The failed-rename notice, whichever folders it names.</summary>
+    private static System.Text.RegularExpressions.Regex NotRenamed =>
+        CatalogShape.Within(Strings.FolderNotRenamedDetail(CatalogShape.Any, CatalogShape.Any));
 
     /// <summary>A new mod's first save writes the round-trip id the mod was given, so an editor opened
     /// straight after it is found again on the next run.</summary>

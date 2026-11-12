@@ -233,7 +233,7 @@ public sealed class MaterialEffectTests : IDisposable
             AuthoredEditFixtures.Hair, 0,
             new[] { new AuthoredMaterialValueEdit("_MatcapIntensity", "2.5") },
             new[] { new AuthoredMaterialEffectEdit("detail", false) }, Resolve, VolumeOperations));
-        Assert.Equal("Detail cannot be disabled on this material.", refusal.Message);
+        Assert.Equal(CoreStrings.EffectCannotBeDisabled(CoreStrings.ShadingEffectDetail), refusal.Message);
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
         Assert.False(Directory.Exists(Path.Combine(_root, "values")));
     }

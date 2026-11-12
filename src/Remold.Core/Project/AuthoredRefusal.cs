@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.IO;
+using Remold.Core.Text;
 
 namespace Remold.Core.Project;
 
@@ -19,6 +20,10 @@ namespace Remold.Core.Project;
 public class AuthoredRefusalException : InvalidOperationException
 {
     public AuthoredRefusalException(string message) : base(message) { }
+
+    /// <summary>The part the sentence already names, when it names one: a surface reporting on several
+    /// parts at once adds the part only to a sentence that does not.</summary>
+    public string? Part { get; init; }
 }
 
 /// <summary>The one place a surface turns a failed authored command into a sentence. Three answers, and
@@ -33,7 +38,9 @@ public static class AuthoredRefusal
     {
         ArgumentNullException.ThrowIfNull(failure);
         if (failure is AuthoredRefusalException) return failure.Message;
-        return Cause(failure) is { } cause ? $"Couldn't {action}: {cause}" : $"Couldn't {action}.";
+        return Cause(failure) is { } cause
+            ? CoreStrings.CouldntActionCause(action, cause)
+            : CoreStrings.CouldntAction(action);
     }
 
     /// <summary>The outside world's own account of what went wrong, ready to follow a colon, or null where
@@ -46,8 +53,7 @@ public static class AuthoredRefusal
     private static string? Cause(Exception failure)
     {
         if (failure is not (IOException or UnauthorizedAccessException or Win32Exception)) return null;
-        string message = failure.Message.Trim();
-        return message.Length == 0 ? null
-            : message.EndsWith('.') ? message : message + ".";
+        string message = Catalog.Sentence(Catalog.Clause(failure.Message.Trim()));
+        return message.Length == 0 ? null : message;
     }
 }

@@ -126,11 +126,9 @@ public sealed class ProjectDocumentTests : IDisposable
         var refusal = Assert.Throws<InvalidDataException>(
             () => AuthoredProjectDocument.Load(dir, _ => null));
 
-        Assert.Contains("Couldn't update these parts of it: c_vesna_body_lod0.", refusal.Message,
-            StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.ProjectOlderFormatCouldntUpdatePartsCause("c_vesna_body_lod0",
+            CoreStrings.MigrationPartGone), refusal.Message);
         Assert.DoesNotContain("Vesna / VesnaSSR01 /", refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("This part is not in the current game files.", refusal.Message,
-            StringComparison.Ordinal);
         Assert.DoesNotContain(GameFilesGate.Unavailable, refusal.Message, StringComparison.Ordinal);
         Assert.Equal(before, File.ReadAllText(ModProject.ManifestPathFor(dir)));
     }
@@ -147,8 +145,7 @@ public sealed class ProjectDocumentTests : IDisposable
 
         string refusal = AuthoredProjectDocument.CannotUpdate(report);
 
-        Assert.Contains("Couldn't update it. Two keys switch the same change.", refusal,
-            StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.ProjectOlderFormatCouldntUpdateCause("Two keys switch the same change."), refusal);
         Assert.DoesNotContain("parts", refusal, StringComparison.Ordinal);
         Assert.DoesNotContain(": project", refusal, StringComparison.Ordinal);
     }
@@ -165,10 +162,9 @@ public sealed class ProjectDocumentTests : IDisposable
 
         string refusal = AuthoredProjectDocument.CannotUpdate(report);
 
-        Assert.Contains("Couldn't update these parts of it: cloth1_lod0, hair_lod0, body_lod0, and 1 more.",
-            refusal, StringComparison.Ordinal);
-        Assert.Contains("Renderer slot did not re-anchor uniquely in the current install.", refusal,
-            StringComparison.Ordinal);
+        Assert.Equal(CoreStrings.ProjectOlderFormatCouldntUpdatePartsAndMoreCause_One(
+            "cloth1_lod0, hair_lod0, body_lod0", 1,
+            "Renderer slot did not re-anchor uniquely in the current install."), refusal);
     }
 
     /// <summary>A released project the current install cannot re-anchor: one mesh edit whose part no resolver
@@ -333,7 +329,7 @@ public sealed class ProjectDocumentTests : IDisposable
 
         var refused = Assert.Throws<InvalidDataException>(
             () => AuthoredProjectSerializer.Save(project, dir));
-        Assert.Equal(AuthoredProjectSerializer.DamagedProject, refused.Message);
+        Assert.Equal(CoreStrings.ProjectDamaged, refused.Message);
         Assert.Contains("slot-active", refused.InnerException!.Message);
         Assert.Contains("mesh has no path id", string.Join("; ", AuthoredProjectValidator.Errors(project)));
         // And the same verdict is what a session refuses to open it with, so no command can mint one either.

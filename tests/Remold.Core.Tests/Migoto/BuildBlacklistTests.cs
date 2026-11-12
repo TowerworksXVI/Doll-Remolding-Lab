@@ -5,6 +5,7 @@ using System.Linq;
 using Remold.Core.Export;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Remold.Core.Workbench;
 using Xunit;
 
@@ -70,7 +71,7 @@ public class BuildBlacklistTests : IDisposable
 
         var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BuildAssetNotSupported(CatalogShape.Any)), ex.Message);
         Assert.Empty(Directory.GetFileSystemEntries(_out));   // no folder, no zip, no work dirs
     }
 
@@ -88,8 +89,7 @@ public class BuildBlacklistTests : IDisposable
 
         var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
-        Assert.Contains("c_Helena_body_lod1", ex.Message);
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Equal(CoreStrings.BuildAssetNotSupported("c_Helena_body_lod1"), ex.Message);
     }
 
     [Fact]
@@ -116,7 +116,6 @@ public class BuildBlacklistTests : IDisposable
 
         var ex = Assert.Throws<BlockedAssetException>(() => ReleasedBuild.Build(p, EnvFor(model), _out));
 
-        Assert.Contains("c_Helena_body_d", ex.Message);
-        Assert.Contains("not a supported asset", ex.Message);
+        Assert.Equal(CoreStrings.BuildAssetNotSupported("c_Helena_body_d"), ex.Message);
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using Remold.App;
 using Remold.App.ViewModels;
 using Remold.Core.Bundles;
 using Remold.Core.Export;
@@ -694,7 +695,8 @@ public class SubjectArmatureTests
                 $"joint {joints[i]} carries a NaN inverse bind");
         }
         // …and it was said out loud, naming the bone
-        Assert.Single(said, l => l.Contains(Paths[HHead]) && l.Contains("no usable rest pose"));
+        Assert.Single(said, l => l.Contains(Paths[HHead])
+            && CatalogShape.Of(CoreStrings.ExportBoneOffArmature(CatalogShape.Any)).IsMatch(l));
     }
 
     // ---------------------------------------------------------------- the skeleton the build assembles
@@ -1801,7 +1803,7 @@ public class SubjectArmatureTests
     {
         Assert.Empty(MainWindowViewModel.BlenderOpenNotices(Array.Empty<string>(), false,
             Array.Empty<string>()));
-        Assert.Contains("wardrobe tables", Assert.Single(MainWindowViewModel.BlenderOpenNotices(
+        Assert.Equal(Strings.BlenderWardrobeUnreadable, Assert.Single(MainWindowViewModel.BlenderOpenNotices(
             Array.Empty<string>(), true, Array.Empty<string>())));
 
         Assert.True(MainWindowViewModel.RetryTableRead(new IOException("the file is in use")));

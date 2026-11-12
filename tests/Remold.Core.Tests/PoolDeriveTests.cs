@@ -94,7 +94,7 @@ public class PoolDeriveTests
     {
         var p = MeshApply.Payload.Geometry(new UnityMesh { Name = "donor", VertexCount = 1 });
         var e = Assert.Throws<AuthoredRefusalException>(() => PoolDerive.Derive(p, Roster));
-        Assert.Contains("no skin", e.Message);
+        Assert.Equal(CoreStrings.PoolDonorNoSkin, e.Message);
     }
 
     [Fact]

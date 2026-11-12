@@ -44,7 +44,7 @@ public partial class MainWindowViewModel : IBuildPageShell
     {
         Interlocked.Increment(ref _buildPlanRuns);
         cancellationToken.ThrowIfCancellationRequested();
-        if (_vfs is not { } vfs) return new BuildPlanningResult(GameUnavailable: BuildGate.GameUnavailable);
+        if (_vfs is not { } vfs) return new BuildPlanningResult(GameUnavailable: GameFilesGate.Unavailable);
         // Nothing authored yet: the gate's own empty-mod sentence answers, which is what an outline with no
         // edits says anyway.
         if (project is null) return new BuildPlanningResult();
@@ -67,7 +67,7 @@ public partial class MainWindowViewModel : IBuildPageShell
             // validator refuses names slots and rows, and a defect names nothing at all. The line says what
             // failed; the exception itself goes to the log.
             AppLog.Write("Couldn't check this build", e);
-            return new BuildPlanningResult(Failure: "Couldn't check this build.");
+            return new BuildPlanningResult(Failure: Strings.BuildCheckFailed);
         }
     }
 
@@ -124,11 +124,11 @@ public partial class MainWindowViewModel : IBuildPageShell
     public async Task<BuildRunResult> RunBuildAsync(IProgress<string> progress)
     {
         if (_vfs is not { } vfs)
-            return Failed(BuildGate.GameUnavailable, "", "", -1, "none");
+            return Failed(GameFilesGate.Unavailable, "", "", -1, "none");
         var session = EditSession;
         var (saved, saveReason) = TrySaveProject();
         if (!saved)
-            return Failed("Couldn't save the mod. " + saveReason, "", "", session.Revision, "none");
+            return Failed(Strings.CouldntSaveMod + " " + saveReason, "", "", session.Revision, "none");
 
         long revision = session.Revision;
         var project = session.Snapshot();
@@ -146,12 +146,12 @@ public partial class MainWindowViewModel : IBuildPageShell
                 if (!sharingTask.IsCompleted)
                 {
                     string waiting = BackgroundWorkLine(_sharingProgress);
-                    progress.Report(waiting.Length == 0 ? "Waiting for the shared-asset check…" : waiting);
+                    progress.Report(waiting.Length == 0 ? Strings.BuildWaitingForSharing : waiting);
                 }
                 try { sharing = await sharingTask; }
                 catch { logLines.Add("asset sharing unavailable; the build continues unscoped"); }
             }
-            progress.Report("Building…");
+            progress.Report(Strings.BuildBuilding);
             var env = NewBuildEnv(vfs, sharing, note => { lock (logLines) logLines.Add(note); });
             var evidence = MaterialEvidenceFor(vfs);
             var meshGate = MeshEditGateFor(vfs);
@@ -170,7 +170,7 @@ public partial class MainWindowViewModel : IBuildPageShell
             package = Path.GetFileName(result.OutDir);
             logPath = BuildLogPath(outRoot, package);
             var warnings = result.Warnings.ToList();
-            if (preview.Missing) warnings.Add(BuildPageVm.PreviewMissingWarning);
+            if (preview.Missing) warnings.Add(Strings.BuildPreviewMissingWarning);
             warnings = warnings.Distinct(StringComparer.Ordinal).ToList();
             WriteBuildLog(logPath, logLines, warnings, result.Infos, result.Diagnostics, null);
             // A successful materialization is the authored-against boundary only while this project is still
@@ -188,7 +188,7 @@ public partial class MainWindowViewModel : IBuildPageShell
             // A refusal was written for the modder and is shown as it is. Everything else is a diagnosis of
             // the build's own machinery — an emitted id, a palette row, an exception's own words — and the
             // whole of it is already in the log this run just wrote.
-            return Failed(e is AuthoredRefusalException ? e.Message : BuildFailedPlainly,
+            return Failed(e is AuthoredRefusalException ? e.Message : Strings.BuildFailedPlainly,
                 logPath, package, revision, preview.Stamp);
         }
         finally
@@ -201,10 +201,6 @@ public partial class MainWindowViewModel : IBuildPageShell
             new(false, reason, "", null, package, log, Array.Empty<string>(), Array.Empty<string>(),
                 revision, stamp);
     }
-
-    /// <summary>What ③ says when a build stopped for a reason the build itself has no words for. It follows
-    /// the footer's own "Build stopped:" lead, so it is a clause rather than a sentence of its own.</summary>
-    internal const string BuildFailedPlainly = "this mod couldn't be built";
 
     /// <summary>Stamp only the project that is still open after a successful build. A switched-away project
     /// has no visible successful result to make current, and an unknown catalog cannot be a durable key.</summary>
@@ -232,10 +228,10 @@ public partial class MainWindowViewModel : IBuildPageShell
             var scan = await Task.Run(() => ModInstall.ScanConflicts(builtDir, mods));
             var prior = scan.PriorVersions;
             if (prior.Count > 0 && !await ConfirmAsync(ModInstall.PriorVersionTitle(prior),
-                    ModInstall.PriorVersionBody(prior), "Install"))
+                    ModInstall.PriorVersionBody(prior), Strings.InstallButton))
                 return new BuildInstallResult(false, false, "");
-            if (scan.Conflicts.Count > 0 && !await ConfirmAsync("Install beside conflicting mods?",
-                    ModInstall.ConflictBody(scan.Conflicts), "Install"))
+            if (scan.Conflicts.Count > 0 && !await ConfirmAsync(Strings.InstallConflictTitle,
+                    ModInstall.ConflictBody(scan.Conflicts), Strings.InstallButton))
                 return new BuildInstallResult(false, false, "");
 
             var outcome = await Task.Run(() => ModInstall.Install(builtDir, mods, LogRetry));
@@ -245,12 +241,12 @@ public partial class MainWindowViewModel : IBuildPageShell
         }
         catch (ModInstall.InstallFailedException e)
         {
-            return new BuildInstallResult(true, true, $"Install stopped: {e.Message} {e.FolderState}");
+            return new BuildInstallResult(true, true, Strings.InstallStopped(e.Message, e.FolderState));
         }
         catch (Exception e)
         {
             return new BuildInstallResult(true, true,
-                $"Install stopped: {e.Message} {ModInstall.InstallFailedException.FolderUntouched}");
+                Strings.InstallStopped(e.Message, ModInstall.InstallFailedException.FolderUntouched));
         }
     }
 
@@ -265,9 +261,9 @@ public partial class MainWindowViewModel : IBuildPageShell
 
     private static string InstallLine(string package, string? leftBehind, IReadOnlyList<string> kept)
     {
-        string line = $"Installed {package} to the Mods folder.";
+        string line = Strings.InstallDone(package);
         foreach (string folder in kept.Concat(leftBehind is null ? Array.Empty<string>() : new[] { leftBehind }))
-            line += $" {folder} is still there. Delete it manually.";
+            line += " " + Strings.InstallLeftBehind(folder);
         return line;
     }
 
@@ -276,9 +272,9 @@ public partial class MainWindowViewModel : IBuildPageShell
         if (MainWindow is not { } owner) return;
         var result = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Locate the 3DMigoto loader",
+            Title = Strings.SettingsLocateLoader,
             AllowMultiple = false,
-            FileTypeFilter = new[] { new FilePickerFileType("Programs") { Patterns = new[] { "*.exe" } } },
+            FileTypeFilter = new[] { new FilePickerFileType(Strings.SettingsProgramsFilter) { Patterns = new[] { "*.exe" } } },
         });
         if (result.FirstOrDefault()?.TryGetLocalPath() is not { } path) return;
         _settings.MigotoLoaderExe = path;
@@ -294,10 +290,10 @@ public partial class MainWindowViewModel : IBuildPageShell
         // model raises is shown whole, and only a defect gets the action's own words.
         if (!exists) throw new AuthoredRefusalException(kind switch
         {
-            BuildArtifactKind.Folder => "The build folder is gone. Build again.",
-            BuildArtifactKind.Zip => "The build zip is gone. Build again.",
-            BuildArtifactKind.Log => "The build log is gone. Build again.",
-            _ => "The installed folder is gone. Install again.",
+            BuildArtifactKind.Folder => Strings.BuildFolderGone,
+            BuildArtifactKind.Zip => Strings.BuildZipGone,
+            BuildArtifactKind.Log => Strings.BuildLogGone,
+            _ => Strings.InstalledFolderGone,
         });
         if (kind == BuildArtifactKind.Zip)
             Process.Start(new ProcessStartInfo
@@ -366,11 +362,11 @@ public partial class MainWindowViewModel : IBuildPageShell
         if (MainWindow is not { } owner) return null;
         var picked = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Choose a preview image",
+            Title = Strings.BuildPreviewPickerTitle,
             AllowMultiple = false,
             FileTypeFilter = new[]
             {
-                new FilePickerFileType("Images")
+                new FilePickerFileType(Strings.BuildPreviewPickerFilter)
                 {
                     Patterns = BuildPageVm.PreviewExtensions.Select(extension => "*" + extension).ToArray(),
                 },
@@ -382,10 +378,10 @@ public partial class MainWindowViewModel : IBuildPageShell
     public void SetPreviewFrom(AuthoredEditSession session, string sourceFile)
     {
         var project = session.Snapshot();
-        string root = project.RootDir ?? throw new InvalidOperationException(BuildPageVm.PreviewNeedsSave);
+        string root = project.RootDir ?? throw new InvalidOperationException(Strings.BuildPreviewNeedsSave);
         string extension = Path.GetExtension(sourceFile).ToLowerInvariant();
         if (!BuildPageVm.PreviewExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
-            throw new InvalidDataException(BuildPageVm.PreviewNotAnImage);
+            throw new InvalidDataException(Strings.BuildPreviewNotAnImage);
         string relative = "preview" + extension;
         string destination = Path.Combine(root, relative);
         string staged = destination + ".tmp";
@@ -415,7 +411,7 @@ public partial class MainWindowViewModel : IBuildPageShell
 
     public void GoToEdit(EditRef edit)
     {
-        SelectedStep = "② Edit";
+        SelectedStep = WorkflowStep.Edit;
         EditPage.SelectEdit(edit);
     }
 

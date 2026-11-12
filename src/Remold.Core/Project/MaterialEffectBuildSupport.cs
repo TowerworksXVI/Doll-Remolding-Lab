@@ -19,12 +19,12 @@ public static class MaterialEffectBuildSupport
     {
         if (render.Contracts is not { Count: > 0 })
             return new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Conflict,
-                AuthoredBuildPlanner.InternalGuard, "the effect operation has no material draw contract"), render,
+                CoreStrings.PlanInternalGuard, "the effect operation has no material draw contract"), render,
                 Array.Empty<BuildRuntimeEmission>(), Array.Empty<BuildOutputArtifact>());
         var selected = operations?.Where(operation => operation.EffectId == request.EffectId).ToArray();
         if (selected is not { Length: > 0 })
             return new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Unsupported,
-                $"{Label(request.EffectId)} cannot be disabled on this material."), render,
+                CoreStrings.EffectCannotBeDisabled(Label(request.EffectId))), render,
                 Array.Empty<BuildRuntimeEmission>(), Array.Empty<BuildOutputArtifact>());
         var emissions = new List<BuildRuntimeEmission>();
         foreach (var contract in render.Contracts)
@@ -34,7 +34,7 @@ public static class MaterialEffectBuildSupport
             var errors = Errors(operation);
             if (errors.Count > 0)
                 return new BuildOperationResolution(BuildPlanDecision.Blocked(BuildPlanVerdict.Conflict,
-                    AuthoredBuildPlanner.InternalGuard, string.Join("; ", errors)), render,
+                    CoreStrings.PlanInternalGuard, string.Join("; ", errors)), render,
                     Array.Empty<BuildRuntimeEmission>(), Array.Empty<BuildOutputArtifact>());
             emissions.Add(new BuildRuntimeEmission(request.RowId + ":" + contract.Id + ":" + index,
                 BuildEmissionKind.MaterialEffect, contract.TargetingProof, request.Gate,

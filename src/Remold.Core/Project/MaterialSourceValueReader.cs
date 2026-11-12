@@ -28,7 +28,7 @@ public sealed class MaterialSourceValueReader : IMaterialGameValueReader
         if (field is null)
             return new MaterialGameValueResolution(BuildPlanVerdict.Unsupported, null,
                 Array.Empty<MaterialCarrierState>(),
-                $"'{semantic}' is not an authorable shading value");
+                CoreStrings.PlanReasonNotAuthorable(semantic));
         if (field.Source == MaterialValueSource.FamilyRule)
             return _family.Resolve(sourceSlot, carrierSlot, semantic);
 
@@ -37,7 +37,7 @@ public sealed class MaterialSourceValueReader : IMaterialGameValueReader
             || material.PathId == 0)
             return new MaterialGameValueResolution(BuildPlanVerdict.Unresolved, null,
                 Array.Empty<MaterialCarrierState>(),
-                "the source slot has no exact current-install material");
+                CoreStrings.PlanReasonSourceNoMaterial);
         BundleReader.MaterialShading? shading;
         try
         {
@@ -48,7 +48,7 @@ public sealed class MaterialSourceValueReader : IMaterialGameValueReader
         if (shading is null)
             return new MaterialGameValueResolution(BuildPlanVerdict.Unresolved, null,
                 Array.Empty<MaterialCarrierState>(),
-                "the exact source material could not be read from the current install");
+                CoreStrings.PlanReasonSourceUnreadable);
 
         string? encoded = null;
         if (field.Kind == MaterialValueKind.Color)
@@ -62,8 +62,7 @@ public sealed class MaterialSourceValueReader : IMaterialGameValueReader
         if (encoded is null)
             return new MaterialGameValueResolution(BuildPlanVerdict.Unresolved, null,
                 Array.Empty<MaterialCarrierState>(),
-                $"the source material '{shading.Name}' does not state {semantic}; "
-                + "the shader default applies there and cannot be copied");
+                CoreStrings.PlanReasonSourceStatesNothing(shading.Name, semantic));
 
         return new MaterialGameValueResolution(BuildPlanVerdict.Resolved, encoded, new[]
         {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
@@ -29,11 +30,13 @@ public sealed partial class MigotoEmitter
     /// <item>the slim-vs-dense size formula, and the ragged assembly layout it ships</item>
     /// <item>the anchor and discriminator SELECTION rules, how K escalates between them, and the tie
     /// choice</item>
+    /// <item>how a tied bone's correction tail is solved: which of its own vertices it reads, how they are
+    /// grouped and scaled, and when a bone keeps the plain tie</item>
     /// </list>
     /// Everything else the solve is parameterised by is a constant, and <see cref="AlgoVersion"/> stamps
     /// those directly — they are not this revision's job. An entry written by another revision is not this
     /// revision's answer, so it is never read.</summary>
-    const int OperatorAlgoRevision = 5;
+    const int OperatorAlgoRevision = 6;
 
     /// <summary>The identity a cached operator is valid under: the hand-bumped revision plus the VALUE of
     /// every constant the solve is parameterised by, so editing one of them retires the entries it would
@@ -42,7 +45,9 @@ public sealed partial class MigotoEmitter
     static string AlgoVersion() => string.Create(CultureInfo.InvariantCulture,
         $"op{OperatorAlgoRevision}|err{OperatorErrGate:r}|def{SlimDefectGate:r}|cap{string.Join('.', CapDivisors)}" +
         $"|k{KStart}.{KCap}|rcond{OperatorRcond:r}|tie{TieCoWeightFloor:r}" +
-        $"|disc{PoolMath.DiscriminatorTargetFloor:r}");
+        $"|disc{PoolMath.DiscriminatorTargetFloor:r}|gain{SlimGainGate:r}.{SlimGainStep:r}" +
+        $"|pool{string.Join('.', AnchorPools.Select(f => f is { } v ? v.ToString("r", CultureInfo.InvariantCulture) : "top"))}" +
+        $"|fix{CorrectionScale:r}.{CorrectionRcond:r}");
 
     /// <summary>The full identity a solved operator is filed under, or null when this build is not caching
     /// (no cache root wired) or the caller could not name the mesh (no key). The operator NAME joins it: the
@@ -97,7 +102,20 @@ public sealed partial class MigotoEmitter
             for (int i = 0; i < dc; i++) diagnostics.Add(ReadBoundedString(f, r));
             var sel = r.ReadBoolean() ? ReadUInts(f, r) : null;
             var off = r.ReadBoolean() ? ReadUInts(f, r) : null;
-            return new OperatorArt(cpinv, weak, tieFullRows, hashes, sourceRows, diagnostics, sel, off, n);
+            var tieWidth = ReadInts(f, r);
+            var groupOf = ReadInts(f, r);
+            int gc = Count(f, r, bytesEach: 5 * sizeof(int));   // a group costs at least its five counts
+            var groups = new List<TieGroup>(gc);
+            for (int i = 0; i < gc; i++)
+            {
+                var bones = ReadInts(f, r);
+                var centers = ReadDoubles(f, r);
+                var scales = ReadDoubles(f, r);
+                var basis = ReadDoubles(f, r);
+                groups.Add(new TieGroup(bones, centers, scales, basis, r.ReadInt32()));
+            }
+            return new OperatorArt(cpinv, weak, tieFullRows, hashes, sourceRows, diagnostics, sel, off, n,
+                tieWidth, groupOf, groups);
         }
         catch (Exception)
         {
@@ -157,6 +175,17 @@ public sealed partial class MigotoEmitter
                 if (art.Sel is { } s) WriteUInts(w, s);
                 w.Write(art.Off is not null);
                 if (art.Off is { } o) WriteUInts(w, o);
+                WriteInts(w, art.TieWidth);
+                WriteInts(w, art.GroupOf);
+                w.Write(art.Groups.Count);
+                foreach (var g in art.Groups)
+                {
+                    WriteInts(w, g.Bones);
+                    WriteDoubles(w, g.Centers);
+                    WriteDoubles(w, g.Scales);
+                    WriteDoubles(w, g.Basis);
+                    w.Write(g.Rank);
+                }
             }
             File.Move(tmp, path, overwrite: true);
         }
@@ -172,12 +201,20 @@ public sealed partial class MigotoEmitter
     }
 
     /// <summary>Payload layout tag; a change to the field list changes it, so old entries read as a miss.</summary>
-    const string CacheFormat = "remold-operator-2";
+    const string CacheFormat = "remold-operator-3";
 
     static void WriteFloats(BinaryWriter w, float[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
     static void WriteInts(BinaryWriter w, int[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
     static void WriteUInts(BinaryWriter w, uint[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
     static void WriteBools(BinaryWriter w, bool[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
+    static void WriteDoubles(BinaryWriter w, double[] a) { w.Write(a.Length); foreach (var v in a) w.Write(v); }
+
+    static double[] ReadDoubles(Stream f, BinaryReader r)
+    {
+        var a = new double[Count(f, r, sizeof(double))];
+        for (int i = 0; i < a.Length; i++) a[i] = r.ReadDouble();
+        return a;
+    }
 
     static float[] ReadFloats(Stream f, BinaryReader r)
     {

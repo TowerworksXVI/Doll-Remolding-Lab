@@ -233,7 +233,8 @@ public class NeighbourAnchorReferenceTests : IDisposable
         Assert.Equal("anchor", space);
         Assert.True(BindReference.SameBind(Matrix4x4.CreateTranslation(-centre), union[Ridden]),
             $"union bind {union[Ridden]} is not the display placement's {Matrix4x4.CreateTranslation(-centre)}");
-        Assert.DoesNotContain(stamped.Warnings, warning => warning.StartsWith("The original mesh of"));
+        Assert.DoesNotContain(stamped.Warnings,
+            CatalogShape.Of(CoreStrings.BuildOriginalMeshChanged(CatalogShape.Any)).IsMatch);
 
         WriteDonorGlb();
         var released = ReleasedBuild.Build(NewProject("HiddenTarget"),
@@ -261,9 +262,7 @@ public class NeighbourAnchorReferenceTests : IDisposable
         var union = RecordedUnion(built.OutDir).Binds;
         Assert.True(BindReference.SameBind(Matrix4x4.CreateTranslation(-recorded), union[Ridden]),
             $"union bind {union[Ridden]} is not the recorded display placement's {Matrix4x4.CreateTranslation(-recorded)}");
-        var warning = Assert.Single(built.Warnings, w => w.StartsWith("The original mesh of"));
-        Assert.Matches("^The original mesh of '[^']+' has changed since this edit was sent back from Blender, "
-            + "so the new mesh may not appear where Blender showed it\\.$", warning);
+        Assert.Single(built.Warnings, CatalogShape.Of(CoreStrings.BuildOriginalMeshChanged(CatalogShape.Any)).IsMatch);
     }
 
     /// <summary>The body is replaced, and the new mesh rides a bone only a part the game starts hidden
@@ -334,7 +333,8 @@ public class NeighbourAnchorReferenceTests : IDisposable
 
         // the premise: the neighbour anchors, and the modder is told about its material
         Assert.Contains($"pool (doll_acc): {BodySlot} (anchor {BodySlot})", r.Diagnostics);
-        Assert.Contains(r.Warnings, w => w.Contains("original material", StringComparison.Ordinal));
+        Assert.Contains(r.Warnings,
+            CatalogShape.Of(CoreStrings.BuildDrawnAsOtherPart(CatalogShape.Any, CatalogShape.Any)).IsMatch);
 
         var stated = ExportStatement();
 
@@ -412,9 +412,7 @@ public class NeighbourAnchorReferenceTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Equal("'acc' can't be built: the new mesh is weighted to bones only other parts use. The "
-            + "game files don't say where 'acc' sits in its skeleton, so those bones can't be placed. In Blender, "
-            + "weight the new mesh to bones 'acc' uses, or remove those weights", ex.Message);
+        Assert.Equal(CoreStrings.BuildUnplacedBonesTarget("acc"), ex.Message);
         Assert.Contains(BuildLogDiagnostics.From(ex), d => d.Contains("its skeleton can't be read"));
     }
 
@@ -429,8 +427,7 @@ public class NeighbourAnchorReferenceTests : IDisposable
 
         var ex = Assert.Throws<AuthoredRefusalException>(() => ReleasedBuild.Build(p, env, _out, zip: false));
 
-        Assert.Equal("'acc' can't be built: the new mesh is weighted to bones only 'body' uses. The game "
-            + "files don't say where 'body' is relative to 'acc'. Remove those weights in Blender", ex.Message);
+        Assert.Equal(CoreStrings.BuildUnplacedBonesSource("acc", "body"), ex.Message);
         Assert.Contains(BuildLogDiagnostics.From(ex), d => d.Contains("'c_doll01_body_lod0': its skeleton can't be read"));
     }
 }

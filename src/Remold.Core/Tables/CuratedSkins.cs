@@ -11,14 +11,15 @@ namespace Remold.Core.Tables;
 /// </summary>
 /// <param name="Character">The internal character KEY — the grouping key the selection ledger, the mod
 /// manifest and the export subfolders persist. Never shown; <see cref="CharacterDisplay"/> is.</param>
-/// <param name="CharacterDisplay">The player-facing character label. A CURATED string, not a
-/// localization lookup: these subjects have no <c>GunCharacterData</c> row to name them.</param>
+/// <param name="CharacterLabel">Reads the player-facing character label. A CURATED string, not a
+/// localization lookup: these subjects have no <c>GunCharacterData</c> row to name them. Read on every
+/// call, so the label is in the UI language in force when the roster is built.</param>
 /// <param name="Stem">The outfit's model stem, and the container ROOT its prefab ships under — the two
 /// are deliberately the same string, because the workbench's slot-ownership rule treats every slot of a
 /// root-name-matching prefab as this subject's, which is what lets a skin claim the shared face mesh it
 /// does not carry its own prefix on.</param>
-/// <param name="OutfitDisplay">The player-facing outfit label. Curated, like
-/// <see cref="CharacterDisplay"/>.</param>
+/// <param name="OutfitLabel">Reads the player-facing outfit label. Curated, like
+/// <paramref name="CharacterLabel"/>.</param>
 /// <param name="MeshPrefix">The prefix every one of this skin's meshes carries, ending at the part token
 /// (so <c>c_X_dorm_face_lod0</c> under <c>c_X_dorm_</c> yields the part <c>face</c>).</param>
 /// <param name="Route">How the resolver reaches the assembly prefab, or null when the stem-address
@@ -28,16 +29,22 @@ namespace Remold.Core.Tables;
 /// <see cref="CuratedSkins"/> on why the sign is the whole collision guarantee.</param>
 public sealed record CuratedSkin(
     string Character,
-    string CharacterDisplay,
+    Func<string> CharacterLabel,
     string Stem,
-    string OutfitDisplay,
+    Func<string> OutfitLabel,
     string MeshPrefix,
     SubjectRoute? Route,
     long ModelConfigId)
 {
+    /// <summary>The player-facing character label, in the current UI language.</summary>
+    public string CharacterDisplay => CharacterLabel();
+
+    /// <summary>The player-facing outfit label, in the current UI language.</summary>
+    public string OutfitDisplay => OutfitLabel();
+
     /// <summary>The player-facing name for this skin: character and outfit label together, as a warning
     /// or a picker names a subject.</summary>
-    public string Display => $"{CharacterDisplay} {OutfitDisplay}";
+    public string Display => CoreStrings.CuratedSkinDisplay(CharacterDisplay, OutfitDisplay);
 
     /// <summary>This entry as a roster outfit. <see cref="OutfitKind.Other"/> is not a fallback: it is
     /// the kind whose label renders BARE (see <see cref="FriendlyNames.KindAndLabel"/>), which is what
@@ -96,11 +103,11 @@ public static class CuratedSkins
         // parts are byte-identical to the Barracks build's (measured; only the two bag prop parts are
         // missing), so its draw hashes are the same and a Barracks mod already covers it in game — a row
         // for it would offer the same mod twice.
-        new("Mayling", "Mayling", "Mayling_dorm", "Barracks", "c_Mayling_dorm_",
+        new("Mayling", () => "Mayling", "Mayling_dorm", () => CoreStrings.CuratedBarracks, "c_Mayling_dorm_",
             SubjectRoute.Addressable("Assets/ConfigPrefab/BarrackModel/Character/Mayling/Mayling_dorm.prefab",
                 "Mayling_dorm"),
             -1),
-        new("Mayling", "Mayling", "c_Mayling_dorm_nobag_skin_model", "Crew Deck", "c_Mayling_dorm_",
+        new("Mayling", () => "Mayling", "c_Mayling_dorm_nobag_skin_model", () => CoreStrings.CuratedCrewDeck, "c_Mayling_dorm_",
             SubjectRoute.Addressable(
                 "Assets/ArtsResource/Lobby_NPC/Mayling/Models/c_Mayling_dorm_nobag_skin_model.prefab",
                 "c_Mayling_dorm_nobag_skin_model"),
@@ -111,32 +118,32 @@ public static class CuratedSkins
         // reader and the workbench already accept as the enemy/NPC shape. Its prefab sits under a context
         // root of the stem-address formula, so it carries NO route — only the roster row is curated. It
         // wears the SAME mesh family as skin 001, plus a hand part 001 has no slot for.
-        new("CommanderMale", "Commander (M)", "CommanderMale", "001", "c_CommanderMale_dorm_",
+        new("CommanderMale", () => CoreStrings.CuratedCommanderMale, "CommanderMale", () => CoreStrings.CuratedSkinNumber("001"), "c_CommanderMale_dorm_",
             SubjectRoute.DirectBundle("fbca8e4d50ae538388763de438d4c903.bundle", "CommanderMale",
                 MaleMats, MaleTex, SkinBlendTex),
             -2),
-        new("CommanderMale", "Commander (M)", "CommanderMale02", "002", "c_CommanderMale02_dorm_",
+        new("CommanderMale", () => CoreStrings.CuratedCommanderMale, "CommanderMale02", () => CoreStrings.CuratedSkinNumber("002"), "c_CommanderMale02_dorm_",
             SubjectRoute.DirectBundle("fedfcb7bd945fc4b300574062376286b.bundle", "CommanderMale02",
                 MaleMats, Skin02Mats, MaleTex, Male02Tex, SkinBlendTex),
             -3),
-        new("CommanderMale", "Commander (M)", "CommanderMale03", "003", "c_CommanderMale03_dorm_",
+        new("CommanderMale", () => CoreStrings.CuratedCommanderMale, "CommanderMale03", () => CoreStrings.CuratedSkinNumber("003"), "c_CommanderMale03_dorm_",
             SubjectRoute.DirectBundle("ced2697753ae7a2f598ca1ea7c185be7.bundle", "CommanderMale03",
                 MaleMats, "615fd3e9ef994e37ab2f96e91f0d308b.bundle",
                 MaleTex, "952c5d63aa99c91c2074266dda7c8185.bundle", SkinBlendTex),
             -4),
-        new("CommanderMale", "Commander (M)", "CommanderNeutral", "Neutral", "c_CommanderMale_dorm_",
+        new("CommanderMale", () => CoreStrings.CuratedCommanderMale, "CommanderNeutral", () => CoreStrings.CuratedNeutral, "c_CommanderMale_dorm_",
             null, -5),
 
-        new("CommanderFemale", "Commander (F)", "CommanderFemale", "001", "c_CommanderFemale_dorm_",
+        new("CommanderFemale", () => CoreStrings.CuratedCommanderFemale, "CommanderFemale", () => CoreStrings.CuratedSkinNumber("001"), "c_CommanderFemale_dorm_",
             SubjectRoute.DirectBundle("c2882f637be0d4d52d6b3182e1af1b5e.bundle", "CommanderFemale",
                 FemaleMats, MaleMats, FemaleTex, MaleTex, FaceBlendTex, SkinBlendTex),
             -6),
-        new("CommanderFemale", "Commander (F)", "CommanderFemale02", "002", "c_CommanderFemale02_dorm_",
+        new("CommanderFemale", () => CoreStrings.CuratedCommanderFemale, "CommanderFemale02", () => CoreStrings.CuratedSkinNumber("002"), "c_CommanderFemale02_dorm_",
             SubjectRoute.DirectBundle("10f82b41089bbd6bdbcacbf40b93b052.bundle", "CommanderFemale02",
                 FemaleMats, Skin02Mats, "ff8e4b32f6bcca4ffd6a3e88e03e2c7b.bundle",
                 FemaleTex, Male02Tex, "2bda47d868fa119688d3ccb0e9d7f248.bundle", FaceBlendTex, SkinBlendTex),
             -7),
-        new("CommanderFemale", "Commander (F)", "CommanderFemale03", "003", "c_CommanderFemale03_dorm_",
+        new("CommanderFemale", () => CoreStrings.CuratedCommanderFemale, "CommanderFemale03", () => CoreStrings.CuratedSkinNumber("003"), "c_CommanderFemale03_dorm_",
             SubjectRoute.DirectBundle("79873b5e22b3cae800dcdc5c084d4e74.bundle", "CommanderFemale03",
                 FemaleMats, "1762af754e7916708a3a6436c3247734.bundle",
                 FemaleTex, "4604d7d02a7e07a30029317b611bb01c.bundle", FaceBlendTex, SkinBlendTex),

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Remold.App;
 using Remold.Core.Blender;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
@@ -217,8 +218,7 @@ public class BlenderBridgeTests
         var note = Assert.Single(Remold.App.ViewModels.MainWindowViewModel.BlenderTransformNotes(
             BlenderBridge.ReadSend(glb), parts));
 
-        Assert.Equal("The Object-mode position or scale on cloth1_lod0 was not applied. "
-            + "Apply the transform in Blender (Ctrl+A), then send it back.", note);
+        Assert.Equal(Strings.BlenderTransformNotApplied("cloth1_lod0"), note);
         // a return the read found clean re-opens nothing and says nothing
         Assert.Empty(Remold.App.ViewModels.MainWindowViewModel.BlenderTransformNotes(
             new IncomingEdit(null, glb), parts));
@@ -311,5 +311,17 @@ public class BlenderBridgeTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, "");
+    }
+
+    [Fact]
+    public void Blender_starts_with_the_bridge_and_the_apps_ui_language()
+    {
+        var start = BlenderBridge.LaunchStart(@"C:\Apps\blender.exe", @"C:\Apps\remold_bridge.py",
+            @"C:\Work\cloth.glb", @"C:\Work", "zh-Hans");
+
+        Assert.Equal(new[] { "--python", @"C:\Apps\remold_bridge.py", "--", @"C:\Work\cloth.glb", @"C:\Work" },
+            start.ArgumentList);
+        Assert.Equal("zh-Hans", start.Environment[BlenderBridge.LanguageVariable]);
+        Assert.False(start.UseShellExecute);
     }
 }

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
+using Remold.Core.Tables;
 using Remold.Core.Workbench;
 
 namespace Remold.Core.Migoto;
@@ -65,16 +66,39 @@ public sealed class SubjectPoolProbe
         _diagnostics = diagnostics;
     }
 
-    /// <summary>A logical bundle's deobfuscated bytes, parsed once. <paramref name="why"/> names what asked,
-    /// for the refusal an install that cannot serve it raises.</summary>
-    public byte[] Bundle(string id, string why)
+    /// <summary>What asked for a bundle, so the refusal an install that cannot serve it raises can name
+    /// it.</summary>
+    public enum BundleUse { Part, PoolPart, Mesh, Tier, Renderer, StockTexture, AssemblyPrefab }
+
+    /// <summary>A logical bundle's deobfuscated bytes, parsed once. <paramref name="use"/> and
+    /// <paramref name="name"/> name what asked, for the refusal an install that cannot serve it raises.</summary>
+    public byte[] Bundle(string id, BundleUse use, string name)
     {
         if (!_bundles.TryGetValue(id, out var bytes))
             _bundles[id] = bytes = _env.Deobfuscate(id);
-        if (bytes is null) _diagnostics?.Add($"bundle '{id}' ({why}) isn't readable in this install");
-        return bytes ?? throw new AuthoredRefusalException(
-            $"the game files for {why} can't be read in this install");
+        if (bytes is null) _diagnostics?.Add($"bundle '{id}' ({Why(use, name)}) isn't readable in this install");
+        return bytes ?? throw new AuthoredRefusalException(use switch
+        {
+            BundleUse.Part => CoreStrings.GameFilesUnreadablePart(PartNames.Display(name)),
+            BundleUse.PoolPart => CoreStrings.GameFilesUnreadablePoolPart(PartNames.Display(name)),
+            BundleUse.Mesh => CoreStrings.GameFilesUnreadableMesh(name),
+            BundleUse.Tier => CoreStrings.GameFilesUnreadableTier(name),
+            BundleUse.Renderer => CoreStrings.GameFilesUnreadableRenderer(PartNames.Display(name)),
+            BundleUse.StockTexture => CoreStrings.GameFilesUnreadableStockTexture(name),
+            _ => CoreStrings.GameFilesUnreadableAssemblyPrefab,
+        });
     }
+
+    private static string Why(BundleUse use, string name) => use switch
+    {
+        BundleUse.Part => $"part '{name}'",
+        BundleUse.PoolPart => $"pool part '{name}'",
+        BundleUse.Mesh => $"mesh '{name}'",
+        BundleUse.Tier => $"tier '{name}'",
+        BundleUse.Renderer => $"the renderer of '{name}'",
+        BundleUse.StockTexture => $"stock texture '{name}'",
+        _ => "assembly prefab",
+    };
 
     /// <summary>Every tier of a part, forward-resolved off the catalog alone: (mesh name, bundle id, which
     /// Mesh of that bundle). A recipe tier is selected by its address's load key, so the read that opens the
@@ -215,21 +239,20 @@ public sealed class SubjectPoolProbe
             try
             {
                 var (name, bid, pid) = Tiers(p)[0];
-                var field = _reader.GetMeshField(Bundle(bid, $"part '{p.Token}'"), name, pid)
-                    ?? throw new AuthoredRefusalException(
-                $"the game files no longer hold the mesh '{name}'. Rescan, then build again");
+                var field = _reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Part, p.Token), name, pid)
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildGameFilesNoLongerHoldMesh(name));
                 // ahead of the skin rule: the bone table is what tells a later orphan-bone failure whether a
                 // refused part could have owned the bones the pool is missing
                 var hashes = field["m_BoneNameHashes"]["Array"].Children.Select(c => c.AsUInt).ToHashSet();
                 // the bone table also settles support: a rig this path can't carry is declined like any
                 // other unsupported asset
                 if (Skeleton.BoneTable.HasUnsupportedRig(hashes))
-                    throw new BlockedAssetException($"'{p.SlotName}' is not a supported asset");
-                if (StreamDump.UnrecoverableSkinReason(field) is { } why)
+                    throw new BlockedAssetException(CoreStrings.BuildAssetNotSupported(p.SlotName));
+                if (StreamDump.UnrecoverableSkinWhy(field) is { } why)
                 {
-                    heldBack.Add(new PoolDerive.MissingPart(p.SlotName, why, hashes,
-                        PartPresence.Classify(p.Token, schemeSlots)));
-                    _diagnostics?.Add($"part '{p.Token}' excluded from pool derivation: can't feed palette recovery: {why}");
+                    heldBack.Add(new PoolDerive.MissingPart(p.SlotName, why.English, hashes,
+                        PartPresence.Classify(p.Token, schemeSlots)) { Skin = why });
+                    _diagnostics?.Add($"part '{p.Token}' excluded from pool derivation: can't feed palette recovery: {why.English}");
                     continue;
                 }
                 // Measured here and nowhere else: the bones this part POSES are what decides whether a donor
@@ -246,10 +269,10 @@ public sealed class SubjectPoolProbe
                 }
                 catch (Exception ex) when (ex is not BlockedAssetException)
                 {
-                    const string unread = "its skin weights can't be read";
-                    heldBack.Add(new PoolDerive.MissingPart(p.SlotName, unread, hashes,
-                        PartPresence.Classify(p.Token, schemeSlots)));
-                    _diagnostics?.Add($"part '{p.Token}' excluded from pool derivation: {unread}: {ex.Message}");
+                    var unread = new StreamDump.SkinWhy(StreamDump.SkinReason.WeightsUnread);
+                    heldBack.Add(new PoolDerive.MissingPart(p.SlotName, unread.English, hashes,
+                        PartPresence.Classify(p.Token, schemeSlots)) { Skin = unread });
+                    _diagnostics?.Add($"part '{p.Token}' excluded from pool derivation: {unread.English}: {ex.Message}");
                     continue;
                 }
                 bones.Add(new PoolDerive.PartBones(p.SlotName, hashes,
@@ -267,10 +290,10 @@ public sealed class SubjectPoolProbe
                     var skin = MeshSkin.Decode(field);
                     skins[p.SlotName] = skin;
                     if (skin is { IsSkinned: true })
-                        rests[p.SlotName] = (Skeleton.SceneRig.TryRead(Bundle(bid, $"part '{p.Token}'"), name, skin, pid)
+                        rests[p.SlotName] = (Skeleton.SceneRig.TryRead(Bundle(bid, SubjectPoolProbe.BundleUse.Part, p.Token), name, skin, pid)
                             ?? (pid.IsExact && model.PrimaryBundle.Length > 0
                                 ? Skeleton.SceneRig.TryReadForMeshRef(
-                                    Bundle(model.PrimaryBundle, "assembly prefab"), pid.PathId, skin)
+                                    Bundle(model.PrimaryBundle, SubjectPoolProbe.BundleUse.AssemblyPrefab, ""), pid.PathId, skin)
                                 : null))?.MeasuredRest;
                 }
                 catch { /* no rest to compose with — the fitted path decides */ }
@@ -365,7 +388,7 @@ public sealed class SubjectPoolProbe
         {
             var (name, bid, pid) = Tiers(part)[0];
             var shown = HiddenPart.For(PlacementOf(model, slot, skin).Placement,
-                () => UnityMesh.Decode(_reader.GetMeshField(Bundle(bid, $"part '{part.Token}'"), name, pid)
+                () => UnityMesh.Decode(_reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Part, part.Token), name, pid)
                     ?? throw new InvalidDataException($"the game files no longer hold the mesh '{name}'"), name),
                 UprightingOf(model, slot));
             return _displays[key] = (shown, shown is null ? Uncentrable : null);
@@ -390,7 +413,7 @@ public sealed class SubjectPoolProbe
             return _placements[key] = new RigPlacement.Placed(placement, problem, Skeleton: null);
         }
         // read as every other file this build reads: one it can't read refuses the build by the part's name
-        return _placements[key] = RigPlacement.Read(_reader, id => Bundle(id, $"part '{part.Token}'"),
+        return _placements[key] = RigPlacement.Read(_reader, id => Bundle(id, SubjectPoolProbe.BundleUse.Part, part.Token),
             _env.DependenciesOf, part.RendererBundle, part.RendererPathId, part.Pose, skin, _poses);
     }
 
@@ -447,7 +470,7 @@ public sealed class SubjectPoolProbe
             try
             {
                 var (name, bid, pid) = Tiers(part)[0];
-                var field = _reader.GetMeshField(Bundle(bid, $"part '{part.Token}'"), name, pid);
+                var field = _reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Part, part.Token), name, pid);
                 // A mesh with no influences at all replaces rigidly, and a rigid donor draws at its own
                 // part and nowhere else. A mesh neither route reaches is the build's refusal to make.
                 if (field is null || StreamDump.Route(field) != StreamDump.ReplaceRoute.Pooled) return part;
@@ -467,6 +490,6 @@ public sealed class SubjectPoolProbe
     {
         foreach (var n in names)
             if (BuildBlacklist.IsBlocked(n))
-                throw new BlockedAssetException($"'{n}' is not a supported asset");
+                throw new BlockedAssetException(CoreStrings.BuildAssetNotSupported(n));
     }
 }

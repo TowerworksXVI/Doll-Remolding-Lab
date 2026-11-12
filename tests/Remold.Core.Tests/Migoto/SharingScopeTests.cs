@@ -130,8 +130,7 @@ public class SharingScopeTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
-        Assert.Contains(r.Infos, i => i == "VesnaSSR01 has no mesh of its own, so the mod cannot tell "
-            + "when it is on screen. Edits on its shared meshes apply wherever those meshes draw.");
+        Assert.Contains(CoreStrings.BuildNoOwnMesh("VesnaSSR01"), r.Infos);
         Assert.DoesNotContain("$zz_gate_", ReadIni(r));
     }
 
@@ -178,7 +177,8 @@ public class SharingScopeTests : IDisposable
         int gate = ini.IndexOf("if $zz_gate_vesnassr01 == 1", StringComparison.Ordinal);
         Assert.True(save >= 0 && gate > save, "saves are unconditional and precede the gated binds");
         // the anchor is shared with ANOTHER character, whose copy visibly co-changes — disclosed
-        Assert.Contains(r.Infos, i => i.Contains("Karst") && i.Contains("shows this edit too"));
+        Assert.Contains(r.Infos, i => i.Contains("Karst") && CatalogShape.Of(
+            CoreStrings.BuildTextureSharedMesh(CatalogShape.Any, CatalogShape.Any, CatalogShape.Any)).IsMatch(i));
     }
 
     /// <summary>Two of one doll's outfits sharing the face texture, each owning its own texture target and
@@ -555,7 +555,7 @@ public class SharingScopeTests : IDisposable
         string ini = ReadIni(r);
         Assert.DoesNotContain("$zz_gate_", ini);
         Assert.DoesNotContain("[TextureOverride_Witness_", ini);
-        Assert.Contains(r.Infos, i => i.Contains("has no mesh of its own"));
+        Assert.Contains(r.Infos, CatalogShape.Of(CoreStrings.BuildNoOwnMesh(CatalogShape.Any)).IsMatch);
     }
 
     [Fact]
@@ -600,7 +600,7 @@ public class SharingScopeTests : IDisposable
 
         string ini = ReadIni(r);
         Assert.Contains("[TextureOverride_Retex_", ini);
-        Assert.Contains(r.Infos, i => i.Contains("haven't been measured"));
+        Assert.Contains(r.Infos, CatalogShape.Of(CoreStrings.BuildSharingUnmeasuredFor(CatalogShape.Any)).IsMatch);
     }
 
     [Theory]
@@ -635,8 +635,7 @@ public class SharingScopeTests : IDisposable
 
         var r = ReleasedBuild.Build(p, env, _world.OutRoot);
 
-        Assert.Contains("Shared meshes and textures haven't been measured. Every edit applies wherever "
-            + "its mesh or texture draws in game.", r.Infos);
+        Assert.Contains(CoreStrings.BuildSharingUnmeasured, r.Infos);
     }
 
     // ---- the tag derivation -----------------------------------------------------------------------

@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -50,7 +51,7 @@ public class CpuLimitTests : IDisposable
     {
         Assert.False(SettingsValidation.CpuLimit(typed, out var value, out var reason));
         Assert.Null(value);
-        Assert.Equal(SettingsValidation.CpuNotANumber, reason);
+        Assert.Equal(Strings.SettingsCpuNotANumber, reason);
     }
 
     /// <summary>The refusal is two sentences like every other row's: what is wrong, then what to do — and
@@ -59,9 +60,9 @@ public class CpuLimitTests : IDisposable
     [Fact]
     public void TheRefusal_NamesTheRemedy()
     {
-        Assert.Contains("Not a whole number above 0.", SettingsValidation.CpuNotANumber);
-        Assert.Contains("Enter a number of cores", SettingsValidation.CpuNotANumber);
-        Assert.Contains("blank", SettingsValidation.CpuNotANumber);
+        Assert.Contains("Not a whole number above 0.", Strings.SettingsCpuNotANumber);
+        Assert.Contains("Enter a number of cores", Strings.SettingsCpuNotANumber);
+        Assert.Contains("blank", Strings.SettingsCpuNotANumber);
     }
 
     /// <summary>The cap is a scheduling bound and nothing else: the same pool solved on one core emits the

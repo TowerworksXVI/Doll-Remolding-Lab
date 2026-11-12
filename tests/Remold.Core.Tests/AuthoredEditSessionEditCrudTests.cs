@@ -121,7 +121,7 @@ public sealed class AuthoredEditSessionEditCrudTests
         var error = Assert.Throws<AuthoredRefusalException>(() =>
             session.CreateEdit(AuthoredEditFixtures.Part("c_vesna_nothing_lod0")));
 
-        Assert.Equal(AuthoredEditSession.NowhereToRecord("an edit"), error.Message);
+        Assert.Equal(CoreStrings.SessionNowhereToRecordEdit, error.Message);
         Assert.Equal(before, AuthoredProjectSerializer.Serialize(session.Snapshot()));
     }
 
@@ -250,7 +250,7 @@ public sealed class AuthoredEditSessionEditCrudTests
 
         // The refusal is shown as it is wherever it surfaces, so it names the two edits the way the modder
         // named them. Ids are the model's own vocabulary and belong nowhere a person reads.
-        Assert.Equal("'Long body' cannot be deleted while 'Short body' takes a value from it.",
+        Assert.Equal(CoreStrings.SessionEditLentOut("Long body", "Short body"),
             error.Message);
         Assert.DoesNotContain("edit-long", error.Message);
         Assert.DoesNotContain("edit-short", error.Message);

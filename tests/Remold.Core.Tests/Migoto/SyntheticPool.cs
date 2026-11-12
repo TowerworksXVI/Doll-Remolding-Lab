@@ -219,6 +219,60 @@ public static class SyntheticPool
         File.WriteAllBytes(Path.Combine(dir, "stream2.buf"), s2);
     }
 
+    /// <summary>A bone that carries a whole block of vertices, a few centimetres across in every direction,
+    /// and is weighted heaviest on one thin band through it. The first <paramref name="band"/> vertices lie
+    /// within half a millimetre of a plane at 0.85 to 0.95 on A; the other <paramref name="body"/> fill the block at 0.5
+    /// to 0.6; B takes the rest of every vertex. A's best-weighted anchors are all on the band, so they state its motion
+    /// across the band only through the band's thickness.</summary>
+    public static void WriteBandedDump(string dir, int seed, int band, int body, uint hashA, uint hashB)
+    {
+        int verts = band + body;
+        WritePartDump(dir, seed, verts, new[] { hashA, hashB });
+
+        static float Unit(uint h) { h ^= h >> 13; h *= 2246822519u; h ^= h >> 16; return h % 10000 / 5000f - 1f; }
+        var s0 = new byte[verts * 40];
+        for (int v = 0; v < verts; v++)
+            for (int c = 0; c < 3; c++)
+            {
+                float u = Unit((uint)(seed * 131) + (uint)v * 2654435761u + (uint)c * 40503u);
+                float extent = c == 1 && v < band ? 0.0005f : 0.07f;
+                BitConverter.GetBytes((c == 1 ? 0.9f : 0f) + u * extent).CopyTo(s0, v * 40 + c * 4);
+            }
+        File.WriteAllBytes(Path.Combine(dir, "stream0.buf"), s0);
+
+        var s2 = new byte[verts * 32];
+        for (int v = 0; v < verts; v++)
+        {
+            // the share varies vertex to vertex, so the two bones are told apart wherever anchors are taken
+            float vary = (Unit((uint)(seed * 977) + (uint)v * 40503u) + 1f) * 0.05f;
+            float wa = (v < band ? 0.85f : 0.5f) + vary;
+            BitConverter.GetBytes(wa).CopyTo(s2, v * 32);
+            BitConverter.GetBytes(1f - wa).CopyTo(s2, v * 32 + 4);
+            BitConverter.GetBytes(0u).CopyTo(s2, v * 32 + 16);
+            BitConverter.GetBytes(1u).CopyTo(s2, v * 32 + 20);
+        }
+        File.WriteAllBytes(Path.Combine(dir, "stream2.buf"), s2);
+    }
+
+    /// <summary>A bone the part barely leans on: the first <paramref name="faint"/> vertices put
+    /// <paramref name="share"/> of their weight on B and the rest on A; the other <paramref name="plain"/>
+    /// are A's alone. B is recovered, but only through that share.</summary>
+    public static void WriteFaintBoneDump(string dir, int seed, int faint, int plain, float share, uint hashA, uint hashB)
+    {
+        int verts = faint + plain;
+        WritePartDump(dir, seed, verts, new[] { hashA, hashB });
+        var s2 = new byte[verts * 32];
+        for (int v = 0; v < verts; v++)
+        {
+            float wb = v < faint ? share : 0f;
+            BitConverter.GetBytes(1f - wb).CopyTo(s2, v * 32);
+            BitConverter.GetBytes(wb).CopyTo(s2, v * 32 + 4);
+            BitConverter.GetBytes(0u).CopyTo(s2, v * 32 + 16);
+            BitConverter.GetBytes(1u).CopyTo(s2, v * 32 + 20);
+        }
+        File.WriteAllBytes(Path.Combine(dir, "stream2.buf"), s2);
+    }
+
     /// <summary>Two bones only the WHOLE mesh separates: the first <paramref name="aOnly"/> vertices are
     /// A-only, the rest exactly 50/50. B's anchors all land in the mixed region where its column is
     /// COLLINEAR with A's, so no anchor-local solve over B's own vertices can hold — but the A-only region

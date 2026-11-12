@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using Remold.App;
 using Remold.App.ViewModels;
 using Remold.Core.Blender;
 using Remold.Core.Export;
@@ -11,6 +12,7 @@ using Remold.Core.Model;
 using Remold.Core.Project;
 using Remold.Core.Skeleton;
 using Remold.Core.Tests.Support;
+using Remold.Core.Text;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using Xunit;
@@ -91,8 +93,7 @@ public class BlenderSessionTests
         using var g = new TempGame();
         string opened = g.At("composition.glb");
 
-        Assert.Equal("Could not update composition.gf2session.json after this send — "
-            + "the Blender panel may offer stale targets until reopened.",
+        Assert.Equal(Strings.BlenderSessionRewriteFailure("composition.gf2session.json"),
             MainWindowViewModel.BlenderSessionRewriteFailure(opened));
     }
 
@@ -1008,7 +1009,8 @@ public class BlenderSessionTests
                       .Select(i => model.LogicalSkins.Single().Joints[i].Name).ToArray());
         Assert.All(SessionBones, h => Assert.DoesNotContain(model.LogicalNodes, n => n.Name == $"bone_{h:x8}"));
         // and never silently: one line, naming the part whose bones are missing
-        Assert.Single(log.Lines, l => l.Contains("body1") && l.Contains("the game is using its files"));
+        Assert.Single(log.Lines, l => l.Contains("body1")
+            && CatalogShape.Of(CoreStrings.ExportBonesMissingGameRunning(CatalogShape.Any)).IsMatch(l));
     }
 
     /// <summary>A synchronous progress sink: <see cref="Progress{T}"/> posts through the sync context, so a
@@ -1237,13 +1239,20 @@ public class BlenderSessionTests
     {
         Assert.Empty(MainWindowViewModel.BlenderOpenNotices(Array.Empty<string>(), false,
             Array.Empty<string>()));
-        Assert.Equal("Could not read cloth_a_d. That material opens untextured.", Notice("cloth_a_d"));
-        Assert.Equal("Could not read cloth_a_d and cloth_b_d. Those materials open untextured.",
+        Assert.Equal(Strings.TexturesUnreadable_One("cloth_a_d"), Notice("cloth_a_d"));
+        Assert.Equal(Strings.TexturesUnreadable_Other(Catalog.List(new[] { "cloth_a_d", "cloth_b_d" })),
             Notice("cloth_b_d", "cloth_a_d"));
-        Assert.Equal("Could not read body_d, cloth_a_d and cloth_b_d. Those materials open untextured.",
+        Assert.Equal(Strings.TexturesUnreadable_Other(Catalog.List(new[] { "body_d", "cloth_a_d", "cloth_b_d" })),
             Notice("cloth_a_d", "body_d", "cloth_b_d"));
-        Assert.Equal("Could not read body_d, cloth_a_d, cloth_b_d and 2 more textures. "
-            + "Those materials open untextured.",
+        Assert.Equal(Strings.TexturesUnreadable_Other(Catalog.List(new[]
+            {
+                "body_d", "cloth_a_d", "cloth_b_d", Strings.MoreTextures_One(1),
+            })),
+            Notice("cloth_a_d", "body_d", "cloth_b_d", "face_d"));
+        Assert.Equal(Strings.TexturesUnreadable_Other(Catalog.List(new[]
+            {
+                "body_d", "cloth_a_d", "cloth_b_d", Strings.MoreTextures_Other(2),
+            })),
             Notice("cloth_a_d", "body_d", "cloth_b_d", "face_d", "hair_d"));
 
         static string Notice(params string[] textures) => Assert.Single(

@@ -184,8 +184,7 @@ public static class LegacyProjectAdapter
                 if (target.PathId is { } oldMesh && oldMesh != 0 && part.Resolution is { } current
                     && current.Mesh.PathId != oldMesh)
                     Report.Add("identity.moved", MigrationDisposition.Inferred, Scope(route),
-                        "The game's mesh for this part changed in a game update, and the mod now "
-                        + "uses the current one.");
+                        CoreStrings.MigrationMeshMoved);
                 AddBinding(part, new TargetSlot
                 {
                     Part = Clone(part.Route),
@@ -230,8 +229,7 @@ public static class LegacyProjectAdapter
                         // donor maps dress those draws — and named the edit it dropped. Same outcome, and
                         // named here too rather than skipped in silence.
                         Report.Add("texture.replaced", MigrationDisposition.Inferred, Scope(route),
-                            $"The edited texture '{target.ObjectName}' is not used on a part this mod "
-                            + "replaces, because the replacement's own maps cover it.");
+                            CoreStrings.MigrationTextureOnReplacedPart(target.ObjectName));
                         continue;
                     }
                     var uses = part.Resolution.Materials
@@ -242,8 +240,7 @@ public static class LegacyProjectAdapter
                     if (uses.Count == 0)
                     {
                         Report.Add("texture.binding", MigrationDisposition.Inferred, Scope(route),
-                            $"No material on this part uses '{target.ObjectName}' any more, so that "
-                            + "edited texture was dropped.");
+                            CoreStrings.MigrationTextureUnusedOnPart(target.ObjectName));
                         continue;
                     }
 
@@ -253,9 +250,8 @@ public static class LegacyProjectAdapter
                             or TargetInputKind.Normal or TargetInputKind.Rmo))
                         {
                             Report.Add("texture.input", MigrationDisposition.Inferred, Scope(route),
-                                $"'{target.ObjectName}' is used here as the "
-                                + $"{Textures.TextureMap.SlotLabel(use.Texture.Input, null)}, which this "
-                                + "mod never changed, so that edit was dropped.");
+                                CoreStrings.MigrationTextureUnchangedMap(target.ObjectName,
+                                    Textures.TextureMap.DisplaySlotLabel(use.Texture.Input, null)));
                             continue;
                         }
                         // One released file replacing SEVERAL current textures is one project asset per
@@ -266,14 +262,13 @@ public static class LegacyProjectAdapter
                         part.HasTexture = true;
                         Edit(part);
                         RequireExact(use.Material.Material, Scope(route),
-                            $"Material {use.Material.MaterialSlotIndex}");
-                        RequireExact(use.Texture.Texture, Scope(route),
-                            $"The {Textures.TextureMap.SlotLabel(use.Texture.Input, use.Texture.ShaderProperty)}");
+                            () => CoreStrings.MigrationMaterialUnidentified(use.Material.MaterialSlotIndex));
+                        RequireExact(use.Texture.Texture, Scope(route), () => CoreStrings.MigrationMapUnidentified(
+                            Textures.TextureMap.DisplaySlotLabel(use.Texture.Input, use.Texture.ShaderProperty)));
                         if (target.PathId is { } oldPath && oldPath != 0
                             && use.Texture.Texture.PathId != oldPath)
                             Report.Add("identity.moved", MigrationDisposition.Inferred, Scope(route),
-                                $"The game's '{target.ObjectName}' texture changed in a game update, "
-                                + "and the mod now uses the current one.");
+                                CoreStrings.MigrationTextureMoved(target.ObjectName));
                         AddBinding(part, new TargetSlot
                         {
                             Part = Clone(part.Route),
@@ -310,8 +305,7 @@ public static class LegacyProjectAdapter
                 // and a workspace holds texture targets for subjects it never selected at all.
                 Report.Add("texture.subject", MigrationDisposition.Inferred,
                     $"{subject.Subject} / {subject.Outfit}",
-                    "This outfit has no parts in the current game files, so its edited texture "
-                    + $"'{target.ObjectName}' was dropped.");
+                    CoreStrings.MigrationOutfitHasNoParts(target.ObjectName));
                 return Array.Empty<PartState>();
             }
             var found = new List<PartState>();
@@ -328,8 +322,7 @@ public static class LegacyProjectAdapter
             if (found.Count == 0)
                 Report.Add("texture.binding", MigrationDisposition.Inferred,
                     $"{subject.Subject} / {subject.Outfit}",
-                    $"No material on this outfit uses '{target.ObjectName}' any more, so that edited "
-                    + "texture was dropped.");
+                    CoreStrings.MigrationTextureUnusedOnOutfit(target.ObjectName));
             return found;
         }
 
@@ -339,7 +332,7 @@ public static class LegacyProjectAdapter
             if (target.Users is not { Count: > 0 })
             {
                 Report.Add("texture.users", MigrationDisposition.Inferred, target.ObjectName,
-                    "This edited texture is not used by any part, so it was dropped.");
+                    CoreStrings.MigrationTextureUnused);
                 yield break;
             }
             foreach (string slot in target.Users.Distinct(StringComparer.OrdinalIgnoreCase))
@@ -360,7 +353,7 @@ public static class LegacyProjectAdapter
             {
                 Report.Add("identity.roster", MigrationDisposition.Unresolved,
                     $"{subject.Subject} / {subject.Outfit}",
-                    $"Couldn't read this outfit's parts from the game files: {e.Message}");
+                    CoreStrings.MigrationOutfitUnreadable(e.Message));
                 slots = Array.Empty<string>();
             }
             _rosters[key] = slots;
@@ -381,7 +374,7 @@ public static class LegacyProjectAdapter
                 // Named, not swallowed: a part the install can't be asked about may be one the edit
                 // belongs on, and the modder is the only one who can tell.
                 Report.Add("identity.probe", MigrationDisposition.Inferred, Scope(route),
-                    $"Couldn't check whether this part uses an edited texture: {e.Message}");
+                    CoreStrings.MigrationPartUncheckable(e.Message));
             }
             if (resolution is not null && !resolution.Target.SameAs(route)) resolution = null;
             _probed[route.Key] = resolution;
@@ -406,8 +399,7 @@ public static class LegacyProjectAdapter
                     // the combination is one only the released shape can hold: a replaced part's ramp is
                     // its replacement's own slot, and a build that met both would refuse.
                     Report.Add("ramp.replaced", MigrationDisposition.Inferred, Scope(route),
-                        $"The toon ramp '{Path.GetFileName(pick.Ramp)}' was picked on a part this mod "
-                        + "replaces, so it was dropped. The replacement has its own toon ramp.");
+                        CoreStrings.MigrationRampOnReplacedPart(Path.GetFileName(pick.Ramp)));
                     continue;
                 }
                 part.HasRamp = true;
@@ -421,15 +413,13 @@ public static class LegacyProjectAdapter
                     Report.Add("ramp.material", materials.Count == 0
                             ? MigrationDisposition.Unresolved : MigrationDisposition.Conflict,
                         Scope(route), materials.Count == 0
-                            ? $"The material '{pick.Material}' the toon ramp was picked on is not in the "
-                              + "current game files."
-                            : $"This part has {materials.Count} materials named '{pick.Material}', so the "
-                              + "toon ramp pick cannot be placed.");
+                            ? CoreStrings.MigrationRampMaterialGone(pick.Material)
+                            : CoreStrings.MigrationRampMaterialAmbiguous(materials.Count, pick.Material));
                 }
                 var material = materials.SingleOrDefault();
                 if (material is not null)
                     RequireExact(material.Material, Scope(route),
-                        $"Material {material.MaterialSlotIndex}");
+                        () => CoreStrings.MigrationMaterialUnidentified(material.MaterialSlotIndex));
                 AddBinding(part, new TargetSlot
                 {
                     Part = Clone(part.Route),
@@ -442,8 +432,7 @@ public static class LegacyProjectAdapter
                 }, new Binding { Kind = BindingKind.ProjectAsset, ProjectAssetId = ramp.Id },
                     $"stock-ramp:{pick.Material}");
                 Report.Add("ramp.source", MigrationDisposition.Inferred, Scope(route),
-                    $"The picked toon ramp '{Path.GetFileName(pick.Ramp)}' does not say which original "
-                    + "ramp it was made from. The file itself is kept.");
+                    CoreStrings.MigrationRampNoSource(Path.GetFileName(pick.Ramp)));
             }
         }
 
@@ -482,8 +471,7 @@ public static class LegacyProjectAdapter
                     foreach (var exclusion in exclusions) _usedExclusions.Add(exclusion);
                     if (exclusions.Count > 1)
                         Report.Add("build.duplicate_exclusion", MigrationDisposition.Conflict, Scope(part.Route),
-                            $"{exclusions.Count} entries turn this part's {verb} change off, and the "
-                            + "mod cannot tell which one to keep.");
+                            CoreStrings.MigrationDuplicateOffSwitch(exclusions.Count, KindWord(verb)));
                     // A released unticked row keeps its edit but gives it no activation placement.
                     continue;
                 }
@@ -497,20 +485,18 @@ public static class LegacyProjectAdapter
                     foreach (var setting in keys) _usedKeys.Add(setting);
                     if (keys.Count > 1)
                         Report.Add("build.duplicate_key", MigrationDisposition.Conflict, Scope(part.Route),
-                            $"{keys.Count} keys are set on this part's {verb} change, and the mod "
-                            + "cannot tell which one to keep.");
+                            CoreStrings.MigrationDuplicateKey(keys.Count, KindWord(verb)));
                     var activeKey = keys[0];
                     string? normalized = ModKeys.Normalize(activeKey.Key);
                     if (normalized is null)
                         Report.Add("build.key", MigrationDisposition.Unsupported, Scope(part.Route),
-                            $"{activeKey.Key} cannot be used as a toggle key.");
+                            CoreStrings.MigrationKeyUnusable(activeKey.Key));
                     else
                     {
                         bool mayHide = verb == EditVerbs.Replace;
                         if (activeKey.HideWhenOff && !mayHide)
                             Report.Add("build.off_state", MigrationDisposition.Inferred, Scope(part.Route),
-                                $"A {verb} change cannot hide the part while its key is off, so the "
-                                + "part returns to the original instead.");
+                                CoreStrings.MigrationCannotHideWhenOff(KindWord(verb)));
                         key = normalized;
                         startsOff = activeKey.StartsOff;
                         hideWhenOff = activeKey.HideWhenOff && mayHide;
@@ -529,14 +515,23 @@ public static class LegacyProjectAdapter
             foreach (var exclusion in _legacy.BuildExcluded.Where(x => !_usedExclusions.Contains(x)))
                 Report.Add("build.inactive_exclusion", MigrationDisposition.Inferred,
                     $"{exclusion.Character} / {exclusion.Outfit} / {exclusion.Mesh}",
-                    $"An off switch was recorded for a {exclusion.Verb} change this mod no longer has, "
-                    + "and was dropped.");
+                    CoreStrings.MigrationOrphanOffSwitch(KindWord(exclusion.Verb)));
             foreach (var key in _legacy.ChangeKeys.Where(k => !_usedKeys.Contains(k)))
                 Report.Add("build.inactive_key", MigrationDisposition.Inferred,
                     $"{key.Character} / {key.Outfit} / {key.Mesh}",
-                    $"A key was recorded for a {key.Verb} change this mod no longer has, and was "
-                    + "dropped.");
+                    CoreStrings.MigrationOrphanKey(KindWord(key.Verb)));
         }
+
+        /// <summary>The kind of change a note names, in the UI language. A verb the old file recorded that is
+        /// none of the four is shown as the file wrote it. Matched without case, as the settings are.</summary>
+        private static string KindWord(string verb) => verb.ToLowerInvariant() switch
+        {
+            EditVerbs.Hide => CoreStrings.MigrationKindHide,
+            EditVerbs.Replace => CoreStrings.MigrationKindReplace,
+            EditVerbs.Retexture => CoreStrings.MigrationKindRetexture,
+            EditVerbs.Ramp => CoreStrings.MigrationKindRamp,
+            _ => verb,
+        };
 
         /// <summary>File every installed game route for each adapted content edit, through the same
         /// part-slot path used when the edit page adds an edit.</summary>
@@ -580,8 +575,7 @@ public static class LegacyProjectAdapter
                     && !ModKeys.SameKey(group.Key, ModKeys.Normalize(_legacy.Info.ToggleKey));
                 if (members.Select(m => m.StartsOff).Distinct().Count() > 1)
                     Report.Add("build.key_start", MigrationDisposition.Inferred, scope,
-                        $"Changes on key {group.Key} disagreed about starting off. One key is one "
-                        + "switch, so they all start on.");
+                        CoreStrings.MigrationKeyStartDisagrees(group.Key));
 
                 var active = members.Select(member => member.EditId).ToList();
                 var off = members.Where(member => member.OffEditId is not null)
@@ -642,9 +636,9 @@ public static class LegacyProjectAdapter
             };
             string explanation = row.RmoAlpha switch
             {
-                RmoAlphaAnswer.Rebuild => "The emissive mask was rebuilt from the original map.",
-                RmoAlphaAnswer.ShipAsAuthored => "The RMO's own emissive mask was kept.",
-                _ => "The RMO file is kept, but the mod did not record which emissive mask to use.",
+                RmoAlphaAnswer.Rebuild => CoreStrings.MigrationEmissiveRebuilt,
+                RmoAlphaAnswer.ShipAsAuthored => CoreStrings.MigrationEmissiveKept,
+                _ => CoreStrings.MigrationEmissiveUnrecorded,
             };
             if (row.RmoAlpha is null)
                 Report.Add("rmo_alpha.absent", MigrationDisposition.Inferred,
@@ -673,8 +667,7 @@ public static class LegacyProjectAdapter
                 {
                     Report.Add("slot.neutral", MigrationDisposition.Unsupported,
                         $"{Scope(part.Route)} / submesh {row.Submesh}",
-                        $"The {Textures.TextureMap.SlotLabel(input, shaderProperty)} cannot be set to a "
-                        + "neutral value.");
+                        CoreStrings.MigrationMapCannotBeNeutral(Textures.TextureMap.DisplaySlotLabel(input, shaderProperty)));
                     binding = new Binding { Kind = BindingKind.InheritedLiveCarrier };
                 }
                 else binding = new Binding { Kind = BindingKind.Neutral };
@@ -688,8 +681,7 @@ public static class LegacyProjectAdapter
                 binding = new Binding { Kind = BindingKind.Neutral };
                 Report.Add("slot.implicit_neutral", MigrationDisposition.Inferred,
                     $"{Scope(part.Route)} / submesh {row.Submesh}",
-                    $"The {Textures.TextureMap.SlotLabel(input, shaderProperty)} was left empty and "
-                    + "another image on this submesh was edited, so it becomes a neutral map.");
+                    CoreStrings.MigrationMapBecomesNeutral(Textures.TextureMap.DisplaySlotLabel(input, shaderProperty)));
             }
             else binding = new Binding { Kind = BindingKind.InheritedLiveCarrier };
 
@@ -722,8 +714,7 @@ public static class LegacyProjectAdapter
                 || material.Textures.All(texture => texture.Input != TargetInputKind.Ramp))
             {
                 Report.Add("ramp.keep_own", MigrationDisposition.Inferred, scope,
-                    "This material draws without a toon ramp in the current game files, so the recorded "
-                    + "keep-the-original-ramp choice was dropped.");
+                    CoreStrings.MigrationKeepRampNoRamp);
                 return null;
             }
             if ((_legacy.StockRamps ?? Enumerable.Empty<StockRampPick>()).Any(pick =>
@@ -732,13 +723,12 @@ public static class LegacyProjectAdapter
                     && string.Equals(pick.Material, material.LegacyName, StringComparison.OrdinalIgnoreCase)))
             {
                 Report.Add("ramp.keep_own", MigrationDisposition.Inferred, scope,
-                    $"A picked toon ramp already answers material '{material.LegacyName}', so the "
-                    + "recorded keep-the-original-ramp choice was dropped.");
+                    CoreStrings.MigrationKeepRampAnswered(material.LegacyName));
                 return null;
             }
 
             RequireExact(material.Material, Scope(part.Route),
-                $"Material {material.MaterialSlotIndex}");
+                () => CoreStrings.MigrationMaterialUnidentified(material.MaterialSlotIndex));
             string key = $"game:{material.MaterialSlotIndex}:{TargetInputKind.Ramp}";
             AddBinding(part, new TargetSlot
             {
@@ -797,8 +787,7 @@ public static class LegacyProjectAdapter
                     Name = carried.Name,
                 };
             Report.Add("ramp.lineage", MigrationDisposition.Inferred, Scope(part.Route),
-                $"The toon ramp '{carried.Name}' does not match one original ramp in the current game "
-                + "files. Its file in the mod is kept as is.");
+                CoreStrings.MigrationRampNoOriginal(carried.Name));
             return null;
         }
 
@@ -817,14 +806,14 @@ public static class LegacyProjectAdapter
             {
                 Report.Add(missingCode, missingDisposition, Scope(route),
                     missingDisposition == MigrationDisposition.Inferred
-                        ? "This part is no longer in the game files, and the entry was dropped."
-                        : "This part is not in the current game files.");
+                        ? CoreStrings.MigrationPartDropped
+                        : CoreStrings.MigrationPartGone);
                 resolution = null;
             }
             else
             {
-                RequireExact(resolution.Renderer, Scope(route), "This part");
-                RequireExact(resolution.Mesh, Scope(route), "This part's mesh");
+                RequireExact(resolution.Renderer, Scope(route), () => CoreStrings.MigrationPartUnidentified);
+                RequireExact(resolution.Mesh, Scope(route), () => CoreStrings.MigrationPartMeshUnidentified);
             }
             found = new PartState(Clone(route), resolution);
             _parts.Add(route.Key, found);
@@ -842,14 +831,12 @@ public static class LegacyProjectAdapter
                     subject = _legacy.Selection[0].Character;
                     outfit = _legacy.Selection[0].Outfit;
                     Report.Add("identity.subject", MigrationDisposition.Inferred, target.ObjectName,
-                        $"This edit did not say which outfit it belongs to, and was read as {subject} / "
-                        + $"{outfit}, the mod's only one.");
+                        CoreStrings.MigrationOutfitInferred(subject, outfit));
                 }
                 else
                 {
                     Report.Add("identity.subject", MigrationDisposition.Unresolved, target.ObjectName,
-                        "This edit does not say which outfit it belongs to, and the mod has more than "
-                        + "one.");
+                        CoreStrings.MigrationOutfitUnknown);
                     part = new TargetPart();
                     return false;
                 }
@@ -864,14 +851,13 @@ public static class LegacyProjectAdapter
             if (target.OriginalFile is null)
             {
                 Report.Add("edit.original_absent", MigrationDisposition.Inferred, scope,
-                    "No original file was recorded, so this is kept as an edit.");
+                    CoreStrings.MigrationNoOriginalFile);
                 return true;
             }
             if (_legacy.RootDir is null)
             {
                 Report.Add("edit.flag", MigrationDisposition.Inferred, scope,
-                    $"The mod's files could not be read, so the recorded edited state ({target.Edited}) "
-                    + "was used.");
+                    CoreStrings.MigrationFilesUnreadable(target.Edited));
                 return target.Edited;
             }
             try
@@ -881,8 +867,7 @@ public static class LegacyProjectAdapter
                 if (!File.Exists(replacement) || !File.Exists(original))
                 {
                     Report.Add("edit.file_absent", MigrationDisposition.Unresolved, scope,
-                        "A file this edit needs is missing from the mod folder, so the app cannot tell "
-                        + "whether it was edited.");
+                        CoreStrings.MigrationEditFileMissing);
                     return true;
                 }
                 return !FilesEqual(replacement, original);
@@ -890,8 +875,7 @@ public static class LegacyProjectAdapter
             catch (Exception e)
             {
                 Report.Add("edit.compare", MigrationDisposition.Inferred, scope,
-                    $"Couldn't compare this edit with the original, so it is kept as an edit: "
-                    + $"{e.Message}");
+                    CoreStrings.MigrationCompareFailed(e.Message));
                 return true;
             }
         }
@@ -917,7 +901,7 @@ public static class LegacyProjectAdapter
                 Id = $"edit-{_nextEdit++:D4}",
                 Kind = EditDefinitionKind.Hide,
                 Target = Clone(part.Route),
-                Label = "Hidden",
+                Label = CoreStrings.DefaultHideName,
             };
             Project.EditDefinitions.Add(part.HideEdit);
             return part.HideEdit;
@@ -991,15 +975,19 @@ public static class LegacyProjectAdapter
                 return;
             }
             kin.Add(source);
-            Report.Add("asset.split", MigrationDisposition.Inferred, file,
-                $"This one file was used for {kin.Count} different game textures "
-                + $"({string.Join(", ", kin.Select(ObjectLabel))}). Each becomes its own "
-                + $"{kind.ToString().ToLowerInvariant()} in the mod, so editing one no longer changes "
-                + "the others.");
+            string objects = string.Join(CoreStrings.ListSeparator, kin.Select(ObjectLabel));
+            Report.Add("asset.split", MigrationDisposition.Inferred, file, kind switch
+            {
+                ProjectAssetKind.Picture => CoreStrings.MigrationSplitFilePicture(kin.Count, objects),
+                ProjectAssetKind.Ramp => CoreStrings.MigrationSplitFileRamp(kin.Count, objects),
+                ProjectAssetKind.Geometry => CoreStrings.MigrationSplitFileGeometry(kin.Count, objects),
+                _ => CoreStrings.MigrationSplitFileOther(kin.Count, objects, kind.ToString().ToLowerInvariant()),
+            });
         }
 
         private static string ObjectLabel(GameAssetRef source) =>
-            string.IsNullOrWhiteSpace(source.Name) ? "an unnamed texture" : $"'{source.Name}'";
+            string.IsNullOrWhiteSpace(source.Name) ? CoreStrings.MigrationUnnamedTexture
+                : CoreStrings.MigrationNamedTexture(source.Name);
 
         private static string SourceKey(GameAssetRef? source) => source is null ? ""
             : $"{source.GameBuild}|{source.LogicalBundle}|{source.PathId}";
@@ -1014,8 +1002,7 @@ public static class LegacyProjectAdapter
             if (existing is null) edit.Bindings.Add(binding);
             else if (!Same(existing, binding))
                 Report.Add("binding.conflict", MigrationDisposition.Conflict, Scope(part.Route),
-                    "Two different values were recorded for the same map on this part, and the mod "
-                    + "cannot tell which one to keep.");
+                    CoreStrings.MigrationValueConflict);
         }
 
         private TargetSlot EnsureSlot(PartState part, TargetSlot slot, string key)
@@ -1042,12 +1029,13 @@ public static class LegacyProjectAdapter
             Name = name,
         };
 
-        private void RequireExact(GameAssetRef value, string scope, string label)
+        /// <summary>Files an item for a reference the install did not identify exactly. The item's detail is
+        /// formatted only when it is filed.</summary>
+        private void RequireExact(GameAssetRef value, string scope, Func<string> unidentified)
         {
             if (string.IsNullOrWhiteSpace(value.GameBuild)
                 || string.IsNullOrWhiteSpace(value.LogicalBundle) || value.PathId == 0)
-                Report.Add("identity.exact", MigrationDisposition.Unresolved, scope,
-                    $"{label} could not be identified in the current game files.");
+                Report.Add("identity.exact", MigrationDisposition.Unresolved, scope, unidentified());
         }
 
         private static bool Matches(ProjectTarget target, LegacyResolvedTexture texture)

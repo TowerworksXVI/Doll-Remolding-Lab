@@ -42,16 +42,10 @@ public partial class MainWindowViewModel
     internal CancellationTokenSource? RiggedGlbPrewarmCts => _riggedGlbPrewarmCts;
     internal bool RiggedGlbPrewarmRunning => Volatile.Read(ref _riggedGlbPrewarmRunning) > 0;
 
-    internal const string RiggedGlbPrewarmTip =
-        "Getting this mod's parts ready so they open in Blender faster.";
-    internal const string RiggedGlbPrewarmUnavailable = "Blender opens will be slower";
-    internal const string RiggedGlbPrewarmUnavailableDetail =
-        "Couldn't get this mod's parts ready in the background. Opening in Blender still works.";
-
     // The cell trims at 180px, and a line longer than that loses its own counter to the ellipsis — the
     // counter is the living half, so the line stays short enough to keep it. Blender is the tooltip's job.
     internal static string RiggedGlbPrewarmLine(RiggedGlbPrewarmProgress progress) =>
-        $"Preparing parts… {progress.Done}/{progress.Total}";
+        Strings.PrewarmLine(progress.Done, progress.Total);
 
     /// <summary>Snapshot the selected subjects that can currently be answered by this install. No model is
     /// built here: the existing model warm owns that read and calls back when the whole selection has landed.

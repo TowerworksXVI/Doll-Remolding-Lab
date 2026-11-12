@@ -1,4 +1,4 @@
-<UserControl xmlns="https://github.com/avaloniaui"
+<UserControl xmlns="https://github.com/avaloniaui" xmlns:t="using:Remold.App"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:Remold.App.ViewModels"
              xmlns:bp="using:Remold.App.ViewModels.BuildPage"
@@ -108,10 +108,12 @@
           </ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="bp:BuildPlacementChipVm">
-              <Button Content="{Binding Label}" Command="{Binding FocusCommand}"
+              <Button Command="{Binding FocusCommand}"
                       Click="OnDiagnosticFlyoutChipClick"
                       Padding="5,1" FontSize="10" Margin="0,0,4,2"
-                      ToolTip.Tip="{x:Static bp:BuildPlacementChipVm.FocusTip}" />
+                      ToolTip.Tip="{x:Static t:Strings.BuildFocusTip}">
+                <TextBlock Text="{Binding Label}" />
+              </Button>
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
@@ -134,15 +136,15 @@
         <Border Grid.Column="0" Classes="buildPanel">
           <Grid RowDefinitions="Auto,*" RowSpacing="8">
             <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
-              <TextBlock Classes="panelTitle" Text="Edits" />
+              <TextBlock Classes="panelTitle" Text="{x:Static t:Strings.BuildEditsTitle}" />
               <TextBlock Grid.Column="1" Text="✗" Foreground="{StaticResource HudErrorBrush}"
                          IsVisible="{Binding HasBlocked}" ToolTip.Tip="{Binding PrimaryBlockedMessage}" />
               <TextBlock Grid.Column="1" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
-                         IsVisible="{Binding EditsNeedAttention}" ToolTip.Tip="Some edits have warnings." />
+                         IsVisible="{Binding EditsNeedAttention}" ToolTip.Tip="{x:Static t:Strings.BuildEditsNeedAttention}" />
             </Grid>
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
               <Panel>
-                <TextBlock Text="This lists every edit in the mod. Add the first one in ② Edit."
+                <TextBlock Text="{x:Static t:Strings.BuildEditsEmpty}"
                            Margin="4,8" TextWrapping="Wrap"
                            Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding !HasSubjects}" />
                 <!-- the library authors placements, so it sleeps while a build runs: a tick that lands
@@ -165,7 +167,7 @@
                                     <DataTemplate x:DataType="bp:BuildEditRowVm">
                                       <Border Classes="buildCard libraryRow" Classes.selected="{Binding IsSelected}"
                                               Padding="7,6" Margin="0,0,0,4"
-                                              ToolTip.Tip="Drag this edit onto Always or a state.">
+                                              ToolTip.Tip="{x:Static t:Strings.BuildEditDragTip}">
                                         <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto,Auto"
                                               ColumnSpacing="5">
                                           <!-- the name trims in its star column with the full name on hover;
@@ -187,11 +189,11 @@
                                                      ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
                                           <Button Grid.Row="0" Grid.Column="2" Classes="flat" Content="⋯"
                                                   FontSize="11"
-                                                  ToolTip.Tip="Choose where this edit is used.">
+                                                  ToolTip.Tip="{x:Static t:Strings.BuildUseInTip}">
                                             <Button.Flyout>
                                               <Flyout Placement="BottomEdgeAlignedRight">
                                                 <StackPanel Width="230" Spacing="5">
-                                                  <TextBlock Text="Use in…" FontWeight="SemiBold" />
+                                                  <TextBlock Text="{x:Static t:Strings.BuildUseIn}" FontWeight="SemiBold" />
                                                   <!-- capped and scrolling like both sibling flyouts: a mod
                                                        with many states otherwise runs off the screen -->
                                                   <ScrollViewer MaxHeight="320"
@@ -199,9 +201,9 @@
                                                     <ItemsControl ItemsSource="{Binding UseIn}">
                                                       <ItemsControl.ItemTemplate>
                                                         <DataTemplate x:DataType="bp:BuildPlacementChoiceVm">
-                                                          <CheckBox Content="{Binding Label}"
-                                                                    IsChecked="{Binding IsPlaced, Mode=TwoWay}"
-                                                                    Margin="0,2" />
+                                                          <CheckBox IsChecked="{Binding IsPlaced, Mode=TwoWay}" Margin="0,2">
+                                                            <TextBlock Text="{Binding Label}" />
+                                                          </CheckBox>
                                                         </DataTemplate>
                                                       </ItemsControl.ItemTemplate>
                                                     </ItemsControl>
@@ -247,16 +249,16 @@
         <!-- Behavior board: Always plus every key group and every ordered state. -->
         <Border x:Name="BehaviorBoard" Grid.Column="1" Classes="buildPanel">
           <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8">
-            <TextBlock Grid.Row="0" Classes="panelTitle" Text="Behavior" />
+            <TextBlock Grid.Row="0" Classes="panelTitle" Text="{x:Static t:Strings.BuildBehaviorTitle}" />
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" AllowAutoHide="False">
               <!-- the board authors the mod's behaviour, so it sleeps while a build runs -->
               <StackPanel Spacing="8" IsEnabled="{Binding BoardEnabled}">
                 <Border x:Name="AlwaysDropZone" Classes="buildCard" Classes.focused="{Binding IsMarked}"
                         DataContext="{Binding Always}"
                         x:DataType="bp:BuildAlwaysVm" DragDrop.AllowDrop="True"
-                        ToolTip.Tip="Edits here are active all the time.">
+                        ToolTip.Tip="{x:Static t:Strings.BuildAlwaysTip}">
                   <StackPanel Spacing="6">
-                    <TextBlock Text="Always" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
                     <ItemsControl ItemsSource="{Binding Tokens}">
                       <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
@@ -264,31 +266,35 @@
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="bp:BuildTokenVm">
                           <Border Classes="buildCard" Padding="6,3" Margin="0,0,5,5"
-                                  ToolTip.Tip="Drag this onto a state or Always to move it.">
+                                  ToolTip.Tip="{x:Static t:Strings.BuildChipDragTip}">
                             <StackPanel Orientation="Horizontal" Spacing="4">
-                              <Button x:Name="DragGrab" Classes="flat" Content="{Binding Display}"
-                                      Command="{Binding OpenCommand}" ToolTip.Tip="Work on this edit in ② Edit." />
+                              <Button x:Name="DragGrab" Classes="flat"
+                                      Command="{Binding OpenCommand}" ToolTip.Tip="{x:Static t:Strings.BuildChipOpenTip}">
+                                <TextBlock Text="{Binding Display}" />
+                              </Button>
                               <TextBlock Classes="mark" Classes.blocked="{Binding IsBlocked}"
                                          Text="{Binding Mark}" IsVisible="{Binding HasWarning}"
                                          ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
                               <Button Classes="flat" Content="×" Command="{Binding RemoveCommand}"
-                                      ToolTip.Tip="Remove this edit from here." />
+                                      ToolTip.Tip="{x:Static t:Strings.BuildChipRemoveTip}" />
                             </StackPanel>
                           </Border>
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <Button Classes="addChip" Content="＋ Add edit ▾" HorizontalAlignment="Left">
+                    <Button Classes="addChip" Content="{x:Static t:Strings.BuildAddEditMenu}" HorizontalAlignment="Left">
                       <Button.Flyout>
                         <Flyout Placement="BottomEdgeAlignedLeft">
                           <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
                             <ItemsControl ItemsSource="{Binding AvailableEdits}" MinWidth="200">
                               <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="bp:BuildEditChoiceVm">
-                                  <Button Classes="flat" Content="{Binding Display}"
+                                  <Button Classes="flat"
                                           Command="{Binding AddCommand}" Click="OnChoiceFlyoutClick"
                                           HorizontalAlignment="Stretch"
-                                          HorizontalContentAlignment="Left" Padding="6,3" />
+                                          HorizontalContentAlignment="Left" Padding="6,3">
+                                    <TextBlock Text="{Binding Display}" />
+                                  </Button>
                                 </DataTemplate>
                               </ItemsControl.ItemTemplate>
                             </ItemsControl>
@@ -303,7 +309,7 @@
                      first action -->
                 <TextBlock Margin="4,6" TextWrapping="Wrap" IsVisible="{Binding !HasGroups}"
                            Foreground="{StaticResource HudSubtextBrush}"
-                           Text="Always is on all the time, and a key group switches between its states with one key. Each state holds its own edits, and ＋ New key makes a group from an edit." />
+                           Text="{x:Static t:Strings.BuildBehaviorEmpty}" />
 
                 <ItemsControl ItemsSource="{Binding Groups}">
                   <ItemsControl.ItemTemplate>
@@ -312,26 +318,26 @@
                         <StackPanel Spacing="7">
                           <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
                             <views:KeyCaptureButton Grid.Column="0" BoundKey="{Binding Key, Mode=TwoWay}"
-                                                    EmptyLabel="No key"
-                                                    ToolTip.Tip="Click, then press a key. Delete or Backspace clears it." />
+                                                    EmptyLabel="{x:Static t:Strings.KeyNone}"
+                                                    ToolTip.Tip="{x:Static t:Strings.BuildGroupKeyTip}" />
                             <TextBox Grid.Column="1" Text="{Binding Label, Mode=OneWay}"
                                      Watermark="{Binding DisplayName}" FontSize="12"
                                      KeyDown="OnBoardLabelKeyDown" LostFocus="OnBoardLabelLostFocus" />
                             <TextBlock Grid.Column="2" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
                                        IsVisible="{Binding HasCollision}" ToolTip.Tip="{Binding CollisionTip}"
                                        VerticalAlignment="Center" />
-                            <Button Grid.Column="3" Content="Delete" Command="{Binding DeleteCommand}"
-                                    ToolTip.Tip="Delete this key group and its states. The edits themselves are kept." />
+                            <Button Grid.Column="3" Content="{x:Static t:Strings.BuildDeleteGroup}" Command="{Binding DeleteCommand}"
+                                    ToolTip.Tip="{x:Static t:Strings.BuildDeleteGroupTip}" />
                           </Grid>
                           <Border Background="{StaticResource HudBgBrush}" CornerRadius="3" Padding="7,5"
                                   IsVisible="{Binding IsKeyless}">
-                            <TextBlock Text="✗ No key set. This blocks the build. Click the key field above, then press a key."
+                            <TextBlock Text="{x:Static t:Strings.BuildGroupNoKey}"
                                        Foreground="{StaticResource HudErrorBrush}" FontSize="11"
                                        TextWrapping="Wrap" />
                           </Border>
-                          <CheckBox Content="Persist after restart" FontSize="11"
+                          <CheckBox Content="{x:Static t:Strings.BuildPersist}" FontSize="11"
                                     IsChecked="{Binding PersistAfterRestart, Mode=TwoWay}"
-                                    ToolTip.Tip="The state this group was left in is restored at the next game launch. Unchecked, the group starts over every launch." />
+                                    ToolTip.Tip="{x:Static t:Strings.BuildGroupPersistTip}" />
 
                           <ItemsControl ItemsSource="{Binding States}">
                             <ItemsControl.ItemTemplate>
@@ -345,29 +351,29 @@
                                       <TextBlock x:Name="StateDragHandle" Grid.Column="0" Text="⠿"
                                                  VerticalAlignment="Center" Padding="2,0"
                                                  Foreground="{StaticResource HudSubtextBrush}"
-                                                 ToolTip.Tip="Drag to reorder this state." />
+                                                 ToolTip.Tip="{x:Static t:Strings.BuildStateDragTip}" />
                                       <TextBox Grid.Column="1" Width="115" Text="{Binding Label, Mode=OneWay}"
                                                Watermark="{Binding DisplayName}" FontSize="11"
                                                KeyDown="OnBoardLabelKeyDown" LostFocus="OnBoardLabelLostFocus" />
                                       <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5"
                                                   VerticalAlignment="Center">
                                         <views:KeyCaptureButton BoundKey="{Binding Shortcut, Mode=TwoWay}"
-                                                                EmptyLabel="No shortcut"
-                                                                ToolTip.Tip="A key that jumps straight to this state. Click, then press a key. Delete or Backspace clears it." />
+                                                                EmptyLabel="{x:Static t:Strings.KeyNoShortcut}"
+                                                                ToolTip.Tip="{x:Static t:Strings.BuildStateShortcutTip}" />
                                         <TextBlock Text="⚠" Foreground="{StaticResource HudAmberBrush}"
                                                    IsVisible="{Binding HasCollision}"
                                                    ToolTip.Tip="{Binding CollisionTip}"
                                                    VerticalAlignment="Center" />
-                                        <TextBlock Text="at launch" FontSize="10"
+                                        <TextBlock Text="{x:Static t:Strings.BuildStateAtLaunch}" FontSize="10"
                                                    Foreground="{StaticResource HudAccentBrush}"
                                                    IsVisible="{Binding IsLaunch}" VerticalAlignment="Center" />
                                       </StackPanel>
                                       <Button Grid.Column="3" Classes="flat" Content="↑"
                                               Command="{Binding MoveUpCommand}" IsEnabled="{Binding CanMoveUp}"
-                                              ToolTip.Tip="Move this state up." />
+                                              ToolTip.Tip="{x:Static t:Strings.BuildStateUpTip}" />
                                       <Button Grid.Column="4" Classes="flat" Content="↓"
                                               Command="{Binding MoveDownCommand}" IsEnabled="{Binding CanMoveDown}"
-                                              ToolTip.Tip="Move this state down." />
+                                              ToolTip.Tip="{x:Static t:Strings.BuildStateDownTip}" />
                                       <Button Grid.Column="5" Classes="flat" Content="×"
                                               Command="{Binding RemoveCommand}"
                                               IsEnabled="{Binding CanRemove}" ToolTip.ShowOnDisabled="True"
@@ -381,23 +387,25 @@
                                       <ItemsControl.ItemTemplate>
                                         <DataTemplate x:DataType="bp:BuildTokenVm">
                                           <Border Classes="buildCard" Padding="6,3" Margin="0,0,5,5"
-                                                  ToolTip.Tip="Drag this onto a state or Always to move it.">
+                                                  ToolTip.Tip="{x:Static t:Strings.BuildChipDragTip}">
                                             <StackPanel Orientation="Horizontal" Spacing="4">
-                                              <Button x:Name="DragGrab" Classes="flat" Content="{Binding Display}"
+                                              <Button x:Name="DragGrab" Classes="flat"
                                                       Command="{Binding OpenCommand}"
-                                                      ToolTip.Tip="Work on this edit in ② Edit." />
+                                                      ToolTip.Tip="{x:Static t:Strings.BuildChipOpenTip}">
+                                                <TextBlock Text="{Binding Display}" />
+                                              </Button>
                                               <TextBlock Classes="mark" Classes.blocked="{Binding IsBlocked}"
                                                          Text="{Binding Mark}" IsVisible="{Binding HasWarning}"
                                                          ToolTip.Tip="{Binding Warning}" VerticalAlignment="Center" />
                                               <Button Classes="flat" Content="×" Command="{Binding RemoveCommand}"
-                                                      ToolTip.Tip="Remove this edit from here." />
+                                                      ToolTip.Tip="{x:Static t:Strings.BuildChipRemoveTip}" />
                                             </StackPanel>
                                           </Border>
                                         </DataTemplate>
                                       </ItemsControl.ItemTemplate>
                                     </ItemsControl>
 
-                                    <Button Classes="addChip" Content="＋ Add edit ▾"
+                                    <Button Classes="addChip" Content="{x:Static t:Strings.BuildAddEditMenu}"
                                             HorizontalAlignment="Left">
                                       <Button.Flyout>
                                         <Flyout Placement="BottomEdgeAlignedLeft">
@@ -406,11 +414,13 @@
                                                           MinWidth="200">
                                               <ItemsControl.ItemTemplate>
                                                 <DataTemplate x:DataType="bp:BuildEditChoiceVm">
-                                                  <Button Classes="flat" Content="{Binding Display}"
+                                                  <Button Classes="flat"
                                                           Command="{Binding AddCommand}"
                                                           Click="OnChoiceFlyoutClick"
                                                           HorizontalAlignment="Stretch"
-                                                          HorizontalContentAlignment="Left" Padding="6,3" />
+                                                          HorizontalContentAlignment="Left" Padding="6,3">
+                                                    <TextBlock Text="{Binding Display}" />
+                                                  </Button>
                                                 </DataTemplate>
                                               </ItemsControl.ItemTemplate>
                                             </ItemsControl>
@@ -423,9 +433,9 @@
                               </DataTemplate>
                             </ItemsControl.ItemTemplate>
                           </ItemsControl>
-                          <Button Content="＋ State" HorizontalAlignment="Left"
+                          <Button Content="{x:Static t:Strings.BuildAddState}" HorizontalAlignment="Left"
                                   Command="{Binding AddStateCommand}"
-                                  ToolTip.Tip="Add a state with the same edits as the last one." />
+                                  ToolTip.Tip="{x:Static t:Strings.BuildAddStateTip}" />
                         </StackPanel>
                       </Border>
                     </DataTemplate>
@@ -434,18 +444,20 @@
               </StackPanel>
             </ScrollViewer>
 
-            <Button Grid.Row="2" Content="＋ New key ▾" HorizontalAlignment="Left"
-                    ToolTip.Tip="Make a key group from an edit.">
+            <Button Grid.Row="2" Content="{x:Static t:Strings.BuildNewKeyMenu}" HorizontalAlignment="Left"
+                    ToolTip.Tip="{x:Static t:Strings.BuildNewKeyTip}">
               <Button.Flyout>
                 <Flyout Placement="TopEdgeAlignedLeft">
                   <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto">
                     <ItemsControl ItemsSource="{Binding NewGroupChoices}" MinWidth="220">
                       <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="bp:BuildEditRowVm">
-                          <Button Classes="flat" Content="{Binding FullDisplay}"
+                          <Button Classes="flat"
                                   Command="{Binding MakeKeyCommand}" Click="OnChoiceFlyoutClick"
                                   HorizontalAlignment="Stretch"
-                                  HorizontalContentAlignment="Left" Padding="6,3" />
+                                  HorizontalContentAlignment="Left" Padding="6,3">
+                            <TextBlock Text="{Binding FullDisplay}" />
+                          </Button>
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -461,59 +473,59 @@
           <StackPanel Spacing="10">
             <Border Classes="buildPanel">
               <StackPanel Spacing="7">
-                <TextBlock Classes="panelTitle" Text="Mod" />
-                <TextBlock Classes="sectionLabel" Text="Name" />
+                <TextBlock Classes="panelTitle" Text="{x:Static t:Strings.BuildModTitle}" />
+                <TextBlock Classes="sectionLabel" Text="{x:Static t:Strings.BuildModName}" />
                 <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageName, Mode=TwoWay}"
-                         Watermark="Mod name" />
+                         Watermark="{x:Static t:Strings.ModNameWatermark}" />
                 <Grid ColumnDefinitions="*,*" ColumnSpacing="7">
                   <StackPanel Grid.Column="0" Spacing="3">
-                    <TextBlock Classes="sectionLabel" Text="Version" />
+                    <TextBlock Classes="sectionLabel" Text="{x:Static t:Strings.BuildModVersion}" />
                     <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageVersion, Mode=TwoWay}" />
                   </StackPanel>
                   <StackPanel Grid.Column="1" Spacing="3">
-                    <TextBlock Classes="sectionLabel" Text="Author" />
+                    <TextBlock Classes="sectionLabel" Text="{x:Static t:Strings.BuildModAuthor}" />
                     <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageAuthor, Mode=TwoWay}" />
                   </StackPanel>
                 </Grid>
-                <TextBlock Classes="sectionLabel" Text="Description" />
+                <TextBlock Classes="sectionLabel" Text="{x:Static t:Strings.BuildModDescription}" />
                 <TextBox Text="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageDescription, Mode=TwoWay}"
                          AcceptsReturn="True" MinHeight="58" TextWrapping="Wrap" />
                 <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
-                  <TextBlock Text="Key" Classes="sectionLabel" VerticalAlignment="Center" />
+                  <TextBlock Text="{x:Static t:Strings.BuildModKey}" Classes="sectionLabel" VerticalAlignment="Center" />
                   <StackPanel Grid.Column="1" Spacing="4">
                     <views:KeyCaptureButton BoundKey="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Mode=TwoWay}"
-                                            EmptyLabel="No key" HorizontalAlignment="Left"
-                                            ToolTip.Tip="Turns the whole mod on and off. Delete or Backspace clears it." />
-                    <CheckBox Content="Persist after restart" FontSize="11"
+                                            EmptyLabel="{x:Static t:Strings.KeyNone}" HorizontalAlignment="Left"
+                                            ToolTip.Tip="{x:Static t:Strings.BuildModKeyTip}" />
+                    <CheckBox Content="{x:Static t:Strings.BuildPersist}" FontSize="11"
                               IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackagePersistToggleKey, Mode=TwoWay}"
                               IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageToggleKey, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
-                              ToolTip.Tip="Whether the mod was left on or off is restored at the next game launch. Unchecked, the mod starts on every launch." />
+                              ToolTip.Tip="{x:Static t:Strings.BuildModPersistTip}" />
                   </StackPanel>
                   <TextBlock Grid.Column="2" Text="⚠" Foreground="{StaticResource HudAmberBrush}"
                              IsVisible="{Binding WholeModKeyCollisionTip, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
                              ToolTip.Tip="{Binding WholeModKeyCollisionTip}" VerticalAlignment="Center" />
                 </Grid>
-                <CheckBox Content="Editable by others"
+                <CheckBox Content="{x:Static t:Strings.BuildEditableByOthers}"
                           IsChecked="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).PackageIncludesRepairData, Mode=TwoWay}"
-                          ToolTip.Tip="Lets anyone import this mod to edit or repair it. Without it, the mod can only be rebuilt from your project." />
+                          ToolTip.Tip="{x:Static t:Strings.BuildEditableByOthersTip}" />
               </StackPanel>
             </Border>
 
             <Border Classes="buildPanel">
               <StackPanel Spacing="7">
-                <TextBlock Classes="panelTitle" Text="Preview" />
+                <TextBlock Classes="panelTitle" Text="{x:Static t:Strings.BuildPreviewTitle}" />
                 <Border x:Name="PreviewDropZone" Height="150" Classes="buildCard"
-                        DragDrop.AllowDrop="True" ToolTip.Tip="Drop one PNG, JPG, JPEG, WEBP or BMP here.">
+                        DragDrop.AllowDrop="True" ToolTip.Tip="{x:Static t:Strings.BuildPreviewDropTip}">
                   <Panel>
                     <Image Source="{Binding PreviewImage}" Stretch="Uniform"
                            IsVisible="{Binding HasPreview}" />
-                    <TextBlock Text="No preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="{x:Static t:Strings.BuildPreviewNone}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding HasNoPreview}" />
-                    <TextBlock Text="Image missing" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="{x:Static t:Strings.BuildPreviewMissing}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{StaticResource HudAmberBrush}" IsVisible="{Binding PreviewMissing}" />
-                    <TextBlock Text="Reading image…" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="{x:Static t:Strings.BuildPreviewReading}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding PreviewDecoding}" />
-                    <TextBlock Text="Couldn't read this image" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="{x:Static t:Strings.BuildPreviewUnreadable}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding PreviewUndecodable}" />
                   </Panel>
                 </Border>
@@ -522,10 +534,10 @@
                            Foreground="{StaticResource HudSubtextBrush}" TextTrimming="CharacterEllipsis"
                            ToolTip.Tip="{Binding PreviewTitle}" />
                 <StackPanel Orientation="Horizontal" Spacing="6">
-                  <Button Content="Browse…" Command="{Binding BrowsePreviewCommand}"
+                  <Button Content="{x:Static t:Strings.Browse}" Command="{Binding BrowsePreviewCommand}"
                           IsEnabled="{Binding PreviewEnabled}" ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding PreviewPickTip}" />
-                  <Button Content="Remove" Command="{Binding RemovePreviewCommand}"
+                  <Button Content="{x:Static t:Strings.BuildPreviewRemove}" Command="{Binding RemovePreviewCommand}"
                           IsVisible="{Binding !HasNoPreview}" IsEnabled="{Binding !IsWorkInFlight}" />
                 </StackPanel>
               </StackPanel>
@@ -543,17 +555,17 @@
           <!-- Row 1: the existing action cluster and the completed-build result. -->
           <Grid Grid.Row="0" ColumnDefinitions="Auto,*" ColumnSpacing="12">
             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="7">
-              <Button Classes="primary" Content="Build" Command="{Binding BuildCommand}"
+              <Button Classes="primary" Content="{x:Static t:Strings.BuildButton}" Command="{Binding BuildCommand}"
                       IsEnabled="{Binding CanBuild}" ToolTip.ShowOnDisabled="True"
                       ToolTip.Tip="{Binding BuildButtonTip}" />
-              <Button Content="Install" Command="{Binding InstallCommand}" IsEnabled="{Binding CanInstall}"
+              <Button Content="{x:Static t:Strings.InstallButton}" Command="{Binding InstallCommand}" IsEnabled="{Binding CanInstall}"
                       IsVisible="{Binding !LoaderNeedsAttention}" ToolTip.ShowOnDisabled="True"
                       ToolTip.Tip="{Binding InstallButtonTip}" />
               <Button Content="{Binding LoaderButtonLabel}" Command="{Binding ChooseLoaderCommand}"
                       IsVisible="{Binding LoaderNeedsAttention}" ToolTip.Tip="{Binding LoaderButtonTip}" />
-              <Button Content="Log" Command="{Binding OpenLogCommand}"
-                      IsVisible="{Binding HasFailureLog}" ToolTip.Tip="Open the build log." />
-              <Button Content="Open installed folder" Command="{Binding OpenInstalledCommand}"
+              <Button Content="{x:Static t:Strings.BuildLog}" Command="{Binding OpenLogCommand}"
+                      IsVisible="{Binding HasFailureLog}" ToolTip.Tip="{x:Static t:Strings.BuildLogTip}" />
+              <Button Content="{x:Static t:Strings.BuildOpenInstalled}" Command="{Binding OpenInstalledCommand}"
                       IsVisible="{Binding HasLastInstall}" ToolTip.Tip="{Binding InstalledFolderTip}" />
             </StackPanel>
             <Grid Grid.Column="1" ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="6"
@@ -561,12 +573,12 @@
               <TextBlock Grid.Column="0" Text="{Binding BuildAgainLine}" FontSize="11"
                          VerticalAlignment="Center" Foreground="{StaticResource HudAmberBrush}"
                          IsVisible="{Binding BuildResultStale}" HorizontalAlignment="Right" />
-              <Button Grid.Column="1" Content="Folder" Command="{Binding OpenFolderCommand}"
+              <Button Grid.Column="1" Content="{x:Static t:Strings.BuildOpenFolder}" Command="{Binding OpenFolderCommand}"
                       ToolTip.Tip="{Binding FolderTip}" />
-              <Button Grid.Column="2" Content="Zip" Command="{Binding OpenZipCommand}"
+              <Button Grid.Column="2" Content="{x:Static t:Strings.BuildOpenZip}" Command="{Binding OpenZipCommand}"
                       IsVisible="{Binding HasBuildZip}" />
-              <Button Grid.Column="3" Content="Log" Command="{Binding OpenLogCommand}"
-                      IsVisible="{Binding HasBuildLog}" ToolTip.Tip="Open the build log." />
+              <Button Grid.Column="3" Content="{x:Static t:Strings.BuildLog}" Command="{Binding OpenLogCommand}"
+                      IsVisible="{Binding HasBuildLog}" ToolTip.Tip="{x:Static t:Strings.BuildLogTip}" />
             </Grid>
           </Grid>
 
@@ -604,9 +616,11 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                       <DataTemplate x:DataType="bp:BuildPlacementChipVm">
-                        <Button Content="{Binding Label}" Command="{Binding FocusCommand}"
+                        <Button Command="{Binding FocusCommand}"
                                 Padding="5,1" FontSize="10"
-                                ToolTip.Tip="{x:Static bp:BuildPlacementChipVm.FocusTip}" />
+                                ToolTip.Tip="{x:Static t:Strings.BuildFocusTip}">
+                          <TextBlock Text="{Binding Label}" />
+                        </Button>
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
@@ -618,7 +632,7 @@
                       Classes.warning="{Binding HasWarningDiagnosticsOnly}"
                       IsVisible="{Binding HasDiagnostics}" Padding="5,2" FontSize="11"
                       VerticalAlignment="Center"
-                      ToolTip.Tip="Open the full list of what the build check found.">
+                      ToolTip.Tip="{x:Static t:Strings.BuildDiagnosticsTip}">
                 <StackPanel Orientation="Horizontal" Spacing="3">
                   <TextBlock Text="{Binding DiagnosticCounts}" />
                   <TextBlock Text="▾" />

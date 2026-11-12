@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -67,7 +68,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the return never finished applying — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
-        Assert.StartsWith("Blender sent back", vm.EditPage.Status);
+        Assert.True(IsReturnCount(vm.EditPage.Status), vm.EditPage.Status);
     }
 
     /// <summary>(a) The whole create-on-send trip. One send, no edit anywhere in the project beforehand:
@@ -87,7 +88,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the return never finished applying — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
-        Assert.StartsWith("Blender sent back", vm.EditPage.Status);
+        Assert.True(IsReturnCount(vm.EditPage.Status), vm.EditPage.Status);
 
         var edit = ContentEdit(session, ClothPart)!;
         // the geometry the send carried, published and readable back at both of its material slots
@@ -180,10 +181,7 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the return never landed — status: '{vm.EditPage.Status}'");
-        string expected = "'cloth' is weighted to a shrunk part's bones and to other bones. "
-            + "In the game the two sets move apart.";
-        Assert.Equal(expected, MainWindowViewModel.BlenderHiddenMixNote("cloth"));
-        Assert.Contains(expected, ContentEdit(session, ClothPart)!.ReturnWarning);
+        Assert.Contains(Strings.BlenderHiddenMixNote("cloth"), ContentEdit(session, ClothPart)!.ReturnWarning);
 
         // the same weights say nothing where the game's own part already mixes, or where no session file
         // could be read
@@ -196,6 +194,23 @@ public class BlenderReturnRoundTripTests
         Assert.Empty(MainWindowViewModel.BlenderHiddenMixNotes(new[] { (Cloth, payload) }, null));
         Assert.Single(MainWindowViewModel.BlenderHiddenMixNotes(new[] { (Cloth, payload) },
             mixes with { Parts = new() { mixes.Parts[0] with { StockMixes = false } } }));
+    }
+
+    /// <summary>A return reports one part's failure with the part named once: a refusal that already names
+    /// the part keeps its sentence, and anything else has the part added.</summary>
+    [Fact]
+    public void A_failed_part_is_named_once_in_the_returns_status()
+    {
+        Assert.Equal("The base color on cloth came back marked unchanged",
+            MainWindowViewModel.BlenderPartReason("Cloth",
+                new AuthoredRefusalException("The base color on cloth came back marked unchanged.") { Part = "cloth" }));
+        Assert.Equal("Couldn't read the mesh (cloth)",
+            MainWindowViewModel.BlenderPartReason("cloth", new AuthoredRefusalException("Couldn't read the mesh.")));
+        Assert.Equal("The base color on hair came back marked unchanged (cloth)",
+            MainWindowViewModel.BlenderPartReason("cloth",
+                new AuthoredRefusalException("The base color on hair came back marked unchanged.") { Part = "hair" }));
+        Assert.Equal("Disk full (cloth)",
+            MainWindowViewModel.BlenderPartReason("cloth", new System.IO.IOException("Disk full.")));
     }
 
     /// <summary>A send-back whose mesh weights only bones outside the shrunk part's, through the same session
@@ -224,6 +239,8 @@ public class BlenderReturnRoundTripTests
             "painted_body.png", "M_body", TargetInputKind.BaseColor, "_BaseMap"));
         Assert.Equal("M_body Base color", MainWindowViewModel.BlenderMapLabel(
             null, "M_body", TargetInputKind.BaseColor, "_BaseMap"));
+        Assert.Equal("Material Base color", MainWindowViewModel.BlenderMapLabel(
+            null, " ", TargetInputKind.BaseColor, "_BaseMap"));
     }
 
     /// <summary>(b) The same return's OTHER half: a part the modder emptied in Blender comes back as a
@@ -324,7 +341,7 @@ public class BlenderReturnRoundTripTests
         };
         await vm.QueueBlenderReturn(vm.ProjectDocument, incoming);
 
-        Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains("maps changed")),
+        Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains(Strings.BlenderSessionMapsMoved)),
             $"the launch material guard did not refuse the send — status: '{vm.EditPage.Status}'");
         Assert.Equal(geometryBefore, GeometryAssetId(session, editId));
         Assert.Equal(changedMapBinding, session.Slots(editId).Single(state =>
@@ -447,7 +464,7 @@ public class BlenderReturnRoundTripTests
             targetFor: (part, prepared) => ExactTarget(session, opened, part, prepared),
             afterSessionWritten: () => ui.Invoke(() => session.DeleteEdit(opened), Settle));
 
-        Assert.True(await Settled(vm, () => vm.EditPage.Status == MainWindowViewModel.BlenderOpenedEditMissing),
+        Assert.True(await Settled(vm, () => vm.EditPage.Status == Strings.BlenderOpenedEditMissing),
             $"the legacy missing edit used selection wording — status: '{vm.EditPage.Status}'");
         Assert.Empty(session.Snapshot().EditDefinitions);
     }
@@ -470,8 +487,8 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains(Cloth.ToUpperInvariant())),
             $"the duplicate sidecar part was not named — status: '{vm.EditPage.Status}'");
-        Assert.Contains("more than once", vm.EditPage.Status);
-        Assert.Contains("Nothing was changed", vm.EditPage.Status);
+        Assert.Matches(CatalogShape.Of(Strings.BlenderFileUnreadableReason(CatalogShape.Any,
+            CoreStrings.BlenderSidecarDuplicatePart(CatalogShape.Any))), vm.EditPage.Status);
         Assert.Empty(session.Snapshot().EditDefinitions);
     }
 
@@ -527,7 +544,7 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains("Former cloth")),
             $"the dead target was not reported — status: '{vm.EditPage.Status}'");
-        Assert.Contains("Nothing was changed", vm.EditPage.Status);
+        Assert.Equal(Strings.BlenderSelectedEditMissing("Former cloth"), vm.EditPage.Status);
         Assert.Empty(session.Snapshot().EditDefinitions);
     }
 
@@ -579,7 +596,8 @@ public class BlenderReturnRoundTripTests
 
         Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains(namedFile)),
             $"the unreadable metadata was not reported — status: '{vm.EditPage.Status}'");
-        Assert.Contains("Nothing was changed", vm.EditPage.Status);
+        Assert.Matches(CatalogShape.Of(Strings.BlenderMetadataUnreadable(CatalogShape.Any + namedFile)),
+            vm.EditPage.Status);
         Assert.Empty(session.Snapshot().EditDefinitions);
     }
 
@@ -736,10 +754,10 @@ public class BlenderReturnRoundTripTests
         SendBack(temp, session, twoParts: true, emptied: Array.Empty<string>(),
             alsoOpen: new[] { Gone, AlsoGone });
 
-        Assert.True(await Settled(vm, () => vm.EditPage.Status.Contains("Nothing was changed")),
+        string refused = Strings.BlenderPublishFailure(
+            Strings.NowhereToRecord_Other(Gone + CoreStrings.ListSeparator + AlsoGone));
+        Assert.True(await Settled(vm, () => vm.EditPage.Status == refused),
             $"the return never reported — status: '{vm.EditPage.Status}'");
-        Assert.Contains(Gone, vm.EditPage.Status);
-        Assert.Contains(AlsoGone, vm.EditPage.Status);
         Assert.Null(ContentEdit(session, ClothPart));
         Assert.Empty(session.Snapshot().EditDefinitions);
     }
@@ -944,7 +962,7 @@ public class BlenderReturnRoundTripTests
                 [Cloth] = BlenderPartTarget.Existing(editId),
             });
 
-        Assert.True(await Settled(vm, () => vm.EditPage.Status == MainWindowViewModel.BlenderReturnNoChanges),
+        Assert.True(await Settled(vm, () => vm.EditPage.Status == MainWindowViewModel.BlenderReturnCounts(0, 0, 0)),
             $"the untouched authored pictures shipped again — status: '{vm.EditPage.Status}'");
         Assert.Equal(revision, session.Revision);
         Assert.Equal(assets, session.Snapshot().ProjectAssets.Select(asset => asset.Id).ToArray());
@@ -1059,11 +1077,11 @@ public class BlenderReturnRoundTripTests
     /// <para>A mod the modder never named is refused BY the same words the rest of the app calls one, not by
     /// the slug of the folder it happens to sit in.</para></summary>
     [Theory]
-    [InlineData(FirstMod, FirstMod)]
-    [InlineData("", MainWindowViewModel.UntitledMod)]
-    public async Task Returns_queued_for_a_mod_that_was_closed_land_nothing_and_are_put_back(
-        string name, string refusedBy)
+    [InlineData(FirstMod)]
+    [InlineData("")]
+    public async Task Returns_queued_for_a_mod_that_was_closed_land_nothing_and_are_put_back(string name)
     {
+        string refusedBy = name.Length > 0 ? name : Strings.UntitledModDisplay;
         using var settings = new SettingsSnapshot();
         using var temp = new TempGame();
         using var ui = new PumpedUiThread();
@@ -1178,7 +1196,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Queued(vm), "the send never reached the return queue");
         var since = System.Diagnostics.Stopwatch.StartNew();
 
-        Assert.True(await WaitFor(() => vm.EditPage.Status == MainWindowViewModel.BlenderReturnApplying),
+        Assert.True(await WaitFor(() => vm.EditPage.Status == Strings.BlenderReturnApplying),
             $"the page never said it was applying — status: '{vm.EditPage.Status}'");
         since.Stop();
         Assert.True(since.Elapsed >= TimeSpan.FromMilliseconds(250),
@@ -1196,7 +1214,7 @@ public class BlenderReturnRoundTripTests
         Assert.True(await Settled(vm, () => ContentEdit(session, ClothPart) is not null),
             $"the return never finished applying — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
-        Assert.NotEqual(MainWindowViewModel.BlenderReturnApplying, vm.EditPage.Status);
+        Assert.NotEqual(Strings.BlenderReturnApplying, vm.EditPage.Status);
         // The gate is given back with the return: a row left working would wait for the life of the app.
         Assert.True(await WaitFor(() => !vm.EditPage.Nodes.Any(node => node.IsBusy)),
             "a row was still saying it was working after the return finished");
@@ -1234,7 +1252,7 @@ public class BlenderReturnRoundTripTests
         // long enough that the line is genuinely due, with the window free to show it and the return still
         // being read: what keeps it off this page has to be the mod it names
         await Task.Delay(TimeSpan.FromMilliseconds(900));
-        lock (said) Assert.DoesNotContain(MainWindowViewModel.BlenderReturnApplying, said);
+        lock (said) Assert.DoesNotContain(Strings.BlenderReturnApplying, said);
 
         release.Set();
         await holding;
@@ -1268,7 +1286,7 @@ public class BlenderReturnRoundTripTests
                 && ContentEdit(session, BodyPart) is not null),
             $"the painted parts never landed — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
-        Assert.DoesNotContain(MainWindowViewModel.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
+        Assert.DoesNotContain(Strings.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
     }
 
     /// <summary>(l) …and when the comparison IS asked for and the file is gone, the return takes every part
@@ -1293,9 +1311,9 @@ public class BlenderReturnRoundTripTests
                 && ContentEdit(session, BodyPart) is not null),
             $"a return that could not compare anything still dropped an edit — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
-        Assert.Contains(MainWindowViewModel.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
+        Assert.Contains(Strings.BlenderReturnBaselineUnreadable, vm.EditPage.Status);
         Assert.All(session.Snapshot().EditDefinitions.Where(edit => edit.Kind == EditDefinitionKind.Content),
-            edit => Assert.Contains(MainWindowViewModel.BlenderReturnBaselineUnreadable,
+            edit => Assert.Contains(Strings.BlenderReturnBaselineUnreadable,
                 edit.ReturnWarning));
     }
 
@@ -1315,11 +1333,10 @@ public class BlenderReturnRoundTripTests
             $"the degraded part never landed — status: '{vm.EditPage.Status}'");
         Assert.True(ui.Idle(Settle), "the window's thread never went idle after the return");
         Assert.Null(ContentEdit(session, BodyPart));
-        Assert.Contains($"Couldn't read the file {Cloth} was opened from, so every UV layer that came "
-            + "back was kept.", vm.EditPage.Status);
+        Assert.Contains(Strings.BlenderUvBaselineUnreadable(Cloth), vm.EditPage.Status);
 
         var edit = ContentEdit(session, ClothPart)!;
-        Assert.Contains($"Couldn't read the file {Cloth} was opened from", edit.ReturnWarning);
+        Assert.Contains(Strings.BlenderUvBaselineUnreadable(Cloth), edit.ReturnWarning);
         var geometry = GeometrySlot(session.Slots(edit.Id));
         string published = Path.Combine(session.Snapshot().RootDir!, geometry.ProjectAsset!.File);
         Assert.True(MeshGltf.ImportGlb(published, Cloth, lenient: true).Has("TexCoord1"),
@@ -1836,6 +1853,20 @@ public class BlenderReturnRoundTripTests
     /// <para>Mutation-proven: a single wait inside the commit on a worker whose continuation needs the same
     /// thread (a <c>FromCurrentSynchronizationContext</c> continuation, which is the shape every
     /// UI-started <c>await</c> has) makes this exact assertion fail, at its timeout.</para></summary>
+    /// <summary>Whether a status line is the count a finished return reports, whatever it counted.</summary>
+    private static bool IsReturnCount(string status)
+    {
+        const string any = CatalogShape.Any;
+        var counts = new[]
+        {
+            Strings.BlenderSentBackNothing, Strings.BlenderSentBack_One_One(any, any),
+            Strings.BlenderSentBack_One_Other(any, any), Strings.BlenderSentBack_Other_One(any, any),
+            Strings.BlenderSentBack_Other_Other(any, any),
+        };
+        return counts.Any(count => CatalogShape.Of(Strings.BlenderReturnSummary(count)).IsMatch(status)
+            || CatalogShape.Of(Strings.BlenderReturnSummaryUnchanged(count, any)).IsMatch(status));
+    }
+
     private static async Task<bool> Settled(MainWindowViewModel vm, Func<bool> landed)
     {
         var deadline = DateTime.UtcNow + Settle;

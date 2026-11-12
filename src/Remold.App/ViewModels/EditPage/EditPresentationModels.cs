@@ -5,34 +5,29 @@ using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Remold.App.ViewModels.EditPage;
 
-/// <summary>The authored state shown on one toon-ramp card.</summary>
-public sealed record RampCardState(string Caption, string? Detail, bool HasPick, bool OptedOut = false)
+/// <summary>The authored state shown on one toon-ramp card: the state glyph and the caption beside it are
+/// separate fields, so the card's state is never read back out of its words.</summary>
+public sealed record RampCardState(string Glyph, string Caption, string? Detail, bool HasPick, bool OptedOut = false)
 {
     public bool HasRecord => HasPick || OptedOut;
 
-    public const string VanillaCaption = "";
-    public const string PickedCaption = "✎ chosen";
+    public const string OwnedGlyph = "✎";
+    public const string ProblemGlyph = "⚠";
 
-    /// <summary>What the recorded keep-the-original answer says. It is a state the modder chose, so the card
-    /// states it rather than reading as a slot nobody has answered — and it carries no ownership marker,
-    /// because what draws here is the original and the mod owns none of it.</summary>
-    public const string KeptCaption = "Original toon ramp, kept";
+    public static readonly RampCardState Vanilla = new("", "", null, false);
 
-    public static readonly RampCardState Vanilla = new(VanillaCaption, null, false);
-    public static readonly RampCardState VanillaOptedOut = new(KeptCaption, null, false, OptedOut: true);
+    /// <summary>The recorded keep-the-original answer. It is a state the modder chose, so the card states it
+    /// rather than reading as a slot nobody has answered — and it carries no ownership marker, because what
+    /// draws here is the original and the mod owns none of it.</summary>
+    public static readonly RampCardState VanillaOptedOut = new("", Strings.RampCardKept, null, false, OptedOut: true);
 
-    public static RampCardState Picked(string? file) => new(PickedCaption, file, true);
+    public static RampCardState Picked(string? file) => new(OwnedGlyph, Strings.RampCardChosen, file, true);
 
     public bool HasDetail => !string.IsNullOrEmpty(Detail);
-    public string Glyph =>
-        Caption.StartsWith("⚠", StringComparison.Ordinal) ? "⚠"
-        : Caption.StartsWith("✎", StringComparison.Ordinal) ? "✎"
-        : "";
-    public string CaptionDetail => Glyph.Length > 0 ? Caption[Glyph.Length..].TrimStart() : Caption;
     public bool HasGlyph => Glyph.Length > 0;
     public bool HasCaption => Caption.Length > 0;
-    public bool IsProblem => Glyph == "⚠";
-    public bool IsOwned => Glyph == "✎";
+    public bool IsProblem => Glyph == ProblemGlyph;
+    public bool IsOwned => Glyph == OwnedGlyph;
 }
 
 /// <summary>One node of the read-only skeleton tree shown by the Edit page.</summary>

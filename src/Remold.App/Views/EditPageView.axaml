@@ -1,4 +1,4 @@
-<UserControl xmlns="https://github.com/avaloniaui"
+<UserControl xmlns="https://github.com/avaloniaui" xmlns:t="using:Remold.App"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:ep="using:Remold.App.ViewModels.EditPage"
              xmlns:conv="using:Avalonia.Data.Converters"
@@ -60,14 +60,14 @@
   <!-- AllowDrop must sit on the pane: without it the AddHandler drop handlers never fire anywhere inside.
        What a drop that arrives actually DOES is decided in EditPageVm.HandleDropAsync. -->
   <Grid RowDefinitions="Auto,Auto,*,Auto" DragDrop.AllowDrop="True">
-    <TextBlock Grid.Row="0" Text="Edit" FontSize="15" Foreground="{StaticResource HudTextBrush}"
+    <TextBlock Grid.Row="0" Text="{x:Static t:Strings.EditTreeTitle}" FontSize="15" Foreground="{StaticResource HudTextBrush}"
                Margin="0,0,0,10" />
 
     <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,0,10">
       <TextBox Grid.Column="0" Text="{Binding Filter}"
-               Watermark="Filter by part, edit, or texture" />
+               Watermark="{x:Static t:Strings.EditFilterWatermark}" />
       <Button Grid.Column="1" Content="✕" Margin="6,0,0,0" Padding="9,4" Command="{Binding ClearFilterCommand}"
-              ToolTip.Tip="Clear filter" />
+              ToolTip.Tip="{x:Static t:Strings.EditFilterClearTip}" />
     </Grid>
 
     <!-- tree (left) + inspector (right) -->
@@ -90,15 +90,15 @@
             <!-- reading the install, and not being able to -->
             <StackPanel Orientation="Horizontal" Spacing="6" Margin="14" IsVisible="{Binding IsReading}">
               <TextBlock Classes="pulse" Text="◌" />
-              <TextBlock Text="Reading game files…" Foreground="{StaticResource HudSubtextBrush}"
+              <TextBlock Text="{x:Static t:Strings.EditReadingGameFiles}" Foreground="{StaticResource HudSubtextBrush}"
                          VerticalAlignment="Center" />
             </StackPanel>
             <TextBlock Text="{Binding Unavailable}" Margin="14" TextWrapping="Wrap" LineHeight="20"
                        Foreground="{StaticResource HudAmberBrush}" IsVisible="{Binding IsUnavailable}" />
-            <TextBlock Text="Nothing in this mod yet. Check an item in ① Pick, then double-click it to open it here."
+            <TextBlock Text="{x:Static t:Strings.EditTreeEmpty}"
                        Margin="14" FontSize="12" LineHeight="20" TextWrapping="Wrap"
                        Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding IsEmpty}" />
-            <TextBlock Text="No parts, edits, or textures match." Margin="14" TextWrapping="Wrap"
+            <TextBlock Text="{x:Static t:Strings.EditFilterNoMatch}" Margin="14" TextWrapping="Wrap"
                        Foreground="{StaticResource HudSubtextBrush}" IsVisible="{Binding NoMatches}" />
           </StackPanel>
           <!-- no sideways scrolling: a row is measured against the pane's width, which is what lets its mesh name
@@ -122,7 +122,7 @@
                              ToolTip.Tip="{Binding ReturnWarning}" />
                   <!-- docked right in this order, so the busy dot ends the row and the badge sits before it -->
                   <TextBlock DockPanel.Dock="Right" Classes="pulse" Text="◌" IsVisible="{Binding IsBusy}"
-                             Margin="6,0,0,0" ToolTip.Tip="Working…" />
+                             Margin="6,0,0,0" ToolTip.Tip="{x:Static t:Strings.EditNodeWorking}" />
                   <!-- the badge rolls up so a collapsed branch shows one; the sentence stays where the fix is -->
                   <TextBlock DockPanel.Dock="Right" Text="⚠" IsVisible="{Binding HasProblemBadge}" Margin="6,0,0,0"
                              Foreground="{StaticResource HudAmberBrush}"
@@ -134,7 +134,7 @@
                          row already leads with ✎ as its type marker -->
                     <TextBlock DockPanel.Dock="Right" Text="✎" IsVisible="{Binding ShowsEditRollup}"
                                Margin="6,0,0,0" Foreground="{StaticResource HudAccentBrush}"
-                               VerticalAlignment="Center" ToolTip.Tip="Edited" />
+                               VerticalAlignment="Center" ToolTip.Tip="{x:Static t:Strings.EditNodeEdited}" />
                     <TextBlock Text="{Binding Title}" Foreground="{StaticResource HudTextBrush}"
                                TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
                                ToolTip.Tip="{Binding Title}" />
@@ -159,7 +159,7 @@
       <Border Grid.Column="2" Background="{StaticResource HudPanelBrush}" Padding="16"
               BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" CornerRadius="3">
         <Panel>
-          <TextBlock Text="Select a part to see its edits, or an edit to work on it."
+          <TextBlock Text="{x:Static t:Strings.EditInspectorEmpty}"
                      TextWrapping="Wrap" Foreground="{StaticResource HudSubtextBrush}"
                      IsVisible="{Binding SelectedNode, Converter={x:Static conv:ObjectConverters.IsNull}}" />
 
@@ -192,7 +192,7 @@
                    app has no type-then-button field anywhere else. A blank name restores the default. -->
               <StackPanel Orientation="Horizontal" Spacing="8"
                           IsVisible="{Binding SelectedNode.IsRenameable}">
-                <TextBlock Text="Name" VerticalAlignment="Center" FontSize="12"
+                <TextBlock Text="{x:Static t:Strings.EditNameLabel}" VerticalAlignment="Center" FontSize="12"
                            Foreground="{StaticResource HudSubtextBrush}" />
                 <TextBox x:Name="RenameBox" Width="240" FontSize="12"
                          Text="{Binding SelectedNode.EditLabel}"
@@ -201,7 +201,7 @@
 
               <!-- geometry: this edit's own, or — on a part with no edits — the game's own -->
               <StackPanel IsVisible="{Binding SelectedNode.ShowsMeshPreview}" Spacing="5">
-                <TextBlock Text="Mesh preview" FontSize="11" Foreground="{StaticResource HudSubtextBrush}" />
+                <TextBlock Text="{x:Static t:Strings.EditMeshPreviewLabel}" FontSize="11" Foreground="{StaticResource HudSubtextBrush}" />
                 <Border Height="220" CornerRadius="3" Background="{StaticResource HudPanelAltBrush}"
                         BorderBrush="{StaticResource HudBorderBrush}" BorderThickness="1" Padding="6">
                   <Panel>
@@ -209,15 +209,15 @@
                             IsVisible="{Binding SelectedNode.IsMeshPreviewLoading}" />
                     <Image Source="{Binding SelectedNode.MeshPreview}" Stretch="Uniform"
                            IsVisible="{Binding SelectedNode.HasMeshPreview}" />
-                    <TextBlock Text="No preview" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <TextBlock Text="{x:Static t:Strings.EditMeshPreviewNone}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                IsVisible="{Binding SelectedNode.IsMeshPreviewFailed}"
                                Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
                   </Panel>
                 </Border>
-                <TextBlock Text="Original mesh" FontSize="11" IsVisible="{Binding SelectedNode.IsPart}"
+                <TextBlock Text="{x:Static t:Strings.EditMeshPreviewOriginal}" FontSize="11" IsVisible="{Binding SelectedNode.IsPart}"
                            Foreground="{StaticResource HudSubtextBrush}" />
                 <!-- the cause and way out, on the row rather than on the status line the verb owns -->
-                <TextBlock Text="{x:Static ep:EditNodeVm.PreviewUnavailable}" FontSize="11" TextWrapping="Wrap"
+                <TextBlock Text="{x:Static t:Strings.EditPreviewUnavailable}" FontSize="11" TextWrapping="Wrap"
                            IsVisible="{Binding SelectedNode.HasPreviewCause}"
                            Foreground="{StaticResource HudSubtextBrush}" />
                 <TextBlock Text="{Binding SelectedNode.MeshMetrics}" FontSize="11"
@@ -228,28 +228,28 @@
               <!-- content edit: its verbs. A mesh the gate refuses disables the two opens; the reason is
                    their hover line — one surface answers, per the text guide. -->
               <WrapPanel ItemSpacing="8" LineSpacing="8" IsVisible="{Binding SelectedNode.IsContentEdit}">
-                <Button Content="Open in Blender" Command="{Binding OpenInBlenderCommand}"
+                <Button Content="{x:Static t:Strings.EditOpenInBlender}" Command="{Binding OpenInBlenderCommand}"
                         CommandParameter="{Binding SelectedNode}"
                         IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.OpenInBlenderHint}" />
-                <Button Content="Open with references" Command="{Binding OpenWithReferencesCommand}"
+                <Button Content="{x:Static t:Strings.EditOpenWithReferences}" Command="{Binding OpenWithReferencesCommand}"
                         CommandParameter="{Binding SelectedNode}"
                         IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.OpenWithReferencesHint}" />
-                <Button Content="Revert mesh" Command="{Binding RevertMeshCommand}"
+                <Button Content="{x:Static t:Strings.EditRevertMesh}" Command="{Binding RevertMeshCommand}"
                         CommandParameter="{Binding SelectedNode}"
                         IsEnabled="{Binding SelectedNode.CanRevertMesh}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.RevertMeshHint}" />
-                <Button Content="Duplicate" Command="{Binding DuplicateEditCommand}"
+                <Button Content="{x:Static t:Strings.EditDuplicate}" Command="{Binding DuplicateEditCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
-                        ToolTip.Tip="{x:Static ep:EditNodeVm.DuplicateHint}" />
-                <Button Content="Delete" Command="{Binding DeleteEditCommand}"
+                        ToolTip.Tip="{x:Static t:Strings.EditDuplicateTip}" />
+                <Button Content="{x:Static t:Strings.EditDelete}" Command="{Binding DeleteEditCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
-                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="Deletes this edit from the mod." />
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{x:Static t:Strings.EditDeleteTip}" />
               </WrapPanel>
 
               <!-- hide edit: no cards, no mesh. The name and where it's used are the shared surface above;
@@ -257,13 +257,13 @@
                    the shared row above it is the content edit's. -->
               <StackPanel IsVisible="{Binding SelectedNode.IsHideEdit}" Spacing="8">
                 <Border Background="{StaticResource HudPanelAltBrush}" CornerRadius="3" Padding="8,5">
-                  <TextBlock Text="{x:Static ep:EditNodeVm.HideExplanation}" TextWrapping="Wrap"
+                  <TextBlock Text="{x:Static t:Strings.EditHideExplanation}" TextWrapping="Wrap"
                              Foreground="{StaticResource HudSubtextBrush}" FontSize="12" />
                 </Border>
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                  <Button Content="Delete" Command="{Binding DeleteEditCommand}"
+                  <Button Content="{x:Static t:Strings.EditDelete}" Command="{Binding DeleteEditCommand}"
                           CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
-                          ToolTip.ShowOnDisabled="True" ToolTip.Tip="Deletes this edit from the mod." />
+                          ToolTip.ShowOnDisabled="True" ToolTip.Tip="{x:Static t:Strings.EditDeleteTip}" />
                 </StackPanel>
               </StackPanel>
 
@@ -282,11 +282,13 @@
                                      IsVisible="{Binding HasReturnWarning}"
                                      Foreground="{StaticResource HudAmberBrush}" VerticalAlignment="Center"
                                      ToolTip.Tip="{Binding ReturnWarning}" />
-                          <Button Grid.Column="2" Content="{Binding Title}" HorizontalAlignment="Left"
+                          <Button Grid.Column="2" HorizontalAlignment="Left"
                                   Padding="0" Background="Transparent" BorderThickness="0"
                                   Foreground="{StaticResource HudTextBrush}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).SelectEditCommand}"
-                                  CommandParameter="{Binding}" ToolTip.Tip="Work on this edit" />
+                                  CommandParameter="{Binding}" ToolTip.Tip="{x:Static t:Strings.EditWorkOnEditTip}">
+                            <TextBlock Text="{Binding Title}" />
+                          </Button>
                           <TextBlock Grid.Column="3" Text="{Binding Detail}" FontSize="11"
                                      Foreground="{StaticResource HudSubtextBrush}" VerticalAlignment="Center" />
                         </Grid>
@@ -299,21 +301,21 @@
                      opening itself authors nothing. A mesh the gate refuses disables the two opens; the
                      reason is their hover line. -->
                 <WrapPanel ItemSpacing="8" LineSpacing="8">
-                  <Button Content="Open in Blender" IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
+                  <Button Content="{x:Static t:Strings.EditOpenInBlender}" IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
                           Command="{Binding OpenInBlenderCommand}"
                           CommandParameter="{Binding SelectedNode}"
                           ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding SelectedNode.OpenInBlenderHint}" />
-                  <Button Content="Open with references" IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
+                  <Button Content="{x:Static t:Strings.EditOpenWithReferences}" IsEnabled="{Binding SelectedNode.CanOpenInBlender}"
                           Command="{Binding OpenWithReferencesCommand}"
                           CommandParameter="{Binding SelectedNode}"
                           ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding SelectedNode.OpenWithReferencesHint}" />
-                  <Button Content="＋ New edit" IsEnabled="{Binding !SelectedNode.IsBusy}"
+                  <Button Content="{x:Static t:Strings.EditNewEdit}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                           Command="{Binding NewEditCommand}" CommandParameter="{Binding SelectedNode}"
                           ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding SelectedNode.NewEditHint}" />
-                  <Button Content="Hide" IsEnabled="{Binding !SelectedNode.IsBusy}"
+                  <Button Content="{x:Static t:Strings.EditHidePart}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                           Command="{Binding HidePartCommand}" CommandParameter="{Binding SelectedNode}"
                           ToolTip.ShowOnDisabled="True"
                           ToolTip.Tip="{Binding SelectedNode.HidePartHint}" />
@@ -340,19 +342,19 @@
 
               <!-- subject: the four verbs that act on everything under it. -->
               <WrapPanel ItemSpacing="8" LineSpacing="8" IsVisible="{Binding SelectedNode.IsSubject}">
-                <Button Content="Open all parts in Blender" Command="{Binding OpenSubjectInBlenderCommand}"
+                <Button Content="{x:Static t:Strings.EditOpenAllInBlender}" Command="{Binding OpenSubjectInBlenderCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.OpenAllHint}" />
-                <Button Content="Open All (Include Edited)"
+                <Button Content="{x:Static t:Strings.EditOpenAllIncludeEdited}"
                         Command="{Binding OpenSubjectFirstEditInBlenderCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.OpenAllFirstEditHint}" />
-                <Button Content="Show in folder" Command="{Binding ShowSubjectFolderCommand}"
+                <Button Content="{x:Static t:Strings.EditShowInFolder}" Command="{Binding ShowSubjectFolderCommand}"
                         CommandParameter="{Binding SelectedNode}"
-                        ToolTip.Tip="Show this item's files in File Explorer" />
-                <Button Content="Remove from mod" Command="{Binding RemoveSubjectCommand}"
+                        ToolTip.Tip="{x:Static t:Strings.EditShowInFolderTip}" />
+                <Button Content="{x:Static t:Strings.EditRemoveFromMod}" Command="{Binding RemoveSubjectCommand}"
                         CommandParameter="{Binding SelectedNode}" IsEnabled="{Binding !SelectedNode.IsBusy}"
                         ToolTip.ShowOnDisabled="True"
                         ToolTip.Tip="{Binding SelectedNode.RemoveSubjectHint}" />
@@ -369,7 +371,7 @@
               <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0"
                           IsVisible="{Binding SelectedNode.IsReadingOriginals}">
                 <TextBlock Classes="pulse" Text="◌" />
-                <TextBlock Text="{x:Static ep:EditNodeVm.ReadingOriginals}" VerticalAlignment="Center"
+                <TextBlock Text="{x:Static t:Strings.EditReadingOriginals}" VerticalAlignment="Center"
                            Foreground="{StaticResource HudSubtextBrush}" FontSize="11" />
               </StackPanel>
               <TextBlock Text="{Binding SelectedNode.OriginalsNote}" FontSize="11" Margin="0,4,0,0"
@@ -393,8 +395,8 @@
                         <Grid ColumnDefinitions="*,Auto">
                           <TextBlock Grid.Column="0" Text="{Binding Title}" FontSize="11" FontWeight="SemiBold"
                                      Foreground="{StaticResource HudTextBrush}" VerticalAlignment="Center" />
-                          <Button Grid.Column="1" Content="Copy name" Padding="6,1" FontSize="11"
-                                  ToolTip.Tip="Copy material name"
+                          <Button Grid.Column="1" Content="{x:Static t:Strings.EditCopyMaterialName}" Padding="6,1" FontSize="11"
+                                  ToolTip.Tip="{x:Static t:Strings.EditCopyMaterialNameTip}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).CopyNameCommand}"
                                   CommandParameter="{Binding CopyText}" />
                         </Grid>
@@ -449,7 +451,7 @@
                                     </StackPanel>
                                     <TextBlock Grid.Column="1" Text="✎" IsVisible="{Binding HasEditBadge}"
                                                Foreground="{StaticResource HudAccentBrush}"
-                                               VerticalAlignment="Center" ToolTip.Tip="Edited" />
+                                               VerticalAlignment="Center" ToolTip.Tip="{x:Static t:Strings.EditNodeEdited}" />
                                   </Grid>
                                   <TextBlock Text="{Binding TextureName}" IsVisible="{Binding HasTextureName}"
                                              Foreground="{StaticResource HudSubtextBrush}" FontSize="11"
@@ -464,10 +466,10 @@
                                              ToolTip.Tip="{Binding GameTextureName}" />
                                   <!-- a blanked slot names no file at all: the build's own flat map stands
                                        where an image would -->
-                                  <TextBlock Text="{x:Static ep:EditMapCardVm.BlankedNote}"
+                                  <TextBlock Text="{x:Static t:Strings.MapBlanked}"
                                              IsVisible="{Binding IsBlanked}" FontSize="11"
                                              Foreground="{StaticResource HudSubtextBrush}"
-                                             ToolTip.Tip="{x:Static ep:EditMapCardVm.BlankedSlotNotEditable}" />
+                                             ToolTip.Tip="{x:Static t:Strings.MapBlankedNotEditable}" />
                                   <!-- what the RMO's fourth channel was answered with, read out from the
                                        record; the round trip that asked is where it changes. The ✎ is its
                                        own accent element, as it is on every other line of this page. -->
@@ -488,7 +490,7 @@
                                     <TextBlock Text="✎" FontSize="11" VerticalAlignment="Top"
                                                IsVisible="{Binding RampState.IsOwned}"
                                                Foreground="{StaticResource HudAccentBrush}" />
-                                    <TextBlock Text="{Binding RampState.CaptionDetail}" FontSize="11"
+                                    <TextBlock Text="{Binding RampState.Caption}" FontSize="11"
                                                TextWrapping="Wrap"
                                                Foreground="{StaticResource HudSubtextBrush}" />
                                   </StackPanel>
@@ -508,7 +510,7 @@
                                              Foreground="{StaticResource HudSubtextBrush}" />
                                   <!-- the cause and way out under a failed read, on the card rather than on
                                        the status line the verb owns -->
-                                  <TextBlock Text="{x:Static ep:EditNodeVm.PreviewUnavailable}" FontSize="11"
+                                  <TextBlock Text="{x:Static t:Strings.EditPreviewUnavailable}" FontSize="11"
                                              IsVisible="{Binding HasPreviewCause}" TextWrapping="Wrap"
                                              Foreground="{StaticResource HudSubtextBrush}" />
                                   <!-- the file this card answers with, where the mod folder no longer holds
@@ -534,13 +536,13 @@
                                           IsEnabled="{Binding CanOpenUvGuide}"
                                           Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).OpenCardUvGuideCommand}"
                                           CommandParameter="{Binding}" />
-                                  <Button Content="Browse…" Padding="10,2" FontSize="11"
+                                  <Button Content="{x:Static t:Strings.Browse}" Padding="10,2" FontSize="11"
                                           Margin="0,0,6,0"
                                           ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding BrowseHint}"
                                           IsEnabled="{Binding CanBrowse}"
                                           Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).BrowseCardCommand}"
                                           CommandParameter="{Binding}" />
-                                  <Button Content="Revert" Padding="10,2" FontSize="11"
+                                  <Button Content="{x:Static t:Strings.EditRevert}" Padding="10,2" FontSize="11"
                                           IsVisible="{Binding ShowsRevert}"
                                           ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding RevertHint}"
                                           IsEnabled="{Binding CanRevert}"
@@ -556,7 +558,7 @@
                                           IsEnabled="{Binding CanChooseRamp}"
                                           Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).ChooseRampCommand}"
                                           CommandParameter="{Binding}" />
-                                  <Button Content="Revert" Padding="10,2" FontSize="11"
+                                  <Button Content="{x:Static t:Strings.EditRevert}" Padding="10,2" FontSize="11"
                                           IsVisible="{Binding ShowsRevert}"
                                           ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding RevertRampHint}"
                                           IsEnabled="{Binding CanRevertRamp}"
@@ -580,7 +582,7 @@
                       </ItemsControl>
                       <StackPanel Spacing="5" IsVisible="{Binding HasShading}">
                         <StackPanel Orientation="Horizontal" Spacing="6">
-                          <TextBlock Text="Shading" FontSize="11" VerticalAlignment="Center"
+                          <TextBlock Text="{x:Static t:Strings.EditShadingLabel}" FontSize="11" VerticalAlignment="Center"
                                      Foreground="{StaticResource HudSubtextBrush}" />
                           <TextBlock Text="✎" IsVisible="{Binding Shading.IsEdited}"
                                      Foreground="{StaticResource HudAccentBrush}" VerticalAlignment="Center" />
@@ -600,7 +602,7 @@
                                           CommandParameter="{Binding}" />
                                 <TextBlock Text="✎" IsVisible="{Binding IsEdited}" FontSize="11"
                                            Foreground="{StaticResource HudAccentBrush}"
-                                           VerticalAlignment="Center" ToolTip.Tip="Edited values" />
+                                           VerticalAlignment="Center" ToolTip.Tip="{x:Static t:Strings.EditShadingEdited}" />
                               </StackPanel>
                             </DataTemplate>
                           </ItemsControl.ItemTemplate>
@@ -609,22 +611,22 @@
                                    FontSize="11" Foreground="{StaticResource HudSubtextBrush}"
                                    TextWrapping="Wrap" />
                         <WrapPanel>
-                          <Button Content="Advanced editor…" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                          <Button Content="{x:Static t:Strings.EditShadingAdvanced}" Padding="10,2" FontSize="11" Margin="0,0,6,4"
                                   IsEnabled="{Binding !Shading.IsBusy}"
                                   ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.EditValuesHint}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).EditShadingValuesCommand}"
                                   CommandParameter="{Binding Shading}" />
-                          <Button Content="Copy from material…" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                          <Button Content="{x:Static t:Strings.EditShadingCopyFrom}" Padding="10,2" FontSize="11" Margin="0,0,6,4"
                                   IsEnabled="{Binding !Shading.IsBusy}"
                                   ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.CopyFromMaterialHint}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).CopyShadingFromMaterialCommand}"
                                   CommandParameter="{Binding Shading}" />
-                          <Button Content="Disable all effects" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                          <Button Content="{x:Static t:Strings.EditShadingDisableAll}" Padding="10,2" FontSize="11" Margin="0,0,6,4"
                                   IsEnabled="{Binding Shading.CanDisableAllEffects}"
                                   ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.DisableAllEffectsHint}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).DisableAllShadingEffectsCommand}"
                                   CommandParameter="{Binding Shading}" />
-                          <Button Content="Revert" Padding="10,2" FontSize="11" Margin="0,0,6,4"
+                          <Button Content="{x:Static t:Strings.EditRevert}" Padding="10,2" FontSize="11" Margin="0,0,6,4"
                                   IsVisible="{Binding Shading.ShowsRevert}" IsEnabled="{Binding Shading.CanRevert}"
                                   ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding Shading.RevertHint}"
                                   Command="{Binding $parent[UserControl].((ep:EditPageVm)DataContext).RevertShadingCommand}"
@@ -657,7 +659,7 @@
                  Foreground="{StaticResource HudTextBrush}" FontSize="13"
                  TextWrapping="Wrap" MaxLines="3" TextTrimming="CharacterEllipsis"
                  ToolTip.Tip="{Binding Status}" />
-      <Button Grid.Column="1" Content="Next: Build ▸" Classes="primary" FontSize="15" Padding="18,10"
+      <Button Grid.Column="1" Content="{x:Static t:Strings.EditNextBuild}" Classes="primary" FontSize="15" Padding="18,10"
               Command="{Binding GoToBuildCommand}" CommandParameter="{Binding SelectedNode}" />
     </Grid>
   </Grid>

@@ -104,7 +104,8 @@ public sealed class MaterialValueTests : IDisposable
             {
                 Assert.Equal(BuildPlanVerdict.Unsupported, operation.Decision.Verdict);
                 Assert.Empty(operation.Emissions!);
-                Assert.Contains("Skin lighting", operation.Decision.Reason);
+                Assert.Equal(CoreStrings.PlanReasonCannotSetOnShader(CoreStrings.ShadingValueUseGIFlatten),
+                    operation.Decision.Reason);
                 Assert.Contains("not declared", operation.Decision.Detail);
                 continue;
             }
@@ -866,7 +867,8 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Equal(BuildPlanVerdict.Unsupported, operation.Decision.Verdict);
         // One sentence per screen, whichever way the shader turned the value down; the catalog's own
         // account of which layout and which declaration disagreed goes to the log.
-        Assert.Contains("cannot be set on this material's shader", operation.Decision.Reason);
+        Assert.Equal(CoreStrings.PlanReasonCannotSetOnShader(CoreStrings.ShadingValueAnisotropy),
+            operation.Decision.Reason);
         Assert.Contains("not declared", operation.Decision.Detail);
     }
 
@@ -1136,8 +1138,8 @@ public sealed class MaterialValueTests : IDisposable
         Assert.Equal(BuildTargetingProof.StockDrawRange, patch.Emission.TargetingProof.Kind);
         var row = plan.Bindings.Single(binding => binding.RowId == patch.Consumer);
         Assert.Equal(BuildTargetingProof.StockDrawRange, row.Decision.TargetingProof!.Kind);
-        Assert.DoesNotContain(plan.Warnings, warning => warning.Contains("mesh replacement",
-            StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.Warnings, CatalogShape.Of(
+            CoreStrings.PlanMeshReplacementsAtOnce(CatalogShape.Any, CatalogShape.Any)).IsMatch);
         var execution = AuthoredBuildExecution.Create(project, plan);
         Assert.Single(execution.Work);
         var pick = Assert.Single(execution.StockMaterials);
@@ -1200,8 +1202,7 @@ public sealed class MaterialValueTests : IDisposable
                     carrierSlot: target),
             });
 
-        Assert.Contains(plan.Conflicts,
-            conflict => conflict.Contains("has conflicting values", StringComparison.Ordinal));
+        Assert.Contains(plan.Conflicts, ConflictingValues.IsMatch);
         Assert.False(plan.CanBuild);
     }
 
@@ -1231,8 +1232,7 @@ public sealed class MaterialValueTests : IDisposable
             });
 
         Assert.True(plan.CanBuild, string.Join(Environment.NewLine, plan.Conflicts));
-        Assert.DoesNotContain(plan.Conflicts,
-            conflict => conflict.Contains("has conflicting values", StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.Conflicts, ConflictingValues.IsMatch);
         var patch = Assert.IsType<MaterialConstantBufferPatch>(Assert.Single(plan.RuntimeEmissions,
             emission => emission.Emission.Kind == BuildEmissionKind.MaterialValuePatch)
             .Emission.MaterialPatch);
@@ -1276,10 +1276,13 @@ public sealed class MaterialValueTests : IDisposable
 
         var plan = AuthoredBuildPlanner.Plan(project, backend);
 
-        Assert.Equal(conflicts, plan.Conflicts.Any(conflict =>
-            conflict.Contains("has conflicting values", StringComparison.Ordinal)));
+        Assert.Equal(conflicts, plan.Conflicts.Any(ConflictingValues.IsMatch));
         Assert.Equal(!conflicts, plan.CanBuild);
     }
+
+    /// <summary>The conflict that one material value is set two ways on the same material, whichever value.</summary>
+    private static System.Text.RegularExpressions.Regex ConflictingValues =>
+        CatalogShape.Of(CoreStrings.PlanConflictingValues(CatalogShape.Any));
 
     [Fact]
     public void Shared_backend_contract_labels_do_not_conflict_across_distinct_draws()
@@ -1367,9 +1370,7 @@ public sealed class MaterialValueTests : IDisposable
 
         var plan = AuthoredBuildPlanner.Plan(project, backend);
 
-        Assert.Contains(plan.Conflicts,
-            conflict => conflict.Contains("has conflicting values on the same material",
-                StringComparison.Ordinal));
+        Assert.Contains(plan.Conflicts, ConflictingValues.IsMatch);
     }
 
     [Fact]
@@ -1426,8 +1427,8 @@ public sealed class MaterialValueTests : IDisposable
         var plan = AuthoredBuildPlanner.Plan(project, backend);
 
         Assert.False(plan.CanBuild);
-        Assert.Contains(plan.Bindings, row => row.Decision.Reason.Contains("cannot be disabled",
-            StringComparison.Ordinal));
+        Assert.Contains(plan.Bindings, row => CatalogShape.Of(CoreStrings.EffectCannotBeDisabled(CatalogShape.Any))
+            .IsMatch(row.Decision.Reason));
         Assert.DoesNotContain(plan.RuntimeEmissions, emission => emission.Verdict == BuildPlanVerdict.Resolved
             && emission.Emission.Kind == BuildEmissionKind.MaterialEffect);
     }

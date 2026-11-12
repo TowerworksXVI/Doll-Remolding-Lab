@@ -50,7 +50,7 @@ public sealed class AuthoredEditSessionKeyGroupTests
         session.SetGroupKey(body, "  ");
         Assert.Null(session.Snapshot().KeyGroups.Single(group => group.Id == body).Key);
         var taken = Assert.Throws<AuthoredRefusalException>(() => session.SetGroupKey(body, "f7"));
-        Assert.Equal("Key F7 is already used by another key group.", taken.Message);
+        Assert.Equal(CoreStrings.KeyGroupKeyTakenByAnotherGroup("F7"), taken.Message);
         Assert.Equal("F7", session.Snapshot().KeyGroups.Single(group => group.Id == hair).Key);
     }
 
@@ -78,10 +78,10 @@ public sealed class AuthoredEditSessionKeyGroupTests
 
         var own = Assert.Throws<AuthoredRefusalException>(() =>
             session.SetStateShortcut(group, "state-0002", "f6"));
-        Assert.Equal("Key F6 already switches this key group. Pick another key for the shortcut.", own.Message);
+        Assert.Equal(CoreStrings.KeyGroupShortcutIsGroupKey("F6"), own.Message);
         var sibling = Assert.Throws<AuthoredRefusalException>(() =>
             session.SetStateShortcut(group, "state-0002", "F8"));
-        Assert.Equal("Key F8 is already the shortcut for State 1. Pick another key.", sibling.Message);
+        Assert.Equal(CoreStrings.KeyGroupShortcutTaken("F8", CoreStrings.PlacementStateNumbered(1)), sibling.Message);
         Assert.Null(session.Snapshot().KeyGroups.Single().States[1].Shortcut);
 
         // setting a state's own shortcut again is not a clash with itself
@@ -115,7 +115,7 @@ public sealed class AuthoredEditSessionKeyGroupTests
 
         var taken = Assert.Throws<AuthoredRefusalException>(() => session.SetGroupKey(group, "F9"));
 
-        Assert.Equal("Key F9 is already the shortcut for State 2. Pick another key.", taken.Message);
+        Assert.Equal(CoreStrings.KeyGroupShortcutTaken("F9", CoreStrings.PlacementStateNumbered(2)), taken.Message);
         Assert.Equal("F6", session.Snapshot().KeyGroups.Single().Key);
     }
 
@@ -147,9 +147,9 @@ public sealed class AuthoredEditSessionKeyGroupTests
         var project = session.Snapshot();
         Assert.DoesNotContain("edit-short", project.Always);
         Assert.Contains("edit-short", project.KeyGroups.Single().States[1].ActiveEditIds);
-        Assert.Equal("Short body isn't used in Always.",
+        Assert.Equal(CoreStrings.KeyGroupEditNotUsed("Short body", CoreStrings.PlacementAlways),
             Assert.Throws<AuthoredRefusalException>(() => session.UnplaceEdit("edit-short")).Message);
-        Assert.Equal("Short body is already used in F6 · State 2.",
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Short body", "F6 · " + CoreStrings.PlacementStateNumbered(2)),
             Assert.Throws<AuthoredRefusalException>(() =>
                 session.PlaceEdit("edit-short", group, "state-0002")).Message);
     }
@@ -195,7 +195,7 @@ public sealed class AuthoredEditSessionKeyGroupTests
         var refused = Assert.Throws<AuthoredRefusalException>(() =>
             session.MovePlacement("edit-short", group, "state-0001", null, null));
 
-        Assert.Equal("Short body is already used in Always.", refused.Message);
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Short body", CoreStrings.PlacementAlways), refused.Message);
         Assert.Equal(revision, session.Revision);
         Assert.Equal(new[] { "edit-long", "edit-short" }, session.Snapshot().Always);
         Assert.Equal(new[] { "edit-short" },
@@ -261,7 +261,7 @@ public sealed class AuthoredEditSessionKeyGroupTests
         var refused = Assert.Throws<AuthoredRefusalException>(() =>
             session.PlaceEdit("edit-long", group, "state-0001"));
 
-        Assert.Equal("Long body is already used in F6 · Coat on.", refused.Message);
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Long body", "F6 · Coat on"), refused.Message);
     }
 
     [Fact]
@@ -366,7 +366,7 @@ public sealed class AuthoredEditSessionKeyGroupTests
 
         var refused = Assert.Throws<AuthoredRefusalException>(() => session.PlaceEdit(hide));
 
-        Assert.Equal("Hidden is already used in Always.", refused.Message);
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Hidden", CoreStrings.PlacementAlways), refused.Message);
         Assert.Equal(1, session.Snapshot().Always.Count(id => id == hide));
     }
 
@@ -382,7 +382,8 @@ public sealed class AuthoredEditSessionKeyGroupTests
             session.PlaceEdit(hide, group, "state-0002"));
         var byIndex = Assert.Throws<AuthoredRefusalException>(() => session.PlaceEdit(hide, group, 1));
 
-        Assert.Equal("Hidden is already used in F6 \u00b7 State 2.", byId.Message);
+        Assert.Equal(CoreStrings.KeyGroupEditAlreadyUsed("Hidden", "F6 · " + CoreStrings.PlacementStateNumbered(2)),
+            byId.Message);
         Assert.Equal(byId.Message, byIndex.Message);
         Assert.Equal(1, session.Snapshot().KeyGroups.Single().States[1].ActiveEditIds
             .Count(id => id == hide));

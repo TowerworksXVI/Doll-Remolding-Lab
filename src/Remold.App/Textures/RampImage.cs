@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Remold.Core.Migoto;
+using Remold.Core;
 
 namespace Remold.App.Textures;
 
@@ -51,24 +52,17 @@ public static class RampImage
         return new Read(image.Width, image.Height, image.Levels[0]);
     }
 
-    /// <summary>Why <paramref name="path"/> cannot be a toon ramp, or null when it can. States the extent or
-    /// the format the file actually has, so a modder who picked the wrong export can see which it was.</summary>
-    /// <summary>The one shape a toon ramp file has, in the words the Import tip states it in. Every refusal
-    /// that isn't about the EXTENT says this rather than the reader's own diagnosis: a DXGI number and a
-    /// sentence about "this reader" tell a modder nothing about the export they should have made.</summary>
-    public const string Requirement = "A toon ramp is a 256×16 RGBAHalf .dds.";
-
     public static string? RefuseAsRamp(string path)
     {
         DdsImage image;
         try { image = DdsReader.Read(path); }
         catch (Exception e) when (e is InvalidDataException or IOException or UnauthorizedAccessException)
         {
-            return $"{Path.GetFileName(path)} isn't a toon ramp. {Requirement}";
+            return Strings.RampNotARamp(Path.GetFileName(path)) + " " + Strings.RampRequirement;
         }
         if (image.Width != RampConversion.RampWidth || image.Height != RampConversion.RampHeight)
-            return $"{Path.GetFileName(path)} is {image.Width}×{image.Height}. "
-                + $"A toon ramp is {RampConversion.RampWidth}×{RampConversion.RampHeight}.";
+            return CoreStrings.RampWrongSize(Path.GetFileName(path), image.Width, image.Height,
+                RampConversion.RampWidth, RampConversion.RampHeight);
         return null;
     }
 

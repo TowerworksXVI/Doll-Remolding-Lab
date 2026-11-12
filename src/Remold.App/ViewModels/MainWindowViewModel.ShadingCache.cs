@@ -46,7 +46,7 @@ public partial class MainWindowViewModel
     private SubjectModel PrepareCurrentSubject(GameVfs vfs, SubjectModel model)
     {
         var prepared = WarmSubjectShading(vfs, model);
-        if (!ReferenceEquals(vfs, _vfs)) throw new InvalidOperationException(EditPageVm.ShadingInstallUnavailable);
+        if (!ReferenceEquals(vfs, _vfs)) throw new InvalidOperationException(Strings.ShadingInstallUnavailable);
         return prepared;
     }
 
@@ -59,23 +59,23 @@ public partial class MainWindowViewModel
     public EditShadingRead? PeekShading(TargetPart part, int materialSlotIndex,
         GameAssetRef? material = null)
     {
-        if (_vfs is not { } vfs) return new EditShadingRead(null, EditPageVm.ShadingInstallUnavailable);
+        if (_vfs is not { } vfs) return new EditShadingRead(null, Strings.ShadingInstallUnavailable);
         var model = SubjectPartOf(part);
         if (model is null)
         {
             var state = SubjectReadState(part.Subject, part.Outfit);
             return state == EditSubjectRead.Reading ? null : new EditShadingRead(null,
                 state == EditSubjectRead.Unreadable ? GameFilesGate.SubjectUnreadable
-                    : MaterialShadingCache.ReadFailure);
+                    : Strings.ShadingUnreadable);
         }
         var selected = model.Materials.ElementAtOrDefault(materialSlotIndex);
         if (selected is null || selected.IsPlaceholder) return new EditShadingRead(null);
         // A saved slot may still name the previous game's material. The loaded outfit owns the
         // current position, exactly as it does for the numeric editor and build resolver.
         material = ShadingMaterial(vfs, selected);
-        if (material is null) return new EditShadingRead(null, MaterialShadingCache.ReadFailure);
+        if (material is null) return new EditShadingRead(null, Strings.ShadingUnreadable);
         // Do not take the factory/evidence lock: a card must never wait for an in-flight bundle read.
         return _materialShading.TryGetValue(vfs, out var cache) && cache.Peek(material) is { } answer
-            ? answer : new EditShadingRead(null, MaterialShadingCache.ReadFailure);
+            ? answer : new EditShadingRead(null, Strings.ShadingUnreadable);
     }
 }

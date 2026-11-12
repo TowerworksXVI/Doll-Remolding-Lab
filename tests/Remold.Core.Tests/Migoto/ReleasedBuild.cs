@@ -93,6 +93,6 @@ internal static class ReleasedBuild
     {
         foreach (var n in names)
             if (BuildBlacklist.IsBlocked(n))
-                throw new BlockedAssetException($"'{n}' is not a supported asset");
+                throw new BlockedAssetException(CoreStrings.BuildAssetNotSupported(n));
     }
 }

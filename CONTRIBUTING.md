@@ -56,6 +56,24 @@ Two habits the codebase keeps that are easy to miss:
 - **A disabled button says why.** Enablement and the reason shown on hover come from one function,
   so the two can never disagree.
 
+## User-facing text
+
+Text a user reads goes in a string catalog: `src/Remold.Core/Text/CoreStrings.resx` for Core,
+`src/Remold.App/Text/Strings.resx` for the app. Add the string to the resx first, then read it through
+the generated accessor (`CoreStrings.Name`, `Strings.Name`). Every entry carries a one-line comment;
+`params:` is left out when the text has no `{0}` holes, and otherwise describes every one:
+
+```
+surface: <button|label|tooltip|status|error|confirmation|title|empty-state|note|other> · where: <window or page and control> · params: {0}=<meaning>; {1}=<meaning> · budget: <short|sentence|paragraph>
+```
+
+The accessors are generated and committed; regenerate the one whose resx you edited:
+
+```
+dotnet run --project tools/GenStrings -- src/Remold.Core/Text/CoreStrings.resx src/Remold.Core/Text/CoreStrings.cs Remold.Core CoreStrings Remold.Core.Text.CoreStrings
+dotnet run --project tools/GenStrings -- src/Remold.App/Text/Strings.resx src/Remold.App/Text/Strings.cs Remold.App Strings Remold.App.Text.Strings
+```
+
 ## Pull requests
 
 Welcome, on one condition. Write the PR yourself.

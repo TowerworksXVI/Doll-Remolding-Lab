@@ -7,8 +7,10 @@ using System.Text;
 using System.Text.Json;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
+using Remold.Core.Tables;
 using Remold.Core.Textures;
 using Remold.Core.Workbench;
+using Remold.Core.Text;
 
 namespace Remold.Core.Migoto;
 
@@ -155,8 +157,7 @@ public static class ModBuilder
         if (shift is null) return payload;
         if (Workbench.HiddenPart.FromList(shift) is not { } centre)
         {
-            warnings.Add($"Couldn't read the position '{mesh}' was moved to so it opened centred in Blender. "
-                + "The new mesh is built where Blender showed it.");
+            warnings.Add(CoreStrings.BuildPositionUnreadable(mesh));
             return payload;
         }
         return new Mesh.MeshApply.Payload
@@ -244,16 +245,13 @@ public static class ModBuilder
                 catch (Exception ex) when (ex is not BlockedAssetException)
                 {
                     unreadable = true;
-                    warnings.Add($"Couldn't read the original {kind} map '{m.TextureName}' for "
-                        + $"'{part}'. The edited {kind} may show with the wrong colours.");
+                    warnings.Add(CoreStrings.BuildAnchorMapUnreadable(ShownKind(kind), m.TextureName, part));
                     continue;
                 }
                 if (wonBy is null) { wonBy = m.TextureName; won = srgb; }
                 else if (srgb != won)
-                    warnings.Add($"The original {kind} maps for '{part}' disagree. '{wonBy}' is "
-                        + $"{Family(won)} and '{m.TextureName}' is {Family(srgb)}, so the edited {kind} is "
-                        + $"written as {Family(won)} and shows with the wrong colours wherever it replaces "
-                        + $"'{m.TextureName}'.");
+                    warnings.Add(CoreStrings.BuildAnchorMapsDisagree(ShownKind(kind), part, wonBy,
+                        ShownFamily(won), m.TextureName, ShownFamily(srgb)));
             }
         if (wonBy is not null) return won;
         if (unreadable)
@@ -262,8 +260,33 @@ public static class ModBuilder
         return byConvention;
     }
 
-    /// <summary>The DXGI family's name for a warning.</summary>
+    /// <summary>The DXGI family's name for the build log.</summary>
     private static string Family(bool srgb) => srgb ? "sRGB" : "linear";
+
+    /// <summary>The DXGI family's name for a warning.</summary>
+    private static string ShownFamily(bool srgb) =>
+        srgb ? CoreStrings.BuildColorFamilySrgb : CoreStrings.BuildColorFamilyLinear;
+
+    /// <summary>A map kind as a warning names it. <paramref name="kind"/> is the build log's word for it.</summary>
+    internal static string ShownKind(string kind) => kind switch
+    {
+        "base color" => CoreStrings.BuildMapKindBaseColor,
+        "normal" => CoreStrings.BuildMapKindNormal,
+        "RMO" => CoreStrings.BuildMapKindRmo,
+        "effect map" => CoreStrings.BuildMapKindEffectMap,
+        "effect" => CoreStrings.BuildMapKindEffect,
+        _ => kind,
+    };
+
+    /// <summary>A retexture's map kind, by its shipped-file suffix letter, as a warning names it.</summary>
+    internal static string RetextureKindWord(string kind) => kind switch
+    {
+        "a" => CoreStrings.BuildMapKindBaseColor,
+        "n" => CoreStrings.BuildMapKindNormal,
+        "r" => CoreStrings.BuildMapKindRmo,
+        "b" => CoreStrings.BuildMapKindEffect,
+        _ => kind,
+    };
 
     /// <summary>The first pair of siblings a twin guard's probe cannot tell apart AND at least one of whose
     /// verdicts the guarded section claims, as (earlier, later) verdict numbers — or null when every claimed
@@ -520,8 +543,7 @@ public static class ModBuilder
     /// pipeline foreign geometry, so identical content shares the dump and differing content refuses.</summary>
     internal static string? DumpNameConflict(string dumpName, DumpIdentity held, DumpIdentity incoming) =>
         held == incoming ? null
-            : $"two mesh edits use the part name '{dumpName}' for different meshes ('{held.MeshName}' and "
-                + $"'{incoming.MeshName}'), so they can't be in one mod. Remove one of the two mesh edits";
+            : CoreStrings.BuildPartNameTwoMeshes(dumpName, held.MeshName, incoming.MeshName);
 
     /// <summary>The refusal when two Replaces land on ONE vanilla draw, else null. Two overrides on one
     /// hash fight over it and which wins is not something this build can decide — the same rule the install
@@ -549,8 +571,7 @@ public static class ModBuilder
                          .Where(pair => collide(hash, pair.Key))
                          .SelectMany(pair => pair.Value))
                 if (!heldGate.ProvablyExclusiveOf(gate))
-                    return $"'{heldSubject}' and '{subject}' replace one mesh they share, and only one "
-                        + "replacement could show. Remove one of the two mesh edits, or switch them with one key";
+                    return CoreStrings.BuildReplacementsShareMesh(heldSubject, subject);
             if (!claimed.TryGetValue(hash, out var already)) claimed[hash] = already = new();
             already.Add((subject, gate));
         }
@@ -581,10 +602,10 @@ public static class ModBuilder
     /// since nothing measured says where it sits.</summary>
     private static string DetailLevel(string tierSlotName) => Model.MeshName.Lod(tierSlotName) switch
     {
-        "lod0" or "base" => "the closest detail level",
-        "lodm0" => "the middle detail level",
-        "lod1" => "the furthest detail level",
-        _ => "a lower detail level",
+        "lod0" or "base" => CoreStrings.BuildDetailLevelClosest,
+        "lodm0" => CoreStrings.BuildDetailLevelMiddle,
+        "lod1" => CoreStrings.BuildDetailLevelFurthest,
+        _ => CoreStrings.BuildDetailLevelLower,
     };
 
     /// <summary>The material at one position of a part, as the workbench shows it. A material the read
@@ -592,8 +613,8 @@ public static class ModBuilder
     /// falls back to, so the modder looks up the material the sentence is about.</summary>
     private static string MaterialLabel(SubjectPart part, int position) =>
         position >= 0 && position < part.Materials.Count && part.Materials[position].Name is { Length: > 0 } name
-            ? $"'{name}'"
-            : $"material {position}";
+            ? CoreStrings.BuildMaterialNamed(name)
+            : CoreStrings.BuildMaterialNumbered(position);
 
     /// <summary>Fail the build on a blocked game asset. Don't weaken or drop the calls to this
     /// (<see cref="BuildBlacklist"/>).</summary>
@@ -601,7 +622,7 @@ public static class ModBuilder
     {
         foreach (var n in names)
             if (BuildBlacklist.IsBlocked(n))
-                throw new BlockedAssetException($"'{n}' is not a supported asset");
+                throw new BlockedAssetException(CoreStrings.BuildAssetNotSupported(n));
     }
 
     /// <summary>The encoded DDS an authored source of this sRGB family ships as: encoded on first claim,
@@ -651,18 +672,17 @@ public static class ModBuilder
     internal static void WarnUnbindableDonorMaps(IReadOnlyDictionary<int, SubmeshMaps> subMaps,
         IReadOnlyList<StockMapTag> stockMaps, string part, List<string> warnings)
     {
-        void Warn(Func<SubmeshMaps, MapSlot> pick, StockMapKind kind, string name)
+        void Warn(Func<SubmeshMaps, MapSlot> pick, StockMapKind kind, Func<string, string> warning)
         {
             bool authored = subMaps.Values.Any(m => pick(m).File is not null);
             if (!authored || stockMaps.Any(t => t.Kind == kind)) return;
-            warnings.Add($"Couldn't apply the edited {name} on '{part}'. "
-                + $"No usable original {name} was found to replace.");
+            warnings.Add(warning(part));
         }
-        Warn(m => m.Albedo, StockMapKind.Albedo, "base color map");
-        Warn(m => m.Normal, StockMapKind.Normal, "normal map");
-        Warn(m => m.Rmo, StockMapKind.Rmo, "RMO map");
-        Warn(m => m.Blend, StockMapKind.Blend, "effect map");
-        Warn(m => m.Ramp, StockMapKind.Ramp, "toon ramp");
+        Warn(m => m.Albedo, StockMapKind.Albedo, CoreStrings.BuildEditedMapUnappliedBaseColor);
+        Warn(m => m.Normal, StockMapKind.Normal, CoreStrings.BuildEditedMapUnappliedNormal);
+        Warn(m => m.Rmo, StockMapKind.Rmo, CoreStrings.BuildEditedMapUnappliedRmo);
+        Warn(m => m.Blend, StockMapKind.Blend, CoreStrings.BuildEditedMapUnappliedEffect);
+        Warn(m => m.Ramp, StockMapKind.Ramp, CoreStrings.BuildEditedMapUnappliedRamp);
     }
 
     /// <summary>The anchor's own stock maps, hashed offline and tagged with the kind whose slot they occupy,
@@ -688,8 +708,7 @@ public static class ModBuilder
                     try { tags.Add(new StockMapTag(hashOf(m), kind, partLabel)); }
                     catch (Exception ex) when (ex is not BlockedAssetException)
                     {
-                        warnings.Add($"Couldn't match the original map '{m.TextureName}' on '{part}' to "
-                            + "a texture slot. Some edited maps may not show in game.");
+                        warnings.Add(CoreStrings.BuildOriginalMapUnmatched(m.TextureName, PartShown(part)));
                         diagnostics.Add($"anchor map '{m.TextureName}' ({sfx}) can't be slot-tagged: {ex.Message}");
                     }
             }
@@ -810,7 +829,7 @@ public static class ModBuilder
         var hiddenFlags = execution.HiddenFlags;
         var shownFlags = execution.ShownFlags;
         if (project.RootDir is null)
-            throw new AuthoredRefusalException("this mod hasn't been saved yet. Save it, then build");
+            throw new AuthoredRefusalException(CoreStrings.BuildNotSaved);
         var warnings = new List<string>();
         var infos = new List<string>();
         var diagnostics = new List<string>();
@@ -828,8 +847,7 @@ public static class ModBuilder
         diagnostics.AddRange(authoredPlan.ProjectArtifacts.Select(artifact =>
             $"plan file {artifact.File}: {artifact.Reason}"));
         if (edits.Count == 0 && rampPicks.Count == 0 && execution.StockMaterials.Count == 0)
-            throw new AuthoredRefusalException("nothing to build. No edited meshes, edited textures, "
-                + "toon ramp picks, shading changes, or hidden meshes");
+            throw new AuthoredRefusalException(CoreStrings.BuildNothingToBuild);
         // A ramp picked on an unreplaced part is referenced exactly as an edit's own files are, so it is
         // checked here beside them: a pick whose file the modder deleted fails fast, by name, rather than
         // partway through a build that has already written a folder.
@@ -839,8 +857,8 @@ public static class ModBuilder
             .Where(x => { try { return !File.Exists(project.Resolve(x.File)); } catch { return true; } })
             .ToList();
         if (dangling.Count > 0)
-            throw new AuthoredRefusalException("these files are missing from the mod folder: "
-                + string.Join(", ", dangling.Select(d => $"{d.Owner}: {d.File}")));
+            throw new AuthoredRefusalException(CoreStrings.BuildFilesMissing(string.Join(CoreStrings.ListSeparator,
+                dangling.Select(d => CoreStrings.BuildFileOfMesh(d.Owner, d.File)))));
         // one published name for the folder and its zip; the transients sit beside them under the same root
         string packageName = ModNaming.PackageFolderName(project.Info);
         string workDir = Path.Combine(outRoot, $".work-{packageName}");
@@ -855,7 +873,7 @@ public static class ModBuilder
         // the ramp conversion can reach the same pool ANCHOR the build will bind the donor's maps at, rather
         // than deriving a second answer nobody compares against.
         var probe = new SubjectPoolProbe(env, reader, diagnostics);
-        byte[] Bundle(string id, string why) => probe.Bundle(id, why);
+        byte[] Bundle(string id, SubjectPoolProbe.BundleUse use, string name) => probe.Bundle(id, use, name);
 
         // The root chain of a pool mesh's renderer (see ReadRootChain), stated by the install where it states
         // one (BuildEnv.RootChainFor). Read for the meshes of a pool of more than one part only: a one-part
@@ -863,7 +881,7 @@ public static class ModBuilder
         IReadOnlyList<uint>? RootChainOf(string meshName, string? rendererBundle, long rendererPathId, string dumpDir,
             string label) =>
             env.RootChainFor is { } stated ? stated(meshName)
-            : ReadRootChain(reader, id => Bundle(id, $"the renderer of '{label}'"), rendererBundle, rendererPathId,
+            : ReadRootChain(reader, id => Bundle(id, SubjectPoolProbe.BundleUse.Renderer, label), rendererBundle, rendererPathId,
                 dumpDir, label, diagnostics);
 
         try
@@ -882,9 +900,7 @@ public static class ModBuilder
             var slotPlan = slotCatalog is null ? ShaderSlotPlan.StockFloor : ShaderSlotPlan.For(slotCatalog);
             if (slotCatalog is null)
             {
-                warnings.Add("This app can't read its texture slot data. Some maps won't show on "
-                    + "replaced meshes, though the mesh swap itself still works. Reinstall the app to "
-                    + "restore it.");
+                warnings.Add(CoreStrings.BuildSlotDataUnreadable);
                 diagnostics.Add($"shader slot catalog unavailable: {slotProblem}");
             }
             // A slot plan naming no ramp register binds a ramp at no draw: the probe sweep is empty, so a
@@ -897,9 +913,8 @@ public static class ModBuilder
                     binding.AuthoredSlot.Input == TargetInputKind.Ramp
                     && binding.Decision.Verdict == BuildPlanVerdict.Resolved
                     && binding.EffectiveValue?.ProjectAsset is not null) is { } rampAsked)
-                throw new AuthoredRefusalException("the toon ramp on "
-                    + $"'{rampAsked.AuthoredSlot.Part.RendererSlot}' can't be built: this app's texture "
-                    + "slot data names no toon ramp slot. Reinstall the app to restore it");
+                throw new AuthoredRefusalException(
+                    CoreStrings.BuildSlotDataNoRamp(rampAsked.AuthoredSlot.Part.RendererSlot));
 
             // ---- resolve subjects and map each edit onto its live roster part -----------------------
             var subjects = new Dictionary<(string, string), SubjectModel>();
@@ -908,8 +923,7 @@ public static class ModBuilder
                 var key = (character.ToLowerInvariant(), stem.ToLowerInvariant());
                 if (subjects.TryGetValue(key, out var m)) return m;
                 var model = env.ResolveSubject(character, stem)
-                    ?? throw new AuthoredRefusalException(
-                        $"'{character} · {stem}' isn't in the current game install. Rescan, then build again");
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildOutfitNotInstalled(character, stem));
                 return subjects[key] = model;
             }
 
@@ -919,9 +933,7 @@ public static class ModBuilder
                 var model = Subject(e.Character, e.Outfit);
                 var part = model.Parts.FirstOrDefault(p =>
                         string.Equals(p.SlotName, e.Mesh, StringComparison.OrdinalIgnoreCase))
-                    ?? throw new AuthoredRefusalException(
-                        $"'{e.Mesh}' is no longer a part of {e.Character} · {e.Outfit}. The game may have "
-                        + "changed since this edit was made");
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildPartNotInOutfit(e.Mesh, e.Character, e.Outfit));
                 RefuseBlocked(model.Character, model.Stem, part.SlotName, part.MeshAddress);
                 work.Add((e, model, part));
             }
@@ -930,7 +942,7 @@ public static class ModBuilder
             // against one of them, and on the others its colours sit on different pieces. Said once per
             // part however many edits target it, and only for parts this build actually changes — an
             // untouched part's configurations are the game's business, not the mod's.
-            // The sentence leads with the part, in the short name the rest of the build calls it by: a
+            // The sentence leads with the part, under the name the Edit tree shows it by: a
             // build that changes several flagged parts has one of these to say about each, and a sentence
             // naming no part would be the same sentence every time — which is one line, about none of
             // them.
@@ -939,15 +951,13 @@ public static class ModBuilder
                 .Distinct().ToList();
             foreach (var (character, stem, slotName) in flaggedParts)
             {
-                string flaggedLabel = AuthoredBuildPlanner.PartName(new TargetPart
+                string flaggedLabel = AuthoredBuildPlanner.ShownPartToken(new TargetPart
                 {
                     Subject = character,
                     Outfit = stem,
                     RendererSlot = slotName,
                 });
-                warnings.Add($"'{flaggedLabel}': This part has more than one stock material configuration "
-                    + "in the game files. The edit was built against the most common one; on the others, "
-                    + "colors may sit on the wrong pieces.");
+                warnings.Add(CoreStrings.BuildAmbiguousMaterials(PartShown(flaggedLabel)));
             }
 
             // ---- repair data, accumulated as the build goes ------------------------------------------
@@ -1247,9 +1257,7 @@ public static class ModBuilder
             foreach (var cycle in keyCycles)
                 if (ModKeys.SameKey(cycle.Key, modKey) && cycle.StateCount > 2)
                     throw new AuthoredRefusalException(
-                        $"key '{ModKeys.Display(cycle.Key)}' switches the whole mod and also cycles "
-                        + $"{cycle.StateCount} states of a key group. The whole-mod key toggles the mod on "
-                        + "and off; a key cycling N states needs its own key");
+                        CoreStrings.BuildModKeyCycles(ModKeys.Display(cycle.Key), cycle.StateCount));
             // ---- what one work item's gate is -------------------------------------------------------
             // The plan states it: the group position this content answers, and the positions of other
             // groups that take the part off screen.
@@ -1413,9 +1421,9 @@ public static class ModBuilder
             // a build touching every tier of every part would hold all of them at once. What is kept is
             // what was taken off it — the draw shapes, which is all any route here reads.
             AssetsTools.NET.AssetTypeValueField MeshFieldOf(string bundleId, string meshName, Bundles.MeshSelector which) =>
-                reader.GetMeshField(Bundle(bundleId, $"mesh '{meshName}'"), meshName, which)
+                reader.GetMeshField(Bundle(bundleId, SubjectPoolProbe.BundleUse.Mesh, meshName), meshName, which)
                 ?? throw new AuthoredRefusalException(
-                    $"the game files no longer hold the mesh '{meshName}'. Rescan, then build again");
+                    CoreStrings.BuildGameFilesNoLongerHoldMesh(meshName));
             DrawShapeSet ShapesOf(string bundleId, string meshName, Bundles.MeshSelector which)
             {
                 string key = MeshKey(bundleId, meshName, which);
@@ -1468,16 +1476,11 @@ public static class ModBuilder
                 diagnostics.Add($"{tierMesh.Name}: {map.Diagnostic}"
                     + (guarded ? " (not routed: shared draw signature)" : ""));
                 if (guarded)
-                    warnings.Add($"At {DetailLevel(tierSlotName)}, '{partLabel}' can't be told apart "
-                        + "from another mesh in game, so each part of the new mesh keeps the original "
-                        + "material it was drawn under there. Some of it may show under the wrong "
-                        + "material.");
+                    warnings.Add(CoreStrings.BuildTierTwinGuarded(DetailLevel(tierSlotName), PartShown(partLabel)));
                 else
                     foreach (var entry in map.UnresolvedPositions)
-                        warnings.Add($"At {DetailLevel(tierSlotName)}, '{partLabel}' has no place to "
-                            + "draw the part of the new mesh that uses "
-                            + $"{MaterialLabel(part, entry.Position)}, so that part of it is not drawn "
-                            + "there.");
+                        warnings.Add(CoreStrings.BuildTierNoPlace(DetailLevel(tierSlotName), PartShown(partLabel),
+                            MaterialLabel(part, entry.Position)));
                 return tierMaps[mapKey] = map;
             }
 
@@ -1540,7 +1543,7 @@ public static class ModBuilder
                         }
                         try
                         {
-                            var field = reader.GetMeshField(Bundle(bid, $"mesh '{name}'"), name, pid)
+                            var field = reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Mesh, name), name, pid)
                                 ?? throw new InvalidDataException($"mesh '{name}' is unavailable");
                             var raw = Mesh.MeshRaw.From(field);
                             meshes[trip] = (new List<string> { part.Token }, raw, BufferHash.Compute(raw).Selector);
@@ -1577,7 +1580,7 @@ public static class ModBuilder
             MeshSig SigOf(SubjectModel model, string bid, string name, Bundles.MeshSelector pid)
             {
                 if (SignatureIndex(model).TryGetValue($"{bid}|{name}|{pid}", out var sig)) return sig;
-                var selector = BufferHash.Compute(Bundle(bid, $"mesh '{name}'"), name, pid, reader).Selector;
+                var selector = BufferHash.Compute(Bundle(bid, SubjectPoolProbe.BundleUse.Mesh, name), name, pid, reader).Selector;
                 string key = selector.Reduce(RosterSelectorsOn(selector.Hash)).Key;
                 Remember(key, selector);
                 return new MeshSig(key, selector.Hash, true, "", Array.Empty<string>());
@@ -1736,9 +1739,7 @@ public static class ModBuilder
                     var sig = SigOf(model, bid, name, pid);
                     if (sig.Unique) continue;
                     if (RequestTwinGuard(model, part, sig.Key, sig.Mates)) continue;
-                    throw new AuthoredRefusalException(
-                        $"'{editMesh}' and '{sig.Mate}' can't be told apart in game, so changing one "
-                        + "would change the other. This mesh edit can't be built");
+                    throw new AuthoredRefusalException(CoreStrings.BuildEditTwinOfMesh(editMesh, sig.Mate));
                 }
             }
 
@@ -1809,8 +1810,7 @@ public static class ModBuilder
             // unscoped edits, said once rather than silently.
             var sharing = env.Sharing;
             if (sharing is null)
-                infos.Add("Shared meshes and textures haven't been measured. Every edit applies "
-                    + "wherever its mesh or texture draws in game.");
+                infos.Add(CoreStrings.BuildSharingUnmeasured);
             // An outfit that failed to measure is uncovered, so a texture it shares reads private here and
             // rebinds game-wide: the reported reach is a floor rather than the truth. A build-log fact,
             // never a user-facing line — it names no action and reads as breakage on builds it cannot
@@ -1824,8 +1824,7 @@ public static class ModBuilder
                 if (sharing is null) return false;
                 if (sharing.Covers(m.Character, m.Stem)) return true;
                 if (measuredNoted.Add((m.Character, m.Stem)))
-                    infos.Add($"Shared meshes and textures haven't been measured for {m.Stem}. Its "
-                        + "edits apply wherever those meshes and textures draw in game.");
+                    infos.Add(CoreStrings.BuildSharingUnmeasuredFor(m.Stem));
                 return false;
             }
             IReadOnlyList<Workbench.SharingIndex.Wearer> MeshOthers(string ib, SubjectModel m) =>
@@ -1833,20 +1832,16 @@ public static class ModBuilder
                             : Array.Empty<Workbench.SharingIndex.Wearer>();
             // Another character's outfit is named by its character; the edited character's own other outfit
             // by the outfit, since naming the character would name the edited outfit too.
-            string WearerLabels(IReadOnlyList<Workbench.SharingIndex.Wearer> wearers, SubjectModel m)
-            {
-                var labels = wearers.Select(w => w.Character.Equals(m.Character, StringComparison.OrdinalIgnoreCase)
+            string WearerLabels(IReadOnlyList<Workbench.SharingIndex.Wearer> wearers, SubjectModel m) =>
+                UpToThree(wearers.Select(w => w.Character.Equals(m.Character, StringComparison.OrdinalIgnoreCase)
                         ? w.StemLabel : w.CharacterLabel)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                return labels.Count <= 3 ? string.Join(", ", labels)
-                    : $"{string.Join(", ", labels.Take(3))} and {labels.Count - 3} more";
-            }
-            static string SiblingLabels(IReadOnlyList<Workbench.SharingIndex.Wearer> wearers)
-            {
-                var labels = wearers.Select(w => w.StemLabel).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                return labels.Count <= 3 ? string.Join(", ", labels)
-                    : $"{string.Join(", ", labels.Take(3))} and {labels.Count - 3} more";
-            }
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+            static string SiblingLabels(IReadOnlyList<Workbench.SharingIndex.Wearer> wearers) =>
+                UpToThree(wearers.Select(w => w.StemLabel).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+            // Up to three names stand joined with no closing conjunction; past three, the first three and
+            // how many more there are.
+            static string UpToThree(IReadOnlyList<string> labels) =>
+                labels.Count <= 3 ? string.Join(CoreStrings.ListSeparator, labels) : Catalog.List(labels, 3);
             string SelfLabel(SubjectModel m) => sharing?.WearerOf(m.Character, m.Stem)?.StemLabel ?? m.Stem;
 
             // Who visibly co-changes with an edit on a mesh this outfit shares. Any other outfit wearing the
@@ -1886,8 +1881,7 @@ public static class ModBuilder
                 }
                 if (witnesses.Count == 0)
                 {
-                    infos.Add($"{m.Stem} has no mesh of its own, so the mod cannot tell when it is on "
-                        + "screen. Edits on its shared meshes apply wherever those meshes draw.");
+                    infos.Add(CoreStrings.BuildNoOwnMesh(m.Stem));
                     return latchNames[key] = null;
                 }
                 string name = PartName(m.Stem, "").TrimEnd('_');
@@ -2045,7 +2039,7 @@ public static class ModBuilder
                         throw new AuthoredRefusalException(conflict);
                     return dumpDir;
                 }
-                StreamDump.Dump(Bundle(bid, $"pool part '{dumpName}'"), meshName, dumpDir, pid, reader);
+                StreamDump.Dump(Bundle(bid, SubjectPoolProbe.BundleUse.PoolPart, dumpName), meshName, dumpDir, pid, reader);
                 dumpedParts[dumpName] = incoming;
                 return dumpDir;
             }
@@ -2082,19 +2076,17 @@ public static class ModBuilder
             foreach (var w in replaceWork)
             {
                 var (name, bid, pid) = Tiers(w.Part)[0];
-                var field = reader.GetMeshField(Bundle(bid, $"part '{w.Part.Token}'"), name, pid)
-                    ?? throw new AuthoredRefusalException(
-                        $"the game files no longer hold the mesh '{name}'. Rescan, then build again");
+                var field = reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Part, w.Part.Token), name, pid)
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildGameFilesNoLongerHoldMesh(name));
                 // Both rig rules read the bone table, and both sit ahead of the routing rule: what drives
                 // a mesh's bones decides whether it can be replaced at all, before the stream layout does.
                 var boneNameHashes = field["m_BoneNameHashes"]["Array"].Children.Select(c => c.AsUInt).ToList();
                 // a spring-chain mesh's skin is usually recoverable, and the refusal is about the
                 // simulation driving its bones, not the stream
                 if (Skeleton.BoneTable.HasSpringChain(boneNameHashes))
-                    throw new AuthoredRefusalException($"'{w.Edit.Mesh}' can't be replaced: "
-                        + "it moves on the game's own spring bones. Remove this mesh edit");
+                    throw new AuthoredRefusalException(CoreStrings.BuildSpringBonesUnreplaceable(w.Edit.Mesh));
                 if (Skeleton.BoneTable.HasUnsupportedRig(boneNameHashes))
-                    throw new BlockedAssetException($"'{w.Part.SlotName}' is not a supported asset");
+                    throw new BlockedAssetException(CoreStrings.BuildAssetNotSupported(w.Part.SlotName));
                 switch (StreamDump.Route(field))
                 {
                     case StreamDump.ReplaceRoute.Pooled: pooledWork.Add(w); break;
@@ -2102,8 +2094,8 @@ public static class ModBuilder
                     default:
                         // a rigid layout took the branch above, so what reaches this carries influences
                         // spelled in a shape recovery can't read (or blend shapes)
-                        throw new AuthoredRefusalException($"'{w.Edit.Mesh}' can't be replaced: "
-                            + $"{StreamDump.UnrecoverableSkinReason(field)}. Remove this mesh edit");
+                        throw new AuthoredRefusalException(CoreStrings.BuildCantBeReplaced(w.Edit.Mesh,
+                            StreamDump.UnrecoverableSkinWhy(field)?.Shown));
                 }
             }
             replaceWork = pooledWork;
@@ -2228,13 +2220,12 @@ public static class ModBuilder
                         bytes = File.ReadAllBytes(src);
                         var image = DdsReader.Parse(bytes, Path.GetFileName(src));
                         if (image.Width != RampWidth || image.Height != RampHeight)
-                            throw new InvalidDataException($"{Path.GetFileName(src)} is "
-                                + $"{image.Width}x{image.Height}, and a toon ramp is {RampWidth}x{RampHeight}");
+                            throw new InvalidDataException(CoreStrings.RampWrongSize(Path.GetFileName(src),
+                                image.Width, image.Height, RampWidth, RampHeight));
                     }
                     catch (Exception e)
                     {
-                        throw new AuthoredRefusalException(
-                            $"the toon ramp on submesh {submesh} can't be built: {e.Message}");
+                        throw new AuthoredRefusalException(CoreStrings.BuildRampUnbuildable(submesh, e.Message));
                     }
                     string key = Convert.ToHexString(
                         System.Security.Cryptography.SHA256.HashData(bytes));
@@ -2248,11 +2239,9 @@ public static class ModBuilder
                 {
                     if (t.Submesh < 0 || t.Submesh >= submeshCount)
                         throw new AuthoredRefusalException(
-                            $"a texture set on '{edit.Mesh}' names submesh {t.Submesh}, but the new "
-                            + $"mesh has {submeshCount}");
+                            CoreStrings.BuildTextureSetSubmeshOutOfRange(edit.Mesh, t.Submesh, submeshCount));
                     if (subMaps.ContainsKey(t.Submesh))
-                        throw new AuthoredRefusalException(
-                            $"the mesh edit on '{edit.Mesh}' has two texture sets for submesh {t.Submesh}");
+                        throw new AuthoredRefusalException(CoreStrings.BuildTwoTextureSets(edit.Mesh, t.Submesh));
                     var albedo = Enc(t.Albedo, t.AlbedoAsk, "a", AlbedoSrgb, t.Submesh);
                     var normal = Enc(t.Normal, t.NormalAsk, "n", NormalSrgb, t.Submesh);
                     var rmo = Enc(t.Rmo, t.RmoAsk, "r", RmoSrgb, t.Submesh);
@@ -2277,23 +2266,18 @@ public static class ModBuilder
                     {
                         if (property.Ask != SlotOrigin.Authored || property.File is null) continue;
                         if (anchor.Materials.Count == 0)
-                            throw new AuthoredRefusalException(
-                                $"{TextureMap.PropertyLabel(property.ShaderProperty)} on '{edit.Mesh}' cannot be applied. "
-                                + "The installed mesh has no material for this picture. Refresh the part, or leave it out.");
+                            throw new AuthoredRefusalException(CoreStrings.BuildPictureNoMaterial(
+                                TextureMap.DisplayPropertyLabel(property.ShaderProperty), edit.Mesh));
                         var material = anchor.Materials[Math.Min(t.Submesh, anchor.Materials.Count - 1)];
                         var registers = slotPlan.ForProperty(property.ShaderProperty);
                         if (registers.Count == 0)
-                            throw new AuthoredRefusalException(
-                                $"{TextureMap.PropertyLabel(property.ShaderProperty)} on '{edit.Mesh}' cannot be applied. "
-                                + $"No measured texture-register coverage exists for {property.ShaderProperty}. "
-                                + "Update the app's game data, or leave this picture out.");
+                            throw new AuthoredRefusalException(CoreStrings.BuildPictureNoRegisters(
+                                TextureMap.DisplayPropertyLabel(property.ShaderProperty), edit.Mesh, property.ShaderProperty));
                         var stock = material.Maps.FirstOrDefault(m =>
                             string.Equals(m.Slot, property.ShaderProperty, StringComparison.Ordinal));
                         if (stock is null)
-                            throw new AuthoredRefusalException(
-                                $"{TextureMap.PropertyLabel(property.ShaderProperty)} on '{edit.Mesh}' cannot be applied. "
-                                + $"The installed material no longer binds {property.ShaderProperty}. "
-                                + "Refresh the part, or leave this picture out.");
+                            throw new AuthoredRefusalException(CoreStrings.BuildPictureSlotGone(
+                                TextureMap.DisplayPropertyLabel(property.ShaderProperty), edit.Mesh, property.ShaderProperty));
                         if (OtherPropertyOnResource(material, stock) is { } other)
                             throw PropertyProbeCannotIsolate(stock.TextureName, edit.Mesh,
                                 property.ShaderProperty, other.Slot);
@@ -2370,8 +2354,8 @@ public static class ModBuilder
                         }
                         catch (Exception ex) when (ex is not BlockedAssetException)
                         {
-                            warnings.Add($"Couldn't match {TextureMap.PropertyLabel(property)} on "
-                                + $"'{edit.Mesh}' to a texture slot, so that picture may not show in game.");
+                            warnings.Add(CoreStrings.BuildPictureUnmatched(TextureMap.DisplayPropertyLabel(property),
+                                edit.Mesh));
                             diagnostics.Add($"anchor property '{property}' ({sfx}) cannot be slot-tagged: {ex.Message}");
                         }
                 }
@@ -2402,9 +2386,8 @@ public static class ModBuilder
                     var (name, bid, pid) = tiers[ti];
                     try
                     {
-                        var field = reader.GetMeshField(Bundle(bid, $"tier '{name}'"), name, pid)
-                            ?? throw new AuthoredRefusalException(
-                        $"the game files no longer hold the mesh '{name}'. Rescan, then build again");
+                        var field = reader.GetMeshField(Bundle(bid, SubjectPoolProbe.BundleUse.Tier, name), name, pid)
+                            ?? throw new AuthoredRefusalException(CoreStrings.BuildGameFilesNoLongerHoldMesh(name));
                         list.Add(new PoolDerive.TierBones(name, SigOf(model, bid, name, pid).Key,
                             StreamDump.WeightedBoneHashes(field)));
                     }
@@ -2427,17 +2410,15 @@ public static class ModBuilder
             {
                 string sfx = MeshPartName(model, part) + StateSuffix(edit);
                 string donorAbs = project.Resolve(edit.DonorFile
-                    ?? throw new AuthoredRefusalException(
-                        $"the mesh edit on '{edit.Mesh}' has nothing sent back from Blender yet"));
-                log?.Invoke($"Reading the mesh for {edit.Mesh}…");
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildNothingSentBack(edit.Mesh)));
+                log?.Invoke(CoreStrings.BuildReadingMesh(edit.Mesh));
                 // A part the game starts hidden opened centred: that comes off first, and the file is then
                 // in the space its rest record states, as every other donor is.
                 var payload = Uncentred(MeshGltf.ImportPayload(donorAbs, lenient: true), edit.Shift, edit.Mesh,
                     warnings);
                 var recordedRest = Mesh.RestBake.FromList(edit.BakedRest, out bool restRefused);
                 if (restRefused)
-                    warnings.Add($"The rest pose recorded for '{edit.Mesh}' can't be applied, so the new "
-                        + "mesh is built without it.");
+                    warnings.Add(CoreStrings.BuildRestPoseUnapplied(edit.Mesh));
 
                 var (partBones, partBySlot, heldBack, partRests, partPaths) = RosterProbe(model);
 
@@ -2448,8 +2429,8 @@ public static class ModBuilder
                 // the part, and the message carries that read's own reason.
                 if (heldBack.FirstOrDefault(m =>
                         string.Equals(m.Mesh, part.SlotName, StringComparison.OrdinalIgnoreCase)) is { } blocked)
-                    throw new AuthoredRefusalException(
-                        $"'{edit.Mesh}' can't be replaced: {blocked.Why}. Remove this mesh edit");
+                    throw new AuthoredRefusalException(CoreStrings.BuildCantBeReplaced(edit.Mesh,
+                        blocked.Skin?.Shown ?? blocked.Why));
 
                 RefuseTwinTarget(model, part, edit.Mesh);
 
@@ -2488,10 +2469,7 @@ public static class ModBuilder
                 // about. The derivation only picks one when the new mesh's weights reach no bone the
                 // edited part moves.
                 if (!string.Equals(pool.Anchor, part.SlotName, StringComparison.OrdinalIgnoreCase))
-                    warnings.Add($"The new mesh for '{edit.Mesh}' uses no bone that part moves, so it is "
-                        + $"drawn as part of '{pool.Anchor}' and shows that part's original material. To "
-                        + "use the edited part's own material, weight the new mesh to bones that "
-                        + $"'{edit.Mesh}' moves.");
+                    warnings.Add(CoreStrings.BuildDrawnAsOtherPart(edit.Mesh, pool.Anchor));
 
                 // Where the union is stated is decided by the anchor's measured rest — the same verdict
                 // the pool compile and the emitter read — and the donor file sits in the space its record
@@ -2516,7 +2494,7 @@ public static class ModBuilder
                 var poolHides = new Dictionary<string, IReadOnlyList<KeyRef>>(StringComparer.Ordinal);
                 var poolTiers = new List<PoolTier>();
                 var partDisplayNames = partBySlot.ToDictionary(pair => pair.Key,
-                    pair => AuthoredBuildPlanner.PartName(new TargetPart
+                    pair => AuthoredBuildPlanner.ShownPartToken(new TargetPart
                     {
                         Subject = model.Character,
                         Outfit = model.Stem,
@@ -2542,8 +2520,7 @@ public static class ModBuilder
                     // keeps the capture to its own draws where they separate the two.
                     if (!sig.Unique && !RequestTwinGuard(model, p, sig.Key, sig.Mates))
                         throw new AuthoredRefusalException(
-                            $"'{p.Token}' and '{sig.Mate}' can't be told apart in game, and this mesh "
-                            + $"edit needs '{p.Token}' on its own. It can't be built");
+                            CoreStrings.BuildPartNeededAlone(PartShown(p.Token), PartShown(sig.Mate)));
                     string h = sig.Key;
                     pipelineIbs.Add(sig.Key);
                     // One capture section serves one signature key. This part reached by another Replace's
@@ -2557,8 +2534,7 @@ public static class ModBuilder
                     // claimant's is the one the other's gate closes over.
                     if (ConflictingCapture(h, claimed, PlanGate(edit)) is { } owner)
                         throw new AuthoredRefusalException(
-                            $"'{owner.Claimant}' and '{claimant}' can't be told apart in game, so this "
-                            + "mesh edit can't be built");
+                            CoreStrings.BuildClaimantsNotTellableApart(owner.Claimant, claimant));
                     // the first claimant names the refusal
                     poolHashOwner.TryAdd(h, new HashClaim(claimed, claimant, PlanGate(edit)));
                     // dump identity is the MESH (name + ib), not the section key: one physical mesh
@@ -2567,7 +2543,7 @@ public static class ModBuilder
                     poolParts.Add(new PoolPart(partName, dumpDir, OpKey(bid, name, pid),
                         partRests.GetValueOrDefault(slotName),
                         pool.Pool.Count > 1 ? RootChainOf(name, p.RendererBundle, p.RendererPathId, dumpDir, partName) : null));
-                    poolMeshes.Add(new SwapCompile.PoolMesh(Bundle(bid, $"pool part '{p.Token}'"), name, pid,
+                    poolMeshes.Add(new SwapCompile.PoolMesh(Bundle(bid, SubjectPoolProbe.BundleUse.PoolPart, p.Token), name, pid,
                         partRests.GetValueOrDefault(slotName)));
                     poolCaptures[partName] = h;
                     sidecarCaptures[partName] = h;
@@ -2634,8 +2610,7 @@ public static class ModBuilder
                             {
                                 pipelineHashes.Remove(h);
                                 PresenceExtra(partName, h);
-                                warnings.Add($"'{name}' can't be told apart from '{tierSig.Mate}' in "
-                                    + "game, so it keeps its original mesh.");
+                                warnings.Add(CoreStrings.BuildTierKeepsOriginal(name, tierSig.Mate));
                                 continue;
                             }
                         }
@@ -2651,8 +2626,7 @@ public static class ModBuilder
                         var tierClaimed = new CaptureMesh(bid, name, pid);
                         if (ConflictingCapture(h, tierClaimed, PlanGate(edit)) is { } tierOwner)
                             throw new AuthoredRefusalException(
-                                $"'{tierOwner.Claimant}' and '{tierClaimant}' can't be told apart in "
-                                + "game, so this mesh edit can't be built");
+                                CoreStrings.BuildClaimantsNotTellableApart(tierOwner.Claimant, tierClaimant));
                         bool mintedClaim = poolHashOwner.TryAdd(h,
                             new HashClaim(tierClaimed, tierClaimant, PlanGate(edit)));
                         // the same rule ClaimDump claims on, ahead of the degrade-to-warning catch below:
@@ -2672,8 +2646,7 @@ public static class ModBuilder
                             // and that dump already succeeded under a name of its own.
                             if (mintedClaim) poolHashOwner.Remove(h);
                             PresenceExtra(partName, h);
-                            warnings.Add($"Couldn't prepare '{name}': {ex.Message}. It keeps its "
-                                + "original mesh.");
+                            warnings.Add(CoreStrings.BuildTierUnprepared(name, ex.Message));
                             continue;
                         }
                         // anchor tiers host the donor draw at their own detail level, so they carry their
@@ -2741,16 +2714,13 @@ public static class ModBuilder
                             {
                                 if (!RequestTwinGuard(model, mp, sig.Key, sig.Mates))
                                     throw new AuthoredRefusalException(
-                                        $"'{mp.Token}' and '{sig.Mate}' can't be told apart in game, and "
-                                        + $"this mesh edit needs '{mp.Token}' on its own. It can't be "
-                                        + "built");
+                                        CoreStrings.BuildPartNeededAlone(PartShown(mp.Token), PartShown(sig.Mate)));
                             }
                             else if (TwinRouteFor(model, mp, sig.Mates) is { } route)
                                 memberTierRoute = route;
                             else
                             {
-                                warnings.Add($"'{name}' can't be told apart from '{sig.Mate}' in game, "
-                                    + "so it keeps its original mesh.");
+                                warnings.Add(CoreStrings.BuildTierKeepsOriginal(name, sig.Mate));
                                 everyTierCaptured = false;
                                 continue;
                             }
@@ -2768,14 +2738,12 @@ public static class ModBuilder
                             // at draws that pick it, while its lod0 stays load-bearing and refuses.
                             if (!lod0)
                             {
-                                warnings.Add($"'{name}' can't be told apart from '{owner.Claimant}' in "
-                                    + "game, so it keeps its original mesh.");
+                                warnings.Add(CoreStrings.BuildTierKeepsOriginal(name, owner.Claimant));
                                 everyTierCaptured = false;
                                 continue;
                             }
                             throw new AuthoredRefusalException(
-                                $"'{owner.Claimant}' and '{claimant}' can't be told apart in game, so "
-                                + "this mesh edit can't be built");
+                                CoreStrings.BuildClaimantsNotTellableApart(owner.Claimant, claimant));
                         }
                         bool minted = poolHashOwner.TryAdd(sig.Key,
                             new HashClaim(claimed, claimant, PlanGate(edit)));
@@ -2784,8 +2752,7 @@ public static class ModBuilder
                         catch (Exception ex) when (!lod0)
                         {
                             if (minted) poolHashOwner.Remove(sig.Key);
-                            warnings.Add($"Couldn't prepare '{name}': {ex.Message}. It keeps its "
-                                + "original mesh.");
+                            warnings.Add(CoreStrings.BuildTierUnprepared(name, ex.Message));
                             everyTierCaptured = false;
                             continue;
                         }
@@ -2862,9 +2829,8 @@ public static class ModBuilder
                 // after the edit was sent back.
                 if (recordedCentre is { } recorded && probe.StockCentre(model, part.SlotName) is { } stock
                     && CentresDiffer(recorded, stock))
-                    warnings.Add($"The original mesh of '{partDisplayNames.GetValueOrDefault(part.SlotName, part.SlotName)}' "
-                        + "has changed since this edit was sent back from Blender, so the new mesh may not appear "
-                        + "where Blender showed it.");
+                    warnings.Add(CoreStrings.BuildOriginalMeshChanged(
+                        PartShown(partDisplayNames.GetValueOrDefault(part.SlotName, part.SlotName))));
                 var referenceBinds = ReferenceInUnionSpace(bindReference.Reference,
                     anchorIsReplaced: string.Equals(pool.Anchor, part.SlotName, StringComparison.OrdinalIgnoreCase),
                     sceneUnion ? anchorScene : null, payloadCarried);
@@ -2880,30 +2846,22 @@ public static class ModBuilder
                         string mate = partDisplayNames.GetValueOrDefault(source, source);
                         // Each cause is its own message: the replaced part's own placement leaves every
                         // other part's bone without a statement, so it names no neighbour.
-                        string why = cause switch
+                        string refusal = cause switch
                         {
                             Mesh.BindReference.Unplacement.Target =>
-                                "the new mesh is weighted to bones only other parts use. The game files don't "
-                                + $"say where '{replaced}' sits in its skeleton, so those bones can't be placed. "
-                                + $"In Blender, weight the new mesh to bones '{replaced}' uses, or remove "
-                                + "those weights",
+                                CoreStrings.BuildUnplacedBonesTarget(PartShown(replaced)),
                             Mesh.BindReference.Unplacement.Skeletons =>
-                                $"the new mesh is weighted to bones only '{mate}' uses. Different skeletons "
-                                + $"move '{mate}' and '{replaced}', and the game files don't say how the two "
-                                + "relate. Remove those weights in Blender",
+                                CoreStrings.BuildUnplacedBonesSkeletons(PartShown(replaced), PartShown(mate)),
                             Mesh.BindReference.Unplacement.Source =>
-                                $"the new mesh is weighted to bones only '{mate}' uses. The game files don't "
-                                + $"say where '{mate}' is relative to '{replaced}'. Remove those weights in "
-                                + "Blender",
+                                CoreStrings.BuildUnplacedBonesSource(PartShown(replaced), PartShown(mate)),
                             _ => throw new ArgumentOutOfRangeException(nameof(cause), cause, null),
                         };
-                        throw BuildLogDiagnostics.Attach(new AuthoredRefusalException(
-                            $"'{replaced}' can't be built: {why}"),
+                        throw BuildLogDiagnostics.Attach(new AuthoredRefusalException(refusal),
                             $"{sfx}: bone {MigotoEmitter.BoneName(partPaths.Count > 0 ? partPaths : null, bone)} has no reference: {problem}");
                     }
                 }
 
-                log?.Invoke($"Fitting {edit.Mesh} to the shared skeleton…");
+                log?.Invoke(CoreStrings.BuildFittingShared(edit.Mesh));
                 string donorDir = Path.Combine(workDir, $"donor_{sfx}");
                 // layout target = the ANCHOR: the compiled streams bind at the anchor's draw, whose input
                 // layout expects that part's exact strides/formats — a hair-anchored pipeline conformed to
@@ -2952,11 +2910,11 @@ public static class ModBuilder
                 var (pipeCross, pipeSiblings) = CoChangers(Tiers(part).SelectMany(t =>
                     MeshOthers(SigOf(model, t.BundleId, t.Name, t.Mesh).Key, model)).Distinct().ToList(), model);
                 if (pipeOthers.Count > 0 && (pipeLatch = LatchFor(model)) is not null && pipeCross.Count > 0)
-                    infos.Add($"'{edit.Mesh}' shares meshes with {WearerLabels(pipeCross, model)}. The "
-                        + $"replacement applies while {model.Stem} is on screen.");
+                    infos.Add(CoreStrings.BuildReplacementSharesMeshes(edit.Mesh, WearerLabels(pipeCross, model),
+                        model.Stem));
                 if (pipeSiblings.Count > 0)
-                    warnings.Add($"'{edit.Mesh}' is also worn by {SiblingLabels(pipeSiblings)}, on screen together "
-                        + $"with {SelfLabel(model)}. The replacement shows on them too.");
+                    warnings.Add(CoreStrings.BuildReplacementOnSiblings(edit.Mesh, SiblingLabels(pipeSiblings),
+                        SelfLabel(model)));
 
                 pipelines.Add(new ReplacePipeline
                 {
@@ -2965,6 +2923,7 @@ public static class ModBuilder
                     DonorDir = donorDir,
                     CaptureHashes = poolCaptures,
                     Anchor = MeshPartName(model, partBySlot[pool.Anchor]),
+                    ReplacedDisplay = partDisplayNames.GetValueOrDefault(part.SlotName, part.SlotName),
                     SubTextures = subMaps.Count > 0 ? subMaps : null,
                     NoSkipParts = noSkip.Count > 0 ? noSkip : null,
                     Tiers = poolTiers.Count > 0 ? poolTiers : null,
@@ -3001,15 +2960,13 @@ public static class ModBuilder
                 string sfx = MeshPartName(model, part) + StateSuffix(edit);
                 RefuseTwinTarget(model, part, edit.Mesh);
                 string donorAbs = project.Resolve(edit.DonorFile
-                    ?? throw new AuthoredRefusalException(
-                        $"the mesh edit on '{edit.Mesh}' has nothing sent back from Blender yet"));
-                log?.Invoke($"Reading the mesh for {edit.Mesh}…");
+                    ?? throw new AuthoredRefusalException(CoreStrings.BuildNothingSentBack(edit.Mesh)));
+                log?.Invoke(CoreStrings.BuildReadingMesh(edit.Mesh));
                 var payload = Uncentred(MeshGltf.ImportPayload(donorAbs, lenient: true), edit.Shift, edit.Mesh,
                     warnings);
                 var recordedRest = Mesh.RestBake.FromList(edit.BakedRest, out bool restRefused);
                 if (restRefused)
-                    warnings.Add($"The rest pose recorded for '{edit.Mesh}' can't be applied, so the new "
-                        + "mesh is built without it.");
+                    warnings.Add(CoreStrings.BuildRestPoseUnapplied(edit.Mesh));
                 // The workspace glb sits in scene-rest space and the target's own space is where the swap
                 // lands, so the recorded uprighting comes back off here. There is no pool to state a shared
                 // space for, which is what makes this unconditional rather than an anchor's verdict.
@@ -3023,9 +2980,9 @@ public static class ModBuilder
                     };
 
                 var (name, bid, pid) = Tiers(part)[0];
-                log?.Invoke($"Fitting {edit.Mesh} to the game's mesh layout…");
+                log?.Invoke(CoreStrings.BuildFittingLayout(edit.Mesh));
                 string rigidDir = Path.Combine(workDir, $"rigid_{sfx}");
-                var compiled = SwapCompile.CompilePart(Bundle(bid, $"part '{part.Token}'"), name, donorAbs,
+                var compiled = SwapCompile.CompilePart(Bundle(bid, SubjectPoolProbe.BundleUse.Part, part.Token), name, donorAbs,
                     rigidDir, pid, payload, reader);
                 warnings.AddRange(compiled.Warnings);
                 diagnostics.AddRange(compiled.Diagnostics);
@@ -3063,7 +3020,7 @@ public static class ModBuilder
                 var rigidMaps = new Dictionary<string, TierMaterialMap>(StringComparer.Ordinal);
                 // and each tier mesh's own vertex layout, which is what its draw reads the donor through
                 var rigidLayouts = new Dictionary<string, RigidTierLayout>(StringComparer.Ordinal);
-                string rigidLabel = AuthoredBuildPlanner.PartName(new TargetPart
+                string rigidLabel = AuthoredBuildPlanner.ShownPartToken(new TargetPart
                 {
                     Subject = model.Character,
                     Outfit = model.Stem,
@@ -3097,11 +3054,11 @@ public static class ModBuilder
                     .SelectMany(h => MeshOthers(h, model)).Distinct().ToList();
                 var (rigidCross, rigidSiblings) = CoChangers(rigidOthers, model);
                 if (rigidOthers.Count > 0 && (rigidLatch = LatchFor(model)) is not null && rigidCross.Count > 0)
-                    infos.Add($"'{edit.Mesh}' shares meshes with {WearerLabels(rigidCross, model)}. The "
-                        + $"replacement applies while {model.Stem} is on screen.");
+                    infos.Add(CoreStrings.BuildReplacementSharesMeshes(edit.Mesh, WearerLabels(rigidCross, model),
+                        model.Stem));
                 if (rigidSiblings.Count > 0)
-                    warnings.Add($"'{edit.Mesh}' is also worn by {SiblingLabels(rigidSiblings)}, on screen together "
-                        + $"with {SelfLabel(model)}. The replacement shows on them too.");
+                    warnings.Add(CoreStrings.BuildReplacementOnSiblings(edit.Mesh, SiblingLabels(rigidSiblings),
+                        SelfLabel(model)));
 
                 diagnostics.Add($"'{edit.Mesh}' took the rigid replace route ({compiled.SubmeshCount} submesh(es))");
 
@@ -3178,10 +3135,7 @@ public static class ModBuilder
                         // for the tiers it lost, and its claimed tiers are answered, not in conflict.
                         if ((e.Verb == EditVerbs.Hide || retexHide) && e.Gate.HiddenWhen.Count > 0
                             && !routedPooledHideHashes.Contains(h))
-                            throw new AuthoredRefusalException(
-                                $"'{e.Mesh}' is hidden by a key group and is also captured by a "
-                                + "replacement on this outfit. One draw takes one override section, so "
-                                + "the build can't emit both. Drop one of the two");
+                            throw new AuthoredRefusalException(CoreStrings.BuildHideAndCapture(e.Mesh));
                         continue;
                     }
                     anchored = true;
@@ -3197,8 +3151,7 @@ public static class ModBuilder
                         foreach (var mate in hideSig.Mates)
                         {
                             string mateMesh = PartOf(model, mate)?.SlotName ?? mate;
-                            string warning = $"Hiding '{e.Mesh}' also hides '{mateMesh}' because their draws "
-                                + "cannot be told apart.";
+                            string warning = CoreStrings.BuildHideAlsoHides(e.Mesh, mateMesh);
                             if (unguardedHideWarnings.Add(warning)) warnings.Add(warning);
                         }
                     }
@@ -3214,14 +3167,13 @@ public static class ModBuilder
                     // disclosure only where someone ELSE's model visibly co-changes
                     if (latch is not null && hideCross.Count > 0)
                     {
-                        string info = $"'{name}' is also drawn by {WearerLabels(hideCross, model)}. The hide "
-                            + $"applies while {model.Stem} is on screen.";
+                        string info = CoreStrings.BuildHideSharedDrawn(name, WearerLabels(hideCross, model), model.Stem);
                         if (hideNotes.Add(info)) infos.Add(info);
                     }
                     if (hideSiblings.Count > 0)
                     {
-                        string warning = $"'{name}' is also drawn by {SiblingLabels(hideSiblings)}, on screen "
-                            + $"together with {SelfLabel(model)}. The hide applies to them too.";
+                        string warning = CoreStrings.BuildHideOnSiblings(name, SiblingLabels(hideSiblings),
+                            SelfLabel(model));
                         if (hideNotes.Add(warning)) warnings.Add(warning);
                     }
                 }
@@ -3230,19 +3182,13 @@ public static class ModBuilder
                 // rather than dropped. A Replace reaches its own capture section instead and a Hide with
                 // no anchor is already refused where its slot fails to re-anchor.
                 if (retexHide && !anchored)
-                    throw new AuthoredRefusalException(
-                        $"'{e.Mesh}' is hidden by a key group, and its only change is a texture edit. "
-                        + "That leaves the part's own draw to gate, and this install renders no tier of "
-                        + "it to put the gate on. Replace the part, or drop the hide");
+                    throw new AuthoredRefusalException(CoreStrings.BuildHideTextureOnlyNoTier(e.Mesh));
                 // The same account for a part hidden in SOME positions with no content of its own: no
                 // pipeline pools it, so no capture section carries its guarded skips, and this install
                 // renders no draw of its own to put them on. An unconditional hide of such a part is the
                 // released shape and says nothing here.
                 if (!anchored && e.Verb == EditVerbs.Hide && e.Gate.HiddenWhen.Count > 0)
-                    throw new AuthoredRefusalException(
-                        $"'{e.Mesh}' is hidden by a key group, and nothing in this build carries that "
-                        + "hide: no replacement pools the part, and this install renders no tier of it to "
-                        + "put the gate on. Replace the part, or drop the hide");
+                    throw new AuthoredRefusalException(CoreStrings.BuildHideNothingCarries(e.Mesh));
             }
 
             // ---- retextures: one override per STOCK TEXTURE, keyed on its own resource hash ----------
@@ -3282,10 +3228,8 @@ public static class ModBuilder
                     {
                         if (shaderProperty is not null && img.ShaderProperty is not null
                             && !string.Equals(shaderProperty, img.ShaderProperty, StringComparison.Ordinal))
-                            throw new AuthoredRefusalException(
-                                $"{img.DisplayLabel} and {displayLabel} on '{claim.Mesh}' change the same original "
-                                + $"texture '{textureName}' and cannot take two different pictures through this route. "
-                                + "Give both slots the same picture, or leave one unchanged.");
+                            throw new AuthoredRefusalException(CoreStrings.BuildTwoPicturesOneTexture(
+                                img.DisplayLabel, displayLabel, claim.Mesh, textureName));
                         throw ImageCollision(textureName, img.Claimant, claimant);
                     }
                 entry.Images.Add(new RetexClaim
@@ -3299,17 +3243,14 @@ public static class ModBuilder
             {
                 if (e.Verb != EditVerbs.Retexture) continue;
                 if (e.Textures is not { Count: > 0 })
-                    throw new AuthoredRefusalException(
-                        $"the texture edit on '{e.Mesh}' has no pictures yet");
+                    throw new AuthoredRefusalException(CoreStrings.BuildTextureEditNoPictures(e.Mesh));
                 string partName = MeshPartName(model, part);
                 if (part.Materials.Count == 0)
-                    throw new AuthoredRefusalException($"the texture edit on '{e.Mesh}' has no material "
-                        + "to work on, so there is no original texture to replace");
+                    throw new AuthoredRefusalException(CoreStrings.BuildTextureEditNoMaterial(e.Mesh));
                 foreach (var t in e.Textures)
                 {
                     if (t.Submesh < 0)
-                        throw new AuthoredRefusalException($"the texture edit on '{e.Mesh}' names "
-                            + $"submesh {t.Submesh}, which does not exist");
+                        throw new AuthoredRefusalException(CoreStrings.BuildTextureEditBadSubmesh(e.Mesh, t.Submesh));
                     // renderer m_Materials order IS the submesh binding; a shortfall repeats the last
                     // slot, the same rule the preview assigns maps by
                     var material = part.Materials[Math.Min(t.Submesh, part.Materials.Count - 1)];
@@ -3332,9 +3273,7 @@ public static class ModBuilder
                             dst = Path.Combine(workDir, $"{stem}_{(srgb ? "srgb" : "lin")}.dds");
                         if (rtxDstOwner.TryGetValue(dst, out var other)
                             && !string.Equals(other, resolved, StringComparison.OrdinalIgnoreCase))
-                            throw new AuthoredRefusalException(
-                                $"two pictures in this mod share the file name '{other}'. Rename one, "
-                                + "then build again");
+                            throw new AuthoredRefusalException(CoreStrings.BuildPictureFileNameShared(other));
                         rtxDstOwner[dst] = resolved;
                         // a passthrough never reaches the encoder, so it says nothing about one either
                         if (!AuthoredDds.IsPassthrough(resolved)) NoteEncoder();
@@ -3355,15 +3294,9 @@ public static class ModBuilder
                         {
                             // the kind letter is the shipped-file suffix; the warning speaks the card's word
                             string kindWord = shaderProperty is not null
-                                ? TextureMap.PropertyLabel(shaderProperty)
-                                : kind switch
-                            {
-                                "a" => "base color", "n" => "normal", "r" => "RMO", "b" => "effect",
-                                _ => kind,
-                            };
-                            warnings.Add($"Material '{material.Name}' on submesh {t.Submesh} of "
-                                + $"'{e.Mesh}' has no {kindWord} map, so the edited one has nothing to "
-                                + "replace. It is skipped.");
+                                ? TextureMap.DisplayPropertyLabel(shaderProperty)
+                                : RetextureKindWord(kind);
+                            warnings.Add(CoreStrings.BuildMaterialLacksMap(material.Name, t.Submesh, e.Mesh, kindWord));
                             return;
                         }
                         // the replacement inherits the stock texture's sRGB family: same resource, same slot
@@ -3429,10 +3362,8 @@ public static class ModBuilder
                                         throw PropertyProbeCannotIsolate(stock.TextureName,
                                             ReferenceEquals(p, part) ? e.Mesh : p.SlotName, shaderProperty, other.Slot);
                         if ((scopedRoute || bindingAlreadyScoped) && registers is { Count: 0 })
-                            throw new AuthoredRefusalException(
-                                $"{TextureMap.PropertyLabel(shaderProperty!)} on '{e.Mesh}' cannot be changed safely. "
-                                + $"No measured texture-register coverage exists for {shaderProperty}. "
-                                + "Update the app's game data, or leave this picture out.");
+                            throw new AuthoredRefusalException(CoreStrings.BuildPictureUnsafe(
+                                TextureMap.DisplayPropertyLabel(shaderProperty!), e.Mesh, shaderProperty));
 
                         if (scopedIdx.TryGetValue(bindingKey, out int si))
                         {
@@ -3473,7 +3404,7 @@ public static class ModBuilder
                                         claimant)
                                     : ImageCollision(stock.TextureName, wide.Images[0].Claimant, claimant);
                             AddWideImage(wide, dds, e, claimant, stock.TextureName, shaderProperty,
-                                shaderProperty is null ? null : TextureMap.PropertyLabel(shaderProperty));
+                                shaderProperty is null ? null : TextureMap.DisplayPropertyLabel(shaderProperty));
                             return;
                         }
                         if (!scopedRoute && !bindingAlreadyScoped)
@@ -3482,7 +3413,7 @@ public static class ModBuilder
                             var freshWide = new RetexBuild { Name = $"{partName}_{kind}_{hash}", Hash = hash };
                             retexBuild.Add(freshWide);
                             AddWideImage(freshWide, dds, e, claimant, stock.TextureName, shaderProperty,
-                                shaderProperty is null ? null : TextureMap.PropertyLabel(shaderProperty));
+                                shaderProperty is null ? null : TextureMap.DisplayPropertyLabel(shaderProperty));
                             return;
                         }
                         scopedIdx[bindingKey] = scopedBuild.Count;
@@ -3528,13 +3459,11 @@ public static class ModBuilder
                                 var (anchorCross, anchorSiblings) = CoChangers(others, model);
                                 if (latch is not null && anchorCross.Count > 0
                                     && crossAnchorNoted.Add($"{entry.Hash}|{model.Stem}"))
-                                    infos.Add($"'{stock.TextureName}' is on a mesh shared with "
-                                        + $"{WearerLabels(anchorCross, model)}. While {model.Stem} is on screen, theirs "
-                                        + "shows this edit too.");
+                                    infos.Add(CoreStrings.BuildTextureSharedMesh(stock.TextureName,
+                                        WearerLabels(anchorCross, model), model.Stem));
                                 if (anchorSiblings.Count > 0 && crossAnchorNoted.Add($"{entry.Hash}|{model.Stem}|siblings"))
-                                    warnings.Add($"'{stock.TextureName}' is on a mesh also drawn by "
-                                        + $"{SiblingLabels(anchorSiblings)}, on screen together with {SelfLabel(model)}. "
-                                        + "This edit shows on them too.");
+                                    warnings.Add(CoreStrings.BuildTextureOnSiblings(stock.TextureName,
+                                        SiblingLabels(anchorSiblings), SelfLabel(model)));
                             }
                         }
                     }
@@ -3601,7 +3530,7 @@ public static class ModBuilder
                 string key = $"{stock.BundleId}|{stock.PathId}|{stock.TextureName}";
                 if (stockTextures.TryGetValue(key, out var cached)) return cached;
                 var src = reader.GetTextureHashSource(
-                        Bundle(stock.BundleId, $"stock texture '{stock.TextureName}'"), stock.Ref)
+                        Bundle(stock.BundleId, SubjectPoolProbe.BundleUse.StockTexture, stock.TextureName), stock.Ref)
                     ?? throw new InvalidDataException(
                         $"stock texture '{stock.TextureName}' (retexture on '{mesh}') isn't in bundle '{stock.BundleId}'");
                 uint dxgi = TextureHash.Dxgi((AssetsTools.NET.Texture.TextureFormat)src.Format, src.Srgb)
@@ -3622,8 +3551,7 @@ public static class ModBuilder
                 var scopedStock = scopedRetex.Select(s => s.StockHash).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 foreach (var (mesh, hash) in inheritingStockTags.Where(t => scopedStock.Contains(t.Hash))
                              .DistinctBy(t => $"{t.Mesh}|{t.Hash}", StringComparer.OrdinalIgnoreCase))
-                    infos.Add($"'{mesh}' keeps an original map that this mod also edits elsewhere. "
-                        + "Submeshes with no edited map keep the original image.");
+                    infos.Add(CoreStrings.BuildKeepsOriginalMap(mesh));
             }
 
             // ---- stock draws: an unreplaced part's own draws of the material a change names ---------------
@@ -3698,16 +3626,16 @@ public static class ModBuilder
                 return map.TryCarrier(position, out var carrier) ? carrier : position;
             }
 
-            // Every level's own draw of the material at lod0 position <position>. `what` names the change in a
-            // refusal ("the toon ramp picked", "the shading change"); `shared` finishes the note to another
-            // outfit or a sibling wearing the same mesh.
-            List<StockDrawTarget> StockDrawsOf(SubjectModel model, SubjectPart part, int position, string what,
-                string sharedInfo, string sharedWarning)
+            // Every level's own draw of the material at lod0 position <position>. `ramp` says which change
+            // this is — a toon ramp picked, or a shading change — and so which words its refusals and its
+            // notes to another outfit or a sibling wearing the same mesh use.
+            List<StockDrawTarget> StockDrawsOf(SubjectModel model, SubjectPart part, int position, bool ramp)
             {
                 RefuseBlocked(part.SlotName, part.MeshAddress);
                 string material = MaterialLabel(part, position);
-                string Refusal(string cause) =>
-                    $"{what} on '{part.SlotName}' · {material} can't be built: {cause}";
+                string Refusal(string cause) => ramp
+                    ? CoreStrings.BuildRampCantBeBuilt(part.SlotName, material, cause)
+                    : CoreStrings.BuildShadingCantBeBuilt(part.SlotName, material, cause);
                 var tiers = Tiers(part);
                 var lod0Shapes = ShapesOf(tiers[0].BundleId, tiers[0].Name, tiers[0].Mesh);
                 var targets = new List<StockDrawTarget>();
@@ -3725,54 +3653,57 @@ public static class ModBuilder
                     // more per extra material, over the same range: from there on, no draw is one material's.
                     if (at is { } shared && materials is { } listed && listed > shapes.Shapes.Count
                         && shared >= shapes.Shapes.Count - 1)
-                        throw new AuthoredRefusalException(Refusal(ProductionAuthoredBuildBackend.SharedDrawCause));
+                        throw new AuthoredRefusalException(Refusal(CoreStrings.PlanReasonSharedDraw));
                     if (at is null && slot.Materials is null)
                     {
-                        StockNote(warnings, $"Couldn't read which materials '{part.Token}' uses at "
-                            + $"{DetailLevel(name)}. The change to {material} doesn't show there. Rescan, then "
-                            + "build again.");
+                        StockNote(warnings, CoreStrings.BuildStockMaterialsUnreadable(PartShown(part.Token),
+                            DetailLevel(name),
+                            material));
                         continue;
                     }
                     if (at is not { } own || own >= shapes.Shapes.Count || shapes.Shapes[own].Count == 0)
                     {
-                        StockNote(warnings, $"'{part.Token}' doesn't use {material} at {DetailLevel(name)}. "
-                            + $"The change to {material} doesn't show there.");
+                        StockNote(warnings, CoreStrings.BuildStockMaterialUnused(PartShown(part.Token), material,
+                            DetailLevel(name)));
                         continue;
                     }
                     var shape = shapes.Shapes[own];
                     // Two materials drawn over the very same range are one draw: nothing at the draw says which.
                     if (shapes.Shapes.Where((other, index) => index != own && other == shape).Any())
-                        throw new AuthoredRefusalException(Refusal(ProductionAuthoredBuildBackend.SharedDrawCause));
+                        throw new AuthoredRefusalException(Refusal(CoreStrings.PlanReasonSharedDraw));
                     var sig = SigOf(model, bid, name, pid);
                     if (rangeAtKey.TryGetValue(sig.Key, out var already))
                     {
                         if (already != shape)
-                            throw new AuthoredRefusalException(Refusal(
-                                $"two detail levels of '{part.Token}' draw the same mesh with their materials "
-                                + "in a different order, so the change can't be kept to this material"));
+                            throw new AuthoredRefusalException(
+                                Refusal(CoreStrings.BuildReasonTierOrderDiffers(PartShown(part.Token))));
                         continue;
                     }
                     rangeAtKey[sig.Key] = shape;
                     if (!sig.Unique && !RequestTwinGuard(model, part, sig.Key, sig.Mates))
-                        throw new AuthoredRefusalException(Refusal(
-                            $"'{part.Token}' and '{sig.Mate}' can't be told apart in game, so changing one would "
-                            + "change the other"));
+                        throw new AuthoredRefusalException(
+                            Refusal(CoreStrings.BuildReasonTwins(PartShown(part.Token), PartShown(sig.Mate))));
                     stockDrawKeys.Add(sig.Key);
                     var (probe, reach) = MaterialTell(model, part, position, MeshOthers(sig.Key, model));
                     string? latch = reach.Count > 0 ? LatchFor(model) : null;
                     var (cross, siblings) = CoChangers(reach, model);
                     if (latch is not null && cross.Count > 0)
-                        StockNote(infos, $"'{part.Token}' is on a mesh shared with {WearerLabels(cross, model)}. "
-                            + $"While {model.Stem} is on screen, {sharedInfo}");
+                        StockNote(infos, ramp
+                            ? CoreStrings.BuildRampSharedMesh(PartShown(part.Token), WearerLabels(cross, model),
+                                model.Stem)
+                            : CoreStrings.BuildShadingSharedMesh(PartShown(part.Token), WearerLabels(cross, model),
+                                model.Stem));
                     if (siblings.Count > 0)
-                        StockNote(warnings, $"'{part.Token}' is on a mesh also drawn by {SiblingLabels(siblings)}, "
-                            + $"on screen together with {SelfLabel(model)}. {sharedWarning}");
+                        StockNote(warnings, ramp
+                            ? CoreStrings.BuildRampOnSiblings(PartShown(part.Token), SiblingLabels(siblings),
+                                SelfLabel(model))
+                            : CoreStrings.BuildShadingOnSiblings(PartShown(part.Token), SiblingLabels(siblings),
+                                SelfLabel(model)));
                     targets.Add(new StockDrawTarget(sig.Key, shape, latch, !sig.Unique,
                         Remold.Core.Model.MeshName.Lod(name), part.Token, probe));
                 }
                 if (targets.Count == 0)
-                    throw new AuthoredRefusalException(Refusal(
-                        $"'{part.Token}' doesn't draw that material at any detail level. Remove the change"));
+                    throw new AuthoredRefusalException(Refusal(CoreStrings.BuildReasonNoDraw(PartShown(part.Token))));
                 return targets;
             }
 
@@ -3788,11 +3719,8 @@ public static class ModBuilder
                 int position = part.Materials.ToList().FindIndex(m =>
                     string.Equals(m.Name, pick.Material, StringComparison.OrdinalIgnoreCase));
                 if (position < 0)
-                    throw new AuthoredRefusalException($"the toon ramp picked on '{pick.Mesh}' · "
-                        + $"'{pick.Material}' can't be built: the part no longer has that material. Rescan, "
-                        + "then pick the toon ramp again");
-                rampDraws[pick] = (model, part, StockDrawsOf(model, part, position, "the toon ramp picked",
-                    "theirs shades with this ramp too.", "This ramp shades them too."));
+                    throw new AuthoredRefusalException(CoreStrings.BuildRampMaterialGone(pick.Mesh, pick.Material));
+                rampDraws[pick] = (model, part, StockDrawsOf(model, part, position, ramp: true));
             }
             // Resolved once per shading row, so an edit with several rows on one material resolves that
             // material's draws once for each. Accepted: the mesh, texture and signature reads underneath are
@@ -3806,11 +3734,9 @@ public static class ModBuilder
                 RefuseBlocked(model.Character, model.Stem);
                 var part = model.Parts.FirstOrDefault(x =>
                         string.Equals(x.SlotName, pick.Part.RendererSlot, StringComparison.OrdinalIgnoreCase))
-                    ?? throw new AuthoredRefusalException($"'{pick.Part.RendererSlot}' isn't part of "
-                        + $"'{model.Character} · {model.Stem}' in the current game install. Rescan, then build again");
-                materialDraws[pick] = (model, part, StockDrawsOf(model, part, pick.MaterialPosition,
-                    "the shading change", "this shading change applies to theirs too.",
-                    "This shading change applies to them too."));
+                    ?? throw new AuthoredRefusalException(
+                        CoreStrings.BuildPartNotInInstall(pick.Part.RendererSlot, model.Character, model.Stem));
+                materialDraws[pick] = (model, part, StockDrawsOf(model, part, pick.MaterialPosition, ramp: false));
             }
 
             // ---- twin guards: one per shared signature, built once every site has spoken --------------
@@ -3961,15 +3887,11 @@ public static class ModBuilder
                         long sibVariant = VariantOf(model, sib);
                         if (sibVariant <= 0)
                             throw new AuthoredRefusalException(
-                                $"'{sib.Token}' and '{mateName}' can only be told apart by "
-                                + $"'{sib.Token}'s base color, which this mod repaints. Once repainted, "
-                                + "neither can be recognized, so this mod can't be built");
+                                CoreStrings.BuildTwinBaseColorRepainted(PartShown(sib.Token), PartShown(mateName)));
                         foreach (var other in model.Parts)
                             if (VariantOf(model, other) != sibVariant && BindsStock(other, tag.TexHash))
                                 throw new AuthoredRefusalException(
-                                    $"'{other.Token}' uses the same base color that tells '{sib.Token}' "
-                                    + $"apart, and this mod repaints it. The repaint would change "
-                                    + $"'{other.Token}' too, so this mod can't be built");
+                                    CoreStrings.BuildTwinBaseColorShared(PartShown(other.Token), PartShown(sib.Token)));
                     }
                     twinGuards.Add(new TwinGuard(group.Key, MigotoEmitter.TwinVar(group.Key), ownVerdicts, tags));
                     foreach (int own in ownVerdicts)
@@ -4044,14 +3966,14 @@ public static class ModBuilder
                         var src = project.Resolve(pick.Ramp);
                         var image = DdsReader.Parse(File.ReadAllBytes(src), Path.GetFileName(src));
                         if (image.Width != RampWidth || image.Height != RampHeight)
-                            throw new InvalidDataException($"{Path.GetFileName(src)} is "
-                                + $"{image.Width}x{image.Height}, and a toon ramp is {RampWidth}x{RampHeight}");
+                            throw new InvalidDataException(CoreStrings.RampWrongSize(Path.GetFileName(src),
+                                image.Width, image.Height, RampWidth, RampHeight));
                         File.Copy(src, dds, overwrite: true);
                     }
                     catch (Exception e)
                     {
-                        throw new AuthoredRefusalException("the toon ramp picked on "
-                            + $"'{pick.Mesh}' · '{pick.Material}' can't be built: {e.Message}");
+                        throw new AuthoredRefusalException(
+                            CoreStrings.BuildRampPickUnreadable(pick.Mesh, pick.Material, e.Message));
                     }
                     // The plan resolved this pick against the live roster, so the part and its material are
                     // the ones this install holds; nothing here re-decides that. What is left is what only
@@ -4064,9 +3986,8 @@ public static class ModBuilder
                     var rampMap = material.Maps.First(m => Materials.MaterialResolver.IsRamp(m.Slot));
                     string? rampHash = TryHash(rampMap, pick.Mesh);
                     if (rampHash is null)
-                        throw new AuthoredRefusalException("the toon ramp picked on "
-                            + $"'{pick.Mesh}' · '{pick.Material}' can't be built: its own toon ramp cannot be "
-                            + "recognized in game. Remove the pick, or pick the ramp on another material");
+                        throw new AuthoredRefusalException(
+                            CoreStrings.BuildRampPickUnrecognized(pick.Mesh, pick.Material));
                     // The ramp's OWN hash has to carry the ramp kind value, which is what says which
                     // register holds a ramp at the draw. A hash something else in this build already tags
                     // carries that section's value instead — the ini parse keeps one section per hash — so
@@ -4075,10 +3996,8 @@ public static class ModBuilder
                     if (claimed.Contains(rampHash)
                         && !(slotKinds.TryGetValue(rampHash, out var already)
                              && already == StockMapKind.Ramp))
-                        throw new AuthoredRefusalException("the toon ramp picked on "
-                            + $"'{pick.Mesh}' · '{pick.Material}' can't be built: it cannot be told apart "
-                            + "from another texture this mod changes. Remove the pick, or build the two "
-                            + "changes as separate mods");
+                        throw new AuthoredRefusalException(
+                            CoreStrings.BuildRampPickAmbiguous(pick.Mesh, pick.Material));
                     // The ramp's hash is tagged as the ramp KIND: a later pick naming the same ramp uses
                     // that tag.
                     claimed.Add(rampHash);
@@ -4181,7 +4100,7 @@ public static class ModBuilder
             }
 
             // ---- emit -------------------------------------------------------------------------------
-            log?.Invoke("Assembling the mod files…");
+            log?.Invoke(CoreStrings.BuildAssembling);
             MigotoEmitter.Result emitted;
             var emitter = new MigotoEmitter
             {
@@ -4334,9 +4253,7 @@ public static class ModBuilder
                 // nothing and reads as a build that worked.
                 if (retex.Count == 0 && hides.Count == 0 && scopedRetex.Count == 0
                     && stockRampBinds.Count == 0 && stockSites.Count == 0)
-                    throw new AuthoredRefusalException(
-                        "nothing survived to build: every change in this mod was held back on this "
-                        + "install. The warnings above say which, and why");
+                    throw new AuthoredRefusalException(CoreStrings.BuildNothingSurvived);
                 emitted = emitter.BuildOverlaysOnly(tmpMod, retex, hides, modKey,
                     hideClaims.Count > 0 ? hideClaims : null,
                     scopedRetex.Count > 0 ? scopedRetex : null,
@@ -4509,7 +4426,7 @@ public static class ModBuilder
                 PublishDistributionZip(finalDir, zipPath);
                 builtZip = zipPath;
             }
-            log?.Invoke($"Built {finalDir}.");
+            log?.Invoke(CoreStrings.BuildDone(finalDir));
             return new Result(finalDir, builtZip, warnings, infos, diagnostics);
         }
         finally
@@ -4638,6 +4555,10 @@ public static class ModBuilder
         }
         return map.Count > 0 ? map : null;
     }
+
+    /// <summary>A part's name as a warning or refusal shows it: read in the UI language
+    /// (<see cref="PartNames"/>). The name itself keeps every other use.</summary>
+    private static string PartShown(string part) => PartNames.Display(part);
 
     /// <summary>Short part name for ini section names and filenames, which both eat it: lowercase character
     /// + part token, with every character that is not a letter or digit collapsed to <c>_</c>. Letters and

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Remold.Core.Project;
@@ -170,6 +171,7 @@ public class RoundTripSweepTests
     }
 
     [Fact]
+    [SupportedOSPlatform("windows")]   // denies itself a folder through a Windows access rule
     public void A_folder_the_sweep_cannot_read_counts_as_touched_and_keeps_its_mod()
     {
         using var temp = new TempGame();

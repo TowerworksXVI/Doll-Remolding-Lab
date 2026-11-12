@@ -9,9 +9,6 @@ namespace Remold.App.ViewModels;
 /// to the edit session and are never stored here.</summary>
 internal sealed class MaterialShadingCache(Func<GameAssetRef, EditShadingRead> read)
 {
-    internal const string ReadFailure =
-        "Couldn't read this material's shading. Use Tools · Rescan game files to try again.";
-
     private readonly ConcurrentDictionary<(string Bundle, long PathId), Lazy<EditShadingRead>> _reads = new();
 
     private static (string Bundle, long PathId) Key(GameAssetRef material) =>
@@ -28,6 +25,6 @@ internal sealed class MaterialShadingCache(Func<GameAssetRef, EditShadingRead> r
         _reads.GetOrAdd(Key(material), _ => new Lazy<EditShadingRead>(() =>
         {
             try { return read(material); }
-            catch (Exception) { return new EditShadingRead(null, ReadFailure); }
+            catch (Exception) { return new EditShadingRead(null, Strings.ShadingUnreadable); }
         }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 }

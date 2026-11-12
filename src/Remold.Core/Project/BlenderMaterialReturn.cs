@@ -155,15 +155,13 @@ public static class BlenderMaterialReturn
         if (alphaSource is null) return null;
         if (!File.Exists(alphaSource))
         {
-            report?.Invoke($"Couldn't find {Path.GetFileName(alphaSource)} for its emissive mask. "
-                + "The RMO is saved without one.");
+            report?.Invoke(CoreStrings.BlenderEmissiveSourceMissing(Path.GetFileName(alphaSource)));
             return null;
         }
         try { return Image.Load<Rgba32>(alphaSource); }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            report?.Invoke($"Couldn't read {Path.GetFileName(alphaSource)} for its emissive mask. "
-                + $"The RMO is saved without one. ({e.Message})");
+            report?.Invoke(CoreStrings.BlenderEmissiveSourceUnreadable(Path.GetFileName(alphaSource), e.Message));
             return null;
         }
     }

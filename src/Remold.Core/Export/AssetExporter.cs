@@ -13,7 +13,9 @@ using Remold.Core.Mesh;
 using Remold.Core.Model;
 using Remold.Core.Project;
 using Remold.Core.Skeleton;
+using Remold.Core.Tables;
 using Remold.Core.Textures;
+using Remold.Core.Text;
 
 namespace Remold.Core.Export;
 
@@ -486,7 +488,7 @@ public static class AssetExporter
                 // deliberately NOT cached as null: another part off the same bundle, one this run exports,
                 // has to reach the rethrow rather than inherit this degrade
                 if (lockedForSkeleton.Add(logical))
-                    log?.Report($"Bones missing for {part}: the game is using its files.");
+                    log?.Report(CoreStrings.ExportBonesMissingGameRunning(PartNames.Display(part)));
                 return null;
             }
         }
@@ -816,7 +818,7 @@ public static class AssetExporter
                 // nothing, so a rig-only part costs one bundle read rather than a whole part export.
                 if (glbOut is null && combinedOut is null) continue;
                 if (restRefused)
-                    log?.Report($"{part} opens in bind pose: its rest pose can't be applied.");
+                    log?.Report(CoreStrings.ExportBindPose(PartNames.Display(part)));
                 // Named by the RECORDED name, which is the renderer slot's; on some enemy/prop slots the
                 // mesh asset's own m_Name differs, and the send-back joins its parts to the ledger by the
                 // name the glb carries.
@@ -830,7 +832,7 @@ public static class AssetExporter
                     mesh.Submeshes.Count);
                 // the renderer bound no textures — the preview rebuilds untextured, but never silently
                 if (partTex.All.Count == 0)
-                    log?.Report($"{part} opens untextured: its materials bind no maps.");
+                    log?.Report(CoreStrings.ExportUntextured(PartNames.Display(part)));
                 // the part's maps land in texDir here — this is what makes the resolve below find anything
                 EnsureWorkspacePngs(partTex);
                 // resolve each renderer texture to its bundle-scoped workspace PNG; a map that isn't there is
@@ -916,7 +918,7 @@ public static class AssetExporter
                         }
                         // never silent: the game copy opens instead, and the caller says which part
                         vanillaFallbacks?.Add(part);
-                        log?.Report($"Couldn't read {part}'s edit. The original opens instead.");
+                        log?.Report(CoreStrings.ExportEditUnreadable(PartNames.Display(part)));
                     }
                     if (sceneRig is null && bones.Count == 0) anyHashNamedRig = true;
                     // null glbOut ⇒ collect for the combined glb only, don't rewrite the per-part glb. The
@@ -971,7 +973,7 @@ public static class AssetExporter
         // an empty bone table. An enemy subject legitimately has an empty root/Root_M-anchored table
         // (Bip001/Bone001 rigs) while every part's scene rig supplies real names — not a degrade.
         if (rigged.Count > 0 && anyHashNamedRig)
-            log?.Report("Some bones open under generated names.");
+            log?.Report(CoreStrings.ExportGeneratedBoneNames);
 
         var skeleton = SubjectSkeleton(unionParts, bones.Path);
 
@@ -1095,8 +1097,8 @@ public static class AssetExporter
                 MeshGltf.ExportRiggedGlb(w.Mesh, StandUnder(w.Skin, reference), bones.Path, w.GlbOut,
                     w.BaseColorPng, w.NormalPng, w.PerSubmesh, w.ScenePaths, w.Uprighting, w.ConnectorRests,
                     ExtraBones(skeleton, w.Skin.BoneHashes, shown, ValidFor(w.MeshName), reference),
-                    m => log?.Report($"{w.Part} · {m}"), MapWouldNotDecode, w.TextureTransport, previewMemo,
-                    w.Shift, HiddenFactsFor(w.MeshName));
+                    m => log?.Report($"{PartNames.Display(w.Part)} · {m}"), MapWouldNotDecode, w.TextureTransport,
+                    previewMemo, w.Shift, HiddenFactsFor(w.MeshName));
             }
             catch (IOException) { throw; }
             catch (Exception e)
@@ -1105,7 +1107,7 @@ public static class AssetExporter
                 // the part's own glb is what a lone session opens and what its compile round trips, so a
                 // write that didn't land must not be reported as rigged
                 done.Remove(w.Part);
-                log?.Report($"Couldn't build the rig for {w.Part}: {e.Message}");
+                log?.Report(CoreStrings.ExportRigFailed(PartNames.Display(w.Part), e.Message));
             }
         }
         ct.ThrowIfCancellationRequested();
@@ -1606,9 +1608,14 @@ public static class AssetExporter
                 var guidePath = UvGuidePathFor(png);
                 onSelfWrite?.Invoke(guidePath);
                 if (UvGuide.TryRenderMerge(mesh, subIdx, gw, gh, guidePath))
-                    log?.Report($"uv    {part}: guide → textures/{Path.GetFileName(guidePath)} ({gw}×{gh}, {subIdx.Count} submesh)");
+                    log?.Report(CoreStrings.ExportUvGuideWritten(PartNames.Display(part),
+                        Path.GetFileName(guidePath), gw, gh, subIdx.Count));
             }
-            catch (Exception e) { log?.Report($"uv    {part}: guide for {Path.GetFileName(png)} failed: {e.Message}"); }
+            catch (Exception e)
+            {
+                log?.Report(CoreStrings.ExportUvGuideFailed(PartNames.Display(part), Path.GetFileName(png),
+                    e.Message));
+            }
         }
     }
 
@@ -1628,7 +1635,7 @@ public static class AssetExporter
         string channel = "TexCoord0", (int Width, int Height)? canvasSize = null)
     {
         if (samplers.Count == 0)
-            return $"No part of this subject samples {textureName}. Nothing to draw.";
+            return CoreStrings.UvGuideNoSampler(textureName);
         var reader = new BundleReader();
         var decCache = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
         byte[]? Dec(string logical)
@@ -1702,12 +1709,11 @@ public static class AssetExporter
                 catch
                 {
                     if (channel == "TexCoord0")
-                        return Refuse("Couldn't read this edit's mesh, so no UV guide was drawn. "
-                            + "Send it back from Blender again, or use Revert mesh.");
+                        return Refuse(CoreStrings.UvGuideEditUnreadable);
                     mesh = null;
                 }
                 if (channel == "TexCoord0" && mesh?.Has(channel) != true)
-                    return Refuse("This edit's mesh has no UV layout, so no UV guide can be drawn.");
+                    return Refuse(CoreStrings.UvGuideEditNoLayout);
             }
             // A legacy edit may predate higher-UV transport. It falls back to the game layout; a current
             // edit carries the channel and therefore stays authoritative for its own guide.
@@ -1721,14 +1727,12 @@ public static class AssetExporter
         }
         if (plotted > 0) return null;
         if (channel == "TexCoord1" && missingChannel)
-            return readable == 1
-                ? $"The mesh that samples {textureName} has no second UV set, so no UV1 guide can be drawn."
-                : $"The meshes that sample {textureName} have no second UV set, so no UV1 guide can be drawn.";
+            return Catalog.Plural(readable, CoreStrings.UvGuideNoSecondUv_One(textureName),
+                CoreStrings.UvGuideNoSecondUv_Other(textureName));
         if (channel == "TexCoord0" && missingChannel)
-            return readable == 1
-                ? $"The mesh that samples {textureName} has no UV layout, so no UV guide can be drawn."
-                : $"The meshes that sample {textureName} have no UV layout, so no UV guide can be drawn.";
-        return $"Couldn't read the meshes that sample {textureName} from the game. Rescan, then try again.";
+            return Catalog.Plural(readable, CoreStrings.UvGuideNoLayout_One(textureName),
+                CoreStrings.UvGuideNoLayout_Other(textureName));
+        return CoreStrings.UvGuideMeshesUnreadable(textureName);
     }
 
     /// <summary>Resolve a part's renderer-bound textures to their on-disk workspace PNGs. The file is named

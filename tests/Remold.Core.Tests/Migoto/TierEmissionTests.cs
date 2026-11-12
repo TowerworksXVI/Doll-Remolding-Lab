@@ -5,6 +5,7 @@ using Remold.Core.Mesh;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
 using Remold.Core.Skeleton;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -22,6 +23,10 @@ public class TierEmissionTests : IDisposable
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
 
     private const uint A = 101, B = 102, C = 103;
+
+    /// <summary>The warning that a detail level does not show some geometry, whatever it names.</summary>
+    private static System.Text.RegularExpressions.Regex MergedTier => CatalogShape.Of(
+        CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any));
 
     /// <summary>Rewrite a dump's positions as a generic (rank-4-support) cloud — the shared fixture's
     /// ramp positions are near-collinear, which the weak-support sentinel correctly rejects.</summary>
@@ -182,7 +187,9 @@ public class TierEmissionTests : IDisposable
         var map = File.ReadAllBytes(Path.Combine(outDir, "alpha_lod1_map_swap.buf"));
         Assert.Equal(PoolMath.Sentinel, BitConverter.ToUInt32(map, 4));
         // the sentinel itself warns of nothing; the tier lacking B is the tier tie's warning, not this one's
-        Assert.All(result.Warnings, w => Assert.Contains("moves less naturally", w));
+        Assert.All(result.Warnings, w => Assert.True(
+            CatalogShape.Of(CoreStrings.EmitterTierTies_One(CatalogShape.Any, CatalogShape.Any)).IsMatch(w)
+            || CatalogShape.Of(CoreStrings.EmitterTierTies_Other(CatalogShape.Any, CatalogShape.Any)).IsMatch(w), w));
     }
 
     [Fact]
@@ -195,9 +202,7 @@ public class TierEmissionTests : IDisposable
         var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
 
         Assert.Equal(
-            "LOD 'alpha_lod1' of 'alpha' cannot be built because its geometry uses a bone missing from the "
-            + "original part. Internal detail: expected exactly one upstream tier-row verdict but found 0. "
-            + "Remove this mesh edit",
+            CoreStrings.EmitterTierVerdictCount("alpha_lod1", "alpha", 0),
             e.Message);
         Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -215,9 +220,7 @@ public class TierEmissionTests : IDisposable
         var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
 
         Assert.Equal(
-            "LOD 'alpha_lod1' of 'alpha' cannot be built because it is missing geometry from another part at "
-            + "this detail level. Internal detail: a MERGED tier-row verdict has no owning part. "
-            + "Remove this mesh edit",
+            CoreStrings.EmitterTierMergedOwnerless("alpha_lod1", "alpha"),
             e.Message);
         Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -235,9 +238,7 @@ public class TierEmissionTests : IDisposable
         var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
 
         Assert.Equal(
-            "LOD 'alpha_lod1' of 'alpha' cannot be built because its recorded bones do not match its geometry. "
-            + "Internal detail: an upstream tier-row verdict does not match a weighted bone outside the union. "
-            + "Remove this mesh edit",
+            CoreStrings.EmitterTierBonesMismatch("alpha_lod1", "alpha"),
             e.Message);
         Assert.DoesNotContain("0x", e.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -268,10 +269,9 @@ public class TierEmissionTests : IDisposable
 
         var result = new MigotoEmitter().Build(req);
 
-        string warning = Assert.Single(result.Warnings, w => w.Contains("does not show some geometry"));
+        string warning = Assert.Single(result.Warnings, MergedTier.IsMatch);
         Assert.Equal(
-            "'cloth1' does not show some geometry from 'shoes', 'hair', and 2 more parts at longer view distances. "
-            + "The build log names the bones.",
+            CoreStrings.EmitterMergedTierWarning("cloth1", CoreStrings.EmitterOwnersMore_Other("'shoes'", "'hair'", 2)),
             warning);
         Assert.DoesNotContain('/', warning);
         Assert.DoesNotContain("cloth1_lod1", warning, StringComparison.Ordinal);
@@ -313,9 +313,8 @@ public class TierEmissionTests : IDisposable
         var result = new MigotoEmitter().Build(req);
 
         Assert.Equal(
-            "'cloth1' does not show some geometry from 'shoes' at longer view distances. "
-            + "The build log names the bones.",
-            Assert.Single(result.Warnings, w => w.Contains("does not show some geometry")));
+            CoreStrings.EmitterMergedTierWarning("cloth1", "'shoes'"),
+            Assert.Single(result.Warnings, MergedTier.IsMatch));
         string diagnostic = Assert.Single(result.Diagnostics,
             d => d.StartsWith("MERGED tier geometry:", StringComparison.Ordinal));
         Assert.Contains("affected part 'cloth1'; tier mesh 'cloth1_lod1'; owning parts 'shoes'", diagnostic);
@@ -567,7 +566,7 @@ public class TierEmissionTests : IDisposable
         }
         var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
         // the tier AND the part it belongs to, as the other tier refusals name them
-        Assert.Contains("LOD 'alpha_lod1' of 'alpha'", e.Message);
+        Assert.Contains(CoreStrings.EmitterLodOfPartLabel("alpha_lod1", "alpha"), e.Message);
         Assert.Contains("Color", e.Message);
     }
 
@@ -588,7 +587,7 @@ public class TierEmissionTests : IDisposable
         // stream 0 is posed into one fixed shape every frame, so there is no copy to give such a tier
         var req = LayoutRequest(out _, ("lod1", Layout(Float16, halfNormals: true)));
         var e = Assert.Throws<AuthoredRefusalException>(() => new MigotoEmitter().Build(req));
-        Assert.Contains("LOD 'alpha_lod1' of 'alpha'", e.Message);
+        Assert.Contains(CoreStrings.EmitterLodOfPartLabel("alpha_lod1", "alpha"), e.Message);
         Assert.Contains("stream 0", e.Message);
     }
 

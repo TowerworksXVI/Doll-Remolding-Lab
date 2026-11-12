@@ -1,3 +1,4 @@
+using Remold.Core.Text;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -10,6 +11,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Remold.App.ViewModels.EditPage;
 using Remold.Core.Project;
+using Remold.Core.Tables;
 
 namespace Remold.App.ViewModels.BuildPage;
 
@@ -71,8 +73,8 @@ public sealed partial class BuildPageVm : ObservableObject
     [ObservableProperty] private bool _isPlanning;
     [ObservableProperty] private bool _isWorkInFlight;
     [ObservableProperty] private BuildFooter _footer = BuildFooter.Idle;
-    [ObservableProperty] private string? _buildDisabledReason = BuildGate.NothingAuthored;
-    [ObservableProperty] private string? _installDisabledReason = InstallGate.NoBuild;
+    [ObservableProperty] private string? _buildDisabledReason = Strings.BuildNothingAuthored;
+    [ObservableProperty] private string? _installDisabledReason = Strings.InstallNoBuild;
     [ObservableProperty] private string _lastBuildDir = "";
     [ObservableProperty] private string _lastZipPath = "";
     [ObservableProperty] private string _lastLogPath = "";
@@ -90,7 +92,7 @@ public sealed partial class BuildPageVm : ObservableObject
     public bool HasWarnings => Warnings.Count > 0;
     public bool HasBlocked => BlockedRows.Count > 0;
     public int BlockedCount => BlockedRows.Count;
-    public int WarningCount => Warnings.Count(line => line != BuildWarningSource.LastBuildLead);
+    public int WarningCount => WarningRows.Count(row => !row.IsHeading);
     public int InfoCount => Infos.Count;
     public bool HasDiagnostics => BlockedCount + WarningCount + InfoCount > 0;
     public bool HasWarningDiagnosticsOnly => BlockedCount == 0 && WarningCount > 0;
@@ -101,13 +103,13 @@ public sealed partial class BuildPageVm : ObservableObject
         PrimaryBlocked?.Placements.Take(1).ToArray() ?? Array.Empty<BuildPlacementChipVm>();
     public string DiagnosticCounts => string.Join(" · ", new[]
     {
-        BlockedCount > 0 ? $"Blocked {BlockedCount}" : "",
-        WarningCount > 0 ? $"Warnings {WarningCount}" : "",
-        InfoCount > 0 ? $"Info {InfoCount}" : "",
+        BlockedCount > 0 ? Strings.BuildCountBlocked(BlockedCount) : "",
+        WarningCount > 0 ? Strings.BuildCountWarnings(WarningCount) : "",
+        InfoCount > 0 ? Strings.BuildCountInfo(InfoCount) : "",
     }.Where(value => value.Length > 0));
-    public string BlockedSectionHeader => $"Blocked {BlockedCount}";
-    public string WarningSectionHeader => $"Warnings {WarningCount}";
-    public string InfoSectionHeader => $"Info {InfoCount}";
+    public string BlockedSectionHeader => Strings.BuildCountBlocked(BlockedCount);
+    public string WarningSectionHeader => Strings.BuildCountWarnings(WarningCount);
+    public string InfoSectionHeader => Strings.BuildCountInfo(InfoCount);
     public bool ShowBlockedVerdict => HasBlocked && Footer.State is BuildFooterState.Idle
         or BuildFooterState.Ready or BuildFooterState.Planning or BuildFooterState.Blocked;
     public bool ShowFooterVerdict => !ShowBlockedVerdict;
@@ -134,40 +136,30 @@ public sealed partial class BuildPageVm : ObservableObject
     /// lands mid-run shows a state the mod does not have — the change itself is refused — so the surfaces
     /// that author one are shut instead.</summary>
     public bool BoardEnabled => !IsWorkInFlight;
-    public string BuildButtonTip => IsWorkInFlight ? BuildRunningReason : BuildDisabledReason ?? BuildGate.Ready;
-    public string InstallButtonTip => IsWorkInFlight ? BuildRunningReason
-        : InstallDisabledReason ?? InstallGate.Ready;
+    public string BuildButtonTip => IsWorkInFlight ? Strings.BuildRunning : BuildDisabledReason ?? Strings.BuildReady;
+    public string InstallButtonTip => IsWorkInFlight ? Strings.BuildRunning
+        : InstallDisabledReason ?? Strings.InstallReady;
     public bool LoaderNeedsAttention => InstallGate.Reason(hasBuild: true, _loader) is not null;
     public string LoaderButtonLabel => string.IsNullOrWhiteSpace(_loader.LoaderExe)
-        ? "Set 3DMigoto path…" : "Fix 3DMigoto path…";
+        ? Strings.BuildSetLoaderPath : Strings.BuildFixLoaderPath;
     public string LoaderButtonTip => string.IsNullOrWhiteSpace(_loader.LoaderExe)
-        ? InstallGate.SetLoader : InstallGate.Reason(hasBuild: true, _loader) ?? InstallGate.SetLoader;
+        ? Strings.InstallSetLoader : InstallGate.Reason(hasBuild: true, _loader) ?? Strings.InstallSetLoader;
     public bool PreviewEnabled => !IsWorkInFlight && _session?.Snapshot().RootDir is not null;
-    public string PreviewPickTip => IsWorkInFlight ? BuildRunningReason
-        : _session?.Snapshot().RootDir is null ? PreviewNeedsSave : PreviewPickReady;
+    public string PreviewPickTip => IsWorkInFlight ? Strings.BuildRunning
+        : _session?.Snapshot().RootDir is null ? Strings.BuildPreviewNeedsSave : Strings.BuildPreviewPickReady;
     // With no preview set, the box's own placeholder already says so; a caption repeating it six pixels
     // below said it twice, so the caption renders only when it has a file to name.
     public bool HasPreviewTitle => PreviewTitle.Length > 0;
     public string PreviewTitle => Preview.RelativeFile is null ? ""
-        : Preview.Missing ? $"{Preview.RelativeFile} missing"
+        : Preview.Missing ? Strings.BuildPreviewFileMissing(Preview.RelativeFile)
         : PreviewImage is not null && Preview.PixelWidth is > 0 && Preview.PixelHeight is > 0
-            ? $"{Preview.RelativeFile} · {Preview.PixelWidth}×{Preview.PixelHeight}"
+            ? Strings.BuildPreviewFileSize(Preview.RelativeFile, Preview.PixelWidth, Preview.PixelHeight)
             : Preview.RelativeFile;
     public bool PreviewMissing => Preview.Missing;
     public bool HasPreview => Preview.HasPreview;
     public bool HasNoPreview => Preview.HasNoPreview;
-    public string BuildAgainLine => BuildResultStale ? "Build again to include the latest changes." : "";
+    public string BuildAgainLine => BuildResultStale ? Strings.BuildAgain : "";
 
-    public const string BuildRunningReason = "A build is running.";
-    public const string PreviewNeedsSave = "Save the mod before adding a preview image.";
-    public const string PreviewPickReady = "Add or replace the image included with this mod.";
-    public const string PreviewNotAnImage =
-        "That file isn't a supported image type. Choose a PNG, JPG, JPEG, WEBP or BMP file.";
-    public const string PreviewOneAtATime = "Drop one preview image at a time.";
-    public const string PreviewNoFileInDrop = "That drop contained no image file.";
-    public const string PreviewMissingWarning =
-        "The preview image is missing. Replace it or remove it before building.";
-    public const string PreviewRemoveQuestion = "Remove preview image?";
     public static readonly IReadOnlyList<string> PreviewExtensions =
         new[] { ".png", ".jpg", ".jpeg", ".webp", ".bmp" };
     public const int PreviewDecodeWidth = 360;
@@ -307,7 +299,7 @@ public sealed partial class BuildPageVm : ObservableObject
             return;
         }
         catch (Exception e)
-        { result = new BuildPlanningResult(Failure: AuthoredRefusal.ForScreen(e, PlanAction)); }
+        { result = new BuildPlanningResult(Failure: AuthoredRefusal.ForScreen(e, Strings.Action_CheckThisBuild)); }
         finally
         {
             Interlocked.CompareExchange(ref _planCancellation, null, owner);
@@ -360,9 +352,8 @@ public sealed partial class BuildPageVm : ObservableObject
                          StringComparer.OrdinalIgnoreCase))
             {
                 var target = partRows.First().Target;
-                string token = _shell.PartToken(target);
-                parts.Add(new LibraryPart(partRows.Key.ToUpperInvariant(),
-                    token.Length == 0 ? target.RendererSlot : token, target, partRows.ToArray()));
+                parts.Add(new LibraryPart(partRows.Key.ToUpperInvariant(), PartName(target), target,
+                    partRows.ToArray()));
             }
             wanted.Add(new LibrarySubject($"{subjectRows.Key.Item1}\u001f{subjectRows.Key.Item2}",
                 _shell.SubjectLabel(first.Target.Subject, first.Target.Outfit), parts));
@@ -443,10 +434,13 @@ public sealed partial class BuildPageVm : ObservableObject
         int values = slots.Count(state => state.Slot.Input == TargetInputKind.MaterialValue
             && state.Binding.Kind is BindingKind.ProjectAsset or BindingKind.SourceSlot);
         var parts = new List<string>();
-        if (mesh) parts.Add("mesh");
-        if (pictures > 0) parts.Add(pictures == 1 ? "1 image" : $"{pictures} images");
-        if (ramps > 0) parts.Add(ramps == 1 ? "1 ramp" : $"{ramps} ramps");
-        if (values > 0) parts.Add(values == 1 ? "1 shading value" : $"{values} shading values");
+        if (mesh) parts.Add(Strings.ChangeSummaryMesh);
+        if (pictures > 0)
+            parts.Add(Catalog.Plural(pictures, Strings.ChangeSummaryImages_One(pictures), Strings.ChangeSummaryImages_Other(pictures)));
+        if (ramps > 0)
+            parts.Add(Catalog.Plural(ramps, Strings.ChangeSummaryRamps_One(ramps), Strings.ChangeSummaryRamps_Other(ramps)));
+        if (values > 0)
+            parts.Add(Catalog.Plural(values, Strings.ChangeSummaryValues_One(values), Strings.ChangeSummaryValues_Other(values)));
         return string.Join(" · ", parts);
     }
 
@@ -490,16 +484,18 @@ public sealed partial class BuildPageVm : ObservableObject
         new(this, edit.Id, edit.Target, edit.Kind, edit.Label, PartName(edit.Target), groupId, stateId);
 
     private BuildEditChoiceVm HideChoice(TargetPart target, string? groupId, string? stateId) =>
-        new(this, "", target, EditDefinitionKind.Hide, "Hide", PartName(target), groupId, stateId);
+        new(this, "", target, EditDefinitionKind.Hide, Strings.BuildHideChoice, PartName(target), groupId, stateId);
 
     private BuildTokenVm Token(AuthoredEditOutlineEntry edit, KeyGroupOutline? group,
         KeyGroupStateOutline? state) => new(this, edit.Id, edit.Target, edit.Kind, edit.Label,
         PartName(edit.Target), group?.Id, state?.Id);
 
+    /// <summary>What this page calls one part: the install's short token, read in the UI language, where it
+    /// has one; the renderer slot, as it is, where it does not.</summary>
     private string PartName(TargetPart target)
     {
         string token = _shell.PartToken(target);
-        return token.Length == 0 ? target.RendererSlot : token;
+        return token.Length == 0 ? target.RendererSlot : PartNames.Display(token);
     }
 
     private IReadOnlyList<BuildPlacementChoiceVm> PlacementChoices(AuthoredEditOutlineEntry edit,
@@ -507,7 +503,7 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         var choices = new List<BuildPlacementChoiceVm>
         {
-            new(this, edit.Id, edit.Target, edit.Kind, "Always", null, null,
+            new(this, edit.Id, edit.Target, edit.Kind, PlacementNames.Always, null, null,
                 edit.Placements.Any(placement => placement.IsAlways)),
         };
         foreach (var group in outline.Groups)
@@ -523,13 +519,10 @@ public sealed partial class BuildPageVm : ObservableObject
         return choices;
     }
 
-    /// <summary>What an unused edit's one chip says, in ② Edit's own words for the same fact.</summary>
-    public const string NotUsedChip = "Not used yet";
-
     private static IReadOnlyList<string> PlacementChipLabels(AuthoredEditOutlineEntry edit,
         AuthoredEditOutline outline)
     {
-        if (edit.Placements.Count == 0) return new[] { NotUsedChip };
+        if (edit.Placements.Count == 0) return new[] { Strings.BuildNotUsedChip };
         var labels = new List<string>();
         if (edit.Placements.Any(placement => placement.IsAlways)) labels.Add(PlacementNames.Always);
         foreach (var groupRows in edit.Placements.Where(placement => !placement.IsAlways)
@@ -590,7 +583,7 @@ public sealed partial class BuildPageVm : ObservableObject
             foreach (string warning in _plan.Warnings)
                 AddIssue(warning, Affected(warning), blocked: false);
             if (!_plan.CanBuild && !Issues.Any(issue => issue.BlocksBuild))
-                AddIssue(BuildGate.UnnamedPlanBlocker, Array.Empty<string>(), blocked: true);
+                AddIssue(Strings.BuildUnnamedPlanBlocker, Array.Empty<string>(), blocked: true);
         }
         ApplyIssueMarks();
         RefreshWarnings();
@@ -680,7 +673,7 @@ public sealed partial class BuildPageVm : ObservableObject
 
     private static string DiagnosticGroupName(KeyGroupOutline group) =>
         !string.IsNullOrWhiteSpace(group.Label) ? group.Label.Trim()
-        : !string.IsNullOrWhiteSpace(group.Key) ? $"Key {group.Key.Trim()}"
+        : !string.IsNullOrWhiteSpace(group.Key) ? Strings.BuildGroupKeyName(group.Key.Trim())
         : PlacementNames.UnnamedGroup;
 
     private void ApplyIssueMarks()
@@ -711,14 +704,14 @@ public sealed partial class BuildPageVm : ObservableObject
         BlockedRows.Clear();
         foreach (var issue in Issues.Where(issue => issue.BlocksBuild)) BlockedRows.Add(issue);
         var live = Issues.Where(issue => !issue.BlocksBuild).Select(issue => issue.Message).ToList();
-        if (Preview.Missing) live.Add(PreviewMissingWarning);
+        if (Preview.Missing) live.Add(Strings.BuildPreviewMissingWarning);
         var merged = BuildWarningSource.Merge(_runWarnings, live);
         Warnings.Clear();
         WarningRows.Clear();
-        foreach (string line in merged)
+        foreach (var (line, isHeading) in merged)
         {
             Warnings.Add(line);
-            if (line == BuildWarningSource.LastBuildLead)
+            if (isHeading)
                 WarningRows.Add(BuildIssueVm.Heading(line));
             else WarningRows.Add(Issues.FirstOrDefault(issue => !issue.BlocksBuild && issue.RawMessage == line)
                 ?? new BuildIssueVm(line, line, line, false, Array.Empty<string>(), Array.Empty<string>(),
@@ -761,14 +754,14 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         var rows = new List<KeyCollisions.Entry>
         {
-            new(KeyCollisions.WholeModLabel, KeyCollisions.WholeModLabel, _shell.WholeModKey),
+            new(WholeModCollisionIdentity, Strings.KeyCollisionWholeMod, _shell.WholeModKey),
         };
         rows.AddRange(Groups.Select(group => new KeyCollisions.Entry(group.Id, group.DisplayName, group.Key)));
         rows.AddRange(Groups.SelectMany(group => group.States.Select(state => new KeyCollisions.Entry(
             ShortcutIdentity(state), $"{group.DisplayName} · {state.DisplayName}", state.Shortcut,
             Shortcut: true))));
         var tips = KeyCollisions.Tips(rows);
-        WholeModKeyCollisionTip = tips.GetValueOrDefault(KeyCollisions.WholeModLabel, "");
+        WholeModKeyCollisionTip = tips.GetValueOrDefault(WholeModCollisionIdentity, "");
         foreach (var group in Groups)
         {
             group.CollisionTip = tips.GetValueOrDefault(group.Id, "");
@@ -776,6 +769,10 @@ public sealed partial class BuildPageVm : ObservableObject
                 state.CollisionTip = tips.GetValueOrDefault(ShortcutIdentity(state), "");
         }
     }
+
+    /// <summary>The whole-mod toggle's identity among the collision rows. The record separator keeps it apart
+    /// from every group id and every state shortcut's identity.</summary>
+    private const string WholeModCollisionIdentity = "\u001ewhole-mod";
 
     /// <summary>A state shortcut's identity among the collision rows. State ids repeat across groups, and
     /// the unit separator keeps it apart from every group id.</summary>
@@ -878,7 +875,7 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         SelectedEdit = AllEdits().FirstOrDefault(row => string.Equals(row.EditDefinitionId,
             edit.EditDefinitionId, StringComparison.Ordinal));
-        if (SelectedEdit is null) Status = $"{edit.Label} isn't in the Edits list.";
+        if (SelectedEdit is null) Status = Strings.BuildEditNotListed(edit.Label);
         else
         {
             FocusTarget = "";
@@ -902,7 +899,7 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         if (_session is null) return;
         Mutate(() => _session.CreateKeyGroup(null, edit.EditDefinitionId),
-            $"Added a key group for {edit.Label}.");
+            Strings.BuildAddedGroupFor(edit.Label));
     }
 
     internal void TogglePlacement(string editId, TargetPart target, EditDefinitionKind kind,
@@ -913,7 +910,7 @@ public sealed partial class BuildPageVm : ObservableObject
         if (!place)
         {
             string name = EditName(editId);
-            Mutate(() => Unplace(editId, groupId, stateId), $"Removed {name} from {where}.");
+            Mutate(() => Unplace(editId, groupId, stateId), Strings.BuildRemovedFrom(name, where));
             return;
         }
         // A hide edit is placed by the verb that places every other edit. What this branch still does is
@@ -926,20 +923,20 @@ public sealed partial class BuildPageVm : ObservableObject
             {
                 if (minted.Length == 0) minted = _session.CreateHideEdit(target);
                 Place(minted, groupId, stateId);
-            }, () => Placed($"Added {EditName(minted)} to {where}.", null));
+            }, () => Placed(Strings.BuildAddedTo(EditName(minted), where), null));
             return;
         }
         // Read before the write: a part is answered once in any one place, so seating this edit takes the
         // seat from whatever answered there, and the sentence says so.
         string? displaced = Displaced(editId, groupId, stateId);
         Mutate(() => _session.SeatEdit(editId, groupId, stateId),
-            () => Placed($"Added {EditName(editId)} to {where}.", displaced));
+            () => Placed(Strings.BuildAddedTo(EditName(editId), where), displaced));
     }
 
     /// <summary>What a placement or a move took away, said after what it did. A replaced answer is not a
     /// silent loss: the edit that left is named where it left from.</summary>
     private static string Placed(string said, string? displaced) =>
-        displaced is null ? said : $"{said} {displaced} is no longer used there.";
+        displaced is null ? said : said + " " + Strings.BuildNoLongerUsedThere(displaced);
 
     /// <summary>The edit a placement here would unseat, by the model's own seat rule, or null. This asks
     /// only for the wording, so a place or an edit the model cannot find is answered with no name at all:
@@ -955,7 +952,7 @@ public sealed partial class BuildPageVm : ObservableObject
 
     /// <summary>What a sentence calls one edit: the name the modder gave it.</summary>
     private string EditName(string editId) => _outline?.Edits.FirstOrDefault(edit =>
-        string.Equals(edit.Id, editId, StringComparison.Ordinal))?.Label ?? "the edit";
+        string.Equals(edit.Id, editId, StringComparison.Ordinal))?.Label ?? Strings.EditFallbackName;
 
     private void Place(string editId, string? groupId, string? stateId)
     {
@@ -975,7 +972,7 @@ public sealed partial class BuildPageVm : ObservableObject
     private string PlacementDestination(string? groupId, string? stateId)
     {
         if (groupId is null) return PlacementNames.Always;
-        if (_outline?.Groups.FirstOrDefault(group => group.Id == groupId) is not { } found) return "this state";
+        if (_outline?.Groups.FirstOrDefault(group => group.Id == groupId) is not { } found) return Strings.BuildStateFallbackName;
         int index = found.States.ToList().FindIndex(state =>
             string.Equals(state.Id, stateId, StringComparison.Ordinal));
         return index < 0 ? PlacementNames.Group(found)
@@ -996,11 +993,11 @@ public sealed partial class BuildPageVm : ObservableObject
         if (edit.Placements.Any(placement =>
                 string.Equals(placement.KeyGroupId, toGroupId, StringComparison.Ordinal)
                 && string.Equals(placement.StateId, toStateId, StringComparison.Ordinal)))
-        { Status = $"{edit.Label} is already there."; return; }
+        { Status = Strings.BuildAlreadyThere(edit.Label); return; }
         string where = PlacementDestination(toGroupId, toStateId);
         string? displaced = Displaced(editId, toGroupId, toStateId);
         Mutate(() => _session.MovePlacement(editId, fromGroupId, fromStateId, toGroupId, toStateId),
-            () => Placed($"Moved {edit.Label} to {where}.", displaced));
+            () => Placed(Strings.BuildMovedTo(edit.Label, where), displaced));
     }
 
     internal void AddTo(string editId, TargetPart target, EditDefinitionKind kind,
@@ -1011,10 +1008,10 @@ public sealed partial class BuildPageVm : ObservableObject
 
     internal void SetGroupKey(string groupId, string? key) =>
         Mutate(() => _session?.SetGroupKey(groupId, key),
-            key is null ? "Key cleared." : $"Key set to {ModKeys.Display(key)}.");
+            key is null ? Strings.BuildKeyCleared : Strings.BuildKeySet(ModKeys.Display(key)));
 
     internal void RenameGroup(string groupId, string? label) =>
-        Mutate(() => _session?.RenameGroup(groupId, label), "Key group renamed.");
+        Mutate(() => _session?.RenameGroup(groupId, label), Strings.BuildGroupRenamed);
 
     // no status line: the checkbox itself is the whole statement
     internal void SetGroupPersistence(string groupId, bool persist) =>
@@ -1022,15 +1019,15 @@ public sealed partial class BuildPageVm : ObservableObject
 
     internal void SetStateShortcut(string groupId, string stateId, string? key) =>
         Mutate(() => _session?.SetStateShortcut(groupId, stateId, key),
-            key is null ? "Shortcut cleared." : $"Shortcut set to {ModKeys.Display(key)}.");
+            key is null ? Strings.BuildShortcutCleared : Strings.BuildShortcutSet(ModKeys.Display(key)));
 
     internal void RenameState(string groupId, string stateId, string? label) =>
-        Mutate(() => _session?.RenameState(groupId, stateId, label), "State renamed.");
+        Mutate(() => _session?.RenameState(groupId, stateId, label), Strings.BuildStateRenamed);
 
     internal void DuplicateLastState(BuildGroupVm group)
     {
         if (group.States.LastOrDefault() is { } last)
-            Mutate(() => _session?.DuplicateState(group.Id, last.Id), "State added.");
+            Mutate(() => _session?.DuplicateState(group.Id, last.Id), Strings.BuildStateAdded);
     }
 
     /// <summary>Remove one state, behind the same confirm every sibling destructive act carries. The uses
@@ -1040,17 +1037,16 @@ public sealed partial class BuildPageVm : ObservableObject
         if (_session is null) return;
         int uses = state.Tokens.Count;
         string body = (uses == 0
-                ? "This state has no edits in it."
-                : $"This removes {uses} use{(uses == 1 ? "" : "s")} of edits. "
-                    + "The edits used in it are kept.")
-            + "\n\nThis cannot be undone.";
-        if (!await _shell.ConfirmAsync($"Remove {state.DisplayName}?", body, "Remove", dangerous: true))
+                ? Strings.BuildRemoveStateEmpty
+                : Catalog.Plural(uses, Strings.BuildRemoveStateUses_One(uses), Strings.BuildRemoveStateUses_Other(uses)))
+            + "\n\n" + Strings.CannotBeUndone;
+        if (!await _shell.ConfirmAsync(Strings.BuildRemoveStateTitle(state.DisplayName), body, Strings.ConfirmRemove, dangerous: true))
             return;
-        Mutate(() => _session.RemoveState(state.GroupId, state.Id), "State removed.");
+        Mutate(() => _session.RemoveState(state.GroupId, state.Id), Strings.BuildStateRemoved);
     }
 
     internal void ReorderState(BuildStateVm state, int toIndex) =>
-        Mutate(() => _session?.ReorderState(state.GroupId, state.Index, toIndex), "States reordered.");
+        Mutate(() => _session?.ReorderState(state.GroupId, state.Index, toIndex), Strings.BuildStatesReordered);
 
     internal async Task DeleteGroupAsync(BuildGroupVm group)
     {
@@ -1062,12 +1058,14 @@ public sealed partial class BuildPageVm : ObservableObject
                 && edit.Placements.All(placement => string.Equals(placement.KeyGroupId, group.Id,
                     StringComparison.Ordinal)))
             .Select(edit => edit.Label).Distinct(StringComparer.Ordinal).ToList();
-        string body = $"This removes {placements} use{(placements == 1 ? "" : "s")} of edits. "
-            + (unused.Count == 0 ? "No edits become unused." : $"{KeyCollisions.NameList(unused)} "
-                + $"{(unused.Count == 1 ? "becomes" : "become")} unused.")
-            + "\n\nThis cannot be undone.";
-        if (!await _shell.ConfirmAsync($"Delete {group.DisplayName}?", body, "Delete", dangerous: true)) return;
-        Mutate(() => _session.DeleteKeyGroup(group.Id), "Key group deleted.");
+        string body = Catalog.Plural(placements, Strings.BuildDeleteGroupUses_One(placements),
+                Strings.BuildDeleteGroupUses_Other(placements))
+            + " " + (unused.Count == 0 ? Strings.BuildDeleteGroupNoneUnused
+                : Catalog.Plural(unused.Count, Strings.BuildDeleteGroupUnused_One(Catalog.List(unused)),
+                    Strings.BuildDeleteGroupUnused_Other(Catalog.List(unused))))
+            + "\n\n" + Strings.CannotBeUndone;
+        if (!await _shell.ConfirmAsync(Strings.BuildDeleteGroupTitle(group.DisplayName), body, Strings.BuildDeleteGroup, dangerous: true)) return;
+        Mutate(() => _session.DeleteKeyGroup(group.Id), Strings.BuildGroupDeleted);
     }
 
     private void Mutate(Action work, string success) => Mutate(work, () => success);
@@ -1076,9 +1074,9 @@ public sealed partial class BuildPageVm : ObservableObject
     /// commits, so a line naming something the change created reads the board as it now stands.</summary>
     private void Mutate(Action work, Func<string> success)
     {
-        if (IsWorkInFlight) { Status = BuildRunningReason; return; }
+        if (IsWorkInFlight) { Status = Strings.BuildRunning; return; }
         try { work(); Status = success(); }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, ChangeAction); Rebuild(); }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_MakeThatChange); Rebuild(); }
     }
 
     // ---- what a failure says ----
@@ -1087,11 +1085,6 @@ public sealed partial class BuildPageVm : ObservableObject
     // is; anything else is a defect whose text names edit, slot, key-group and state ids, which the text
     // guide keeps off screen — so the page says what it could not do instead. The verb phrases below
     // complete "Couldn't …".
-
-    public const string ChangeAction = "make that change";
-    public const string PlanAction = "check this build";
-    public const string BuildAction = "build this mod";
-    public const string InstallAction = "install this mod";
 
     internal void FocusPlacement(BuildPlacementChipVm chip)
     {
@@ -1102,7 +1095,7 @@ public sealed partial class BuildPageVm : ObservableObject
                 : BuildMarkedTarget.State(chip.GroupId, chip.StateId!);
         FocusTarget = "";
         FocusTarget = chip.Target;
-        Status = BuildFooter.End($"Showing {chip.Label}");
+        Status = BuildFooter.End(Strings.BuildShowing(chip.Label));
     }
 
     /// <summary>The view calls this for input originating on the Behavior board. The diagnostic chip that
@@ -1121,7 +1114,7 @@ public sealed partial class BuildPageVm : ObservableObject
         {
             if (_outline?.Edits.FirstOrDefault(edit => edit.Id == editId) is not { } edit) return;
             if (IsUsedAt(editId, groupId, stateId))
-            { Status = $"{edit.Label} is already there."; return; }
+            { Status = Strings.BuildAlreadyThere(edit.Label); return; }
             AddTo(edit.Id, edit.Target, edit.Kind, groupId, stateId);
         }
     }
@@ -1158,13 +1151,13 @@ public sealed partial class BuildPageVm : ObservableObject
         _runSurfaceCleared = false;
         IsWorkInFlight = true;
         _footerHeld = true;
-        Footer = BuildFooter.Running("Saving…");
+        Footer = BuildFooter.Running(Strings.BuildSaving);
         RefreshGates();
         BuildRunResult result;
         try { result = await _shell.RunBuildAsync(_progress); }
         catch (Exception e)
         {
-            result = new BuildRunResult(false, AuthoredRefusal.ForScreen(e, BuildAction), "", null,
+            result = new BuildRunResult(false, AuthoredRefusal.ForScreen(e, Strings.Action_BuildThisMod), "", null,
                 "", "", Array.Empty<string>(), Array.Empty<string>(), _session?.Revision ?? -1,
                 Preview.Stamp);
         }
@@ -1174,7 +1167,7 @@ public sealed partial class BuildPageVm : ObservableObject
             // This run's log, or none: a failure that wrote no log must not leave the Log button offering
             // the last run's, which is a different build's account of a different outcome.
             LastLogPath = result.LogPath;
-            Footer = BuildFooter.Failed(result.Failure ?? BuildGate.UnnamedFailure);
+            Footer = BuildFooter.Failed(result.Failure ?? Strings.BuildUnnamedFailure);
         }
         else
         {
@@ -1219,12 +1212,12 @@ public sealed partial class BuildPageVm : ObservableObject
         bool standingFooterHeld = _footerHeld;
         IsWorkInFlight = true;
         _footerHeld = true;
-        Footer = BuildFooter.Running("Installing…");
+        Footer = BuildFooter.Running(Strings.BuildInstalling);
         RefreshGates();
         BuildInstallResult result;
         try { result = await _shell.InstallBuildAsync(LastBuildDir, BuiltPackage); }
         catch (Exception e)
-        { result = new BuildInstallResult(true, true, AuthoredRefusal.ForScreen(e, InstallAction)); }
+        { result = new BuildInstallResult(true, true, AuthoredRefusal.ForScreen(e, Strings.Action_InstallThisMod)); }
         IsWorkInFlight = false;
         if (result.Completed)
         {
@@ -1243,7 +1236,7 @@ public sealed partial class BuildPageVm : ObservableObject
     [RelayCommand]
     private async Task ChooseLoader()
     {
-        if (IsWorkInFlight) { Status = BuildRunningReason; return; }
+        if (IsWorkInFlight) { Status = Strings.BuildRunning; return; }
         await _shell.ChooseLoaderAsync();
         _loader = _shell.LoaderState();
         RefreshGates();
@@ -1262,7 +1255,7 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         if (path.Length == 0) return;
         try { _shell.OpenArtifact(kind, path); }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, $"open {Path.GetFileName(path)}"); }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_OpenFile(Path.GetFileName(path))); }
     }
 
     [RelayCommand]
@@ -1274,8 +1267,8 @@ public sealed partial class BuildPageVm : ObservableObject
 
     public void DropPreview(IReadOnlyList<string> paths)
     {
-        if (paths.Count == 0) { Status = PreviewNoFileInDrop; return; }
-        if (paths.Count != 1) { Status = PreviewOneAtATime; return; }
+        if (paths.Count == 0) { Status = Strings.BuildPreviewNoFileInDrop; return; }
+        if (paths.Count != 1) { Status = Strings.BuildPreviewOneAtATime; return; }
         SetPreview(paths[0]);
     }
 
@@ -1283,28 +1276,28 @@ public sealed partial class BuildPageVm : ObservableObject
     {
         if (!PreviewEnabled) { Status = PreviewPickTip; return; }
         if (!PreviewExtensions.Contains(Path.GetExtension(source), StringComparer.OrdinalIgnoreCase))
-        { Status = PreviewNotAnImage; return; }
+        { Status = Strings.BuildPreviewNotAnImage; return; }
         try
         {
             _shell.SetPreviewFrom(_session!, source);
-            Status = $"Preview saved as preview{Path.GetExtension(source).ToLowerInvariant()}.";
+            Status = Strings.BuildPreviewSaved("preview" + Path.GetExtension(source).ToLowerInvariant());
         }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "copy the image"); }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_CopyTheImage); }
         RefreshPreview();
     }
 
     [RelayCommand]
     private async Task RemovePreview()
     {
-        if (IsWorkInFlight) { Status = BuildRunningReason; return; }
+        if (IsWorkInFlight) { Status = Strings.BuildRunning; return; }
         if (Preview.RelativeFile is null || _session is null) return;
         bool owned = IsOwnedPreview(Preview.RelativeFile) && Preview.FullPath is not null && !Preview.Missing;
         string body = owned
-            ? $"{Preview.RelativeFile} is deleted from the mod folder. This cannot be undone."
-            : "The image file stays where it is. This mod stops using it.";
-        if (!await _shell.ConfirmAsync(PreviewRemoveQuestion, body, "Remove", dangerous: true)) return;
-        try { _shell.RemovePreviewFile(_session, Preview); Status = "Preview removed."; }
-        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, "remove the preview"); }
+            ? Strings.BuildPreviewDeleteBody(Preview.RelativeFile)
+            : Strings.BuildPreviewUnlinkBody;
+        if (!await _shell.ConfirmAsync(Strings.BuildPreviewRemoveTitle, body, Strings.ConfirmRemove, dangerous: true)) return;
+        try { _shell.RemovePreviewFile(_session, Preview); Status = Strings.BuildPreviewRemoved; }
+        catch (Exception e) { Status = AuthoredRefusal.ForScreen(e, Strings.Action_RemoveThePreview); }
         RefreshPreview();
     }
 
@@ -1523,7 +1516,7 @@ public sealed class BuildAlwaysVm : ObservableObject
 {
     private readonly BuildPageVm _page;
     internal BuildAlwaysVm(BuildPageVm page) => _page = page;
-    public string Label => "Always";
+    public string Label => PlacementNames.Always;
     public bool IsMarked => _page.MarkedTarget?.Kind == BuildMarkedTargetKind.Always;
     public ObservableCollection<BuildTokenVm> Tokens { get; } = new();
     public ObservableCollection<BuildEditChoiceVm> AvailableEdits { get; } = new();
@@ -1542,7 +1535,7 @@ public sealed partial class BuildGroupVm : ObservableObject
     public string Id { get; }
     public bool IsMarked => _page.MarkedTarget?.Matches(this) == true;
     public string DisplayName => !string.IsNullOrWhiteSpace(Label) ? Label.Trim()
-        : !string.IsNullOrWhiteSpace(Key) ? $"Key {ModKeys.Display(Key)}" : "Unnamed key group";
+        : !string.IsNullOrWhiteSpace(Key) ? Strings.BuildGroupKeyName(ModKeys.Display(Key)) : PlacementNames.UnnamedGroup;
     public bool IsKeyless => string.IsNullOrWhiteSpace(Key);
     public ObservableCollection<BuildStateVm> States { get; } = new();
     [ObservableProperty] private string? _key;
@@ -1592,9 +1585,9 @@ public sealed partial class BuildStateVm : ObservableObject
     /// <summary>Two states are the session's floor — the UI greys ✕ at the floor rather than offering a
     /// click the session refuses.</summary>
     public bool CanRemove => StateCount > 2;
-    public string RemoveTip => CanRemove ? "Remove this state. The edits used in it are kept."
+    public string RemoveTip => CanRemove ? Strings.BuildRemoveStateTip
         : AuthoredEditSession.TwoStateFloor;
-    public string DisplayName => string.IsNullOrWhiteSpace(Label) ? $"State {Index + 1}" : Label.Trim();
+    public string DisplayName => string.IsNullOrWhiteSpace(Label) ? Strings.BuildStateName(Index + 1) : Label.Trim();
     public bool IsLaunch => Index == 0;
     public ObservableCollection<BuildTokenVm> Tokens { get; } = new();
     public ObservableCollection<BuildEditChoiceVm> AvailableEdits { get; } = new();
@@ -1716,6 +1709,5 @@ public sealed partial class BuildPlacementChipVm : ObservableObject
     public string? StateId { get; }
     public bool IsGroup { get; }
     public string Target => IsGroup ? "group:" + GroupId : StateId ?? "always";
-    public const string FocusTip = "Show this on the Behavior board.";
     [RelayCommand] private void Focus() => _page.FocusPlacement(this);
 }

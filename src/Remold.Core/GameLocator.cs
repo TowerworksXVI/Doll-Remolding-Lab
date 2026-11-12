@@ -65,7 +65,7 @@ public static class GameLocator
     /// ("best" = the first existing, correctly named dir).</summary>
     public static (string? Dir, string? Problem) ValidateDetailed(string? path)
     {
-        if (string.IsNullOrWhiteSpace(path)) return (null, "No folder given.");
+        if (string.IsNullOrWhiteSpace(path)) return (null, CoreStrings.GameFolderNotGiven);
         string? problem = null;
         foreach (var c in new[]
         {
@@ -79,10 +79,9 @@ public static class GameLocator
                 continue;
             if (SentinelProblem(full) is { } p) { problem ??= p; continue; }
             if (GameRootOf(full) is { } root) return (root, null);
-            problem ??= "This isn't a standard GF2 install layout.";
+            problem ??= CoreStrings.GameFolderNotStandardLayout;
         }
-        return (null, problem ??
-            "No AssetBundles_Windows folder found here. Pick the game's install folder.");
+        return (null, problem ?? CoreStrings.GameFolderNoAssetBundles);
     }
 
     /// <summary>Null when <paramref name="dir"/> carries the GF2 sentinels, else why it doesn't:
@@ -98,14 +97,13 @@ public static class GameLocator
             // The cache is filled on the game's first run, so an install that has never launched reaches
             // here with the folder tree in place and no catalog in it. Both remedies are named.
             if (!catalogs.MoveNext())
-                return "This folder doesn't have the game's files yet. Pick the game's install folder, "
-                    + "and launch the game once if it has never run on this machine.";
+                return CoreStrings.GameFolderNotRunYet;
             if (!File.Exists(Path.Combine(dir, VfsManifestFile)))
-                return "This folder is missing some of the game's files, so it isn't a GF2 install (or it's an incomplete copy).";
+                return CoreStrings.GameFolderIncomplete;
             return null;
         }
-        catch (IOException) { return "The folder couldn't be read (a lock or permissions)."; }
-        catch (UnauthorizedAccessException) { return "The folder couldn't be read (permissions)."; }
+        catch (IOException) { return CoreStrings.GameFolderLockedOrDenied; }
+        catch (UnauthorizedAccessException) { return CoreStrings.GameFolderDenied; }
     }
 
     /// <summary>True when the game holds its files open — it opens the VFS manifest with a deny-read

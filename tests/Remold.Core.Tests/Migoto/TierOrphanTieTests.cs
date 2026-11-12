@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Remold.Core.Migoto;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -21,6 +22,12 @@ public class TierOrphanTieTests : IDisposable
     public void Dispose() { try { Directory.Delete(_root, recursive: true); } catch { } }
 
     private const uint A = 101, B = 102, C = 103;
+
+    /// <summary>Either warning about what a lower detail level shows less of at longer view distances.</summary>
+    private static bool LongerViews(string warning) =>
+        CatalogShape.Of(CoreStrings.EmitterTierTies_One(CatalogShape.Any, CatalogShape.Any)).IsMatch(warning)
+        || CatalogShape.Of(CoreStrings.EmitterTierTies_Other(CatalogShape.Any, CatalogShape.Any)).IsMatch(warning)
+        || CatalogShape.Of(CoreStrings.EmitterMergedTierWarning(CatalogShape.Any, CatalogShape.Any)).IsMatch(warning);
 
     /// <summary>Generic (rank-4-support) positions, so no bone of the dump trips the weak-support gate.</summary>
     private static void GenericPositions(string dir, int verts)
@@ -99,9 +106,8 @@ public class TierOrphanTieTests : IDisposable
 
         Assert.Contains(result.Diagnostics, d => d.Contains("alpha_lod1: bone 0x00000066 has no row at this tier")
             && d.Contains("nearest bone 0x00000065"));
-        var warning = Assert.Single(result.Warnings, w => w.Contains("longer view distances"));
-        Assert.Equal("'alpha' moves less naturally at longer view distances: its lower-detail mesh does not "
-            + "use 1 bone the replacement mesh uses. The build log names the bones.", warning);
+        var warning = Assert.Single(result.Warnings, LongerViews);
+        Assert.Equal(CoreStrings.EmitterTierTies_One("alpha", 1), warning);
         Assert.DoesNotContain("0x", warning);
     }
 
@@ -145,7 +151,7 @@ public class TierOrphanTieTests : IDisposable
         Assert.False(File.Exists(Path.Combine(outDir, "tiertie_lod1_swap.hlsl")));
         string ini = File.ReadAllText(Path.Combine(outDir, "mod.ini"));
         Assert.DoesNotContain("CustomShaderTierTie", ini);
-        Assert.DoesNotContain(result.Warnings, w => w.Contains("longer view distances"));
+        Assert.DoesNotContain(result.Warnings, LongerViews);
         Assert.DoesNotContain(result.Diagnostics, d => d.Contains("has no row at this tier"));
     }
 }

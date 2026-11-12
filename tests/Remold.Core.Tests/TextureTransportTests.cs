@@ -237,7 +237,7 @@ public class TextureTransportTests
         Assert.Equal(MapKind.Texture, mask.Kind);
         Assert.Equal(MapAnswer.Untouched, mask.Map.Answer);
         Assert.Contains(notes, note => note.Contains("Not In Session", System.StringComparison.Ordinal)
-            && note.Contains("wasn't in the file this session opened", System.StringComparison.Ordinal));
+            && CatalogShape.Of(CoreStrings.BlenderIgnoredUnsentSlot(CatalogShape.Any, CatalogShape.Any)).IsMatch(note));
 
         var normalized = BlenderMaterialReturn.Normalize(maps, game.At("normalized"));
         var row = Assert.Single(normalized);
@@ -331,8 +331,7 @@ public class TextureTransportTests
         var refusal = Assert.Throws<AuthoredRefusalException>(() =>
             MeshGltf.ReadSubmeshMaps(returned, "veil", opened));
 
-        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
-            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+        Assert.Equal(CoreStrings.BlenderUnchangedNotSent(CoreStrings.MapBaseColor, "veil"), refusal.Message);
     }
 
     [Fact]
@@ -353,8 +352,7 @@ public class TextureTransportTests
         var refusal = Assert.Throws<AuthoredRefusalException>(() =>
             MeshGltf.ReadSubmeshMaps(returned, "veil", game.At("missing-record.glb")));
 
-        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
-            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+        Assert.Equal(CoreStrings.BlenderUnchangedNotSent(CoreStrings.MapBaseColor, "veil"), refusal.Message);
     }
 
     [Fact]
@@ -375,8 +373,36 @@ public class TextureTransportTests
         var refusal = Assert.Throws<AuthoredRefusalException>(() =>
             MeshGltf.ReadSubmeshMaps(returned, "veil", opened));
 
-        Assert.Equal("The Base color on veil came back marked unchanged, but it isn't the picture this "
-            + "session sent. Open the part again from the Lab and send it once more", refusal.Message);
+        Assert.Equal(CoreStrings.BlenderUnchangedNotSent(CoreStrings.MapBaseColor, "veil"), refusal.Message);
+    }
+
+    /// <summary>Both refusals of an "unchanged" marker name the part they refuse, so a return reporting on
+    /// several parts names it once.</summary>
+    [Fact]
+    public void Both_unchanged_marker_refusals_carry_the_part_they_name()
+    {
+        using var game = new TempGame();
+        string stock = Png(game.At("stock.png"), 20);
+        string opened = game.At("opened.glb");
+        string unrecorded = game.At("unrecorded.glb");
+        string mismatched = game.At("mismatched.glb");
+        MeshGltf.ExportGlb(Patch(), opened, textureTransport: new[]
+        {
+            Source("_BaseMap", MapKind.BaseColor, stock),
+        });
+        var outbound = Assert.Single(PreviewMaps.ReadTransportBindings(opened));
+        MeshGltf.ExportGlb(Patch(), unrecorded);
+        WriteHashOnlyRow(unrecorded, outbound);
+        MeshGltf.ExportGlb(Patch(), mismatched);
+        WriteHashOnlyRow(mismatched, outbound with { OutboundHash = new string('b', 64) });
+
+        var noRecord = Assert.Throws<AuthoredRefusalException>(() =>
+            MeshGltf.ReadSubmeshMaps(unrecorded, "veil", game.At("missing-record.glb")));
+        var mismatch = Assert.Throws<AuthoredRefusalException>(() =>
+            MeshGltf.ReadSubmeshMaps(mismatched, "veil", opened));
+
+        Assert.Equal("veil", noRecord.Part);
+        Assert.Equal("veil", mismatch.Part);
     }
 
     [Fact]
@@ -566,7 +592,7 @@ public class TextureTransportTests
         Assert.Equal(MapAnswer.None, maps.Normal.Answer);
         string note = Assert.Single(notes);
         Assert.Contains(Textures.TextureMap.PropertyLabel("_NormalMap"), note, StringComparison.Ordinal);
-        Assert.Contains("came back from Blender without a picture", note, StringComparison.Ordinal);
+        Assert.Matches(CatalogShape.Of(CoreStrings.BlenderPictureDropped(CatalogShape.Any, CatalogShape.Any)), note);
         Assert.DoesNotContain(Textures.TextureMap.PropertyLabel("_BaseMap"), note, StringComparison.Ordinal);
 
         // the same picture taken off a part whose other rows came back: reported the same way
@@ -1382,7 +1408,7 @@ public class TextureTransportTests
 
         MeshGltf.ReadSubmeshMaps(glb, report: notes.Add);
 
-        Assert.Contains("Ignored Loose paint reference from Blender: it isn't linked to a texture slot.",
+        Assert.Contains(CoreStrings.BlenderIgnoredUnlinked("Loose paint reference"),
             notes);
     }
 
@@ -1403,12 +1429,9 @@ public class TextureTransportTests
         MeshGltf.ReadSubmeshMaps(parsed, "veil", report: notes.Add, reportUnkeyed: false);
         MeshGltf.ReadSubmeshMaps(parsed, "unrelated", report: notes.Add, reportUnkeyed: false);
         foreach (string image in parsed.UnkeyedTextureImages)
-            notes.Add($"Ignored {image} from Blender: it isn't linked to a texture slot.");
+            notes.Add(CoreStrings.BlenderIgnoredUnlinked(image));
 
-        Assert.Equal(new[]
-        {
-            "Ignored Loose combined reference from Blender: it isn't linked to a texture slot.",
-        }, notes);
+        Assert.Equal(new[] { CoreStrings.BlenderIgnoredUnlinked("Loose combined reference") }, notes);
     }
 
     private static Rgba32 FirstPixel(string png)

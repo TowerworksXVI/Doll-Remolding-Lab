@@ -8,9 +8,10 @@ namespace Remold.Core.Tests.Migoto;
 
 /// <summary>
 /// Operator conditioning: a bone whose vertex support can't determine its palette row is tied rigidly to a
-/// sound co-riding bone. The alternatives are a min-norm estimate (distorts donor geometry) or a sentinel to
-/// its lod0 row (lives in the lod0 draw's SPACE, so it displaces in a two-placement frame). Sentinel remains
-/// only when the mesh has no sound bone at all.
+/// sound co-riding bone, and the tie is corrected by what the bone's own vertices show, so those vertices
+/// land where the game put them. The alternatives are a min-norm estimate (distorts donor geometry) or a
+/// sentinel to its lod0 row (lives in the lod0 draw's SPACE, so it displaces in a two-placement frame).
+/// Sentinel remains only when the mesh has no sound bone at all.
 /// </summary>
 public class OperatorConditioningTests : IDisposable
 {
@@ -54,21 +55,172 @@ public class OperatorConditioningTests : IDisposable
         Assert.InRange(shown, 0.01, 0.9);
         // this tie's target is narrow, so the message carries no width note
         Assert.DoesNotContain("dense width", tieDiag);
+        Assert.Contains("corrected by 2 of its own vertices", tieDiag);
 
-        // Both the 4 slim rows AND the anchor-vertex segment are byte-copies: coefficients are meaningless
-        // without the vertices they index, so a tie must carry both.
-        var cp = File.ReadAllBytes(Path.Combine(outDir, "alpha_cpinv.buf"));
-        var sel = SyntheticPool.ShippedSelBytes(outDir, "alpha");
-        int k = sel.Length / 4 / 2;                 // 2 bones × K uint indices
-        Assert.Equal(2 * 4 * k * 4, cp.Length);     // 4 rows of K floats per bone
-        int rowBytes = k * 4;
+        // The weak bone's block opens with the stand-in's 4 slim rows AND its anchor-vertex segment, as
+        // byte-copies: coefficients are meaningless without the vertices they index, so a tie carries both.
+        // The correction follows them as a tail of its own.
+        var off = ReadOff(outDir, "alpha");
+        Assert.True(off[1].Width > off[0].Width, "the tied bone carries no correction tail");
+        AssertOpensWith(outDir, "alpha", off[1], off[0]);
+    }
+
+    [Fact]
+    public void A_tied_bones_own_vertices_land_where_the_game_posed_them()
+    {
+        // Two vertices cannot state a bone, so it rides the sound one; but they do state where the game put
+        // THEM. A replacement that leaves them where they were, weighted as they were, must show them there
+        // in any pose, which a plain tie misses by the whole of the bone's motion against its stand-in.
+        // a second bone posed far from the first: the fixture's usual pair of hashes pose nearly alike
+        const uint apart = 700;
+        string ad = Path.Combine(_root, "own");
+        SyntheticPool.WriteCoWeightedDump(ad, Strong, apart, strongVerts: 62);
+        string outDir = Path.Combine(_root, "out-own");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("own", ad) },
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["own"] = "aaaa0011" },
+                },
+            },
+        });
+
+        var miss = PosedPoolSim.OwnVertexMiss(outDir, "swap", "own", ad);
+        Assert.True(miss.Max() < 1e-3f, $"a vertex of the part's own lands {miss.Max()} from where the game posed it");
+
+        // the same two vertices under the plain tie: the pose moves the two bones apart by well over a unit
+        var plain = PlainTieMiss(outDir, "own", ad);
+        Assert.True(plain[62] > 0.1f && plain[63] > 0.1f, "the fixture's pose does not separate the two bones");
+    }
+
+    [Fact]
+    public void A_replacement_weighted_to_a_tied_bone_away_from_its_vertices_keeps_the_plain_tie_and_says_so()
+    {
+        // The correction speaks for the bone's own two vertices and what lies between them. A replacement
+        // that weights the bone anywhere else would be placed by a guess, so that pipeline ships the tie as
+        // it was, and the build warns that the part leans on a bone it cannot place.
+        string ad = Path.Combine(_root, "lean");
+        SyntheticPool.WriteCoWeightedDump(ad, Strong, Weak, strongVerts: 62);
+        string donor = Path.Combine(_root, "lean-donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2);
+        string outDir = Path.Combine(_root, "out-lean");
+        var result = new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("lean", ad) },
+                    DonorDir = donor,
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["lean"] = "aaaa0012" },
+                },
+            },
+        });
+
+        var warning = Assert.Single(result.Warnings, w => w == Remold.Core.CoreStrings.EmitterTiedBones_One("lean", 1));
+        Assert.Contains(result.Diagnostics, d => d.Contains($"bone 0x{Weak:x8} keeps its plain tie in lean") && d.Contains("past its own vertices"));
+        Assert.Contains(result.Diagnostics, d => d.Contains("weight on a bone the build ties") && d.Contains($"0x{Weak:x8}"));
+
+        // the pipeline's own copy of the operator: the stand-in's rows, and a tail of zeros
+        var off = ReadOff(outDir, "lean");
+        var cp = File.ReadAllBytes(Path.Combine(outDir, "lean_cpinv_swap.buf"));
         for (int r = 0; r < 4; r++)
         {
-            var strongRow = cp.Skip((0 * 4 + r) * rowBytes).Take(rowBytes).ToArray();
-            var weakRow = cp.Skip((1 * 4 + r) * rowBytes).Take(rowBytes).ToArray();
-            Assert.Equal(strongRow, weakRow);
+            for (int t = 0; t < off[0].Width; t++)
+                Assert.Equal(BitConverter.ToSingle(cp, (4 * off[0].Base + r * off[0].Width + t) * 4),
+                    BitConverter.ToSingle(cp, (4 * off[1].Base + r * off[1].Width + t) * 4));
+            for (int t = off[0].Width; t < off[1].Width; t++)
+                Assert.Equal(0f, BitConverter.ToSingle(cp, (4 * off[1].Base + r * off[1].Width + t) * 4));
         }
-        Assert.Equal(sel.Take(k * 4).ToArray(), sel.Skip(k * 4).Take(k * 4).ToArray());
+    }
+
+    [Fact]
+    public void A_replacement_that_keeps_a_tied_bones_vertices_where_they_were_takes_the_correction_silently()
+    {
+        // every replacement vertex on the tied bone stands on one of the bone's own, weighted as it is
+        string ad = Path.Combine(_root, "kept");
+        SyntheticPool.WriteCoWeightedDump(ad, Strong, Weak, strongVerts: 62);
+        string donor = Path.Combine(_root, "kept-donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2);
+        var s0 = File.ReadAllBytes(Path.Combine(ad, "stream0.buf"));
+        var s2 = File.ReadAllBytes(Path.Combine(ad, "stream2.buf"));
+        var d0 = File.ReadAllBytes(Path.Combine(donor, "stream0.buf"));
+        var d2 = File.ReadAllBytes(Path.Combine(donor, "stream2.buf"));
+        for (int v = 0; v < 8; v++)
+        {
+            int from = v < 2 ? 62 + v : v;     // the two tied vertices, then six of the sound bone's
+            Array.Copy(s0, from * 40, d0, v * 40, 12);
+            Array.Copy(s2, from * 32, d2, v * 32, 32);
+        }
+        File.WriteAllBytes(Path.Combine(donor, "stream0.buf"), d0);
+        File.WriteAllBytes(Path.Combine(donor, "stream2.buf"), d2);
+        string outDir = Path.Combine(_root, "out-kept");
+        var result = new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("kept", ad) },
+                    DonorDir = donor,
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["kept"] = "aaaa0013" },
+                },
+            },
+        });
+
+        Assert.Empty(result.Warnings);
+        Assert.DoesNotContain(result.Diagnostics, d => d.Contains("keeps its plain tie"));
+        Assert.False(File.Exists(Path.Combine(outDir, "kept_cpinv_swap.buf")));   // the solved operator ships
+    }
+
+    /// <summary>A tied bone's block opens with its stand-in's block: the same anchor vertices and the same
+    /// four rows of coefficients, entry for entry.</summary>
+    private static void AssertOpensWith(string outDir, string name, (int Base, int Width) tied, (int Base, int Width) standIn,
+        string? operatorFile = null)
+    {
+        var cp = File.ReadAllBytes(Path.Combine(outDir, operatorFile ?? $"{name}_cpinv.buf"));
+        var sel = SyntheticPool.ShippedSel(outDir, name)!;
+        Assert.True(tied.Width >= standIn.Width, "the tied bone's block is narrower than its stand-in's");
+        for (int t = 0; t < standIn.Width; t++)
+        {
+            Assert.Equal(sel[standIn.Base + t], sel[tied.Base + t]);
+            for (int r = 0; r < 4; r++)
+                Assert.Equal(BitConverter.ToSingle(cp, (4 * standIn.Base + r * standIn.Width + t) * 4),
+                    BitConverter.ToSingle(cp, (4 * tied.Base + r * tied.Width + t) * 4));
+        }
+    }
+
+    /// <summary>How far each vertex of a two-bone part lands from the game's pose when the second bone takes
+    /// the first bone's recovered rows outright, which is what a plain tie ships.</summary>
+    private static float[] PlainTieMiss(string outDir, string name, string dumpDir)
+    {
+        var rows = PosedPoolSim.Recover(outDir, "swap", name, dumpDir);
+        var posed = PosedPoolSim.Pose(dumpDir);
+        var s0 = File.ReadAllBytes(Path.Combine(dumpDir, "stream0.buf"));
+        var s2 = File.ReadAllBytes(Path.Combine(dumpDir, "stream2.buf"));
+        var miss = new float[posed.Length];
+        for (int v = 0; v < posed.Length; v++)
+        {
+            var p = new System.Numerics.Vector3(BitConverter.ToSingle(s0, v * 40), BitConverter.ToSingle(s0, v * 40 + 4),
+                BitConverter.ToSingle(s0, v * 40 + 8));
+            var acc = System.Numerics.Vector3.Zero;
+            for (int k = 0; k < 4; k++)
+            {
+                float w = BitConverter.ToSingle(s2, v * 32 + k * 4);
+                if (w > 0) acc += w * System.Numerics.Vector3.Transform(p, rows[0]);
+            }
+            miss[v] = System.Numerics.Vector3.Distance(acc, posed[v]);
+        }
+        return miss;
     }
 
     /// <summary>A tied bone ships its tie's rows, so where the reference restates the tie, the tied bone's
@@ -100,15 +252,17 @@ public class OperatorConditioningTests : IDisposable
             },
         });
 
-        // restated at all, and the weak block a byte-copy of the restated sound block: were the weak bone
-        // restated by its own (absent) statement, it would still carry the solved rows
+        // restated at all, and the weak block opening with a byte-copy of the restated sound block: were
+        // the weak bone restated by its own (absent) statement, it would still carry the solved rows. The
+        // reference does not state the weak bone, so this pipeline cannot read a correction under it and
+        // the tail ships as zeros.
+        var off = ReadOff(outDir, "tied");
+        AssertOpensWith(outDir, "tied", off[1], off[0], "tied_cpinv_swap.buf");
         var cp = File.ReadAllBytes(Path.Combine(outDir, "tied_cpinv_swap.buf"));
-        var sel = SyntheticPool.ShippedSelBytes(outDir, "tied");
-        int k = sel.Length / 4 / 2;
-        int rowBytes = k * 4;
+        Assert.True(off[1].Width > off[0].Width);
         for (int r = 0; r < 4; r++)
-            Assert.Equal(cp.Skip((0 * 4 + r) * rowBytes).Take(rowBytes).ToArray(),
-                cp.Skip((1 * 4 + r) * rowBytes).Take(rowBytes).ToArray());
+            for (int t = off[0].Width; t < off[1].Width; t++)
+                Assert.Equal(0f, BitConverter.ToSingle(cp, (4 * off[1].Base + r * off[1].Width + t) * 4));
     }
 
     [Fact]
@@ -484,12 +638,17 @@ public class OperatorConditioningTests : IDisposable
         Assert.Contains($"wide: no small set of vertices recovers bone 0x{Weak:x8}", tieDiag);
         Assert.Contains($"co-riding bone 0x{Strong:x8}", tieDiag);
 
-        // the tie carries the stand-in's rows AND its anchor segment, at the stand-in's width
+        // the tie opens with the stand-in's rows AND its anchor segment, and stays far under the mesh's
+        // width with its correction
         var off = ReadOff(outDir, "wide");
         Assert.True(off[0].Width < n, $"the sound bone widened ({off[0].Width} of {n})");
-        Assert.Equal(off[0].Width, off[1].Width);
-        var sel = SyntheticPool.ShippedSel(outDir, "wide")!;
-        for (int t = 0; t < off[0].Width; t++) Assert.Equal(sel[off[0].Base + t], sel[off[1].Base + t]);
+        AssertOpensWith(outDir, "wide", off[1], off[0]);
+        Assert.True(off[1].Width <= 256, $"the tied bone's block is {off[1].Width} wide");
+
+        // its own vertices state it in full here, so the correction carries it the whole way: every vertex
+        // of the part lands where the game posed it
+        var miss = PosedPoolSim.OwnVertexMiss(outDir, "swap", "wide", ad);
+        Assert.True(miss.Max() < 2e-3f, $"a vertex of the part's own lands {miss.Max()} from where the game posed it");
     }
 
     [Fact]
@@ -522,8 +681,8 @@ public class OperatorConditioningTests : IDisposable
 
         var off = ReadOff(outDir, "tiedwide");
         Assert.True(off[0].Width < n, "the sound bone widened");
-        Assert.Equal(off[0].Width, off[1].Width);
-        Assert.Equal(off[0].Width, off[2].Width);
+        AssertOpensWith(outDir, "tiedwide", off[1], off[0]);
+        AssertOpensWith(outDir, "tiedwide", off[2], off[0]);
     }
 
     [Fact]
@@ -594,6 +753,45 @@ public class OperatorConditioningTests : IDisposable
         var unkeyed = new MigotoEmitter { OperatorCacheDir = cache }
             .Build(Req(Path.Combine(_root, "out-c3"), null));
         Assert.NotEqual(solved, File.ReadAllBytes(Path.Combine(unkeyed.OutDir, "cached_cpinv.buf")));
+    }
+
+    [Fact]
+    public void A_cached_operator_decides_its_corrected_ties_as_the_solved_one_did()
+    {
+        // What a pipeline needs to judge a corrected tie (where its tail starts, and what the bone's own
+        // vertices span) is part of the operator, so a build served from the cache keeps or zeroes the tail
+        // exactly as the build that solved it did.
+        string ad = Path.Combine(_root, "cachedtie");
+        string cache = Path.Combine(_root, "opcache-tie");
+        SyntheticPool.WriteCoWeightedDump(ad, Strong, Weak, strongVerts: 62);
+        string donor = Path.Combine(_root, "cachedtie-donor");
+        SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2);
+        PoolBuildRequest Req(string outDir, string? donorDir) => new()
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("cachedtie", ad, "cat1|bundle0|tie|0") },
+                    DonorDir = donorDir,
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["cachedtie"] = "aaaa00fd" },
+                },
+            },
+        };
+
+        var solved = new MigotoEmitter { OperatorCacheDir = cache }.Build(Req(Path.Combine(_root, "out-t1"), donor));
+        Assert.Single(Directory.GetFiles(cache, "*.op"));
+        var cached = new MigotoEmitter { OperatorCacheDir = cache }.Build(Req(Path.Combine(_root, "out-t2"), donor));
+
+        Assert.Equal(solved.Warnings, cached.Warnings);
+        Assert.Equal(solved.Diagnostics, cached.Diagnostics);
+        // the pipeline withdrew the tail, so it ships its own copy of the operator and not the solved one
+        foreach (string file in new[] { "cachedtie_cpinv_swap.buf", "cachedtie_off.buf" })
+            Assert.Equal(File.ReadAllBytes(Path.Combine(solved.OutDir, file)),
+                File.ReadAllBytes(Path.Combine(cached.OutDir, file)));
+        Assert.Contains(cached.Diagnostics, d => d.Contains("keeps its plain tie"));
     }
 
     [Fact]
@@ -692,6 +890,125 @@ public class OperatorConditioningTests : IDisposable
     }
 
     /// <summary>The (base, width) pairs of a slim part's off buffer, one per part-local bone.</summary>
+    [Fact]
+    public void A_bone_weighted_heaviest_on_a_thin_band_is_anchored_across_everything_it_carries()
+    {
+        // The posed vertices a row reads carry their own float rounding, new every frame. Anchors that all
+        // lie on a thin band state the bone's motion across the band through the band's thickness alone, so
+        // the row hands that rounding to the rest of what the bone carries hundreds of times over, and the
+        // replacement shakes. The defect gate cannot see it: such a row is exact on exact input.
+        const int band = 300, body = 1500;
+        string ad = Path.Combine(_root, "banded");
+        SyntheticPool.WriteBandedDump(ad, seed: 5, band: band, body: body, Strong, Weak);
+        var p = PoolMath.ParsePositions(File.ReadAllBytes(Path.Combine(ad, "stream0.buf")), 40, 0);
+        var (w, bi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(ad, "stream2.buf")));
+
+        // the fixture bites: the best-weighted anchors alone are inside the defect gate and far over the gain gate
+        var onBand = PoolMath.SelectAnchorRows(p, w, bi, 0, 32);
+        Assert.All(onBand, v => Assert.True(v < band));
+        var (bandRows, bandDefect) = PoolMath.LocalPInvRows(p, w, bi, 0, onBand, 2);
+        Assert.True(bandDefect <= 1e-3, $"the band solve's defect is {bandDefect}");
+        Assert.True(PoolMath.RowGain(p, w, bi, 0, bandRows) > 64, "the band solve is already quiet");
+
+        string outDir = Path.Combine(_root, "out-banded");
+        new MigotoEmitter().Build(new PoolBuildRequest
+        {
+            OutDir = outDir,
+            Pipelines = new[]
+            {
+                new ReplacePipeline
+                {
+                    Suffix = "swap",
+                    Parts = new[] { new PoolPart("banded", ad) },
+                    CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["banded"] = "aaaa0021" },
+                },
+            },
+        });
+
+        // what ships: both bones inside the gain gate, on anchors that leave the band
+        var off = ReadOff(outDir, "banded");
+        var sel = SyntheticPool.ShippedSel(outDir, "banded")!;
+        var cp = File.ReadAllBytes(Path.Combine(outDir, "banded_cpinv.buf"));
+        for (int b = 0; b < 2; b++)
+        {
+            var rows = new double[4][];
+            for (int r = 0; r < 4; r++)
+                rows[r] = Enumerable.Range(0, off[b].Width)
+                    .Select(t => (double)BitConverter.ToSingle(cp, (4 * off[b].Base + r * off[b].Width + t) * 4)).ToArray();
+            // the shipped coefficients index packet entries or vertices alike for this measure: it reads the rows alone
+            double gain = PoolMath.RowGain(p, w, bi, b, rows);
+            Assert.True(gain <= 64, $"bone {b} ships multiplying its input's rounding {gain} times");
+        }
+        Assert.Contains(Enumerable.Range(0, off[0].Width), t => sel[off[0].Base + t] >= band);
+        Assert.True(off[0].Width <= 256, $"the bone's block is {off[0].Width} wide");
+
+        // and it is still an exact recovery: every vertex of the part lands where the game posed it
+        var miss = PosedPoolSim.OwnVertexMiss(outDir, "swap", "banded", ad);
+        Assert.True(miss.Max() < 1e-3f, $"a vertex of the part's own lands {miss.Max()} from where the game posed it");
+    }
+
+    [Fact]
+    public void A_replacement_leaning_harder_on_a_bone_than_the_part_does_is_named_in_the_build_log()
+    {
+        // The gain gate holds a bone's rows on the vertices the PART carries, at the part's weights. A bone
+        // the part leans on by half a percent is recovered through coefficients two hundred times its
+        // motion, which the part's own weights scale back down; a replacement weighted to it in full gets
+        // them whole. The build log measures the replacement's vertices and names the bone.
+        string ad = Path.Combine(_root, "faint");
+        SyntheticPool.WriteFaintBoneDump(ad, seed: 3, faint: 200, plain: 400, share: 0.005f, Strong, Weak);
+        MigotoEmitter.Result Build(string tag, int donorRow)
+        {
+            string donor = Path.Combine(_root, $"faint-donor-{tag}");
+            SyntheticPool.WriteDonor(donor, verts: 8, unionBones: 2);
+            SyntheticPool.WeightDonorOn(donor, donorRow);
+            return new MigotoEmitter().Build(new PoolBuildRequest
+            {
+                OutDir = Path.Combine(_root, $"out-faint-{tag}"),
+                Pipelines = new[]
+                {
+                    new ReplacePipeline
+                    {
+                        Suffix = "swap",
+                        Parts = new[] { new PoolPart("faint", ad) },
+                        DonorDir = donor,
+                        CaptureHashes = new System.Collections.Generic.Dictionary<string, string> { ["faint"] = "aaaa0031" },
+                    },
+                },
+            });
+        }
+
+        var onFaint = Build("b", donorRow: 1);
+        Assert.DoesNotContain(onFaint.Diagnostics, d => d.Contains("tied rigidly"));   // the bone is recovered
+        var line = Assert.Single(onFaint.Diagnostics, d => d.Contains("more than 64 times their input's rounding"));
+        Assert.Contains($"mostly through bone 0x{Weak:x8}", line);
+
+        // the same part under a replacement weighted to the bone it carries in full says nothing
+        Assert.DoesNotContain(Build("a", donorRow: 0).Diagnostics, d => d.Contains("times their input's rounding"));
+    }
+
+    [Theory]
+    // inside the defect gate beats outside it, whatever the gains
+    [InlineData(5e-4, 900.0, 2e-3, 1.0, true)]
+    [InlineData(2e-3, 1.0, 5e-4, 900.0, false)]
+    // two inside it compare by gain, and a tie keeps the incumbent
+    [InlineData(9e-4, 3.0, 1e-6, 40.0, true)]
+    [InlineData(1e-6, 40.0, 9e-4, 3.0, false)]
+    [InlineData(1e-6, 3.0, 1e-6, 3.0, false)]
+    // inside the gain gate beats outside it, by however little
+    [InlineData(1e-6, 60.0, 1e-6, 70.0, true)]
+    [InlineData(1e-6, 70.0, 1e-6, 60.0, false)]
+    // two outside the gain gate change hands only for a quarter less rounding
+    [InlineData(1e-6, 200.0, 1e-6, 250.0, false)]
+    [InlineData(1e-6, 150.0, 1e-6, 250.0, true)]
+    // two outside it compare by defect
+    [InlineData(0.01, 900.0, 0.5, 1.0, true)]
+    // a NaN never wins
+    [InlineData(double.NaN, 1.0, 0.5, 1.0, false)]
+    [InlineData(1e-6, double.NaN, 1e-6, 40.0, false)]
+    public void The_better_of_two_solves_is_the_exact_one_then_the_quieter_one(double defectA, double gainA,
+        double defectB, double gainB, bool aIsBetter) =>
+        Assert.Equal(aIsBetter, MigotoEmitter.BetterSolve(defectA, gainA, defectB, gainB));
+
     private static (int Base, int Width)[] ReadOff(string outDir, string part)
     {
         var raw = ReadUints(outDir, $"{part}_off.buf");

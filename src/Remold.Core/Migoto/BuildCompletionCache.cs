@@ -8,6 +8,7 @@ using System.Text.Json;
 using Remold.Core.Export;
 using Remold.Core.Project;
 using Remold.Core.Workbench;
+using Remold.Core.Text;
 
 namespace Remold.Core.Migoto;
 
@@ -122,6 +123,9 @@ internal static class BuildCompletionCache
             Add(hash, "catalog", env.CatalogIdentity);
             Add(hash, "catalog-version", env.CatalogVersion ?? "");
             Add(hash, "zip", zip ? "1" : "0");
+            // The record replays the warnings, notices and progress lines the build showed, in the language
+            // it ran in; a build under another UI language must not be served them.
+            Add(hash, "ui-language", Catalog.CurrentTag);
             Add(hash, "project", AuthoredProjectSerializer.Serialize(execution.Project));
             Add(hash, "plan", JsonSerializer.Serialize(execution.Plan, Json));
             Add(hash, "sharing", env.Sharing?.BuildIdentity() ?? "none");

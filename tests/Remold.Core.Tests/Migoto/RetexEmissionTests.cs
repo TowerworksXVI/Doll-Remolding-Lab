@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using Remold.Core.Migoto;
 using Remold.Core.Project;
+using Remold.Core.Tests.Support;
 using Xunit;
 
 namespace Remold.Core.Tests.Migoto;
@@ -347,13 +348,12 @@ public class RetexEmissionTests : IDisposable
                     }, "cloth1"),
                 }));
 
-        Assert.Contains("same slot tag", ex.Message);
-        // the parts are what the author can find on the change list; the hashes appear nowhere else
-        Assert.Contains($"{TagTwin1} on body", ex.Message);
-        Assert.Contains($"{TagTwin2} on cloth1", ex.Message);
-        // both hashes came in as retextures, so both are changes the author can leave out — named in the
-        // words the change row itself shows
-        Assert.EndsWith("Leave one row's new textures out of the build.", ex.Message);
+        // the parts are what the author can find on the change list; the hashes appear nowhere else. Both
+        // hashes came in as retextures, so both are changes the author can leave out — named in the words
+        // the change row itself shows
+        Assert.Equal(CoreStrings.EmitterSlotTagCollision(CoreStrings.EmitterTextureOnPart(TagTwin1, "body"),
+            CoreStrings.EmitterTextureOnPart(TagTwin2, "cloth1"), MigotoEmitter.RetexTag(TagTwin1),
+            CoreStrings.EmitterFixLeaveOneRowTextures), ex.Message);
     }
 
     /// <summary>One hash owns one TextureOverride section, and a hidden mesh a scoped retexture also
@@ -494,13 +494,13 @@ public class RetexEmissionTests : IDisposable
                 },
             }));
 
-        // both are the anchor part's own stock maps, so the part the author has to find is named twice
-        Assert.Contains($"{TagTwin1} on body", ex.Message);
-        Assert.Contains($"{TagTwin2} on body", ex.Message);
-        // no retexture is in this build: the fix must not send the author hunting for one to drop
+        // both are the anchor part's own stock maps, so the part the author has to find is named twice; no
+        // retexture is in this build, so the fix must not send the author hunting for one to drop
+        Assert.Equal(CoreStrings.EmitterSlotTagCollision(CoreStrings.EmitterTextureOnPart(TagTwin1, "body"),
+            CoreStrings.EmitterTextureOnPart(TagTwin2, "body"), MigotoEmitter.RetexTag(TagTwin1),
+            CoreStrings.EmitterFixLeaveRowWithMesh), ex.Message);
         Assert.DoesNotContain("retexture", ex.Message);
         Assert.DoesNotContain("new textures", ex.Message);
-        Assert.EndsWith("Leave a row with a new mesh out of the build.", ex.Message);
     }
 
     [Fact]
@@ -527,8 +527,9 @@ public class RetexEmissionTests : IDisposable
                     }),
                 }));
 
-        Assert.Contains("same slot tag", ex.Message);
-        Assert.Contains($"{TagTwin1} on body", ex.Message);
+        Assert.Matches(CatalogShape.Of(CoreStrings.EmitterSlotTagCollision(
+            CoreStrings.EmitterTextureOnPart(TagTwin1, "body"), CatalogShape.Any, MigotoEmitter.RetexTag(TagTwin1),
+            CatalogShape.Any)), ex.Message);
         Assert.Contains(TagTwin2, ex.Message);
     }
 
@@ -551,8 +552,8 @@ public class RetexEmissionTests : IDisposable
                     }),
                 }));
 
-        Assert.Contains($"Stock textures {TagTwin1} and {TagTwin2} derive the same slot tag", ex.Message);
-        Assert.EndsWith("Leave one row's new textures out of the build.", ex.Message);
+        Assert.Equal(CoreStrings.EmitterSlotTagCollision(TagTwin1, TagTwin2, MigotoEmitter.RetexTag(TagTwin1),
+            CoreStrings.EmitterFixLeaveOneRowTextures), ex.Message);
     }
 
     [Fact]
@@ -587,12 +588,11 @@ public class RetexEmissionTests : IDisposable
                 },
             }));
 
-        Assert.Contains("same slot tag", ex.Message);
-        Assert.Contains($"{TagTwin1} on body", ex.Message);
-        Assert.Contains($"{TagTwin2} on cloth1", ex.Message);
         // each way out names WHICH part is which: one row ships new textures, the other a new mesh
-        Assert.EndsWith("Leave the new textures on cloth1 or the new mesh on body out of the build.",
-            ex.Message);
+        Assert.Equal(CoreStrings.EmitterSlotTagCollision(CoreStrings.EmitterTextureOnPart(TagTwin1, "body"),
+            CoreStrings.EmitterTextureOnPart(TagTwin2, "cloth1"), MigotoEmitter.RetexTag(TagTwin1),
+            CoreStrings.EmitterFixLeaveEither(CoreStrings.EmitterNewTexturesOn("cloth1"),
+                CoreStrings.EmitterNewMeshOn("body"))), ex.Message);
     }
 
     private static int CountOf(string text, string token)

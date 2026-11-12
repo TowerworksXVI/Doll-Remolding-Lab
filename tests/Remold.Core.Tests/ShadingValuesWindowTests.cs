@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -47,7 +48,7 @@ public sealed class ShadingValuesWindowTests
             {
                 [MaterialValueSemantics.UseGiFlatten] = "",
             }, new FixedReader("0"));
-        var field = new EditShadingField(MaterialValueSemantics.UseGiFlatten, "Skin lighting",
+        var field = new EditShadingField(MaterialValueSemantics.UseGiFlatten, CoreStrings.ShadingValueUseGIFlatten,
             MaterialValueKind.Float, 0, 1, "1");
 
         var row = Assert.Single(ShadingValuesWindow.DialogRows(new[] { field },
@@ -129,14 +130,14 @@ public sealed class ShadingValuesWindowTests
     [Fact]
     public void An_unreadable_copy_problem_is_visible_and_untouched_input_preserves_the_copy()
     {
-        var field = new EditShadingField("_StockingCenterColor", "Stocking centre colour",
+        var field = new EditShadingField("_StockingCenterColor", CoreStrings.ShadingValueStockingCenterColor,
             MaterialValueKind.Color, 0, 1, "0 0 0 1");
         var row = Assert.Single(ShadingValuesWindow.DialogRows(new[] { field },
             new Dictionary<string, string> { [field.Semantic] = "" },
             new HashSet<string>(StringComparer.Ordinal) { field.Semantic },
             new HashSet<string>(StringComparer.Ordinal) { field.Semantic }));
 
-        Assert.Equal(ShadingValuesWindow.CopiedValueUnreadable, row.Problem);
+        Assert.Equal(Strings.ShadingCopiedValueUnreadable, row.Problem);
         Assert.Empty(ShadingValuesWindow.ApplyRows(new[]
         {
             new ShadingValuesWindow.DialogInput(field, row.Initial, row.Copied, row.Initial),
@@ -152,9 +153,9 @@ public sealed class ShadingValuesWindowTests
     [Fact]
     public void Apply_rows_ignores_unchanged_originals_and_refuses_mixed_invalid_input()
     {
-        var color = new EditShadingField("_StockingCenterColor", "Stocking centre colour",
+        var color = new EditShadingField("_StockingCenterColor", CoreStrings.ShadingValueStockingCenterColor,
             MaterialValueKind.Color, 0, 1, "0 0 0 1");
-        var toggle = new EditShadingField(MaterialValueSemantics.UseGiFlatten, "Skin lighting",
+        var toggle = new EditShadingField(MaterialValueSemantics.UseGiFlatten, CoreStrings.ShadingValueUseGIFlatten,
             MaterialValueKind.Float, 0, 1, "1");
 
         var result = ShadingValuesWindow.ApplyRows(new[]
@@ -165,7 +166,7 @@ public sealed class ShadingValuesWindowTests
 
         Assert.Empty(result.Edits);
         Assert.True(result.Refused);
-        Assert.Equal("Not 0 or 1.", result.Problems[MaterialValueSemantics.UseGiFlatten]);
+        Assert.Equal(Strings.ShadingNotZeroOrOne, result.Problems[MaterialValueSemantics.UseGiFlatten]);
     }
 
     private sealed class FixedReader(string value) : IMaterialGameValueReader

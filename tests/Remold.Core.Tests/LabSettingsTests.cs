@@ -205,4 +205,25 @@ public class LabSettingsTests
         Assert.False(loaded.LoadedFromDefaultsAfterError);
         Assert.Null(loaded.EditTreeWidth);
     }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsLanguage()
+    {
+        using var g = new TempGame();
+        var path = g.At("settings.json");
+        new LabSettings { Language = "zh-Hans" }.Save(path);
+        Assert.Equal("zh-Hans", LabSettings.Load(path).Language);
+    }
+
+    [Fact]
+    public void Load_FileWithoutLanguage_IsEnglish()
+    {
+        // A settings.json without the key reads as null, which is English.
+        using var g = new TempGame();
+        var path = g.At("settings.json");
+        File.WriteAllText(path, """{ "Author": "TestAuthor" }""");
+        var loaded = LabSettings.Load(path);
+        Assert.False(loaded.LoadedFromDefaultsAfterError);
+        Assert.Null(loaded.Language);
+    }
 }

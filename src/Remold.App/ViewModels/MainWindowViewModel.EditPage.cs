@@ -1,3 +1,4 @@
+using Remold.Core.Text;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -200,8 +201,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         AppLog.Write("Removed shading values that have no effect in game", list);
         AutoSaveProject();
         EditPage.Rebuild();
-        MergeNoticeIntoCell(new NoticeMessage(ShadingValuesRemovedNoticeId, "Shading values removed",
-            $"Removed shading values that have no effect on their material in game: {list}.",
+        string shown = string.Join(CoreStrings.ListSeparator, removed.Select(value =>
+            Strings.ShadingValueInEdit(MaterialValueCatalog.Field(value.Semantic)?.DisplayLabel ?? value.Semantic,
+                value.EditLabel)));
+        MergeNoticeIntoCell(new NoticeMessage(ShadingValuesRemovedNoticeId, Strings.ShadingValuesRemovedNotice,
+            Strings.ShadingValuesRemovedDetail(shown),
             ProjectScoped: true, Severity: NoticeSeverity.Info));
     }
 
@@ -236,10 +240,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
 
     // ---- reading the install ------------------------------------------------------------------------
 
-    /// <summary>What the page says when the game's forward view is not loaded — the app's one sentence for
-    /// that state.</summary>
-    internal const string EditGameUnavailable = Remold.Core.GameFilesGate.Unavailable;
-
     /// <summary>How far along this install is with one subject — the one predicate behind every surface that
     /// has to say why a subject's model is not in hand, so they cannot say three different things about one
     /// state.
@@ -272,13 +272,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             EditSubjectRead.Unavailable => GameFilesGate.Unavailable,
             EditSubjectRead.Reading => GameFilesGate.SubjectReading,
             EditSubjectRead.Unreadable => GameFilesGate.SubjectUnreadable,
-            _ => EditGameUnavailable,
+            _ => GameFilesGate.Unavailable,
         };
 
     public EditInstallState InstallState() =>
         _vfs is not null || _subjectModelWarm is not null ? new EditInstallState()
         : IsScanning ? new EditInstallState(IsReading: true)
-        : new EditInstallState(Unavailable: EditGameUnavailable);
+        : new EditInstallState(Unavailable: GameFilesGate.Unavailable);
 
     /// <summary>Re-anchor one part against the current install. A resolver instance caches the bundles it
     /// deobfuscates, so one is kept per install rather than minted per part; a rescan replaces the install and
@@ -610,7 +610,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// <summary>What a render says when the edit's own geometry file is gone from the mod folder. Names the
     /// file, because putting it back is the whole remedy.</summary>
     internal static string GeometryFileMissing(string file) =>
-        $"{file} isn't in the mod folder. Send it back from Blender again, or use Revert mesh.";
+        Strings.GeometryFileMissing(file);
 
     /// <summary>What each submesh samples, in renderer-slot order: the file this edit's answer resolves to
     /// where it resolves to one, else the game's own texture. Read on the UI thread; decoded on a worker.
@@ -858,7 +858,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// so the refusal does not depend on the card having read its header first.</summary>
     private string? FormatRefusalFor(EditSlotRef slot) =>
         slot.ProjectRelativeFile is null && GameMapFor(slot) is { } map && !GameTextureProbe(map).Authorable
-            ? EditMapCardVm.FloatFormat : null;
+            ? Strings.MapFloatFormat : null;
 
     /// <summary>The size of the picture a slot currently shows: the mod's own file where one is bound, else
     /// the game texture's header. Null where neither can be read.</summary>
@@ -877,7 +877,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         if (SubjectPartOf(target) is not { } part)
         { status.Report(SubjectReadFailure(target.Subject, target.Outfit)); return; }
-        if (withReferences && part.IsStatic) { status.Report(BlenderGate.StaticPart); return; }
+        if (withReferences && part.IsStatic) { status.Report(Strings.BlenderStaticPart); return; }
         await OpenSessionBlenderAsync(target.Subject, target.Outfit, target, requestedEditId: null,
             withReferences, openAllMode: SessionBlenderOpenAll.None, status: status);
     }
@@ -886,7 +886,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         if (SubjectPartOf(edit.Part) is not { } part)
         { status.Report(SubjectReadFailure(edit.Part.Subject, edit.Part.Outfit)); return; }
-        if (withReferences && part.IsStatic) { status.Report(BlenderGate.StaticPart); return; }
+        if (withReferences && part.IsStatic) { status.Report(Strings.BlenderStaticPart); return; }
         await OpenSessionBlenderAsync(edit.Part.Subject, edit.Part.Outfit,
             edit.Part, edit.EditDefinitionId, withReferences,
             openAllMode: SessionBlenderOpenAll.None, status: status);
@@ -909,7 +909,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         var model = _subjectModels.TryGet(subject, outfit);
         if (model is null) { status.Report(SubjectReadFailure(subject, outfit)); return; }
-        if (model.AllPartsStatic) { status.Report(BlenderGate.StaticOnly); return; }
+        if (model.AllPartsStatic) { status.Report(Strings.BlenderStaticOnly); return; }
         await OpenSessionBlenderAsync(subject, outfit, requested: null, requestedEditId: null,
             withReferences: true, openAllMode: SessionBlenderOpenAll.Stock, status: status);
     }
@@ -919,7 +919,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         var model = _subjectModels.TryGet(subject, outfit);
         if (model is null) { status.Report(SubjectReadFailure(subject, outfit)); return; }
-        if (model.AllPartsStatic) { status.Report(BlenderGate.StaticOnly); return; }
+        if (model.AllPartsStatic) { status.Report(Strings.BlenderStaticOnly); return; }
         await OpenSessionBlenderAsync(subject, outfit, requested: null, requestedEditId: null,
             withReferences: true, openAllMode: SessionBlenderOpenAll.FirstEdit, status: status);
     }
@@ -1135,31 +1135,31 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         if (EditSession is not { } session || _vfs is not { } vfs
             || GameDir is not { Length: > 0 } gameDir
             || PickOutfit(subject, outfit) is not { } outfitModel)
-        { status.Report(EditGameUnavailable); return; }
+        { status.Report(GameFilesGate.Unavailable); return; }
         if (_subjectModels.TryGet(subject, outfit) is not { } model)
         { status.Report(SubjectReadFailure(subject, outfit)); return; }
         AutoNameFromSubject(subject);
-        if (!EnsureModRoot()) { status.Report("Couldn't create the mod folder."); return; }
+        if (!EnsureModRoot()) { status.Report(Strings.ModFolderNotCreated); return; }
         // A return already taken but not yet committed is intent this open would compose around. The scan
         // used to land its edits on the caller's own thread, ahead of everything after it; now that the
         // reading half runs on a worker, THIS is where that ordering is kept — the one caller whose
         // outbound snapshot a pending return would make stale.
         await PendingBlenderReturns;
         var snapshot = session.Snapshot();
-        if (snapshot.RootDir is null) { status.Report("Couldn't create the mod folder."); return; }
+        if (snapshot.RootDir is null) { status.Report(Strings.ModFolderNotCreated); return; }
 
         var blender = BlenderLocator.Find(BlenderOverride());
-        if (blender is null) { status.Report(BlenderGate.NotFound); return; }
+        if (blender is null) { status.Report(Strings.BlenderNotFound); return; }
         var script = _bridgeScriptPath;
         if (!File.Exists(script))
         {
-            status.Report("The Blender script is missing from the app folder. Reinstall Doll Remolding Lab.");
+            status.Report(Strings.BlenderScriptMissing);
             return;
         }
 
         var requestedPart = requested is null ? null : SubjectPartOf(requested);
         if (requested is not null && requestedPart is null)
-        { status.Report($"Couldn't find {requested.RendererSlot}'s mesh."); return; }
+        { status.Report(Strings.BlenderPartMeshNotFound(requested.RendererSlot)); return; }
         // The mesh-edit gate, at the one place sessions are written: a part whose game mesh cannot be
         // replaced never opens writable, so nothing a send returns can land geometry on it.
         if (requestedPart is not null
@@ -1198,8 +1198,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         if (writableEdits.Count == 0 && writableStockParts.Count == 0)
         {
             status.Report(openAll
-                ? "No part of this item can be edited in Blender."
-                : "This part cannot be sent back from Blender.");
+                ? Strings.BlenderNothingEditable
+                : Strings.BlenderPartNotEditable);
             return;
         }
 
@@ -1242,7 +1242,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     sourceEdit is null ? null : session.Slots(sourceEdit), snapshot.RootDir,
                     () => workspaceFacts.BakedRestOf(target))));
         }
-        if (pending.Count == 0) { status.Report("No parts to open."); return; }
+        if (pending.Count == 0) { status.Report(Strings.BlenderNoPartsToOpen); return; }
         var plans = pending.Select(item => item.Plan).ToList();
         var modelSlotNames = model.Parts.Select(part => part.SlotName).ToList();
         var displayedSlotNames = displayed.Select(part => part.SlotName).ToList();
@@ -1257,7 +1257,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             && (stockCombinedCandidate || authoredReferenceCandidate);
 
         using var preparing = BeginSessionBlenderPrepare(pending.Count > 1);
-        status.Report(pending.Count == 1 ? "Preparing the part for Blender…" : "Preparing the parts for Blender…");
+        status.Report(pending.Count == 1 ? Strings.BlenderPreparingPart : Strings.BlenderPreparingParts);
         // The parts whose OWN edited geometry could not be read; nothing is opened while it holds anything.
         IReadOnlyList<string> unreadableEdits = Array.Empty<string>();
         // Filled by the preparation pass itself, after it successfully writes a prepared file from inputs
@@ -1369,9 +1369,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     previewMemo: previewMemo);
             });
         }
-        catch (IOException) { status.Report("The game is using these files. Close the game and try again."); return; }
+        catch (IOException) { status.Report(Strings.GameUsingFiles); return; }
         catch (Exception e)
-        { status.Report($"Couldn't prepare the Blender file: {Reason(e)}"); return; }
+        { status.Report(Strings.BlenderPrepareFailed(Reason(e))); return; }
         // Store the cold build's products off the critical path: Blender should not wait on cache copies.
         if (coldPartsDiagnostics is { } partsDiagnostics && coldPartsBuilt is { } partsBuilt
             && !wardrobeUnreadable && sessionRigCache is not null
@@ -1451,8 +1451,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // identity the model keeps for itself. The line reports the open; the reason goes to the log.
             AppLog.Write("Couldn't prepare this edit for Blender", e);
             status.Report(e is AuthoredRefusalException
-                ? $"Couldn't prepare this edit for Blender: {Reason(e)}"
-                : "Couldn't prepare this edit for Blender.");
+                ? Strings.BlenderPrepareEditRefused(Reason(e))
+                : Strings.BlenderPrepareEditFailed);
             return;
         }
 
@@ -1510,11 +1510,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                         previewMemo: previewMemo));
                 }
                 catch (IOException)
-                { status.Report("The game is using these files. Close the game and try again."); return; }
+                { status.Report(Strings.GameUsingFiles); return; }
                 catch (Exception e)
-                { status.Report($"Couldn't build the combined Blender file: {Reason(e)}"); return; }
+                { status.Report(Strings.BlenderCombinedFailed(Reason(e))); return; }
                 if (!File.Exists(opened))
-                { status.Report("No parts could be opened together for this item."); return; }
+                { status.Report(Strings.BlenderNothingOpenedTogether); return; }
                 // Every part joins the composition through its PREPARED file; one that could not be assembled
                 // from opens on the game copy instead. For a bare part that IS the game copy either way, but a
                 // part carrying mesh work would open as the game's under the edit's name — refuse instead.
@@ -1574,11 +1574,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             BlenderBridge.WriteSession(opened, requested is null ? null : requestedPart!.SlotName,
                 sessionParts, AssetExporter.SessionSendGlbName, targets, notices);
             EnsureWatcher();
-            if (!KeepRoundTripId(status, "Blender")) return;
+            if (!KeepRoundTripId(status, blender: true)) return;
             WatchBlenderExit(BlenderBridge.Launch(blender, script, opened, Path.GetDirectoryName(opened)!), status);
             if (notices.Count > 0) status.Report(string.Join(" ", notices));
         }
-        catch (Exception e) { status.Report($"Couldn't start Blender: {Reason(e)}"); }
+        catch (Exception e) { status.Report(Strings.BlenderStartFailed(Reason(e))); }
     }
 
     /// <summary>One displayed part of a Blender open, as everything after the pending walk reads it: which
@@ -2295,8 +2295,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             try
             {
                 if (!File.Exists(part.Rigged))
-                    // A fragment, not a sentence: the caller's own "Couldn't prepare the Blender file:" leads it.
-                    throw new InvalidDataException($"{part.Token}'s mesh file was not written");
+                    throw new InvalidDataException(Strings.BlenderMeshFileNotWritten(PartNames.Display(part.Token)));
                 if (!PrepareSessionPartGlb(part.Rigged, part.EditedGlb, part.SlotName, part.Prepared,
                         part.Maps, part.TextureMaps, previewMemo, part.BakedRest, part.Shift))
                     unreadableResult[index] = true;
@@ -2445,18 +2444,18 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         parts.Count == 0 ? null : EditGeometryUnreadable(parts);
 
     internal static string EditGeometryUnreadable(IReadOnlyList<string> parts) =>
-        $"Couldn't read the edit on {NameList(parts)}, so Blender was not opened. "
-        + $"It would have shown the original mesh instead of your {(parts.Count == 1 ? "edit" : "edits")}.";
+        Catalog.Plural(parts.Count, Strings.EditGeometryUnreadable_One(Catalog.List(Shown(parts))),
+            Strings.EditGeometryUnreadable_Other(Catalog.List(Shown(parts))));
 
-    /// <summary>One failure's own words as the tail of a sentence this file began. Whatever the message
-    /// ends with, what comes back ends in a full stop: a reason without one ran straight into the sentence
-    /// after it.</summary>
-    private static string Reason(Exception failure) => failure.Message.TrimEnd().TrimEnd('.') + ".";
+    /// <summary>Part tokens as a sentence names them: each read in the UI language.</summary>
+    private static IReadOnlyList<string> Shown(IReadOnlyList<string> parts) =>
+        parts.Select(PartNames.Display).ToList();
 
-    /// <summary>Names in a sentence: "body", "body and cloth", "body, hair and cloth". One home, so every
-    /// line an open writes about a set of parts or maps reads the same way.</summary>
-    private static string NameList(IReadOnlyList<string> names) => names.Count == 1 ? names[0]
-        : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[^1];
+    /// <summary>One failure's own words as the tail of a sentence this file began. What comes back ends a
+    /// sentence in the UI language: one closing full stop in either script gives way to the catalog's
+    /// sentence end, and a reason with none gets it, so it never runs into the sentence after it.</summary>
+    private static string Reason(Exception failure) => Catalog.Sentence(Catalog.Clause(failure.Message));
+
 
     /// <summary>The notices shared verbatim by the app's launch status and the Blender session document.
     /// The status adds spacing only; the sentences themselves have one construction site.</summary>
@@ -2473,12 +2472,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     }
 
     private static string? PartsAbsentNotice(IReadOnlyList<string> parts) => parts.Count == 0 ? null
-        : $"Could not open {NameList(parts)} with the item's other parts, so "
-          + (parts.Count == 1 ? "it is not" : "they are not") + " in this Blender scene.";
+        : Catalog.Plural(parts.Count, Strings.PartsAbsentFromScene_One(Catalog.List(Shown(parts))),
+            Strings.PartsAbsentFromScene_Other(Catalog.List(Shown(parts))));
 
     private static string? WardrobeUnreadableNotice(bool unreadable) => unreadable
-        ? "Could not read the game's wardrobe tables, so this session may offer fewer bones to paint on "
-          + "than a build would accept."
+        ? Strings.BlenderWardrobeUnreadable
         : null;
 
     private static string? UnreadableTextureNotice(IReadOnlyCollection<string> textures)
@@ -2486,9 +2484,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         if (textures.Count == 0) return null;
         var named = textures.OrderBy(name => name, StringComparer.Ordinal).Take(3).ToList();
         int rest = textures.Count - named.Count;
-        if (rest > 0) named.Add($"{rest} more textures");
-        return $"Could not read {NameList(named)}. "
-            + (textures.Count == 1 ? "That material opens untextured." : "Those materials open untextured.");
+        if (rest > 0) named.Add(Catalog.Plural(rest, Strings.MoreTextures_One(rest), Strings.MoreTextures_Other(rest)));
+        return Catalog.Plural(textures.Count, Strings.TexturesUnreadable_One(Catalog.List(named)),
+            Strings.TexturesUnreadable_Other(Catalog.List(named)));
     }
 
     private static TargetPart SessionTarget(string subject, string outfit, SubjectPart part) => new()
@@ -2661,27 +2659,15 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             state.Slot.ShaderProperty))
         .ToList();
 
-    /// <summary>What the two stale-session refusals say, in the sentence the part's name is appended to and
-    /// the closing "Nothing was changed." follows. Both end the same way because the way out is the same one:
-    /// the file in Blender was written against maps this edit no longer has, and only a fresh open writes a
-    /// file that matches. Sending again from the open session hands back the same mismatch.</summary>
-    internal const string BlenderSessionMapsMovedUnderIt =
-        "this edit's maps changed in Doll Remolding Lab while Blender was open, so open the part in Blender "
-        + "again before sending";
-
-    internal const string BlenderSessionFromAnOlderVersion =
-        "this file from Blender was made by an older version of Doll Remolding Lab, so open the part in "
-        + "Blender again before sending";
-
     private static void RequireUnchangedBlenderMaterials(IReadOnlyList<EditSlotState> slots,
         BlenderSessionTarget target)
     {
         if (target.MaterialSlots is null)
-            throw new AuthoredRefusalException(BlenderSessionFromAnOlderVersion);
+            throw new AuthoredRefusalException(Strings.BlenderSessionFromOlderVersion);
         var current = BlenderMaterialBaselines(slots);
         if (current.Count != target.MaterialSlots.Count
             || current.Zip(target.MaterialSlots).Any(pair => pair.First != pair.Second))
-            throw new AuthoredRefusalException(BlenderSessionMapsMovedUnderIt);
+            throw new AuthoredRefusalException(Strings.BlenderSessionMapsMoved);
     }
 
     /// <param name="Canonicalized">Every map file in <paramref name="Rows"/> that THIS PREPARATION wrote,
@@ -3010,14 +2996,18 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     }
 
     /// <summary>The authored identity of one image returned by Blender. A carried image name wins; older
-    /// returns without one fall back to the material and slot names the return still carries.</summary>
+    /// returns without one fall back to the material and slot names the return still carries. That fallback
+    /// is a default name, minted in the UI language when the picture comes back, like a typed name: the map
+    /// is named in the UI language and an unnamed material by the catalog's word for one. An asset already
+    /// labelled keeps its label.</summary>
     internal static string BlenderMapLabel(string? returnedName, string? materialName, TargetInputKind input,
         string? shaderProperty)
     {
         string image = Path.GetFileNameWithoutExtension(returnedName ?? "").Trim();
         if (image.Length > 0) return image;
-        string material = string.IsNullOrWhiteSpace(materialName) ? "Material" : materialName.Trim();
-        return $"{material} {TextureMap.SlotLabel(input, shaderProperty)}";
+        string map = TextureMap.DisplaySlotLabel(input, shaderProperty);
+        return string.IsNullOrWhiteSpace(materialName) ? Strings.BlenderMapLabelNoMaterial(map)
+            : Strings.BlenderMapLabel(materialName.Trim(), map);
     }
 
     /// <summary>Give a new-edit or hide return the places its answers bind at: slots from the install where
@@ -3059,19 +3049,22 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// read off a warmed subject model, and an install that could not answer for the part has none. Three
     /// names then a count — a status line is one line.</summary>
     internal static string PartsWithNowhereToRecord(IReadOnlyList<string> parts) => parts.Count == 1
-        ? $"{parts[0]} isn't in the current game files, so there is nowhere to record what came back"
-        : "These parts aren't in the current game files, so there is nowhere to record what came back: "
-          + string.Join(", ", parts.Take(3))
-          + (parts.Count > 3 ? $", and {parts.Count - 3} more" : "");
+        ? Strings.NowhereToRecord_One(parts[0])
+        : Strings.NowhereToRecord_Other(parts.Count <= 3
+            ? string.Join(CoreStrings.ListSeparator, parts)
+            : Catalog.Plural(parts.Count - 3,
+                Strings.NowhereToRecordAndMore_One(string.Join(CoreStrings.ListSeparator, parts.Take(3)), parts.Count - 3),
+                Strings.NowhereToRecordAndMore_Other(string.Join(CoreStrings.ListSeparator, parts.Take(3)), parts.Count - 3)));
 
     /// <summary>One target's failure, told with the part it happened on. A return is all-or-nothing, so any
     /// one part's refusal is the whole send's — and every sentence underneath here was written for a
     /// surface that already stands on a part. This one does not: fifteen parts went out, and the modder is
     /// owed which of them came back wrong.</summary>
-    internal static string BlenderPartReason(string part, string reason)
+    internal static string BlenderPartReason(string part, Exception failure)
     {
-        string clean = reason.TrimEnd().TrimEnd('.');
-        return clean.Contains($" on {part} ", StringComparison.OrdinalIgnoreCase)
+        string clean = Catalog.Clause(failure.Message);
+        return failure is AuthoredRefusalException { Part: { } named }
+            && string.Equals(named, part, StringComparison.OrdinalIgnoreCase)
             ? clean : $"{clean} ({part})";
     }
 
@@ -3080,11 +3073,15 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     private static void ForPart(string part, Action work)
     {
         try { work(); }
-        catch (AuthoredRefusalException e)
-        { throw new AuthoredRefusalException(BlenderPartReason(part, e.Message)); }
         catch (Exception e) when (e is not OutOfMemoryException)
-        { throw new InvalidOperationException(BlenderPartReason(part, e.Message), e); }
+        { throw PartFailure(part, e); }
     }
+
+    /// <summary>One target's failure as a return reports it: the part named once, and a refusal kept a
+    /// refusal that names <paramref name="part"/>, so a surface over several parts does not name it again.</summary>
+    internal static Exception PartFailure(string part, Exception failure) => failure is AuthoredRefusalException
+        ? new AuthoredRefusalException(BlenderPartReason(part, failure)) { Part = part }
+        : new InvalidOperationException(BlenderPartReason(part, failure), failure);
 
     private static ResolvedBlenderTargets ResolveBlenderTargets(IncomingEdit incoming,
         IReadOnlyList<BlenderSessionTarget> routes, BlenderSessionDocument? liveSession,
@@ -3095,7 +3092,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         foreach (var route in routes)
         {
             if (parts.ContainsKey(route.Part))
-                return new(Array.Empty<ResolvedBlenderTarget>(), parts, BlenderReturnFromAnOlderLab);
+                return new(Array.Empty<ResolvedBlenderTarget>(), parts, Strings.BlenderReturnFromAnOlderLab);
             SessionPart? declared = liveSession?.Parts.FirstOrDefault(part =>
                 string.Equals(part.Name, route.Part, StringComparison.OrdinalIgnoreCase));
             var selected = incoming.TargetFor(route.Part);
@@ -3126,7 +3123,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             if (useSelection && selected!.IsNew)
             {
                 if (!route.IsPartRoute)
-                    return new(Array.Empty<ResolvedBlenderTarget>(), parts, BlenderReturnFromAnOlderLab);
+                    return new(Array.Empty<ResolvedBlenderTarget>(), parts, Strings.BlenderReturnFromAnOlderLab);
                 var part = RoutePart(route);
                 resolved.Add(new ResolvedBlenderTarget(route, part, null, selected.NewEditName, false));
                 parts.Add(route.Part, part);
@@ -3139,14 +3136,14 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     string.Equals(candidate.Id, editId, StringComparison.Ordinal));
                 if (definition is null)
                     return new(Array.Empty<ResolvedBlenderTarget>(), parts,
-                        BlenderOpenedEditMissing);
+                        Strings.BlenderOpenedEditMissing);
                 var part = CopyTarget(definition.Target);
                 resolved.Add(new ResolvedBlenderTarget(route, part, editId, null, true));
                 parts.Add(route.Part, part);
                 continue;
             }
             if (!route.IsPartRoute)
-                return new(Array.Empty<ResolvedBlenderTarget>(), parts, BlenderReturnFromAnOlderLab);
+                return new(Array.Empty<ResolvedBlenderTarget>(), parts, Strings.BlenderReturnFromAnOlderLab);
             var routedPart = RoutePart(route);
             resolved.Add(new ResolvedBlenderTarget(route, routedPart, null, null, false));
             parts.Add(route.Part, routedPart);
@@ -3169,19 +3166,14 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     };
 
     internal static string BlenderSelectedEditMissing(string editId, string? label) =>
-        $"The selected edit '{(string.IsNullOrWhiteSpace(label) ? editId : label)}' no longer exists. "
-        + "Nothing was changed.";
-
-    internal const string BlenderOpenedEditMissing =
-        "The edit this part was opened from no longer exists. Nothing was changed.";
+        Strings.BlenderSelectedEditMissing((string.IsNullOrWhiteSpace(label) ? editId : label));
 
     internal static string BlenderSelectedEditWrongPart(string editId, string? label, string part) =>
-        $"The selected edit '{(string.IsNullOrWhiteSpace(label) ? editId : label)}' does not belong to "
-        + $"{part}. Nothing was changed.";
+        Strings.BlenderSelectedEditWrongPart((string.IsNullOrWhiteSpace(label) ? editId : label),
+            PartNames.Display(part));
 
     internal static string BlenderRetargetShapeMismatch(string label, int held, int sent) =>
-        $"The selected edit '{label}' holds {held} material slots and the sent mesh has {sent}, "
-        + "so the send cannot land on it. Nothing was changed.";
+        Strings.BlenderRetargetShapeMismatch(label, held, sent);
 
     /// <summary>The replacement material layout an edit already owns, or null while it has no authored
     /// geometry and therefore no replacement layout to preserve. Output indices are minted contiguously by
@@ -3197,8 +3189,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     }
 
     internal static string BlenderMetadataUnreadable(string path) =>
-        $"Could not read {Path.GetFileName(path)}, so the file sent back from Blender could not be addressed. "
-        + "Nothing was changed.";
+        Strings.BlenderMetadataUnreadable(Path.GetFileName(path));
 
     /// <summary>Read one session-native Blender return whole, WITHOUT touching authored state: the glb
     /// parse, every per-part re-export and normalization, and the new-edit targets' install reads. Runs on a
@@ -3219,10 +3210,10 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 && !BlenderBridge.ReturnTargetMetadataReadable(edit.GlbPath))
                 return PreparedBlenderReturnPlan.Refused(
                     BlenderMetadataUnreadable(BlenderBridge.TargetPath(edit.GlbPath)));
-            return PreparedBlenderReturnPlan.Refused(BlenderReturnUnaddressed);
+            return PreparedBlenderReturnPlan.Refused(Strings.BlenderReturnUnaddressed);
         }
         if (targets.Any(target => !target.IsExactSlot && !target.IsPartRoute))
-            return PreparedBlenderReturnPlan.Refused(BlenderReturnFromAnOlderLab);
+            return PreparedBlenderReturnPlan.Refused(Strings.BlenderReturnFromAnOlderLab);
 
         string? sessionGlb = BlenderBridge.ReadReturnSessionGlb(edit.GlbPath);
         string? comparisonGlb = BlenderBridge.ReadReturnBaseline(edit.GlbPath);
@@ -3257,7 +3248,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             var returnedMeshes = (returned?.MeshNames ?? Array.Empty<string>())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var returnNotes = (returned?.UnkeyedTextureImages ?? Array.Empty<string>())
-                .Select(image => $"Ignored {image} from Blender: it isn't linked to a texture slot.")
+                .Select(image => CoreStrings.BlenderIgnoredUnlinked(image))
                 .ToList();
             var partNotes = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             // Keep only the small answer every part's warning/filter needs. A parsed prepared GLB can embed
@@ -3293,10 +3284,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                     }
                     await ReadOneTarget(target, preparedMaps);
                 }
-                catch (AuthoredRefusalException e)
-                { throw new AuthoredRefusalException(BlenderPartReason(target.Target.Part, e.Message)); }
                 catch (Exception e) when (e is not OutOfMemoryException)
-                { throw new InvalidOperationException(BlenderPartReason(target.Target.Part, e.Message), e); }
+                { throw PartFailure(target.Target.Part, e); }
             }
 
             async Task ReadOneTarget(ResolvedBlenderTarget destination, PreparedBlenderMaps? preparedMaps)
@@ -3420,8 +3409,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 if (!unreadableGeometryContracts.Add(key)) return;
                 AddPartNotes(target.Part, new[]
                 {
-                    $"Couldn't read the file {target.Part} was opened from, so every UV layer "
-                    + "that came back was kept."
+                    Strings.BlenderUvBaselineUnreadable(PartNames.Display(target.Part))
                 });
             }
 
@@ -3452,8 +3440,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // identifiers (an edit id, a slot id, a missing artifact path) and says nothing on a status
             // line, so that line reports the read and the exception goes to the log.
             return PreparedBlenderReturnPlan.Refused(e is AuthoredRefusalException
-                ? $"Couldn't read the file sent back from Blender: {Reason(e)} Nothing was changed."
-                : BlenderReturnUnreadable);
+                ? Strings.BlenderReturnReadRefused(Reason(e))
+                : Strings.BlenderReturnUnreadable);
         }
     }
 
@@ -3496,9 +3484,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         notes.AddRange(plan.Notes);
         notes.AddRange(plan.PartNotes.Values.SelectMany(part => part));
         // First, because it is the reason the counts below read the way they do.
-        if (plan.BaselineUnreadable) notes.Add(BlenderReturnBaselineUnreadable);
+        if (plan.BaselineUnreadable) notes.Add(Strings.BlenderReturnBaselineUnreadable);
         var globalWarnings = new List<string>(plan.Notes);
-        if (plan.BaselineUnreadable) globalWarnings.Add(BlenderReturnBaselineUnreadable);
+        if (plan.BaselineUnreadable) globalWarnings.Add(Strings.BlenderReturnBaselineUnreadable);
         // Asked of every considered part: an Object-mode-only move can be byte-identical and skipped, while
         // its transient status note still has to explain why nothing landed.
         // This re-opens the returned file outside the transaction below. It asks every considered part rather
@@ -3603,7 +3591,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // Same split the read makes: a refusal is the transaction's sentence for the modder, and a
             // per-field validator list or a model identifier is not.
             EditPage.ReportStatus(e is AuthoredRefusalException
-                ? BlenderPublishFailure(e.Message) : BlenderPublishUnreadable);
+                ? BlenderPublishFailure(e.Message) : Strings.BlenderPublishUnreadable);
         }
     }
 
@@ -3666,8 +3654,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     }
 
     internal static string BlenderSessionRewriteFailure(string openedGlb) =>
-        $"Could not update {Path.GetFileName(BlenderBridge.SessionPath(openedGlb))} after this send — "
-        + "the Blender panel may offer stale targets until reopened.";
+        Strings.BlenderSessionRewriteFailure(Path.GetFileName(BlenderBridge.SessionPath(openedGlb)));
 
     /// <summary>Remove the leaf transport directory an exact open minted when this send deliberately landed
     /// somewhere else. The app-owned target row is still treated as untrusted path input: only a leaf under
@@ -3764,15 +3751,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         return hidden;
     }
 
-    /// <summary>The line a return owes when the file it was exported FROM was named and could not be
-    /// opened — a mod folder renamed out from under a session still open in Blender, a run folder cleaned
-    /// by hand. Every part then comes back with nothing to compare it to and is saved, so a modder who
-    /// changed one part of an outfit and is handed fifteen edits has the reason in front of them rather
-    /// than a mod full of parts they never touched.</summary>
-    internal const string BlenderReturnBaselineUnreadable =
-        "Couldn't read the file opened in Blender, so every part sent back was saved, "
-        + "not only the changed ones.";
-
     /// <summary>The line a return owes for each part whose Object-mode transform the geometry read dropped.
     /// Blender writes that transform on the glb NODE for a mesh with no skin, and the read takes vertex
     /// positions alone — so the part arrives exactly as it always did, minus the placement the modder can
@@ -3794,8 +3772,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         catch { return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); }
         return parts.Where(moved.Contains).Distinct(StringComparer.OrdinalIgnoreCase)
             .ToDictionary(part => part,
-                part => $"The Object-mode position or scale on {part} was not applied. "
-                    + "Apply the transform in Blender (Ctrl+A), then send it back.",
+                part => Strings.BlenderTransformNotApplied(PartNames.Display(part)),
                 StringComparer.OrdinalIgnoreCase);
     }
 
@@ -3851,19 +3828,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     /// <summary>The return warning for a part weighted across a part the game starts shrunk and other
     /// bones.</summary>
     internal static string BlenderHiddenMixNote(string part) =>
-        $"'{part}' is weighted to a shrunk part's bones and to other bones. In the game the two sets move apart.";
+        Strings.BlenderHiddenMixNote(PartNames.Display(part));
 
     /// <summary>What a return says when the transaction refuses. It reports no partial landing because
     /// there is none: the whole return is one compound change, so a refusal anywhere leaves the mod exactly
     /// as it was — the same closing sentence a return that could not be READ already gives.</summary>
     internal static string BlenderPublishFailure(string reason) =>
-        $"Stopped while saving the file sent back from Blender: {reason.TrimEnd().TrimEnd('.')}. "
-        + "Nothing was changed.";
-
-    /// <summary>…and when the transaction refused for a reason it has no words for. Same closing sentence,
-    /// because the outcome is the same one: the mod is exactly as it was.</summary>
-    internal const string BlenderPublishUnreadable =
-        "Stopped while saving the file sent back from Blender. Nothing was changed.";
+        Strings.BlenderPublishFailure(Catalog.Clause(reason));
 
     public void ShowSubjectFolder(string subject, string outfit)
     {
@@ -3885,11 +3856,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         // internal character key and outfit stem are the model's address for this item, and a question
         // phrased in those raw tokens is a question about a row the modder cannot see.
         string label = SubjectLabel(subject, outfit);
-        if (edits > 0 && !await ConfirmAsync($"Remove {label}?", RemoveSubjectConfirmBody(edits),
-                "Remove", dangerous: true)) return;
+        if (edits > 0 && !await ConfirmAsync(Strings.RemoveSubjectTitle(label), RemoveSubjectConfirmBody(edits),
+                Strings.ConfirmRemove, dangerous: true)) return;
         session.ForgetSubject(subject, outfit);
         SyncSubjectsFromLedger();
-        EditPage.ReportStatus($"Removed {label} from the mod.");
+        EditPage.ReportStatus(Strings.RemovedSubject(label));
     }
 
     public async Task<EditPictureOpenResult> OpenPictureAsync(EditSlotRef slot, IProgress<string> status,
@@ -3900,9 +3871,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         { status.Report(refused); return EditPictureOpenResult.NotLaunched; }
         if (!confirmed && launch.Kind == EditTextureSharing.Shared)
         {
-            if (!await ConfirmAsync("Edit this map?",
-                    $"{EditMapCardVm.MapOnMaterial(slot)}.\n\n"
-                    + EditMapCardVm.SharedConsequence(launch.Uses!.Value), "Edit"))
+            if (!await ConfirmAsync(Strings.EditThisMapTitle,
+                    Strings.EditThisMapBody(EditMapCardVm.MapOnMaterial(slot),
+                        EditMapCardVm.SharedConsequence(launch.Uses!.Value)), Strings.EditThisMapButton))
                 return EditPictureOpenResult.NotLaunched;
         }
 
@@ -3919,12 +3890,12 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         bool tracked = false;
         try
         {
-            if (!KeepRoundTripId(status, "the image editor")) return EditPictureOpenResult.NotLaunched;
+            if (!KeepRoundTripId(status, blender: false)) return EditPictureOpenResult.NotLaunched;
             TrackPictureRoundTrip(ingress, status);
             tracked = true;
             if (!LaunchInImageEditor(ingress.Outbound,
-                $"Opened {ingress.Label} in the image editor. Save to send it back.",
-                "Couldn't open the image editor", status))
+                Strings.ImageEditorOpened(ingress.Label),
+                Strings.ImageEditorOpenFailed, status))
             {
                 UntrackPictureRoundTrip(ingress);
                 return EditPictureOpenResult.NotLaunched;
@@ -3934,7 +3905,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         catch (Exception e)
         {
             if (tracked) UntrackPictureRoundTrip(ingress);
-            status.Report($"Couldn't prepare the image editor: {Reason(e)}");
+            status.Report(Strings.ImageEditorPrepareFailed(Reason(e)));
             return EditPictureOpenResult.NotLaunched;
         }
     }
@@ -3947,11 +3918,11 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         if (MainWindow is not { } owner) return null;
         var picked = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Choose a .png",
+            Title = Strings.PngPickerTitle,
             AllowMultiple = false,
             FileTypeFilter = new[]
             {
-                new FilePickerFileType("PNG images") { Patterns = new[] { "*.png" } },
+                new FilePickerFileType(Strings.PngPickerFilter) { Patterns = new[] { "*.png" } },
             },
         });
         return picked.FirstOrDefault()?.TryGetLocalPath();
@@ -3962,7 +3933,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         if (SubjectPartOf(slot.Edit.Part) is not { } part)
         { status.Report(SubjectReadFailure(slot.Edit.Part.Subject, slot.Edit.Part.Outfit)); return; }
         if (EditSession?.Snapshot() is not { RootDir: { } root } project)
-        { status.Report("Couldn't find the mod folder."); return; }
+        { status.Report(Strings.ModFolderNotFound); return; }
 
         var route = UvGuideRouteFor(slot, EditSession, project);
         if (route.MissingGeometry is { } missing)
@@ -3990,12 +3961,12 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         {
             textureName = replacementName;
             if (route.CanvasSize is not { } size)
-            { status.Report($"Couldn't read {textureName}, so its UV guide cannot be sized."); return; }
+            { status.Report(Strings.UvGuideCannotSize(textureName)); return; }
             canvasSize = size;
             textureBundle = "";
             guideSource = route.GuideSource!;
         }
-        else { status.Report(UvGuideNeedsGameTexture); return; }
+        else { status.Report(Strings.UvGuideNeedsGameTexture); return; }
 
         var recipe = part.ToRecipePart();
         var samplers = new List<(string MeshName, string MeshAddress, int Submesh, string? ModdedGlb)>
@@ -4013,16 +3984,16 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         string channel = UvGuide.TexCoordChannel(slot.Input);
         if (_vfs is { } vfs)
         {
-            status.Report($"Drawing the UV guide for {textureName}…");
+            status.Report(Strings.UvGuideDrawing(textureName));
             var problem = await Task.Run(() => AssetExporter.BuildUvGuideOnDemand(vfs, textureName,
                 textureBundle, samplers, guide, channel, canvasSize));
             if (problem is not null) { status.Report(problem); return; }
         }
         else if (!File.Exists(guide))
-        { status.Report("Game files aren't loaded yet. Try again in a moment."); return; }
+        { status.Report(Strings.GameFilesNotLoadedYet); return; }
         LaunchInImageEditor(guide,
-            $"Opened the UV guide for {textureName}. Layer it under the paint.",
-            "Couldn't open the UV guide", status);
+            Strings.UvGuideOpened(textureName),
+            Strings.UvGuideOpenFailed, status);
     }
 
     internal sealed record UvGuideCardRoute(int Submesh, string? ModdedGlb, string? MissingGeometry,
@@ -4053,11 +4024,6 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             geometry.Path, geometry.Missing, replacementName, guideSource, canvasSize);
     }
 
-    /// <summary>A guide is drawn against the GAME texture's UV layout, so a slot with no game texture behind
-    /// it has nothing to draw one from.</summary>
-    internal const string UvGuideNeedsGameTexture =
-        "There is no game texture for this map, so no UV guide can be drawn.";
-
     /// <summary>Show the toon-ramp pick list for one card. The rows, the refusals and the write are the
     /// shipped picker's; what comes back here is what was chosen — a published file, or the pinned
     /// keep-the-game's-own row — which the page turns into a binding.</summary>
@@ -4065,12 +4031,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         if (EditSession is not { } session) return null;
         var candidates = SessionRampCandidates(slot);
+        string material = slot.MaterialName ?? Strings.MaterialByPosition(slot.MaterialSlotIndex ?? 0);
         var picker = new SessionRampPickerVm(
             ct => StreamSessionRamps(candidates, slot.ProjectRelativeFile, ct),
             RampImage.RefuseAsRamp,
             // The material, named as the card group over the button names it: an install that supplies no
             // name leaves the same positional label the cards and every confirm use.
-            $"{slot.MaterialName ?? $"material {slot.MaterialSlotIndex ?? 0}"} · {PartToken(slot.Edit.Part)}")
+            $"{material} · {PartNames.Display(PartToken(slot.Edit.Part))}")
         {
             ExportTo = (choice, path) => Task.Run(() => ExportSessionRamp(choice, path)),
         };
@@ -4142,7 +4109,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         var ownRead = own is null ? SessionRampChoice.KeepOwn
             : new SessionRampChoice(own.BundleId, own.TextureName, null, own.PathId);
         found.Add(new SessionRampCandidate(SessionRampChoice.KeepOwn, ownRead,
-            new List<string> { "Original" }, Own: true));
+            new List<string> { Strings.RampRowOriginal }, Own: true));
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (_subjectModels.TryGet(slot.Edit.Part.Subject, slot.Edit.Part.Outfit) is { } model)
             foreach (var part in model.Parts)
@@ -4151,8 +4118,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                                  InputOfSlot(map.Slot) == TargetInputKind.Ramp))
                     {
                         string key = $"{map.BundleId}|{(map.PathId == 0 ? map.TextureName : map.PathId)}";
-                        string label = ReferenceEquals(map, own) ? "This material"
-                            : $"{part.Token} · {part.Materials[materialIndex].Name}";
+                        string label = ReferenceEquals(map, own) ? Strings.RampRowThisMaterial
+                            : $"{PartNames.Display(part.Token)} · {part.Materials[materialIndex].Name}";
                         if (!seen.Add(key))
                         {
                             var existing = found.First(candidate => !candidate.Own
@@ -4339,7 +4306,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             return null;
         }
         catch (Exception e) when (e is not OutOfMemoryException)
-        { return $"Couldn't export the toon ramp: {Reason(e)}"; }
+        { return Strings.RampExportFailed(Reason(e)); }
     }
 
     private void WriteGameRamp(SessionRampChoice choice, string destination)
@@ -4347,22 +4314,22 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         // Both of these are for the modder: the game files could not give the ramp up. They surface as they
         // are, and neither names the bundle it came from — which is the app's own address for it.
         byte[] bytes = TryDeobfuscateBundle(choice.Bundle!)
-            ?? throw new AuthoredRefusalException("Couldn't read this toon ramp from the game files.");
+            ?? throw new AuthoredRefusalException(Strings.RampGameReadFailed);
         var raw = new BundleReader().GetTextureHashSource(bytes, choice.Ref)
-            ?? throw new AuthoredRefusalException($"{choice.Texture} isn't in the game files any more.");
+            ?? throw new AuthoredRefusalException(Strings.RampNotInGameFiles(choice.Texture));
         if (raw.Width != Core.Migoto.RampConversion.RampWidth
             || raw.Height != Core.Migoto.RampConversion.RampHeight
             || !Core.Migoto.RampConversion.WriteRaw(raw, destination))
-            throw new InvalidDataException($"{choice.Texture} is not a 256×16 RGBAHalf toon ramp");
+            throw new InvalidDataException(Strings.RampNotToonRamp(choice.Texture));
     }
 
     public async Task<EditAssetResult?> AcceptDroppedPictureAsync(EditSlotRef slot, string path,
         IProgress<string> status, bool confirmed = false, EditTextureSharingOffer? offered = null)
     {
-        if (!File.Exists(path)) { status.Report($"{Path.GetFileName(path)} is no longer there."); return null; }
+        if (!File.Exists(path)) { status.Report(Strings.FileNoLongerThere(Path.GetFileName(path))); return null; }
         string name = Path.GetFileName(path);
         if (!slot.HasDrawableCarrier)
-        { status.Report(EditMapCardVm.NoDrawableCarrier); return null; }
+        { status.Report(Strings.MapNoDrawableCarrier); return null; }
         // Asked before the question rather than only at the bind below, so a picture that cannot land is
         // never confirmed first.
         var launch = TextureSharingAt(slot);
@@ -4379,9 +4346,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         // A picture that does not match the map's size is said before it is taken, never after.
         string size = await Task.Run(() => EditMapCardVm.SizeNote(PngInfo.TryPngSize(path),
             CurrentPictureSize(slot))) is { } note ? " " + note : "";
-        if (!confirmed && !await ConfirmAsync($"Apply {name}?",
-                $"{name} becomes this edit's {EditMapCardVm.MapInSentence(slot)}.{size}{consequence}",
-                "Apply")) return null;
+        if (!confirmed && !await ConfirmAsync(Strings.EditApplyTitle(name),
+                Strings.ApplyImageBecomesEditMap(name, EditMapCardVm.MapInSentence(slot)) + size + consequence,
+                Strings.Apply)) return null;
 
         TextureSharingSnapshot? shown = offered is { } cardOffer
             ? new TextureSharingSnapshot(cardOffer.Kind, cardOffer.Uses)
@@ -4409,7 +4376,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             }
             catch (Exception e)
             {
-                status.Report($"{name} couldn't be read as an image. {e.Message}");
+                status.Report(Strings.ImageUnreadable(name, e.Message));
                 return null;
             }
         }
@@ -4424,7 +4391,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         }
         catch (Exception e)
         {
-            status.Report($"{name} couldn't be read as an image. {Reason(e)}");
+            status.Report(Strings.ImageUnreadable(name, Reason(e)));
             return null;
         }
     }
@@ -4518,12 +4485,16 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     internal static string BlenderReturnCounts(int edits, int images, int unchangedParts)
     {
         string result = edits == 0 && images == 0
-            ? BlenderReturnNoChanges.TrimEnd('.')
-            : $"Blender sent back {edits} edit{(edits == 1 ? "" : "s")} and "
-              + $"{images} changed image{(images == 1 ? "" : "s")}";
-        if (unchangedParts > 0)
-            result += $" · {unchangedParts} unchanged part{(unchangedParts == 1 ? "" : "s")}";
-        return result + ".";
+            ? Strings.BlenderSentBackNothing
+            : Catalog.Plural(edits,
+                Catalog.Plural(images, Strings.BlenderSentBack_One_One(edits, images),
+                    Strings.BlenderSentBack_One_Other(edits, images)),
+                Catalog.Plural(images, Strings.BlenderSentBack_Other_One(edits, images),
+                    Strings.BlenderSentBack_Other_Other(edits, images)));
+        return unchangedParts > 0
+            ? Strings.BlenderReturnSummaryUnchanged(result, Catalog.Plural(unchangedParts,
+                Strings.BlenderUnchangedParts_One(unchangedParts), Strings.BlenderUnchangedParts_Other(unchangedParts)))
+            : Strings.BlenderReturnSummary(result);
     }
 
     private static bool IsBareCard(EditSlotRef slot) =>
@@ -4534,7 +4505,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             && state.Slot.Input == bare.Input
             && string.Equals(state.Slot.ShaderProperty, bare.ShaderProperty, StringComparison.Ordinal)
             && (state.Slot.MaterialSlotIndex ?? state.Slot.SubmeshIndex) == bare.MaterialSlotIndex)
-        ?? throw new AuthoredRefusalException("This map is no longer in the game files.");
+        ?? throw new AuthoredRefusalException(Strings.MapNotInGameFiles);
 
     internal EditAssetResult PublishFirstEditAsset(AuthoredEditSession session, EditSlotRef bare,
         string source, ProjectAssetKind kind, string label, ProjectAssetNormalization normalization,
@@ -4544,7 +4515,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         bool hasSlots = snapshot.TargetSlots.Any(slot => slot.Part.SameAs(bare.Edit.Part));
         var resolved = hasSlots ? null : ResolvePart(bare.Edit.Part)
             ?? throw new AuthoredRefusalException(
-                "This part isn't in the current game files, so there is nowhere to record its values.");
+                Strings.PartNotInstalledForValues);
         string handover = Path.Combine(ProjectAssetIngress.RootFor(snapshot), "sources",
             Guid.NewGuid().ToString("N") + Path.GetExtension(source));
         Directory.CreateDirectory(Path.GetDirectoryName(handover)!);
@@ -4582,7 +4553,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         if (EditSession is not { } session) return null;
         if (!slot.HasDrawableCarrier)
-        { status.Report(EditMapCardVm.NoDrawableCarrier); return null; }
+        { status.Report(Strings.MapNoDrawableCarrier); return null; }
         var launch = TextureSharingAt(slot);
         if (EditMapCardVm.RefusalFor(launch.Kind) is { } refused)
         { status.Report(refused); return null; }
@@ -4599,7 +4570,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         string? prepared = null;
         if (slot.ProjectRelativeFile is null && supplied is null)
         {
-            if (GameMapFor(slot) is not { } map) { status.Report(NoPictureBehindSlot); return null; }
+            if (GameMapFor(slot) is not { } map) { status.Report(Strings.NoPictureBehindSlot); return null; }
             label = PictureIngressLabel(snapshot, slot, supplied, map.TextureName);
             try
             {
@@ -4611,7 +4582,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             }
             catch (Exception e)
             {
-                status.Report($"Couldn't prepare {map.TextureName}: {Reason(e)}");
+                status.Report(Strings.MapPrepareFailed(map.TextureName, Reason(e)));
                 return null;
             }
         }
@@ -4625,7 +4596,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 {
                     var resolved = ResolvePart(slot.Edit.Part)
                         ?? throw new AuthoredRefusalException(
-                            "This part isn't in the current game files, so there is nowhere to record its values.");
+                            Strings.PartNotInstalledForValues);
                     detached.EnsurePartSlots(slot.Edit.Part, _ => resolved);
                 }
                 string editId = detached.CreateEdit(slot.Edit.Part);
@@ -4675,13 +4646,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         // Both of these reach the screen through the caller's "Couldn't prepare <texture>:" line, so neither
         // names the app's own address for the game files it could not read.
         byte[] bytes = TryDeobfuscateBundle(map.BundleId)
-            ?? throw new InvalidDataException("the game files behind it couldn't be read");
+            ?? throw new InvalidDataException(Strings.MapExportGameFilesUnreadable);
         // A float-format texture would decode to a lossy flattening and could never be encoded back, so it is
         // refused by name here rather than blamed on the game files below.
         if (TextureExport.Probe(bytes, map.Ref) is { Authorable: false })
-            throw new InvalidDataException("it is a float-format texture and cannot be edited here");
+            throw new InvalidDataException(Strings.MapExportFloatFormat);
         if (!TextureExport.ExportPng(new BundleReader(), bytes, map.TextureName, destination))
-            throw new InvalidDataException("it isn't in the game files any more");
+            throw new InvalidDataException(Strings.MapExportGone);
     }
 
     private GameAssetRef GameAsset(SubjectMap map) => new()
@@ -4717,7 +4688,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 RequireMapStillInMod(ingress.Owner.Snapshot(), ingress.LandedSlot ?? ingress.Slot);
             var liveSlot = LiveSlotFor(ingress);
             if (!liveSlot.HasDrawableCarrier)
-            { refuse.Report(PictureSaveGateRefusal(liveSlot, EditMapCardVm.NoDrawableCarrier)); return false; }
+            { refuse.Report(PictureSaveGateRefusal(liveSlot, Strings.MapNoDrawableCarrier)); return false; }
             var live = TextureSharingAt(liveSlot);
             if (EditMapCardVm.RefusalFor(live.Kind) is { } refused)
             { refuse.Report(PictureSaveGateRefusal(liveSlot, refused)); return false; }
@@ -4764,13 +4735,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 // Named the way the drop's own result line names its place — the edit, the map, the
                 // material — rather than "this map", which on a page the modder has moved since names
                 // nothing at all.
-                status.Report($"Saved {ingress.Label} to "
-                    + $"{liveSlot.Edit.Label}'s {EditMapCardVm.MapInSentence(liveSlot)}.");
+                status.Report(Strings.PictureSavedTo(ingress.Label, liveSlot.Edit.Label,
+                    EditMapCardVm.MapInSentence(liveSlot)));
             return true;
         }
         catch (Exception e)
         {
-            refuse.Report($"Couldn't apply the image editor's save: {Reason(e)}");
+            refuse.Report(Strings.PictureSaveApplyFailed(Reason(e)));
             return false;
         }
     }
@@ -4782,11 +4753,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 string.Equals(edit.Id, slot.Edit.EditDefinitionId, StringComparison.Ordinal)
                 && edit.Bindings.Any(binding =>
                     string.Equals(binding.SlotId, slot.SlotId, StringComparison.Ordinal))))
-            throw new AuthoredRefusalException(PictureMapRemoved);
+            throw new AuthoredRefusalException(Strings.PictureMapRemoved);
     }
-
-    internal const string PictureMapRemoved =
-        "the map it was opened for is no longer in the mod. Nothing was changed.";
 
     /// <summary>Resolve a long-lived editor transport's slot against its session now. The first save can
     /// change the binding from the game's value to a project picture, so the launch card is not live state.</summary>
@@ -4817,22 +4785,16 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     }
 
     internal static string PictureSaveSharingRefusal(EditSlotRef slot, int uses) =>
-        $"Couldn't save the image editor's file to {slot.Edit.Label}'s {EditMapCardVm.MapInSentence(slot)}: "
-        + EditMapCardVm.SharedConsentRequired(uses);
+        Strings.PictureSaveRefused(slot.Edit.Label, EditMapCardVm.MapInSentence(slot),
+            EditMapCardVm.SharedConsentRequired(uses));
 
     internal static string PictureSaveGateRefusal(EditSlotRef slot, string gate) =>
-        $"Couldn't save the image editor's file to {slot.Edit.Label}'s {EditMapCardVm.MapInSentence(slot)}: "
-        + $"{gate} Nothing was changed. The editor still has the file.";
+        Strings.PictureSaveGateRefused(slot.Edit.Label, EditMapCardVm.MapInSentence(slot), gate);
 
     /// <summary>What a save from the image editor says when the mod it belongs to is not the open one. The
     /// save waits in the editor's file, and that mod takes it when it next opens.</summary>
     internal static string PictureSaveModClosed(string mod) =>
-        $"The image editor saved a picture for '{mod}'. Open '{mod}' to apply it.";
-
-    /// <summary>A replacement's own map with nothing recorded on it yet: there is no game picture to start
-    /// from, so the exact card's drop route is the way in.</summary>
-    internal const string NoPictureBehindSlot =
-        "There is no image here yet. Drop a .png on this card to add one.";
+        Strings.PictureSaveModClosed(mod);
 
     // ---- shading values -----------------------------------------------------------------------------
 
@@ -4961,7 +4923,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         {
             if (MaterialValueCatalog.Field(field.Semantic) is not { } meta) continue;
             string? effectId = MaterialEffectCatalog.EffectForSemantic(meta.Semantic, present);
-            fields.Add(new EditShadingField(meta.Semantic, meta.Label, meta.Kind,
+            fields.Add(new EditShadingField(meta.Semantic, meta.DisplayLabel, meta.Kind,
                 meta.ObservedMin, meta.ObservedMax,
                 originals?.Value(meta),
                 effectId is not null && present.Contains(effectId) ? effectId : null,
@@ -4969,13 +4931,9 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         }
         var info = fields.Count == 0 && effects.Length == 0 ? null
             : new EditShadingInfo(fields.AsReadOnly(), Array.AsReadOnly(effects), operations);
-        return new EditShadingRead(info, info is { EffectOperations: null } ? EffectsUnreadable : null,
+        return new EditShadingRead(info, info is { EffectOperations: null } ? Strings.ShadingEffectsUnreadable : null,
             presentEffects);
     }
-
-    /// <summary>The material's values were read but its effects were not: the card keeps its values and
-    /// says so, and Copy compares values only.</summary>
-    internal const string EffectsUnreadable = "Couldn't read this material's effects.";
 
     private static TargetSlot ShadingProbe(GameAssetRef material) => new()
         {
@@ -4990,13 +4948,13 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         GameAssetRef? material = null)
     {
         var install = CurrentMaterialEvidence()
-            ?? throw new EditShadingFailureException(EditPageVm.ShadingInstallUnavailable);
+            ?? throw new EditShadingFailureException(Strings.ShadingInstallUnavailable);
         if (SubjectPartOf(part) is { } model)
             material = model.Materials.ElementAtOrDefault(materialSlotIndex) is { } selected
                 ? ShadingMaterial(install.Vfs, selected) : null;
         else material ??= ResolvePart(part)?.Materials?
             .FirstOrDefault(candidate => candidate.MaterialSlotIndex == materialSlotIndex)?.Material;
-        if (material is null) throw new EditShadingFailureException(NoAdjustableValues);
+        if (material is null) throw new EditShadingFailureException(Strings.ShadingNoAdjustableValues);
         var cache = MaterialShadingFor(install.Vfs);
         var read = await Task.Run(() => cache.GetOrRead(material));
         if (read.Problem is { } problem) throw new EditShadingFailureException(problem);
@@ -5010,7 +4968,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         try
         {
             var install = CurrentMaterialEvidence()
-                ?? throw new EditShadingFailureException(EditPageVm.ShadingInstallUnavailable);
+                ?? throw new EditShadingFailureException(Strings.ShadingInstallUnavailable);
             if (MainWindow is not { } owner) return null;
             // the resolver is page-thread state; only the bundle reads leave the thread
             var material = ResolvePart(edit.Part)?.Materials?
@@ -5032,7 +4990,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // On the status line, not in a modal of its own: this is one of the five things clicking Edit
             // values… can answer, and the other four all speak there. A dialog raised only to be dismissed
             // is a second gesture asked of the modder for news.
-            if (opened is null) throw new EditShadingFailureException(NoAdjustableValues);
+            if (opened is null) throw new EditShadingFailureException(Strings.ShadingNoAdjustableValues);
             var definition = project!.EditDefinitions.FirstOrDefault(candidate => candidate.Id == edit.EditDefinitionId);
             var effects = opened.Value.Info.Effects?.Select(effect => effect with
             {
@@ -5047,10 +5005,8 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 opened.Value.Values.UnreadableCopies, addsFirstEdit, effects);
         }
         catch (EditShadingFailureException) { throw; }
-        catch { throw new EditShadingFailureException(EditPageVm.EditShadingValuesFailed); }
+        catch { throw new EditShadingFailureException(Strings.ShadingValuesOpenFailed); }
     }
-
-    internal const string NoAdjustableValues = "This material's shader has no adjustable values.";
 
     /// <summary>The rows the Advanced editor shows: every field the material's drawn programs read, plus
     /// any field the edit already sets that they do not — a value a released project authored before
@@ -5117,7 +5073,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         try
         {
             if (_vfs is not { } vfs)
-                throw new EditShadingFailureException(EditPageVm.ShadingInstallUnavailable);
+                throw new EditShadingFailureException(Strings.ShadingInstallUnavailable);
             if (MainWindow is not { } owner) return null;
             if (SubjectPartOf(part) is { } model)
                 targetMaterial = model.Materials.ElementAtOrDefault(materialSlotIndex) is { } selected
@@ -5127,24 +5083,24 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             // read; nothing here resolves or parses a part merely to open the chooser.
             if (targetMaterial is { } known
                 && (known.PathId == 0 || string.IsNullOrWhiteSpace(known.LogicalBundle)))
-                throw new EditShadingFailureException(NoAdjustableValues);
+                throw new EditShadingFailureException(Strings.ShadingNoAdjustableValues);
             var picked = await ShadingSourcePickerWindow.Show(owner,
-                $"{materialLabel} · {PartToken(part)}",
+                $"{materialLabel} · {PartNames.Display(PartToken(part))}",
                 gone => Task.Run(() => ShadingSourceRows(part, materialSlotIndex, subjects,
                     vfs.CatalogVersion, gone), gone), _subjectModels.WaitForChangeAsync);
             if (picked?.Tag is not (TargetPart sourcePart, int sourceIndex, GameAssetRef sourceMaterial))
                 return null;
-            status.Report(EditPageVm.ReadingShadingValues);
+            status.Report(Strings.ShadingReadingValues);
             // The target material is needed only to compare the source the modder actually chose. Keep its
             // resolver/bundle work behind that choice and off the UI thread, so opening the list never waits
             // on a mesh read or on the shared resolver lock.
             var carrier = targetMaterial ?? await Task.Run(() => ResolvePart(part)?.Materials?
                 .FirstOrDefault(candidate => candidate.MaterialSlotIndex == materialSlotIndex)?.Material);
             if (carrier is null)
-                throw new EditShadingFailureException(NoAdjustableValues);
+                throw new EditShadingFailureException(Strings.ShadingNoAdjustableValues);
             var rows = await Task.Run(() => ShadingCopyRows(carrier, sourceMaterial, authored));
             if (rows is null)
-                throw new EditShadingFailureException(NoAdjustableValues);
+                throw new EditShadingFailureException(Strings.ShadingNoAdjustableValues);
             var targetRamp = ResolvePart(part)?.Materials?.FirstOrDefault(candidate =>
                 candidate.MaterialSlotIndex == materialSlotIndex)?.Textures?
                 .Any(texture => texture.Input == TargetInputKind.Ramp) == true;
@@ -5156,7 +5112,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                 sourceMaterial.Name ?? "", rows.SkippedUnreadable, rows.EffectsCompared);
         }
         catch (EditShadingFailureException) { throw; }
-        catch { throw new EditShadingFailureException(EditPageVm.CopyShadingFailed); }
+        catch { throw new EditShadingFailureException(Strings.ShadingCopyFailed); }
     }
 
     /// <summary>Every material of every part the mod's subjects have, except the target position itself.
@@ -5196,21 +5152,22 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
                         {
                             Subject = subject, Outfit = outfit, RendererSlot = part.SlotName,
                         };
+                        string partName = PartNames.Display(part.Token);
                         for (int materialIndex = 0; materialIndex < part.Materials.Count; materialIndex++)
                         {
                             var material = part.Materials[materialIndex];
                             if (material.PathId == 0 || string.IsNullOrWhiteSpace(material.Bundle)) continue;
                             string partLabel = subjects.Count > 1
-                                ? $"{part.Token} · {SubjectLabel(subject, outfit)}" : part.Token;
+                                ? $"{partName} · {SubjectLabel(subject, outfit)}" : partName;
                             string materialName = string.IsNullOrWhiteSpace(material.Name)
-                                ? $"material {materialIndex}" : material.Name;
+                                ? Strings.MaterialByPosition(materialIndex) : material.Name;
                             var exact = new GameAssetRef
                             {
                                 GameBuild = catalogVersion, LogicalBundle = material.Bundle!,
                                 PathId = material.PathId, Name = material.Name,
                             };
                             built.Add(new ShadingSourceRow(partLabel, materialName,
-                                (candidate, materialIndex, exact)));
+                                (candidate, materialIndex, exact), part.Token));
                         }
                     }
                     _shadingSourceRows[cacheKey] = cached = built;
@@ -5243,7 +5200,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
         IReadOnlyDictionary<string, string> authored)
     {
         var install = CurrentMaterialEvidence()
-            ?? throw new EditShadingFailureException(EditPageVm.ShadingInstallUnavailable);
+            ?? throw new EditShadingFailureException(Strings.ShadingInstallUnavailable);
         var cache = MaterialShadingFor(install.Vfs);
         var targetRead = cache.GetOrRead(carrier);
         if (targetRead.Problem is { } targetProblem) throw new EditShadingFailureException(targetProblem);
@@ -5320,7 +5277,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
             if (ConfirmForTests is { } confirm)
                 return await confirm(title, body, confirmLabel, dangerous);
             if (MainWindow is not { } owner) return false;
-            return await ConfirmWindow.Show(owner, title, body, confirmLabel, "Cancel", danger: dangerous);
+            return await ConfirmWindow.Show(owner, title, body, confirmLabel, Strings.Cancel, danger: dangerous);
         }
         catch { return false; }
     }
@@ -5331,7 +5288,7 @@ public partial class MainWindowViewModel : EditPage.IEditPageShell
     {
         try
         {
-            SelectedStep = "③ Build";
+            SelectedStep = WorkflowStep.Build;
             if (edit is not null) BuildPage.SelectEdit(edit);
         }
         catch { /* the step is a display choice; a failure to move is not worth taking a verb out for */ }

@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -40,7 +41,7 @@ public sealed class SessionRampRouteTests
 
         string refusal = Assert.IsType<string>(RampImage.RefuseAsRamp(path));
 
-        Assert.Contains(RampImage.Requirement, refusal);
+        Assert.Contains(Strings.RampRequirement, refusal);
     }
 
     [Fact]
@@ -52,7 +53,7 @@ public sealed class SessionRampRouteTests
 
         string refusal = Assert.IsType<string>(RampImage.RefuseAsRamp(path));
 
-        Assert.Contains(RampImage.Requirement, refusal);
+        Assert.Contains(Strings.RampRequirement, refusal);
     }
 
     [Fact]
@@ -65,7 +66,7 @@ public sealed class SessionRampRouteTests
 
         string refusal = Assert.IsType<string>(RampImage.RefuseAsRamp(path));
 
-        Assert.Contains(RampImage.Requirement, refusal);
+        Assert.Contains(Strings.RampRequirement, refusal);
     }
 
     [Fact]
@@ -125,7 +126,23 @@ public sealed class SessionRampRouteTests
 
         picker.Filter = "missing";
         Assert.Empty(picker.Visible);
-        Assert.Equal("No match for 'missing'.", picker.StateLine);
+        Assert.Equal(Strings.PickNoMatch("missing"), picker.StateLine);
+    }
+
+    [Fact]
+    public void Shading_source_filter_finds_a_part_by_its_token_whatever_name_it_shows()
+    {
+        var body = new ShadingSourceRow("身体", "Skin", new object(), "body");
+        var hair = new ShadingSourceRow("头发", "Bangs", new object(), "hair");
+        var picker = new ShadingSourcePickerVm();
+        picker.SetRows(new[] { body, hair });
+        picker.Read = EditSubjectRead.Answered;
+
+        picker.Filter = "hair";
+        Assert.Equal(new[] { hair }, picker.Visible.ToArray());
+
+        picker.Filter = "body skin";
+        Assert.Equal(new[] { body }, picker.Visible.ToArray());
     }
 
     [Fact]
@@ -148,7 +165,7 @@ public sealed class SessionRampRouteTests
         {
             waits++;
             Assert.Equal(GameFilesGate.SubjectReading, picker.StateLine);
-            Assert.NotEqual(ShadingSourcePickerVm.NoRowsLine, picker.StateLine);
+            Assert.NotEqual(Strings.ShadingSourceNoRows, picker.StateLine);
             Assert.Single(picker.Rows);
             shell.SubjectModels.GetOrBuild(subjects[1].Subject, subjects[1].Outfit,
                 () => ShadingModel(subjects[1].Subject, subjects[1].Outfit, "coat", 74002));
@@ -165,7 +182,7 @@ public sealed class SessionRampRouteTests
         picker.Read = EditSubjectRead.Reading;
         Assert.Equal(GameFilesGate.SubjectReading, picker.StateLine);
         picker.Read = EditSubjectRead.Answered;
-        Assert.Equal(ShadingSourcePickerVm.NoRowsLine, picker.StateLine);
+        Assert.Equal(Strings.ShadingSourceNoRows, picker.StateLine);
     }
 
     [Fact]
@@ -259,7 +276,7 @@ public sealed class SessionRampRouteTests
         await picker.LoadAsync();
 
         Assert.True(picker.HasNoRows);
-        Assert.Equal("No toon ramps were found.", RampPickerVm.NoRowsLine);
+        Assert.Equal("No toon ramps were found.", Strings.RampPickerNoRows);
         picker.Dispose();
     }
 
@@ -281,7 +298,7 @@ public sealed class SessionRampRouteTests
         var row = Assert.Single(load.Rows);
         Assert.Equal(choice, row.Choice);
         Assert.Equal("Vesna · Default · Body", row.Title);
-        Assert.Equal("and 1 more", row.Source);
+        Assert.Equal(Strings.RampRowAndMore_One(1), row.Source);
         Assert.Contains("Vesna · Default · Body", row.SourcesTip);
         Assert.Contains("Vesna · Default · Coat", row.SourcesTip);
         Assert.True(row.IsBound);
@@ -349,7 +366,7 @@ public sealed class SessionRampRouteTests
 
         Assert.Equal("Body ramp.dds", suggestion);
         Assert.Equal(picker.Selected!.Choice, written);
-        Assert.Equal("\u2713 Exported chosen.dds", picker.Note);
+        Assert.Equal(Strings.RampPickerExported("chosen.dds"), picker.Note);
         picker.Dispose();
     }
 

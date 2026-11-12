@@ -101,7 +101,7 @@ public sealed partial class AuthoredEditSession
         {
             ArgumentNullException.ThrowIfNull(target);
             AuthoredEditSession.EnsurePartSlots(_project, target,
-                resolved ?? throw new AuthoredRefusalException(PartNotInstalled));
+                resolved ?? throw new AuthoredRefusalException(CoreStrings.SessionPartNotInstalled));
         }
 
         /// <summary>Add one content edit to a part, fresh from vanilla. Returns its id, which the rest of

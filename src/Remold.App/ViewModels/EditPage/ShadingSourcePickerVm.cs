@@ -8,10 +8,12 @@ using Remold.Core;
 
 namespace Remold.App.ViewModels.EditPage;
 
-/// <summary>One material another material's shading can be copied from: where it is, and its name.</summary>
-public sealed record ShadingSourceRow(string PartLabel, string MaterialName, object Tag)
+/// <summary>One material another material's shading can be copied from: where it is, and its name.
+/// <paramref name="FilterExtra"/> is text the row is findable by without showing it: the part's token, so the
+/// game's own word finds the part whatever language its shown name is in.</summary>
+public sealed record ShadingSourceRow(string PartLabel, string MaterialName, object Tag, string FilterExtra = "")
 {
-    public string Haystack => (PartLabel + " " + MaterialName).ToLowerInvariant();
+    public string Haystack => (PartLabel + " " + MaterialName + " " + FilterExtra).ToLowerInvariant();
 
     public override string ToString() => $"{PartLabel} \u00b7 {MaterialName}";
 }
@@ -50,10 +52,8 @@ public sealed partial class ShadingSourcePickerVm : ObservableObject
     public string StateLine => Failure is { Length: > 0 } failure ? failure
         : Read == EditSubjectRead.Reading ? GameFilesGate.SubjectReading
         : Read == EditSubjectRead.Unreadable ? GameFilesGate.SubjectUnreadable
-        : Rows.Count == 0 ? NoRowsLine
+        : Rows.Count == 0 ? Strings.ShadingSourceNoRows
         : MainWindowViewModel.NoMatchLine(Filter, Visible.Count);
-
-    public const string NoRowsLine = "No other materials in this mod.";
 
     /// <summary>Poll the cache-only producer while any subject is still warming. Each snapshot is folded into
     /// the rows already on screen, so a warm subject is usable immediately and a later one never replaces it.</summary>

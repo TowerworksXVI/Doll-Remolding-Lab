@@ -15,6 +15,7 @@ using Avalonia.Threading;
 using Remold.App.ViewModels;
 using Remold.Core;
 using Remold.Core.Migoto;
+using Remold.Core.Text;
 using Remold.Core.Textures;
 
 namespace Remold.App.Views;
@@ -40,6 +41,7 @@ public sealed class SettingsInput
     /// offering to arm a request that already stands.</summary>
     public bool ForceRescanOwed { get; init; }
     public int? EncoderCpuLimit { get; init; }             // null = all cores
+    public string? Language { get; init; }                 // null = English
 }
 
 /// <summary>The edited settings the user accepted. A null field means "fall back" — auto-detect, OS
@@ -68,6 +70,47 @@ public sealed class SettingsResult
     /// leaves the standing debt for the next rescan to honour.</summary>
     public bool ForceRescanWasOwed { get; set; }
     public int? EncoderCpuLimit { get; set; }              // null = all cores
+    /// <summary>The UI language tag, or null for English. Applies the next time the app starts.</summary>
+    public string? Language { get; set; }
+}
+
+/// <summary>One item in the Language row's list: what it shows and the tag a Save stores for it, null for
+/// English.</summary>
+internal sealed record LanguageChoice(string Display, string? Tag)
+{
+    public override string ToString() => Display;
+}
+
+/// <summary>The Language row's list and what it opens on, kept off the window so it can be exercised
+/// without a UI runtime.</summary>
+internal static class LanguageRow
+{
+    /// <summary>The offered languages in menu order, English storing null. A stored tag opens on the listed
+    /// language it selects at startup (<see cref="Catalog.Resolve"/>): <c>zh-CN</c>, <c>zh-SG</c> and any
+    /// case of <c>zh-Hans</c> open on Simplified Chinese, and <c>en</c> in any case on English. Any other
+    /// tag, such as the pseudolocale or a tag from a newer build, gets one more item showing the raw tag, and
+    /// the row opens on it.</summary>
+    internal static (IReadOnlyList<LanguageChoice> Choices, LanguageChoice Selected) Choices(string? stored)
+    {
+        var choices = Catalog.Languages
+            .Select(language => new LanguageChoice(language.DisplayName,
+                language.Tag == Catalog.English ? null : language.Tag))
+            .ToList();
+        if (string.IsNullOrEmpty(stored)) return (choices, choices[0]);
+        string resolved = Catalog.Resolve(stored);
+        var listed = resolved == Catalog.English
+            ? (string.Equals(stored, Catalog.English, StringComparison.OrdinalIgnoreCase) ? choices[0] : null)
+            : choices.FirstOrDefault(choice => choice.Tag == resolved);
+        if (listed is not null) return (choices, listed);
+        var raw = new LanguageChoice(stored, stored);
+        choices.Add(raw);
+        return (choices, raw);
+    }
+
+    /// <summary>What a Save stores: the tag of the item the row shows. A listed item writes its own tag, so a
+    /// stored <c>zh-CN</c> the row opened on Simplified Chinese is written back as <c>zh-Hans</c>; the raw
+    /// item carries the stored tag exactly as it was.</summary>
+    internal static string? Stored(LanguageChoice? picked, LanguageChoice opened) => (picked ?? opened).Tag;
 }
 
 /// <summary>What one validated row shows at rest: the glyph beside its box, and the words that hang off it.
@@ -90,14 +133,10 @@ internal static class SettingsValidation
         var text = typed?.Trim() ?? "";
         if (text.Length == 0) return true;
         if (int.TryParse(text, out int n) && n > 0) { value = n; return true; }
-        reason = CpuNotANumber;
+        reason = Strings.SettingsCpuNotANumber;
         return false;
     }
 
-    /// <summary>What the CPU box refuses on: the diagnosis, then both ways out — a count, or the blank that
-    /// means every core. The same two-sentence shape the loader and projects-folder verdicts take.</summary>
-    internal const string CpuNotANumber =
-        "Not a whole number above 0. Enter a number of cores, or leave it blank to use all of them.";
 
     /// <summary>Which rows can hold the form shut. Each of the three names a value the app goes on to act on
     /// with nothing to fall back to: a game path that resolves to no install, a projects folder that refuses
@@ -113,7 +152,7 @@ internal static class SettingsValidation
     /// <summary>What a refused Save reads on the form-level line: it names the glyph the rows holding it shut
     /// are wearing, so the sentence and the rows point at each other. Built from
     /// <see cref="GlyphBlocking"/> itself — the line can't come to name a glyph the rows don't show.</summary>
-    internal const string SaveRefused = "Cannot save yet. Fix the rows marked " + GlyphBlocking + " first.";
+    internal static string SaveRefused => Strings.SettingsSaveRefused(GlyphBlocking);
 
     /// <summary>The form-level line after a Save attempt, or null when there is nothing for it to say. A Save
     /// the rows let through closes the form, so the only thing left to report is the refusal — and reporting
@@ -139,9 +178,6 @@ internal static class SettingsValidation
     /// here, so the severity is picked in one place whoever asked for the reading.</summary>
     internal static RowReading Reading(bool ok, bool blocking, string text) => new(RowGlyph(ok, blocking), text);
 
-    /// <summary>What a row shows when its own rule threw. Not a verdict on the value — nothing was read — so
-    /// it cautions rather than stopping, and Save runs the rule again for real.</summary>
-    internal const string CheckFailed = "Couldn't check this value.";
 
     // ── what an empty box says ────────────────────────────────────────────────────────────────────────
     // The form answers "what is this set to" for every row at once, so a blank box is a reading of its own
@@ -149,20 +185,19 @@ internal static class SettingsValidation
     // the loader — the one setting with no fallback and no default — shows nothing, because it is optional
     // and the Launch command is where an unset loader is worth saying something about.
 
-    internal const string GameNotSet = "Not set. The app asks for the game folder on the main screen.";
 
     /// <summary>Blank game folder. A caution, not a stop: the form saves with it empty and the main screen
     /// asks for the folder, so this reports an unfinished setting rather than a refused one.</summary>
-    internal static RowReading BlankGameRow() => new(GlyphAdvisory, GameNotSet);
+    internal static RowReading BlankGameRow() => new(GlyphAdvisory, Strings.SettingsGameNotSet);
 
     /// <summary>Blank projects folder. An all-clear naming the library that stands in, so the row answers
     /// where New Mod will put things rather than leaving the modder to know the default.</summary>
     internal static RowReading BlankProjectsRow(string defaultLibrary) =>
-        new(GlyphOk, $"Using the default projects folder: {defaultLibrary}.");
+        new(GlyphOk, Strings.SettingsProjectsDefault(defaultLibrary));
 
     /// <summary>Blank CPU limit. An all-clear naming the number of cores it comes to.</summary>
     internal static RowReading BlankCpuRow(int processorCount) =>
-        new(GlyphOk, $"Using every core ({processorCount}).");
+        new(GlyphOk, Strings.SettingsCpuEveryCore(processorCount));
 
     /// <summary>Blank 3DMigoto loader: nothing to show. The loader is optional; Launch is the only live
     /// action that wants one, and it says so itself.</summary>
@@ -173,27 +208,15 @@ internal static class SettingsValidation
     /// looked at.</summary>
     internal static RowReading CpuRow(string? typed, int processorCount) =>
         CpuLimit(typed, out var value, out var reason)
-            ? value is { } n ? new RowReading(GlyphOk, $"Capped at {n} core{(n == 1 ? "" : "s")}.") : BlankCpuRow(processorCount)
+            ? value is { } n
+                ? new RowReading(GlyphOk, Catalog.Plural(n, Strings.SettingsCpuCapped_One(n), Strings.SettingsCpuCapped_Other(n)))
+                : BlankCpuRow(processorCount)
             : Reading(ok: false, blocking: true, reason!);
 
-    internal const string LoaderNotThere = "That file isn't there. Select the loader exe.";
 
-    /// <summary>An exe with no 3DMigoto configuration beside it. Names the OUTCOME rather than the missing
-    /// file: the modder picking this row has no reason to know what the ini is, and a filename in the verdict
-    /// reads as something to go and create.</summary>
-    internal const string LoaderNoIni =
-        "This doesn't look like a 3DMigoto loader, so mods won't show up in game. Select the loader exe.";
 
-    /// <summary>What the Settings row's hookless-host verdict adds to the shared sentence: on THIS surface
-    /// the reading is advisory and the form still commits, so the row says so rather than leaving the modder
-    /// hunting for the thing holding their Save.
-    /// <para>Composed here rather than folded into <see cref="LoaderGate.NoTextureHook"/> because the
-    /// Settings reading is advisory and the form still commits.</para></summary>
-    internal const string LoaderStillSaveable =
-        "Select a different loader exe. You can still save Settings.";
 
-    internal const string LoaderNoHook = LoaderGate.NoTextureHook + " " + LoaderStillSaveable;
-    internal const string LoaderReady = "Mods you build will show up in game with this 3DMigoto.";
+    internal static string LoaderNoHook => Strings.LoaderNoTextureHook + " " + Strings.SettingsLoaderStillSaveable;
 
     /// <summary>Whether the 3DMigoto box names a loader a built mod would actually fire on, or the plain
     /// reason it doesn't. Blank is allowed and always passes — the loader is optional, and Launch is the
@@ -207,9 +230,9 @@ internal static class SettingsValidation
     {
         var text = typed?.Trim() ?? "";
         if (text.Length == 0) return null;
-        if (!File.Exists(text)) return LoaderNotThere;
+        if (!File.Exists(text)) return Strings.SettingsLoaderNotThere;
         var ini = MigotoIni.Read(text);
-        if (!ini.Found) return LoaderNoIni;
+        if (!ini.Found) return Strings.SettingsLoaderNoIni;
         if (!ini.HasTextureHook) return LoaderNoHook;
         return null;
     }
@@ -219,9 +242,6 @@ internal static class SettingsValidation
     /// if the value never lands — see <see cref="RemoveCreatedFolders"/>.</param>
     internal readonly record struct ProjectsFolderCheck(bool Ok, string? Reason, IReadOnlyList<string> Created);
 
-    internal const string NotWritableFolder = "Not a writable folder. Select one the app can create files in.";
-    internal const string WritableFolder = "New mod can create project folders here.";
-    internal const string WillBeCreated = "Will be created on Save.";
 
     /// <summary>Whether the projects-folder box names somewhere mods can actually be created. Blank is the
     /// default library and always passes. A named folder is created if it isn't there yet and then probed
@@ -250,7 +270,7 @@ internal static class SettingsValidation
         {
             DeleteProbe(probe);
             RemoveCreatedFolders(created);
-            return new ProjectsFolderCheck(false, NotWritableFolder, Array.Empty<string>());
+            return new ProjectsFolderCheck(false, Strings.SettingsNotWritableFolder, Array.Empty<string>());
         }
         DeleteProbe(probe);
         return new ProjectsFolderCheck(true, null, created);
@@ -271,18 +291,18 @@ internal static class SettingsValidation
         {
             if (!Directory.Exists(text))
                 return CanBeCreated(text)
-                    ? new ProjectsFolderCheck(true, WillBeCreated, Array.Empty<string>())
-                    : new ProjectsFolderCheck(false, NotWritableFolder, Array.Empty<string>());
+                    ? new ProjectsFolderCheck(true, Strings.SettingsWillBeCreated, Array.Empty<string>())
+                    : new ProjectsFolderCheck(false, Strings.SettingsNotWritableFolder, Array.Empty<string>());
             var probe = Path.Combine(text, "." + Guid.NewGuid().ToString("N") + ".probe");
             try { File.WriteAllBytes(probe, Array.Empty<byte>()); }
-            catch { return new ProjectsFolderCheck(false, NotWritableFolder, Array.Empty<string>()); }
+            catch { return new ProjectsFolderCheck(false, Strings.SettingsNotWritableFolder, Array.Empty<string>()); }
             finally { DeleteProbe(probe); }
-            return new ProjectsFolderCheck(true, WritableFolder, Array.Empty<string>());
+            return new ProjectsFolderCheck(true, Strings.SettingsWritableFolder, Array.Empty<string>());
         }
         catch
         {
             // a path no file system takes: the shape fails before anything is read
-            return new ProjectsFolderCheck(false, NotWritableFolder, Array.Empty<string>());
+            return new ProjectsFolderCheck(false, Strings.SettingsNotWritableFolder, Array.Empty<string>());
         }
     }
 
@@ -358,17 +378,8 @@ internal sealed class RowGeneration
 /// </summary>
 public sealed class SettingsWindow : Window
 {
-    // The stand-in for a rejected path the locator gave no reason for. It is a fallback only: a folder that
-    // failed for a reason the locator can name says THAT instead, so the row doesn't tell a modder to pick
-    // the folder they just correctly picked.
-    private const string WrongFolderHint = "Select the folder that contains GF2_Exilium.exe.";
 
-    // What the row says once the box holds a path that resolves — Re-detect, Browse and Save all land here.
-    private const string GameFound = "Found the game install.";
 
-    // What a Re-detect that found nothing says. It reads as a caution, not a stop: the search changed nothing
-    // in the box, so whatever the modder already typed there still stands and may be perfectly good.
-    private const string NoGameDetected = "No game found. Browse to the install folder.";
 
     // The app's throbber, in the glyph and style class MainWindow's status bar and the Build footer pulse.
     private const string PulseGlyph = "◌";
@@ -406,6 +417,8 @@ public sealed class SettingsWindow : Window
     private readonly TextBox _authorBox;
     private readonly CheckBox _repairDataBox;
     private readonly ComboBox _editorBox;
+    private readonly ComboBox _languageBox;
+    private readonly LanguageChoice _languageOpened;
     private readonly TextBox _cpuBox;
     private readonly RowVerdict _cpuVerdict = new();
     private readonly LiveRow _cpuRow;
@@ -425,9 +438,9 @@ public sealed class SettingsWindow : Window
         public override string ToString() => Display;
     }
 
-    private SettingsWindow(SettingsInput input)
+    internal SettingsWindow(SettingsInput input)
     {
-        Title = "Settings";
+        Title = Strings.SettingsTitle;
         // Wide enough for a row's hint to land on one line beside a label column that sizes to its longest
         // label — the paths themselves are longer than any width, and the boxes scroll.
         Width = 730;
@@ -450,55 +463,71 @@ public sealed class SettingsWindow : Window
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*") };
         int row = 0;
 
+        // ── Language ──────────────────────────────────────────────────────────
+        // The first row, so a modder who cannot read the UI language finds the way back where the form
+        // starts. Read once at startup, before any window exists, so a Save changes nothing on screen until
+        // the next launch; the hint says so.
+        var (languages, openedOn) = LanguageRow.Choices(input.Language);
+        _languageOpened = openedOn;
+        _languageBox = new ComboBox
+        {
+            ItemsSource = languages,
+            SelectedItem = openedOn,
+            Width = 280,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        AddRow(grid, ref row, Strings.SettingsLanguageLabel, _languageBox, Hint(Strings.SettingsLanguageHint));
+
         // ── Game folder ───────────────────────────────────────────────────────
         // Read when the form opens and again after every edit. The game path is the ROOT (the folder holding
         // GF2_Exilium.exe) — the one canonical value everywhere.
-        _gameBox = new TextBox { Text = _gamePath ?? "", Watermark = "Path to the game folder", VerticalAlignment = VerticalAlignment.Center };
+        _gameBox = new TextBox { Text = _gamePath ?? "", Watermark = Strings.SettingsGameWatermark, VerticalAlignment = VerticalAlignment.Center };
         _gameRow = new LiveRow(_gameBox, _gameVerdict, ReadGameRow, offThread: true, EditDebounce, () => _closed);
-        var gameRe = SmallButton("Re-detect");
+        var gameRe = SmallButton(Strings.SettingsRedetect);
         gameRe.Click += (_, _) => RedetectGame();
-        var gameBrowse = SmallButton("Browse…");
+        var gameBrowse = SmallButton(Strings.Browse);
         gameBrowse.Click += async (_, _) => await BrowseGame();
-        AddRow(grid, ref row, "Game folder", WithVerdict(_gameBox, _gameVerdict), null, gameRe, gameBrowse);
+        AddRow(grid, ref row, Strings.SettingsGameLabel, WithVerdict(_gameBox, _gameVerdict), null, gameRe, gameBrowse);
 
         // ── Blender ───────────────────────────────────────────────────────────
         // Blank = auto-detect; an explicit exe when more than one Blender is installed.
         _blenderBox = new TextBox
         {
             Text = _blenderPath ?? "",
-            Watermark = $"Auto-detect · {_blenderAuto ?? "not found"}",
+            Watermark = _blenderAuto is { } found
+                ? Strings.SettingsBlenderAutoFound(found) : Strings.SettingsBlenderAutoNotFound,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        var blenderAutoBtn = SmallButton("Auto");
+        var blenderAutoBtn = SmallButton(Strings.SettingsBlenderAuto);
         blenderAutoBtn.Click += (_, _) => _blenderBox.Text = "";   // blank → auto-detect
-        var blenderBrowse = SmallButton("Browse…");
-        blenderBrowse.Click += async (_, _) => await BrowseExe("Locate blender.exe", "Blender", new[] { "blender.exe" },
+        var blenderBrowse = SmallButton(Strings.Browse);
+        blenderBrowse.Click += async (_, _) => await BrowseExe(Strings.SettingsLocateBlender, Strings.SettingsBlenderFilter, new[] { "blender.exe" },
             p => _blenderBox.Text = p);
-        var blenderHint = Hint("Blank auto-detects. Set a path if more than one Blender is installed.");
-        AddRow(grid, ref row, "Blender", _blenderBox, blenderHint, blenderAutoBtn, blenderBrowse);
+        var blenderHint = Hint(Strings.SettingsBlenderHint);
+        AddRow(grid, ref row, Strings.SettingsBlenderLabel, _blenderBox, blenderHint, blenderAutoBtn, blenderBrowse);
 
         // ── Image editor ──────────────────────────────────────────────────────
         _editorBox = BuildEditorBox(input.DetectedEditors);
-        var editorBrowse = SmallButton("Browse…");
-        editorBrowse.Click += async (_, _) => await BrowseExe("Locate an image editor", "Programs", new[] { "*.exe" },
+        var editorBrowse = SmallButton(Strings.Browse);
+        editorBrowse.Click += async (_, _) => await BrowseExe(Strings.SettingsLocateImageEditor, Strings.SettingsProgramsFilter, new[] { "*.exe" },
             p => SelectCustomEditor(p));
-        AddRow(grid, ref row, "Image editor", _editorBox, null, editorBrowse);
+        AddRow(grid, ref row, Strings.SettingsImageEditorLabel, _editorBox, null, editorBrowse);
 
         // ── Projects folder ───────────────────────────────────────────────────
         // Blank = the default library. This is where the app's own mod PROJECTS live — not the game's.
-        _libraryBox = new TextBox { Text = _libraryRoot ?? "", Watermark = $"Default · {_defaultLibrary}", VerticalAlignment = VerticalAlignment.Center };
+        _libraryBox = new TextBox { Text = _libraryRoot ?? "", Watermark = Strings.SettingsProjectsWatermark(_defaultLibrary), VerticalAlignment = VerticalAlignment.Center };
         _libraryRow = new LiveRow(_libraryBox, _libraryVerdict, ReadLibraryRow, offThread: true, EditDebounce, () => _closed);
-        var libDefault = SmallButton("Default");
+        var libDefault = SmallButton(Strings.SettingsProjectsDefaultButton);
         // blank → default library, answered for on the spot rather than waiting out the debounce the edit
         // armed: the three escape buttons on this form (Clear, Default, All cores) name a fallback, and the
         // row says which one.
         libDefault.Click += (_, _) => { _libraryBox.Text = ""; _libraryRow.Evaluate(); };
-        var libBrowse = SmallButton("Browse…");
+        var libBrowse = SmallButton(Strings.Browse);
         // A picked folder is answered for on the spot, like the game path's own Browse: the pick is the moment
         // the modder is looking at the row, and a share that refuses writes is worth knowing then, not on Save.
         libBrowse.Click += async (_, _) =>
         {
-            var p = await PickFolder("Choose the projects folder");
+            var p = await PickFolder(Strings.SettingsChooseProjectsFolder);
             if (p is null) return;
             _libraryBox.Text = p;
             int id = _libraryRow.Begin();   // this answer outranks the re-read the box's own edit armed
@@ -506,11 +535,10 @@ public sealed class SettingsWindow : Window
             var check = await Task.Run(() => SettingsValidation.ProjectsFolder(p));
             SettingsValidation.RemoveCreatedFolders(check.Created);   // a browse commits nothing
             _libraryRow.Apply(id, SettingsValidation.Reading(check.Ok, blocking: true,
-                check.Ok ? SettingsValidation.WritableFolder : check.Reason!));
+                check.Ok ? Strings.SettingsWritableFolder : check.Reason!));
         };
-        var libHint = Hint("Where New mod creates project folders. A typed folder is created on Save. "
-            + "Open mods stay where they are.");
-        AddRow(grid, ref row, "Projects folder", WithVerdict(_libraryBox, _libraryVerdict),
+        var libHint = Hint(Strings.SettingsProjectsHint);
+        AddRow(grid, ref row, Strings.SettingsProjectsLabel, WithVerdict(_libraryBox, _libraryVerdict),
             libHint, libDefault, libBrowse);
 
         // ── 3DMigoto loader ───────────────────────────────────────────────────
@@ -520,47 +548,46 @@ public sealed class SettingsWindow : Window
         _migotoBox = new TextBox
         {
             Text = _migotoLoaderExe ?? "",
-            Watermark = "Path to the loader exe beside the Mods folder",
+            Watermark = Strings.SettingsLoaderWatermark,
             VerticalAlignment = VerticalAlignment.Center,
         };
         _migotoRow = new LiveRow(_migotoBox, _migotoVerdict, ReadMigotoRow, offThread: true, EditDebounce, () => _closed);
-        var migotoClear = SmallButton("Clear");
+        var migotoClear = SmallButton(Strings.SettingsLoaderClear);
         // blank → unset, which this row shows as nothing at all: the loader is optional, and Launch is where
         // an unset one is worth a word.
         migotoClear.Click += (_, _) => { _migotoBox.Text = ""; _migotoRow.Evaluate(); };
-        var migotoBrowse = SmallButton("Browse…");
+        var migotoBrowse = SmallButton(Strings.Browse);
         // A picked exe is answered for on the spot, like the game and projects rows: the pick is the moment
         // the modder is looking at this row, and "this 3DMigoto can't fire a mod" is worth knowing then
         // rather than after a build. The ini read is disk, so it waits off-thread.
         migotoBrowse.Click += async (_, _) =>
         {
-            if (await PickExe("Locate the 3DMigoto loader", "Programs", new[] { "*.exe" }) is not { } p) return;
+            if (await PickExe(Strings.SettingsLocateLoader, Strings.SettingsProgramsFilter, new[] { "*.exe" }) is not { } p) return;
             _migotoBox.Text = p;
             int id = _migotoRow.Begin();   // this answer outranks the re-read the box's own edit armed
             _migotoRow.Pulse();   // the ini tree is disk, and a loader on a share can hold for its timeout
             var why = await Task.Run(() => SettingsValidation.MigotoLoaderExe(p));
             _migotoRow.Apply(id, SettingsValidation.Reading(why is null, blocking: false,
-                why ?? SettingsValidation.LoaderReady));
+                why ?? Strings.SettingsLoaderReady));
         };
-        var migotoHint = Hint("3DMigoto Loader.exe, or SSMT's per-game Run.exe. Launch starts it before the game.");
-        AddRow(grid, ref row, "3DMigoto loader", WithVerdict(_migotoBox, _migotoVerdict),
+        var migotoHint = Hint(Strings.SettingsLoaderHint);
+        AddRow(grid, ref row, Strings.SettingsLoaderLabel, WithVerdict(_migotoBox, _migotoVerdict),
             migotoHint, migotoClear, migotoBrowse);
 
         // ── Author ────────────────────────────────────────────────────────────
-        _authorBox = new TextBox { Text = input.Author, Watermark = "Name or handle", Width = 240, HorizontalAlignment = HorizontalAlignment.Left };
-        var authorHint = Hint("Default for new mods. Existing mods keep their own.");
-        AddRow(grid, ref row, "Author", _authorBox, authorHint);
+        _authorBox = new TextBox { Text = input.Author, Watermark = Strings.SettingsAuthorWatermark, Width = 240, HorizontalAlignment = HorizontalAlignment.Left };
+        var authorHint = Hint(Strings.SettingsAuthorHint);
+        AddRow(grid, ref row, Strings.SettingsAuthorLabel, _authorBox, authorHint);
 
         // ── Repair data ───────────────────────────────────────────────────────
         // Seeds new mods only. Each project carries its own serialized choice after creation.
         _repairDataBox = new CheckBox
         {
-            Content = "New mods are editable by others",
+            Content = Strings.SettingsEditableCheck,
             IsChecked = input.IncludeRepairData,
         };
-        var repairHint = Hint("Lets Doll Remolding Lab import a built mod and rebuild it. "
-            + "Default for new mods. Existing mods keep their own.");
-        AddRow(grid, ref row, "Editable mods", _repairDataBox, repairHint);
+        var repairHint = Hint(Strings.SettingsEditableHint);
+        AddRow(grid, ref row, Strings.SettingsEditableLabel, _repairDataBox, repairHint);
 
         // ── CPU limit ─────────────────────────────────────────────────────────
         // Blank = every logical processor. The one value behind all of the app's wide parallel work.
@@ -569,18 +596,18 @@ public sealed class SettingsWindow : Window
         {
             Text = _encoderCpuLimit?.ToString() ?? "",
             // the fallback named with the number it comes to, like the Blender and library rows name theirs
-            Watermark = $"All cores · {Environment.ProcessorCount}",
+            Watermark = Strings.SettingsCpuWatermark(Environment.ProcessorCount),
             Width = 130,
             HorizontalAlignment = HorizontalAlignment.Left,
         };
         // The rule here is a parse, not a folder tree, so the row answers on the keystroke with no debounce
         // to wait out.
         _cpuRow = new LiveRow(_cpuBox, _cpuVerdict, ReadCpuRow, offThread: false, TimeSpan.Zero, () => _closed);
-        var cpuAll = SmallButton("All cores");
+        var cpuAll = SmallButton(Strings.SettingsCpuAllCores);
         // blank → every logical processor, which the row names — the same escape as the loader's Clear and the
         // projects folder's Default.
         cpuAll.Click += (_, _) => _cpuBox.Text = "";
-        var cpuHint = Hint("Caps texture encoding, building and reading game files. Blank uses every core.");
+        var cpuHint = Hint(Strings.SettingsCpuHint);
         // The box is a fixed 130 rather than the line's width, so its glyph rides beside the box itself
         // instead of docking to the far right of the line, where it would read as the button's.
         var cpuLine = new StackPanel
@@ -589,7 +616,7 @@ public sealed class SettingsWindow : Window
             HorizontalAlignment = HorizontalAlignment.Left,
             Children = { _cpuBox, _cpuVerdict.Glyph },
         };
-        AddRow(grid, ref row, "CPU limit", cpuLine, cpuHint, cpuAll);
+        AddRow(grid, ref row, Strings.SettingsCpuLabel, cpuLine, cpuHint, cpuAll);
 
         // ── one-shot actions ──────────────────────────────────────────────────
         // Everything above is a value that STAYS; the two rows below are single actions that fire once with
@@ -602,8 +629,8 @@ public sealed class SettingsWindow : Window
         // the label reports what is PENDING rather than claiming it already happened.
         _clearRecentsButton = SmallButton(RecentLabel(input.RecentCount));
         _clearRecentsButton.IsEnabled = input.RecentCount > 0;
-        _clearRecentsButton.Click += (_, _) => { _clearRecents = true; _clearRecentsButton.IsEnabled = false; _clearRecentsButton.Content = RecentsPendingLabel; };
-        AddRow(grid, ref row, "Recent mods", _clearRecentsButton);
+        _clearRecentsButton.Click += (_, _) => { _clearRecents = true; _clearRecentsButton.IsEnabled = false; _clearRecentsButton.Content = Strings.SettingsRecentsPending; };
+        AddRow(grid, ref row, Strings.SettingsRecentsLabel, _clearRecentsButton);
 
         // ── Force rescan ──────────────────────────────────────────────────────
         // Armed like the Recents row above: the click only ARMS, Save fires it, and Cancel drops the form
@@ -622,11 +649,11 @@ public sealed class SettingsWindow : Window
             _forceRescan = !_forceRescan;
             _forceRescanButton.Content = ForceRescanButtonLabel(_forceRescan);
         };
-        AddRow(grid, ref row, ForceRescanLabel, _forceRescanButton, Hint(ForceRescanHint));
+        AddRow(grid, ref row, Strings.SettingsForceRescanLabel, _forceRescanButton, Hint(Strings.SettingsForceRescanHint));
 
-        var save = new Button { Content = "Save", IsDefault = true, Padding = new Thickness(16, 6) };
+        var save = new Button { Content = Strings.SettingsSave, IsDefault = true, Padding = new Thickness(16, 6) };
         save.Classes.Add("primary");
-        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6) };
+        var cancel = new Button { Content = Strings.Cancel, IsCancel = true, Padding = new Thickness(16, 6) };
         // Every row's own rule runs, so one Save reports each bad value rather than the first one only. The
         // library and loader rules touch the file system, so Save waits on them off-thread rather than
         // freezing the form for a share timeout — and a save that doesn't land takes back whatever proving
@@ -659,7 +686,7 @@ public sealed class SettingsWindow : Window
             catch (Exception e)
             {
                 AppLog.Write("Couldn't check the settings form's values", e);
-                ShowSaveStatus("Couldn't check these settings. Try again.");
+                ShowSaveStatus(Strings.SettingsSaveCheckFailed);
             }
             finally { save.IsEnabled = true; }
         };
@@ -739,11 +766,11 @@ public sealed class SettingsWindow : Window
         var typed = _gameBox.Text?.Trim() ?? "";
         if (typed.Length == 0) { _gamePath = null; _gameRow.Show(SettingsValidation.BlankGameRow()); return true; }
         var (resolved, problem) = GameLocator.ValidateDetailed(typed);   // accepts the game root (or its bundle dir); returns the game root
-        if (resolved is null) { ShowGameVerdict(problem ?? WrongFolderHint, ok: false); return false; }
+        if (resolved is null) { ShowGameVerdict(problem ?? Strings.SettingsWrongGameFolder, ok: false); return false; }
         _gamePath = resolved;          // resolved is the game root; normalise the field to it
         _gameBox.Text = resolved;
         // after the box, so this verdict outranks the re-read that writing to it armed
-        ShowGameVerdict(GameFound, ok: true);
+        ShowGameVerdict(Strings.SettingsGameFound, ok: true);
         return true;
     }
 
@@ -766,7 +793,7 @@ public sealed class SettingsWindow : Window
         // A named folder that took the probe says so; a blank box names the library standing in for it.
         _libraryRow.Apply(id, !check.Ok
             ? SettingsValidation.Reading(ok: false, blocking: true, check.Reason!)
-            : named ? SettingsValidation.Reading(ok: true, blocking: true, SettingsValidation.WritableFolder)
+            : named ? SettingsValidation.Reading(ok: true, blocking: true, Strings.SettingsWritableFolder)
                 : SettingsValidation.BlankProjectsRow(_defaultLibrary));
         return check.Ok;
     }
@@ -822,7 +849,7 @@ public sealed class SettingsWindow : Window
         if (text.Length == 0) return SettingsValidation.BlankGameRow();
         var (resolved, problem) = GameLocator.ValidateDetailed(text);
         return SettingsValidation.Reading(resolved is not null, blocking: true,
-            resolved is not null ? GameFound : problem ?? WrongFolderHint);
+            resolved is not null ? Strings.SettingsGameFound : problem ?? Strings.SettingsWrongGameFolder);
     }
 
     /// <summary>The projects row, in the mode that creates nothing: a folder tree is the modder's to make,
@@ -841,7 +868,7 @@ public sealed class SettingsWindow : Window
     {
         if (string.IsNullOrWhiteSpace(typed)) return SettingsValidation.BlankLoaderRow();
         var why = SettingsValidation.MigotoLoaderExe(typed);
-        return SettingsValidation.Reading(why is null, blocking: false, why ?? SettingsValidation.LoaderReady);
+        return SettingsValidation.Reading(why is null, blocking: false, why ?? Strings.SettingsLoaderReady);
     }
 
     /// <summary>The CPU row: a parse, cheap enough to run on the keystroke.</summary>
@@ -852,7 +879,7 @@ public sealed class SettingsWindow : Window
     public static Task<SettingsResult?> Show(Window owner, SettingsInput input) =>
         new SettingsWindow(input).ShowDialog<SettingsResult?>(owner);
 
-    private SettingsResult Collect() => new()
+    internal SettingsResult Collect() => new()
     {
         GamePath = _gamePath,             // the resolved game root (set in ValidateGameOnSave); blank → prompt
         BlenderPath = _blenderBox.Text,   // blank → ApplySettings Empty2Nulls it to auto-detect
@@ -865,18 +892,19 @@ public sealed class SettingsWindow : Window
         ForceRescan = _forceRescan,
         ForceRescanWasOwed = _forceRescanWasOwed,   // the row's opening state, so the Save can tell arming from carrying
         EncoderCpuLimit = _encoderCpuLimit,   // parsed in ValidateCpuLimitOnSave; blank → null
+        Language = LanguageRow.Stored(_languageBox.SelectedItem as LanguageChoice, _languageOpened),
     };
 
     // ── editor dropdown ───────────────────────────────────────────────────────
 
     private ComboBox BuildEditorBox(IReadOnlyList<string> detected)
     {
-        _editorChoices.Add(new EditorChoice("OS default", null));
+        _editorChoices.Add(new EditorChoice(Strings.SettingsEditorOsDefault, null));
         foreach (var exe in detected)
             _editorChoices.Add(new EditorChoice(ImageEditorLocator.FriendlyName(exe), exe));
         // a custom override that isn't a detected install gets its own row
         if (_imageEditorPath is not null && !detected.Any(e => string.Equals(e, _imageEditorPath, StringComparison.OrdinalIgnoreCase)))
-            _editorChoices.Add(new EditorChoice($"Custom · {ImageEditorLocator.FriendlyName(_imageEditorPath)}", _imageEditorPath));
+            _editorChoices.Add(new EditorChoice(Strings.SettingsEditorCustom(ImageEditorLocator.FriendlyName(_imageEditorPath)), _imageEditorPath));
 
         var box = new ComboBox { ItemsSource = _editorChoices, Width = 280, HorizontalAlignment = HorizontalAlignment.Left };
         box.SelectedItem = _editorChoices.FirstOrDefault(c =>
@@ -889,7 +917,7 @@ public sealed class SettingsWindow : Window
         var existing = _editorChoices.FirstOrDefault(c => string.Equals(c.Path, exe, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
         {
-            existing = new EditorChoice($"Custom · {ImageEditorLocator.FriendlyName(exe)}", exe);
+            existing = new EditorChoice(Strings.SettingsEditorCustom(ImageEditorLocator.FriendlyName(exe)), exe);
             _editorChoices.Add(existing);
         }
         _editorBox.SelectedItem = existing;
@@ -906,16 +934,16 @@ public sealed class SettingsWindow : Window
         if (GameLocator.Find() is { } found)
         {
             _gameBox.Text = found;   // the game root
-            ShowGameVerdict(GameFound, ok: true);
+            ShowGameVerdict(Strings.SettingsGameFound, ok: true);
         }
         // A caution whatever the row's own severity: the search read nowhere the modder pointed it and wrote
         // nothing into the box, so the value still sitting there was never the thing judged.
-        else _gameRow.Show(new RowReading(SettingsValidation.GlyphAdvisory, NoGameDetected));
+        else _gameRow.Show(new RowReading(SettingsValidation.GlyphAdvisory, Strings.SettingsNoGameDetected));
     }
 
     private async Task BrowseGame()
     {
-        var picked = await PickFolder("Locate the GIRLS' FRONTLINE 2 EXILIUM install folder");
+        var picked = await PickFolder(Strings.SettingsLocateGame);
         if (picked is null) return;
         // The locator's own diagnosis, not a generic one: a picked folder that failed for a nameable reason —
         // a game that has never been launched, an incomplete copy — deserves that reason, and it is the same
@@ -924,9 +952,9 @@ public sealed class SettingsWindow : Window
         if (resolved is not null)
         {
             _gameBox.Text = resolved;   // the game root
-            ShowGameVerdict(GameFound, ok: true);
+            ShowGameVerdict(Strings.SettingsGameFound, ok: true);
         }
-        else ShowGameVerdict(problem ?? WrongFolderHint, ok: false);
+        else ShowGameVerdict(problem ?? Strings.SettingsWrongGameFolder, ok: false);
     }
 
     private void ShowGameVerdict(string text, bool ok) =>
@@ -960,32 +988,14 @@ public sealed class SettingsWindow : Window
 
     // ── display helpers ───────────────────────────────────────────────────────
 
-    private static string RecentLabel(int n) => n > 0 ? $"Clear recent mods ({n})" : "No recent mods";
+    private static string RecentLabel(int n) => n > 0 ? Strings.SettingsClearRecents(n) : Strings.SettingsNoRecents;
 
-    /// <summary>What the row reads once the clear is armed: it lands with the rest of the form.</summary>
-    internal const string RecentsPendingLabel = "Recent mods clear on Save";
 
-    /// <summary>The force-rescan row's label in the one-shot actions area.</summary>
-    internal const string ForceRescanLabel = "Force rescan";
-    /// <summary>What the force-rescan row promises — and, as plainly, what it leaves alone. The caches are
-    /// named as a CATEGORY: the sweep takes four trees (the game index, the solved palette operators, the
-    /// encoded texture blobs, the thumbnails), and a line that lists two of them is false about the other
-    /// two. Thumbnails are called out because they are the part the modder can see go.</summary>
-    internal const string ForceRescanHint =
-        "Clears the app's rebuilt caches, thumbnails included, then re-reads the game. "
-        + "Mods, projects, and edits are kept.";
-    /// <summary>The button at rest: what a click will arm, named as the action rather than as the row.</summary>
-    internal const string ForceRescanRestingLabel = "Clear caches and rescan";
-    /// <summary>What the button reads once the rescan is armed: it lands with the rest of the form. A
-    /// STATEMENT of what the Save will do, the same shape as <see cref="RecentsPendingLabel"/> beside it —
-    /// the button is live either way, so a question mark would read as the click asking rather than as the
-    /// state it reports.</summary>
-    internal const string ForceRescanArmedLabel = "Caches clear on Save";
 
     /// <summary>The force-rescan button's word for the state the row is in. One place, so the label the form
     /// opens on and the label a toggle lands on can never disagree.</summary>
     internal static string ForceRescanButtonLabel(bool armed) =>
-        armed ? ForceRescanArmedLabel : ForceRescanRestingLabel;
+        armed ? Strings.SettingsForceRescanArmed : Strings.SettingsForceRescanResting;
 
     // ── layout helpers ────────────────────────────────────────────────────────
 
@@ -1169,7 +1179,7 @@ public sealed class SettingsWindow : Window
         private RowReading Read(string? text)
         {
             try { return _read(text); }
-            catch { return new RowReading(SettingsValidation.GlyphAdvisory, SettingsValidation.CheckFailed); }
+            catch { return new RowReading(SettingsValidation.GlyphAdvisory, Strings.SettingsCheckFailed); }
         }
     }
 

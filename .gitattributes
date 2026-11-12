@@ -8,3 +8,8 @@ tests/Remold.Core.Tests/Migoto/golden/** -text
 # bytes are LF, and the snapshot is written with an LF newline on every platform, so the comparison
 # no longer answers to whatever core.autocrlf a checkout was made under.
 tests/Remold.Core.Tests/Project/golden/*.json -text
+
+# String catalogs carry embedded newlines inside values, and the generated accessors are written LF by
+# tools/GenStrings; both stay LF on every checkout so a value never gains a carriage return.
+*.resx text eol=lf
+src/**/Text/*.cs text eol=lf

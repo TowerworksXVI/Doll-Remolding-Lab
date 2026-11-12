@@ -50,10 +50,6 @@ public partial class MainWindowViewModel
     /// bar's notice cell carries the load's warnings, which a launch must not overwrite.</summary>
     [ObservableProperty] private StatusFacet _launchStatus = StatusFacet.None;
 
-    /// <summary>Rides every terminal launch failure short of the game's own start: which stage failed says
-    /// nothing about whether the game came up, and the header shows the label alone. "Game didn't launch"
-    /// already says it and takes none.</summary>
-    private const string NotLaunched = " · game not launched";
 
     /// <summary>A launch is in flight — the button stays off until it finishes, so a second click can't
     /// start a second loader (3DMigoto refuses one anyway, with its own error).</summary>
@@ -61,20 +57,15 @@ public partial class MainWindowViewModel
 
     partial void OnIsLaunchingChanged(bool value) => OnPropertyChanged(nameof(CanLaunchGame));
 
-    /// <summary>Why the Launch action is off while a watch follows a live game. 3DMigoto hooks the game as it
-    /// starts and cannot attach to one already up, so a second launch behind this one has nothing to
-    /// offer.</summary>
-    internal const string GameAlreadyRunning = "The game is already running.";
-
     /// <summary>Why the Launch action is off, or null when it can run. A game this app is watching outranks
     /// the configuration gates: those describe what a launch would need, and this one is why there is nothing
     /// to launch.</summary>
     public string? LaunchDisabledReason =>
-        IsWatchingLaunchedGame ? GameAlreadyRunning
+        IsWatchingLaunchedGame ? Strings.LaunchGameAlreadyRunning
         : LaunchGate.Reason(GameDir.Length > 0, _settings.MigotoLoaderExe, _loaderExeExists);
     public bool CanLaunchGame => !IsLaunching && LaunchDisabledReason is null;
     /// <summary>What Launch does, or why it's off (shown on the disabled button).</summary>
-    public string LaunchButtonTip => LaunchDisabledReason ?? LaunchGate.Ready;
+    public string LaunchButtonTip => LaunchDisabledReason ?? Strings.LaunchReady;
 
     /// <summary>The disk reads both loader gates stand on, taken when the gates are raised rather than
     /// on every binding evaluation. The loader is user-set only — nothing detects it. The ini read is the
@@ -91,7 +82,7 @@ public partial class MainWindowViewModel
 
     /// <summary>The status bar's 3DMigoto cell, reflecting the configured loader. Recomputed by
     /// <see cref="RaiseModsFolderGates"/> off the same disk reads the gates stand on.</summary>
-    [ObservableProperty] private StatusFacet _migotoStatus = StatusFacet.Loading("3DMigoto…");
+    [ObservableProperty] private StatusFacet _migotoStatus = StatusFacet.Loading(Strings.StatusMigotoLoading);
 
     /// <summary>What the loader's state reads as on the status bar. The warn tone says something is
     /// missing, never that the app is blocked: Launch is the only live action that wants the loader, and a
@@ -104,21 +95,21 @@ public partial class MainWindowViewModel
     internal static StatusFacet MigotoFacet(string? loaderExe, bool loaderExists, string? modsFolder,
         MigotoIniFacts ini) =>
         string.IsNullOrWhiteSpace(loaderExe)
-            ? StatusFacet.Warn("3DMigoto · not set",
-                "Launch and Install need the 3DMigoto loader. Set it in Settings.")
+            ? StatusFacet.Warn(Strings.StatusMigotoNotSet,
+                Strings.StatusMigotoNotSetTip)
         : !loaderExists
-            ? StatusFacet.Warn("3DMigoto · not found",
-                $"{LoaderGate.LoaderNotFound(loaderExe)} Launch and Install need it.")
+            ? StatusFacet.Warn(Strings.StatusMigotoNotFound,
+                Strings.LoaderNotFound(loaderExe) + " " + Strings.MigotoLaunchAndInstallNeedIt)
         : modsFolder is null
-            ? StatusFacet.Warn("3DMigoto · can't install mods",
-                $"{LoaderGate.NoModsFolder(loaderExe)} Launch still works.")
+            ? StatusFacet.Warn(Strings.StatusMigotoNoModsFolder,
+                Strings.LoaderNoModsFolder(loaderExe) + " " + Strings.MigotoLaunchStillWorks)
         : !ini.Found
-            ? StatusFacet.Warn("3DMigoto · mods won't show up",
-                $"{LoaderGate.NoLoaderIni(loaderExe)} Launch still works.")
+            ? StatusFacet.Warn(Strings.StatusMigotoNoIni,
+                Strings.LoaderNoIni(loaderExe) + " " + Strings.MigotoLaunchStillWorks)
         : !ini.HasTextureHook
-            ? StatusFacet.Warn("3DMigoto · texture mods won't show",
-                $"{LoaderGate.NoTextureHook} Select a different loader exe in Settings. Launch still works.")
-            : StatusFacet.Good("3DMigoto");
+            ? StatusFacet.Warn(Strings.StatusMigotoNoTextureHook,
+                Strings.LoaderNoTextureHook + " " + Strings.MigotoPickAnotherLoader)
+            : StatusFacet.Good(Strings.StatusMigoto);
 
     /// <summary>Re-take the loader disk reads and re-raise Launch plus the status-bar cell.</summary>
     private void RaiseModsFolderGates()
@@ -162,8 +153,8 @@ public partial class MainWindowViewModel
         string gameDir = GameDir;
         if (await Task.Run(() => GameLauncher.Resolve(gameDir)) is not { } plan)
         {
-            LaunchStatus = StatusFacet.Bad($"No game executable{NotLaunched}",
-                $"Couldn't find the game's .exe in {gameDir}. Use Tools · Locate game… to set the install folder.");
+            LaunchStatus = StatusFacet.Bad(Strings.LaunchNoGameExe,
+                Strings.LaunchNoGameExeTip(gameDir));
             return;
         }
 
@@ -171,7 +162,7 @@ public partial class MainWindowViewModel
         Process? migoto = null;
         try
         {
-            LaunchStatus = StatusFacet.Loading("Starting 3DMigoto…");
+            LaunchStatus = StatusFacet.Loading(Strings.LaunchStartingMigoto);
             // Read before anything starts: it decides whether this launch starts the game at all, and with
             // it WHEN the game's pids have to be read. A host that starts the game itself can have it up
             // before the warmup ends, so the snapshot the watch measures against is taken here — after the
@@ -192,7 +183,7 @@ public partial class MainWindowViewModel
             // is accepted here as a loader; without it, a live loader process is a working one.
             if (before.Count > 0)
             {
-                LaunchStatus = StatusFacet.Loading("3DMigoto already running. Warming up…");
+                LaunchStatus = StatusFacet.Loading(Strings.LaunchMigotoAlreadyRunning);
                 proof = LoaderProof.AlreadyRunning;
             }
             else
@@ -214,31 +205,31 @@ public partial class MainWindowViewModel
                     // The start's own exception is a Win32/shell diagnosis of a file the modder can't act on
                     // from here; what they can do is check the exe itself, so that is what the line says.
                     AppLog.Write($"Couldn't start the 3DMigoto loader {loader}", e);
-                    LaunchStatus = StatusFacet.Bad($"3DMigoto didn't start{NotLaunched}",
-                        $"Couldn't start {loader}. Check that 3DMigoto still runs on its own.");
+                    LaunchStatus = StatusFacet.Bad(Strings.LaunchMigotoDidntStart,
+                        Strings.LaunchMigotoDidntStartTip(loader));
                     return;
                 }
 
                 LaunchStatus = StatusFacet.Loading(stubIsLoader
-                    ? "Starting 3DMigoto…"
-                    : "Waiting for the Windows permission prompt…");
+                    ? Strings.LaunchStartingMigoto
+                    : Strings.LaunchWaitingForPermission);
                 switch (await WaitForLoaderAsync(loaderName, migoto, before, stubIsLoader))
                 {
                     case LoaderWait.Stopped:
                         // 3DMigoto hooks the game as it starts, so no loader up means the game would come up
                         // unmodded. Say so instead of launching it.
                         KillStartedProcess(migoto);
-                        LaunchStatus = StatusFacet.Bad($"3DMigoto stopped{NotLaunched}",
-                            "3DMigoto closed before the game started.");
+                        LaunchStatus = StatusFacet.Bad(Strings.LaunchMigotoStopped,
+                            Strings.LaunchMigotoStoppedTip);
                         return;
                     case LoaderWait.NotElevated:
                         KillStartedProcess(migoto);
-                        LaunchStatus = StatusFacet.Bad($"Permission prompt not answered{NotLaunched}",
-                            "This 3DMigoto needs Windows permission to start. Answer the prompt, then launch again.");
+                        LaunchStatus = StatusFacet.Bad(Strings.LaunchPermissionNotAnswered,
+                            Strings.LaunchPermissionNotAnsweredTip);
                         return;
                 }
 
-                LaunchStatus = StatusFacet.Loading("3DMigoto is running. Warming up…");
+                LaunchStatus = StatusFacet.Loading(Strings.LaunchMigotoWarmingUp);
                 // The proof is the launch MODE, not whichever Ready rule happened to fire first: when the
                 // started process is itself a loader, so is any successor under its name (a copy that forks
                 // and exits, or quits as a duplicate beside a survivor), and the re-check accepts either.
@@ -257,8 +248,8 @@ public partial class MainWindowViewModel
                     migoto is null || StartedHandleAlive(migoto)))
             {
                 KillStartedProcess(migoto);
-                LaunchStatus = StatusFacet.Bad($"3DMigoto stopped{NotLaunched}",
-                    "3DMigoto closed before the game started.");
+                LaunchStatus = StatusFacet.Bad(Strings.LaunchMigotoStopped,
+                    Strings.LaunchMigotoStoppedTip);
                 return;
             }
 
@@ -275,7 +266,7 @@ public partial class MainWindowViewModel
             }
             else
             {
-                LaunchStatus = StatusFacet.Loading("Launching the game…");
+                LaunchStatus = StatusFacet.Loading(Strings.LaunchLaunchingGame);
                 // The game's pids as they stand BEFORE the start, so a copy that was already up cannot pass
                 // for the one this launch brings. Read here rather than at the entry: the loader wait sits
                 // between, and a game started during it is not this launch's.
@@ -288,13 +279,13 @@ public partial class MainWindowViewModel
                 catch (Exception e)
                 {
                     AppLog.Write($"Couldn't start the game {plan.Target}", e);
-                    LaunchStatus = StatusFacet.Bad("Game didn't launch",
-                        $"Couldn't start {plan.Target}. Check that the game still runs on its own.");
+                    LaunchStatus = StatusFacet.Bad(Strings.LaunchGameDidntLaunch,
+                        Strings.LaunchGameDidntLaunchTip(plan.Target));
                     return;
                 }
                 launched = plan.Note is { } note
-                    ? StatusFacet.Warn("Game launched", note)
-                    : StatusFacet.Good("Game launched");
+                    ? StatusFacet.Warn(Strings.LaunchGameLaunched, note)
+                    : StatusFacet.Good(Strings.LaunchGameLaunched);
             }
             LaunchStatus = launched;
             // The start hands back no game process — through Steam it is the client's, and a host that
@@ -322,19 +313,19 @@ public partial class MainWindowViewModel
     /// loader, and the game is on its way from somewhere the app doesn't drive. The label says the state
     /// rather than claiming a start this app didn't make; the detail says why nothing else is coming, so the
     /// wait doesn't read as the button having done half its job.</summary>
-    internal static StatusFacet LoaderStartsGameLine => StatusFacet.Good("3DMigoto is starting the game")
+    internal static StatusFacet LoaderStartsGameLine => StatusFacet.Good(Strings.LaunchMigotoStartsGame)
         with
         {
-            Detail = "This 3DMigoto starts the game itself, so Doll Remolding Lab didn't start a second copy.",
+            Detail = Strings.LaunchMigotoStartsGameTip,
         };
 
     /// <summary>What the launch reports when the whole sequence had nothing left to do: a host that starts
     /// the game itself was already up, and the game it started is already running. Saying it is STARTING
     /// would promise something no one is going to do.</summary>
-    internal static StatusFacet GameAlreadyStartedLine => StatusFacet.Good("Game is already running")
+    internal static StatusFacet GameAlreadyStartedLine => StatusFacet.Good(Strings.LaunchGameAlreadyUp)
         with
         {
-            Detail = "This 3DMigoto starts the game itself and was already running, so the game was too.",
+            Detail = Strings.LaunchGameAlreadyUpTip,
         };
 
     /// <summary>Whether a launch behind a host that starts the game itself has anything left to start. The
@@ -351,10 +342,6 @@ public partial class MainWindowViewModel
 
     // ---- the game this app launched -----------------------------------------------------------------
 
-    /// <summary>What the status bar's Game cell reads while the game is up. ONE wording for one state: the
-    /// load reaches it by finding the install's files held open, this watch by the process it started.</summary>
-    internal const string GameRunningLabel = "Game · running";
-
     /// <summary>How long the watch gives the game's own process to appear. A Steam launch goes through the
     /// client first, and the client may still have an update to apply before the game runs at all.</summary>
     private static readonly TimeSpan GameAppearLimit = TimeSpan.FromMinutes(5);
@@ -366,11 +353,6 @@ public partial class MainWindowViewModel
     /// than this is what a launcher's handoff looks like — the exe start Steam answers by starting its own
     /// copy — so the watch waits for the replacement instead of reporting an exit.</summary>
     private static readonly TimeSpan GameReArmGrace = TimeSpan.FromSeconds(30);
-
-    /// <summary>The Game cell's tooltip while a game is up. The cell's own label says the state; this says
-    /// what it costs, which is why a build or a preview may fail while it stands.</summary>
-    internal const string GameRunningDetail =
-        "The game holds its files open. Builds and previews may fail until it closes.";
 
     private bool _watchingLaunchedGame;
 
@@ -419,7 +401,7 @@ public partial class MainWindowViewModel
                 int pid = await WaitForGamePidAsync(processName, known, appearLimit);
                 if (pid == NoPid) break;
                 followed = true;
-                GameStatus = StatusFacet.Warn(GameRunningLabel, GameRunningDetail);
+                GameStatus = StatusFacet.Warn(Strings.StatusGameRunning, Strings.StatusGameRunningTip);
                 var lived = Stopwatch.StartNew();
                 while (await Task.Run(() => PidsNamed(processName).Contains(pid)))
                     await Task.Delay(GameWatchPollInterval);
@@ -504,14 +486,10 @@ public partial class MainWindowViewModel
                 // The DETAIL is the shared one, so a sweep owed when the game closed is named here too: this
                 // is the same wait the "Rescan queued" notice describes, and the reload it waits for is the
                 // one that will sweep.
-                ShowQueuedRescanNotice(GameClosedNotice);
+                ShowQueuedRescanNotice(Strings.GameClosedNotice);
                 break;
         }
     }
-
-    /// <summary>The exit's own title over the shared queued-rescan detail: the game closing is what the
-    /// modder just did, and it reads better than the generic wait.</summary>
-    internal const string GameClosedNotice = "Game closed";
 
     /// <summary>What the exit of a game this app launched does about the install read.</summary>
     internal enum ExitAction

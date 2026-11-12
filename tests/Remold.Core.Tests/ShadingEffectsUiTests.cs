@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -99,7 +100,7 @@ public sealed class ShadingEffectsUiTests
 
         Assert.True(row.IsEdited);
         Assert.True(row.CanRevert);
-        Assert.Equal("1 effect disabled", row.Summary);
+        Assert.Equal(Strings.ShadingEffectsDisabled_One(1), row.Summary);
         Assert.False(row.CanDisableAllEffects);
         Assert.False(row.Effects[0].IsEdited);
 
@@ -133,8 +134,8 @@ public sealed class ShadingEffectsUiTests
     {
         var selection = new ShadingValuesWindow.EffectSelection(new[]
         {
-            new EditShadingEffect("internal-volume", "Internal volume", false),
-            new EditShadingEffect("matcap", "Matcap", false, ParentId: "internal-volume"),
+            new EditShadingEffect("internal-volume", CoreStrings.ShadingEffectInternalVolume, false),
+            new EditShadingEffect("matcap", CoreStrings.ShadingEffectMatcap, false, ParentId: "internal-volume"),
         });
         selection.SetEnabled("internal-volume", true);
 
@@ -151,19 +152,19 @@ public sealed class ShadingEffectsUiTests
     {
         Assert.Throws<ArgumentException>(() => new ShadingValuesWindow.EffectSelection(new[]
         {
-            new EditShadingEffect("matcap", "Matcap", ParentId: "missing"),
+            new EditShadingEffect("matcap", CoreStrings.ShadingEffectMatcap, ParentId: "missing"),
         }));
         Assert.Throws<ArgumentException>(() => new ShadingValuesWindow.EffectSelection(new[]
         {
-            new EditShadingEffect("internal-volume", "Internal volume", ParentId: "matcap"),
-            new EditShadingEffect("matcap", "Matcap", ParentId: "internal-volume"),
+            new EditShadingEffect("internal-volume", CoreStrings.ShadingEffectInternalVolume, ParentId: "matcap"),
+            new EditShadingEffect("matcap", CoreStrings.ShadingEffectMatcap, ParentId: "internal-volume"),
         }));
     }
 
     private static EditShadingEffect[] VolumeEffects() => new[]
     {
-        new EditShadingEffect("internal-volume", "Internal volume"),
-        new EditShadingEffect("matcap", "Matcap", ParentId: "internal-volume"),
+        new EditShadingEffect("internal-volume", CoreStrings.ShadingEffectInternalVolume),
+        new EditShadingEffect("matcap", CoreStrings.ShadingEffectMatcap, ParentId: "internal-volume"),
     };
 
     private sealed class ClickableCheckBox : CheckBox

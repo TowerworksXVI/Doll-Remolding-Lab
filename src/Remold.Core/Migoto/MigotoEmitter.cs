@@ -13,6 +13,8 @@ using System.Threading.Tasks;
 using Remold.Core.Mesh;
 using Remold.Core.Project;
 using Remold.Core.Skeleton;
+using Remold.Core.Tables;
+using Remold.Core.Text;
 
 namespace Remold.Core.Migoto;
 
@@ -58,6 +60,10 @@ public sealed record ReplacePipeline
 
     /// <summary>Anchor part name (hosts convert+skin+draw); null = the last pool part.</summary>
     public string? Anchor { get; init; }
+
+    /// <summary>The replaced part as a build warning names it, before it is read in the UI language. Null =
+    /// the anchor part's own name.</summary>
+    public string? ReplacedDisplay { get; init; }
 
     /// <summary>Per-submesh map binds (submesh index → its three slots). A submesh with NO entry binds
     /// nothing at all, so the anchor's own stock maps keep drawing on it; within an entry each slot decides
@@ -1255,6 +1261,10 @@ public sealed partial class MigotoEmitter
         IReadOnlyList<string> OwningParts, IReadOnlyList<(uint Hash, string? Name)> Bones,
         IReadOnlyDictionary<string, string>? DisplayNames = null);
 
+    /// <summary>A part's name as a warning or refusal shows it: read in the UI language
+    /// (<see cref="PartNames"/>). The name itself keeps every other use.</summary>
+    static string PartShown(string part) => PartNames.Display(part);
+
     static string EnglishList(IReadOnlyList<string> values) => values.Count switch
     {
         0 => "",
@@ -1265,15 +1275,19 @@ public sealed partial class MigotoEmitter
 
     static string FormatMergedTierWarning(MergedTierWarning issue)
     {
-        string Display(string raw) => issue.DisplayNames is not null
-            && issue.DisplayNames.TryGetValue(raw, out var supplied) ? supplied : raw;
+        string Display(string raw) => PartShown(issue.DisplayNames is not null
+            && issue.DisplayNames.TryGetValue(raw, out var supplied) ? supplied : raw);
         var owners = issue.OwningParts.Select(p => $"'{Display(p)}'").ToList();
-        string namedOwners = owners.Count <= 2
-            ? EnglishList(owners)
-            : $"{owners[0]}, {owners[1]}, and {owners.Count - 2} more "
-                + $"part{(owners.Count - 2 == 1 ? "" : "s")}";
-        return $"'{Display(issue.AffectedPart)}' does not show some geometry from "
-            + $"{namedOwners} at longer view distances. The build log names the bones.";
+        int more = owners.Count - 2;
+        string namedOwners = owners.Count switch
+        {
+            0 => "",
+            1 => owners[0],
+            2 => CoreStrings.EmitterOwnersTwo(owners[0], owners[1]),
+            _ => Catalog.Plural(more, CoreStrings.EmitterOwnersMore_One(owners[0], owners[1], more),
+                CoreStrings.EmitterOwnersMore_Other(owners[0], owners[1], more)),
+        };
+        return CoreStrings.EmitterMergedTierWarning(Display(issue.AffectedPart), namedOwners);
     }
 
     static string FormatMergedTierDiagnostic(MergedTierWarning issue)
@@ -1421,8 +1435,7 @@ public sealed partial class MigotoEmitter
     internal static void RequireRingFits(string anchor, string source, int packet)
     {
         if (packet > MaxRingPacket)
-            throw new AuthoredRefusalException($"'{anchor}' can't be replaced: it moves with '{source}', which "
-                + "has too many vertices to follow. Remove this mesh edit");
+            throw new AuthoredRefusalException(CoreStrings.EmitterRingTooLarge(PartShown(anchor), PartShown(source)));
     }
 
     /// <summary>The pick's margins: a slot placed by a bone's row may stand at most
@@ -1510,6 +1523,10 @@ public sealed partial class MigotoEmitter
     sealed record TierLayout(string Key, string Mesh, string? Part, IReadOnlyList<UnityMesh.ChannelDef>? Channels)
     {
         public string Label => Part is null ? $"LOD '{Mesh}'" : $"LOD '{Mesh}' of '{Part}'";
+
+        /// <summary><see cref="Label"/> in the UI language, for a refusal the modder reads.</summary>
+        public string ShownLabel => Part is null
+            ? CoreStrings.EmitterLodLabel(Mesh) : CoreStrings.EmitterLodOfPartLabel(Mesh, PartShown(Part));
     }
 
     /// <summary>The re-encoded copies of one shipped donor stream that its other draws need. The primary,
@@ -1545,11 +1562,9 @@ public sealed partial class MigotoEmitter
             if (!Stores(t.Channels, stream)) continue;
             if (UnityMesh.SameStreamLayout(builtFor, t.Channels, stream)) continue;
             if (!reencode || !Stores(builtFor, stream))
-                throw new AuthoredRefusalException(
-                    $"{t.Label} cannot be built because it stores vertex data the original part does "
-                    + $"not. Internal detail: stream {stream} "
-                    + (reencode ? "is absent from the replacement" : "is laid out differently and ships in one shape")
-                    + ". Remove this mesh edit");
+                throw new AuthoredRefusalException(reencode
+                    ? CoreStrings.EmitterStreamAbsent(t.ShownLabel, stream)
+                    : CoreStrings.EmitterStreamReshaped(t.ShownLabel, stream));
             int k = layouts.FindIndex(l => UnityMesh.SameStreamLayout(l, t.Channels, stream));
             if (k < 0)
             {
@@ -1559,9 +1574,7 @@ public sealed partial class MigotoEmitter
                 try { recoded = UnityMesh.TranscodeStream(primary, vcount, builtFor, t.Channels, stream, out filled); }
                 catch (FormatException ex)
                 {
-                    throw new AuthoredRefusalException(
-                        $"{t.Label} cannot be built because it stores vertex data the original part does "
-                        + $"not. Internal detail: {ex.Message}. Remove this mesh edit");
+                    throw new AuthoredRefusalException(CoreStrings.EmitterStreamTranscode(t.ShownLabel, ex.Message));
                 }
                 k = layouts.Count;
                 layouts.Add(t.Channels);
@@ -3126,29 +3139,112 @@ public sealed partial class MigotoEmitter
             foreach (var (h, bind) in pipe.ReferenceBinds ?? new Dictionary<uint, Matrix4x4>())
                 reference[h] = anchorConversion is { } restate ? BindSpace.Rebase(bind, restate) : bind;
             var foldedOps = new HashSet<string>(StringComparer.Ordinal);
+            // The replacement's own vertices as this pipeline skins them: where each stands and its weights
+            // by union row. Null on the identity route, whose geometry is the pool's own.
+            (double[,] P, double[,] W, int[,] BI)? donorVerts = null;
+            if (pipe.DonorDir is { } donorStreams)
+            {
+                var (dw, dbi) = PoolMath.ParseSkin(File.ReadAllBytes(Path.Combine(donorStreams, "stream2.buf")));
+                donorVerts = (PoolMath.ParsePositions(
+                    File.ReadAllBytes(Path.Combine(donorStreams, "stream0.buf")), 40, 0), dw, dbi);
+            }
+            // Bones a pool part writes from a plain tie: nothing it ships says how they move. A lower-detail
+            // mesh's are kept apart: they move that way only where the game draws that mesh.
+            var plainTied = new HashSet<uint>();
+            var tierTied = new SortedDictionary<string, SortedSet<uint>>(StringComparer.Ordinal);
+            // How far the replacement leans on each corrected tie of one mesh past what the mesh's own
+            // vertices state (TieGroup.Reach), by compact row.
+            double[] TailReach(OperatorArt art, uint[] hashes)
+            {
+                var reach = new double[art.Hashes.Length];
+                if (donorVerts is not { } dv || art.Groups.Count == 0) return reach;
+                var localOf = plan.FullUnion.UnionHashes.Select(h => Array.IndexOf(hashes, h)).ToArray();
+                var compactOf = new Dictionary<int, int>();
+                for (int i = 0; i < art.Hashes.Length; i++)
+                    if (art.TieWidth[i] >= 0) compactOf[art.SourceRows[i]] = i;
+                var lanes = new List<(int Row, double Weight)>(4);
+                var measured = new Dictionary<int, double>();
+                for (int v = 0; v < dv.P.GetLength(0); v++)
+                {
+                    lanes.Clear();
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int u = dv.BI[v, k];
+                        if (dv.W[v, k] <= 0 || u < 0 || u >= localOf.Length || localOf[u] < 0) continue;
+                        lanes.Add((localOf[u], dv.W[v, k]));
+                    }
+                    measured.Clear();
+                    foreach (var (row, _) in lanes)
+                    {
+                        if (!compactOf.TryGetValue(row, out int i)) continue;
+                        int g = art.GroupOf[i];
+                        if (!measured.TryGetValue(g, out double r))
+                            measured[g] = r = art.Groups[g].Reach(dv.P[v, 0], dv.P[v, 1], dv.P[v, 2], lanes);
+                        if (r > reach[i]) reach[i] = r;
+                    }
+                }
+                return reach;
+            }
             // Ship one mesh's operator for THIS pipeline: as solved when the mesh states every retained bone
-            // under the reference, else as a converted copy of its own.
-            void ShipOperator(string name, string dir, OperatorArt art)
+            // under the reference and every corrected tie holds for this replacement, else as a copy of its
+            // own. `writes` says which bones this mesh's rows are written for in this pipeline: a corrected tie
+            // nothing writes is left as solved. Returns, per compact row, whether the row ships as a plain tie.
+            bool[] ShipOperator(string name, string dir, OperatorArt art, Func<uint, bool> writes)
             {
                 var hashes = UnionInput(dir).Hashes;
                 var binds = BindsOf(dir);
                 var constants = new double[]?[art.Hashes.Length];
                 var converted = new List<(uint Hash, float Offset)>();
+                var plain = new bool[art.Hashes.Length];
+                var withdrawn = new List<(int Row, string Why)>();
+                double[]? reach = null;
                 for (int i = 0; i < art.Hashes.Length; i++)
                 {
-                    // a tied bone ships its TIE's rows, so it is the tie's statement that needs converting
-                    int source = art.Weak[i] && art.TieFullRows[i] >= 0 ? art.TieFullRows[i] : art.SourceRows[i];
+                    // A corrected tie states the bone's own rows, so it holds only where this pipeline reads
+                    // the bone under the mesh's own bind and the replacement stays within what the mesh's
+                    // vertices vouch for. Elsewhere the tail is zeroed, which leaves the plain tie.
+                    bool corrected = art.TieWidth[i] >= 0 && writes(art.Hashes[i]);
+                    if (corrected)
+                    {
+                        uint self = hashes[art.SourceRows[i]];
+                        bool sameBind = binds.TryGetValue(self, out var selfOwn)
+                            && reference.TryGetValue(self, out var selfTarget)
+                                ? BindReference.Constant(selfTarget, selfOwn) is null
+                                : reference.Count == 0;
+                        string? why = !sameBind ? "the replacement reads the bone under another bind"
+                            : (reach ??= TailReach(art, hashes))[i] > CorrectionReach
+                                ? $"the replacement weights the bone {reach[i] * 1000:g2} mm past its own vertices"
+                                : null;
+                        if (why is not null)
+                        {
+                            corrected = false;
+                            withdrawn.Add((i, why));
+                        }
+                    }
+                    plain[i] = art.Weak[i] && !corrected;
+                    // a plainly tied bone ships its TIE's rows, so it is the tie's statement that needs
+                    // converting; a corrected one is read under its own, which the reference shares
+                    int source = plain[i] && art.TieFullRows[i] >= 0 ? art.TieFullRows[i] : art.SourceRows[i];
                     uint h = hashes[source];
                     if (!binds.TryGetValue(h, out var own) || !reference.TryGetValue(h, out var target)) continue;
                     if ((constants[i] = BindReference.Constant(target, own)) is null) continue;
                     converted.Add((art.Hashes[i], MathF.Max(RestBake.TranslationDiff(target, own),
                         RestBake.RotationDiff(target, own))));
                 }
-                if (converted.Count == 0) { solvedOperatorUsers.Add(name); return; }
-                File.WriteAllBytes(Path.Combine(req.OutDir, $"{name}_cpinv_{sfx}.buf"),
-                    FloatBytes(FoldConstants(art, constants)));
+                foreach (var (i, why) in withdrawn)
+                    diagnostics.Add($"{sfx}: bone {BoneName(pipe.BonePaths, art.Hashes[i])} keeps its plain tie in {name}: {why}");
+                if (converted.Count == 0 && withdrawn.Count == 0) { solvedOperatorUsers.Add(name); return plain; }
+                var shipped = FoldConstants(art, constants);
+                foreach (var (i, _) in withdrawn)
+                {
+                    int at = 4 * (int)art.Off![2 * i], width = (int)art.Off[2 * i + 1];
+                    for (int r = 0; r < 4; r++)
+                        Array.Clear(shipped, at + r * width + art.TieWidth[i], width - art.TieWidth[i]);
+                }
+                File.WriteAllBytes(Path.Combine(req.OutDir, $"{name}_cpinv_{sfx}.buf"), FloatBytes(shipped));
                 foldedOps.Add(name);
                 convertedOperators.Add(name);
+                if (converted.Count == 0) return plain;
                 var worst = converted.OrderByDescending(c => c.Offset).ThenBy(c => c.Hash).Take(6)
                     .Select(c => (pipe.BonePaths is not null && pipe.BonePaths.TryGetValue(c.Hash, out var path)
                             ? BoneTable.MatchingSuffix(c.Hash, path) : null) is { } named
@@ -3156,6 +3252,7 @@ public sealed partial class MigotoEmitter
                 diagnostics.Add($"{sfx}: {name} binds {converted.Count} bone{(converted.Count == 1 ? "" : "s")} "
                     + "elsewhere than the replacement is posed from, so their recovered rows are converted "
                     + $"(largest offsets: {string.Join(", ", worst)})");
+                return plain;
             }
 
             // ---- per-part shared operator + per-pipeline scatter map ----------------------------------
@@ -3163,21 +3260,32 @@ public sealed partial class MigotoEmitter
             var partMeta = new List<(string Part, int N, int Nb, int Rows)>();
             var partScatter = new List<uint[]>();
             var partArts = new List<OperatorArt>();
+            var partPlain = new List<bool[]?>();   // per part: the rows it ships as plain ties, null when it ships none
             for (int i = 0; i < parts.Count; i++)
             {
                 ClaimName(parts[i], dirs[i]);
                 var load = Load(dirs[i]);
                 bool active = plan.PoolSources.Contains((parts[i], dirs[i]));
                 var art = active ? Operator(parts[i], dirs[i]) : Analysis(parts[i], dirs[i]);
-                if (active) ShipOperator(parts[i], dirs[i], art);
+                int part = i;
+                bool Owned(uint h)
+                {
+                    int old = Array.IndexOf(plan.FullUnion.UnionHashes, h);
+                    return old >= 0 && plan.FullUnion.Owner[old] == part && compact.OldToCompact[old] >= 0;
+                }
+                var plainRows = active ? ShipOperator(parts[i], dirs[i], art, Owned) : null;
                 partArts.Add(art);
+                partPlain.Add(plainRows);
                 var scatter = Enumerable.Repeat(PoolMath.Sentinel, art.Hashes.Length).ToArray();
                 if (active)
                     for (int row = 0; row < art.Hashes.Length; row++)
                     {
                         int old = Array.IndexOf(plan.FullUnion.UnionHashes, art.Hashes[row]);
                         if (old >= 0 && plan.FullUnion.Owner[old] == i && compact.OldToCompact[old] >= 0)
+                        {
                             scatter[row] = (uint)compact.OldToCompact[old];
+                            if (plainRows![row]) plainTied.Add(art.Hashes[row]);
+                        }
                     }
                 partScatter.Add(scatter);
                 partMeta.Add((parts[i], load.P.GetLength(0), active ? art.Hashes.Length : 0,
@@ -3234,18 +3342,13 @@ public sealed partial class MigotoEmitter
                                 && string.Equals(v.Tier, sourceTier, StringComparison.OrdinalIgnoreCase)).ToList();
                             if (matches.Count != 1)
                                 throw new AuthoredRefusalException(
-                                    $"LOD '{sourceTier}' of '{sourcePart}' cannot be built because its "
-                                    + "geometry uses a bone missing from the original part. Internal "
-                                    + "detail: expected exactly one upstream tier-row verdict but found "
-                                    + $"{matches.Count}. Remove this mesh edit");
+                                    CoreStrings.EmitterTierVerdictCount(sourceTier, PartShown(sourcePart),
+                                        matches.Count));
                             var verdict = matches[0];
                             if (verdict.Classification == PoolDerive.TierBoneClass.Merged
                                 && verdict.OwningParts.Count == 0)
                                 throw new AuthoredRefusalException(
-                                    $"LOD '{sourceTier}' of '{sourcePart}' cannot be built because it is "
-                                    + "missing geometry from another part at this detail level. Internal "
-                                    + "detail: a MERGED tier-row verdict has no owning part. Remove this "
-                                    + "mesh edit");
+                                    CoreStrings.EmitterTierMergedOwnerless(sourceTier, PartShown(sourcePart)));
                             consumedVerdicts.Add(verdict);
                             if (verdict.Classification == PoolDerive.TierBoneClass.Merged)
                                 mergedVerdicts.Add(verdict);
@@ -3268,9 +3371,7 @@ public sealed partial class MigotoEmitter
                 }
                 if (consumedVerdicts.Count != verdicts.Count)
                     throw new AuthoredRefusalException(
-                        $"LOD '{sourceTier}' of '{sourcePart}' cannot be built because its recorded "
-                        + "bones do not match its geometry. Internal detail: an upstream tier-row verdict "
-                        + "does not match a weighted bone outside the union. Remove this mesh edit");
+                        CoreStrings.EmitterTierBonesMismatch(sourceTier, PartShown(sourcePart)));
                 if (mergedVerdicts.Count > 0)
                 {
                     var bones = new List<(uint Hash, string? Name)>();
@@ -3311,18 +3412,140 @@ public sealed partial class MigotoEmitter
                 if (active)
                 {
                     var art = Operator(t.Name, t.DumpDir);
-                    ShipOperator(t.Name, t.DumpDir, art);
+                    var plainRows = ShipOperator(t.Name, t.DumpDir, art, h =>
+                    {
+                        int original = Array.IndexOf(tierHashes, h);
+                        return original >= 0 && scatter[original] != PoolMath.Sentinel;
+                    });
                     var compactScatter = new uint[art.Hashes.Length];
                     for (int row = 0; row < art.Hashes.Length; row++)
                     {
                         int original = Array.IndexOf(tierHashes, art.Hashes[row]);
                         compactScatter[row] = original >= 0 ? scatter[original] : PoolMath.Sentinel;
+                        if (compactScatter[row] == PoolMath.Sentinel || !plainRows[row]) continue;
+                        if (!tierTied.TryGetValue(t.Name, out var tiedHere))
+                            tierTied[t.Name] = tiedHere = new SortedSet<uint>();
+                        tiedHere.Add(art.Hashes[row]);
                     }
                     tierWork.Add((t.Name, pi, compactScatter, art));
                     tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 4 * art.Hashes.Length, t.Shapes, t.Map));
                 }
                 else
                     tierMeta.Add((t.Part, t.Name, t.Suffix, t.CaptureHash, 0, t.Shapes, t.Map));
+            }
+
+            // ---- weight on bones this pipeline cannot place --------------------------------------------
+            // A plainly tied bone moves as its stand-in does. Weight on one is a vertex that goes where the
+            // stand-in goes, however the bone itself moved, so a replacement leaning on one a pool part ties
+            // says so on the build page; which bones and how many vertices is the build log's. One a
+            // lower-detail mesh ties is the build log's alone.
+            if (donorVerts is { } leaning)
+            {
+                // the replacement's vertices with the notice's share of their weight on one of the bones, and
+                // which of the bones they lean on
+                (int Vertices, SortedSet<uint> Bones) Leaning(ICollection<uint> bones)
+                {
+                    var tiedRow = plan.FullUnion.UnionHashes.Select(bones.Contains).ToArray();
+                    var leanedOn = new SortedSet<uint>();
+                    int leaners = 0;
+                    for (int v = 0; v < leaning.P.GetLength(0); v++)
+                    {
+                        bool leans = false;
+                        for (int k = 0; k < 4; k++)
+                        {
+                            int u = leaning.BI[v, k];
+                            if (u < 0 || u >= tiedRow.Length || !tiedRow[u]) continue;
+                            double onBone = 0;
+                            for (int k2 = 0; k2 < 4; k2++)
+                                if (leaning.BI[v, k2] == u && leaning.W[v, k2] > 0) onBone += leaning.W[v, k2];
+                            if (onBone < TiedWeightNotice) continue;
+                            leans = true;
+                            leanedOn.Add(plan.FullUnion.UnionHashes[u]);
+                        }
+                        if (leans) leaners++;
+                    }
+                    return (leaners, leanedOn);
+                }
+                string Line(int leaners, SortedSet<uint> bones, string where) =>
+                    $"{sfx}: {leaners} replacement vert{(leaners == 1 ? "ex puts" : "ices put")} "
+                    + $"{TiedWeightNotice:P0} or more of {(leaners == 1 ? "its" : "their")} weight on a bone {where}: "
+                    + string.Join(", ", bones.Select(h => BoneName(pipe.BonePaths, h)));
+
+                var (onParts, partBones) = Leaning(plainTied);
+                if (onParts > 0)
+                {
+                    string display = PartShown(pipe.ReplacedDisplay ?? parts[anchorIdx]);
+                    warnings.Add(Catalog.Plural(partBones.Count, CoreStrings.EmitterTiedBones_One(display, partBones.Count),
+                        CoreStrings.EmitterTiedBones_Other(display, partBones.Count)));
+                    diagnostics.Add(Line(onParts, partBones, "the build ties"));
+                }
+                foreach (var (tier, bones) in tierTied)
+                {
+                    var (onTier, tierBones) = Leaning(bones);
+                    if (onTier > 0) diagnostics.Add(Line(onTier, tierBones, $"{tier} ties"));
+                }
+
+                // What the replacement's OWN vertices make of the rounding in the posed vertices their bones
+                // are recovered from. The slim search holds each bone's rows to the gain gate on the vertices
+                // the part itself carries; a replacement weighted to a bone more heavily than the part is, or
+                // away from where the part is, multiplies those rows by more, and this is where that shows.
+                // Each vertex's skinned position is one combination of the pool parts' posed vertices; its
+                // length is the multiple, parts taken as independent.
+                var rowOf = new (int Part, int Row)[plan.FullUnion.UnionHashes.Length];
+                for (int u = 0; u < rowOf.Length; u++)
+                {
+                    int owner = plan.FullUnion.Owner[u];
+                    var art = partArts[owner];
+                    rowOf[u] = (owner, art.Cpinv.Length > 0 ? Array.IndexOf(art.Hashes, plan.FullUnion.UnionHashes[u]) : -1);
+                }
+                var combination = partMeta.Select(m => new double[m.N]).ToArray();
+                var touched = new List<(int Part, int Vertex)>();
+                double worst = 0;
+                uint worstBone = 0;
+                int over = 0;
+                for (int v = 0; v < leaning.P.GetLength(0); v++)
+                {
+                    touched.Clear();
+                    double heaviest = 0;
+                    uint heaviestBone = 0;
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int u = leaning.BI[v, k];
+                        double wv = leaning.W[v, k];
+                        if (wv <= 0 || u < 0 || u >= rowOf.Length || rowOf[u].Row < 0) continue;
+                        var (pi, row) = rowOf[u];
+                        var art = partArts[pi];
+                        int width = art.Off is { } off ? (int)off[2 * row + 1] : art.N;
+                        int at = art.Off is { } off2 ? 4 * (int)off2[2 * row] : 4 * row * art.N;
+                        int selAt = art.Off is { } off3 ? (int)off3[2 * row] : 0;
+                        // a tie this pipeline ships plain ends where its tail would begin
+                        int take = partPlain[pi]![row] && art.TieWidth[row] >= 0 ? art.TieWidth[row] : width;
+                        double lane = 0;
+                        for (int t = 0; t < take; t++)
+                        {
+                            double c = wv * (leaning.P[v, 0] * art.Cpinv[at + t] + leaning.P[v, 1] * art.Cpinv[at + width + t]
+                                             + leaning.P[v, 2] * art.Cpinv[at + 2 * width + t] + art.Cpinv[at + 3 * width + t]);
+                            int source = art.Sel is { } sel ? (int)sel[selAt + t] : t;
+                            if (combination[pi][source] == 0) touched.Add((pi, source));
+                            combination[pi][source] += c;
+                            lane += c * c;
+                        }
+                        if (lane > heaviest) { heaviest = lane; heaviestBone = plan.FullUnion.UnionHashes[u]; }
+                    }
+                    double sum = 0;
+                    foreach (var (pi, source) in touched)
+                    {
+                        sum += combination[pi][source] * combination[pi][source];
+                        combination[pi][source] = 0;
+                    }
+                    double multiple = Math.Sqrt(sum);
+                    if (multiple > SlimGainGate) over++;
+                    if (multiple > worst) { worst = multiple; worstBone = heaviestBone; }
+                }
+                if (over > 0)
+                    diagnostics.Add($"{sfx}: {over} replacement vert{(over == 1 ? "ex gets" : "ices get")} more than "
+                        + $"{SlimGainGate:g3} times their input's rounding: up to {worst:g3}, mostly through bone "
+                        + BoneName(pipe.BonePaths, worstBone));
             }
 
             // ---- witness bones: constants-free space conversion --------------------------------------
@@ -3571,7 +3794,8 @@ public sealed partial class MigotoEmitter
                             else gmap[k] = (uint)idx;
                         }
                         if (gmap.All(v => v == PoolMath.Sentinel)) continue;   // nothing left for it to write
-                        ShipOperator(mesh.Name, mesh.DumpDir, art);
+                        // a wardrobe member writes no tied row, so none of its is decided here
+                        ShipOperator(mesh.Name, mesh.DumpDir, art, _ => false);
                         File.WriteAllBytes(Path.Combine(req.OutDir, $"{mesh.Name}_gmap_{sfx}.buf"), UIntBytes(gmap));
                         bool slim = slimParts.Contains(mesh.Name);
                         bool atDraw = mesh.IsLod0 && !lod0HasWitness;
@@ -3610,11 +3834,10 @@ public sealed partial class MigotoEmitter
                     if (!tierTiePairs.TryGetValue(tier.Suffix, out var list))
                         tierTiePairs[tier.Suffix] = list = new List<(uint, uint)>();
                     list.AddRange(pairs);
-                    string display = tier.PartDisplayNames is not null
-                        && tier.PartDisplayNames.TryGetValue(tier.Part, out var shown) ? shown : tier.Part;
-                    warnings.Add($"'{display}' moves less naturally at longer view distances: its "
-                        + $"lower-detail mesh does not use {pairs.Count} bone{(pairs.Count == 1 ? "" : "s")} "
-                        + "the replacement mesh uses. The build log names the bones.");
+                    string display = PartShown(tier.PartDisplayNames is not null
+                        && tier.PartDisplayNames.TryGetValue(tier.Part, out var shown) ? shown : tier.Part);
+                    warnings.Add(Catalog.Plural(pairs.Count, CoreStrings.EmitterTierTies_One(display, pairs.Count),
+                        CoreStrings.EmitterTierTies_Other(display, pairs.Count)));
                 }
             }
             var tierTies = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -4898,22 +5121,21 @@ public sealed partial class MigotoEmitter
             {
                 bool otherIsBuffer = buffers.Contains(other.Hash), oneIsBuffer = buffers.Contains(one.Hash);
                 throw new AuthoredRefusalException(otherIsBuffer || oneIsBuffer
-                    ? $"{Kind(other, otherIsBuffer)} and {Kind(one, oneIsBuffer)} derive the same draw tag ({tag}). "
-                        + "The draw predicates can't tell the two apart. "
-                        + BufferTagCollisionFix(other, otherIsBuffer, one, oneIsBuffer, retex)
-                    : $"Stock textures {Named(other)} and {Named(one)} derive the same slot tag ({tag}). "
-                        + "The draw probes can't tell the two apart. "
-                        + TagCollisionFix(retex.Contains(other.Hash), other.Part, retex.Contains(one.Hash), one.Part));
+                    ? CoreStrings.EmitterDrawTagCollision(Kind(other, otherIsBuffer), Kind(one, oneIsBuffer), tag,
+                        BufferTagCollisionFix(other, otherIsBuffer, one, oneIsBuffer, retex))
+                    : CoreStrings.EmitterSlotTagCollision(Named(other), Named(one), tag,
+                        TagCollisionFix(retex.Contains(other.Hash), other.Part, retex.Contains(one.Hash), one.Part)));
             }
             byTag[tag] = one;
         }
 
         static string Named((string Hash, string Part) t) =>
-            t.Part.Length > 0 ? $"{t.Hash} on {t.Part}" : t.Hash;
+            t.Part.Length > 0 ? CoreStrings.EmitterTextureOnPart(t.Hash, PartShown(t.Part)) : t.Hash;
 
         static string Kind((string Hash, string Part) t, bool isBuffer) => isBuffer
-            ? (t.Part.Length > 0 ? $"the mesh {t.Part}" : $"a mesh buffer ({t.Hash})")
-            : $"stock texture {Named(t)}";
+            ? (t.Part.Length > 0 ? CoreStrings.EmitterMeshNamed(PartShown(t.Part))
+                : CoreStrings.EmitterMeshBuffer(t.Hash))
+            : CoreStrings.EmitterStockTexture(Named(t));
 
         // the buffer side is a mesh edit row; the other side is whatever kind it is
         static string BufferTagCollisionFix((string Hash, string Part) first, bool firstIsBuffer,
@@ -4921,12 +5143,14 @@ public sealed partial class MigotoEmitter
         {
             if (firstIsBuffer && secondIsBuffer)
                 return first.Part.Length > 0 && second.Part.Length > 0
-                    ? $"Leave the edit on {first.Part} or the edit on {second.Part} out of the build."
-                    : "Leave one of the two mesh edits out of the build.";
+                    ? CoreStrings.EmitterFixLeaveEither(CoreStrings.EmitterEditOn(PartShown(first.Part)),
+                        CoreStrings.EmitterEditOn(PartShown(second.Part)))
+                    : CoreStrings.EmitterFixLeaveOneMeshEdit;
             var (buffer, texture) = firstIsBuffer ? (first, second) : (second, first);
-            string bufferRow = buffer.Part.Length > 0 ? $"the edit on {buffer.Part}" : "the mesh edit";
+            string bufferRow = buffer.Part.Length > 0 ? CoreStrings.EmitterEditOn(PartShown(buffer.Part))
+                : CoreStrings.EmitterMeshEditRow;
             string textureRow = retex.Contains(texture.Hash) ? RetexRow(texture.Part) : MeshRow(texture.Part);
-            return $"Leave {bufferRow} or {textureRow} out of the build.";
+            return CoreStrings.EmitterFixLeaveEither(bufferRow, textureRow);
         }
     }
 
@@ -4942,20 +5166,20 @@ public sealed partial class MigotoEmitter
     /// <summary>What the author can do about one tag collision, by what the colliding pair came from —
     /// named in the change list's own row vocabulary.</summary>
     static string TagCollisionFix(bool firstIsRetex, string firstPart, bool secondIsRetex, string secondPart) =>
-        firstIsRetex && secondIsRetex ? "Leave one row's new textures out of the build."
+        firstIsRetex && secondIsRetex ? CoreStrings.EmitterFixLeaveOneRowTextures
         : firstIsRetex
-            ? $"Leave {RetexRow(firstPart)} or {MeshRow(secondPart)} out of the build."
+            ? CoreStrings.EmitterFixLeaveEither(RetexRow(firstPart), MeshRow(secondPart))
         : secondIsRetex
-            ? $"Leave {RetexRow(secondPart)} or {MeshRow(firstPart)} out of the build."
-        : "Leave a row with a new mesh out of the build.";
+            ? CoreStrings.EmitterFixLeaveEither(RetexRow(secondPart), MeshRow(firstPart))
+        : CoreStrings.EmitterFixLeaveRowWithMesh;
 
     /// <summary>The retextured row as the fix line names it, falling back to the unlabelled form.</summary>
     static string RetexRow(string part) =>
-        part.Length > 0 ? $"the new textures on {part}" : "one row's new textures";
+        part.Length > 0 ? CoreStrings.EmitterNewTexturesOn(PartShown(part)) : CoreStrings.EmitterOneRowNewTextures;
 
     /// <summary>The replaced row as the fix line names it, falling back to the unlabelled form.</summary>
     static string MeshRow(string part) =>
-        part.Length > 0 ? $"the new mesh on {part}" : "a row with a new mesh";
+        part.Length > 0 ? CoreStrings.EmitterNewMeshOn(PartShown(part)) : CoreStrings.EmitterRowWithNewMesh;
 
     /// <summary>One rigid replacement as the ini needs it: the sections it owns, the strides and index
     /// format its shipped buffers declare, its donor submesh draws and their texture asks.</summary>
@@ -7320,9 +7544,17 @@ public sealed partial class MigotoEmitter
     /// indexed by the compact output row like <see cref="Weak"/> and <see cref="Hashes"/>, but each
     /// nonnegative VALUE is a FULL local source row (the space recorded by <see cref="SourceRows"/>), not
     /// a compact index. -1 means the mesh has no sound bone at all: the bone keeps its own rows, and tier
-    /// scatter sentinels it to its lod0 row.</summary>
+    /// scatter sentinels it to its lod0 row.
+    /// <para>A tied bone whose own vertices state where the game put them ships a CORRECTED tie: its block
+    /// opens with the tie's rows and anchors and continues with a tail that carries the bone from its
+    /// stand-in's motion to what those vertices show. <see cref="TieWidth"/> is where that tail starts in
+    /// the bone's block, -1 for a bone that has none; zeroing the tail leaves the plain tie.
+    /// <see cref="GroupOf"/> names the entry of <see cref="Groups"/> the tail was solved in, which says how
+    /// far the tail can be trusted for a vertex that is not one of the mesh's own. Both are indexed like
+    /// <see cref="Weak"/>.</para></summary>
     internal sealed record OperatorArt(float[] Cpinv, bool[] Weak, int[] TieFullRows, uint[] Hashes,
-        int[] SourceRows, IReadOnlyList<string> Diagnostics, uint[]? Sel, uint[]? Off, int N);
+        int[] SourceRows, IReadOnlyList<string> Diagnostics, uint[]? Sel, uint[]? Off, int N,
+        int[] TieWidth, int[] GroupOf, IReadOnlyList<TieGroup> Groups);
 
     /// <summary>Max acceptable |recovered − true| row error in the DENSE synthetic residual (an
     /// absolute bound against the O(1) probe palette).</summary>
@@ -7340,11 +7572,48 @@ public sealed partial class MigotoEmitter
     /// <c>&gt;</c> comparison into shipping unexamined coefficients.</summary>
     static bool FailsSlimGate(double defect) => !(defect <= SlimDefectGate);
 
+    /// <summary>Max acceptable slim NOISE GAIN (<see cref="PoolMath.RowGain"/>): how many times a bone's rows
+    /// may multiply the rounding in the posed vertices they read before it reaches a vertex the bone
+    /// carries. The defect says a solve is exact on exact input; this says what it does to the input's own
+    /// last bits, which differ every frame. A posed coordinate near one metre rounds by about 0.03 µm, so
+    /// this bound keeps a recovered vertex within about 2 µm of where exact input would put it.</summary>
+    const double SlimGainGate = 64;
+
+    /// <summary>NaN-safe, as <see cref="FailsSlimGate"/>.</summary>
+    static bool FailsGainGate(double gain) => !(gain <= SlimGainGate);
+
+    /// <summary>What a later solve must bring a bone's gain down to, as a share of its incumbent's, to
+    /// replace it while both are over the gain gate. A bone its part cannot recover quietly gets a little
+    /// quieter with every wider selection, and a row costs frame time in proportion to its width, so a
+    /// wider one has to buy a real share of the rounding.</summary>
+    const double SlimGainStep = 0.75;
+
+    /// <summary>The anchor pools a bone's slim search draws from at each level, in the order tried: the
+    /// best-weighted candidates alone (null), then every candidate down to each weight floor
+    /// (<see cref="PoolMath.SelectAnchorRows"/>).</summary>
+    static readonly double?[] AnchorPools = { null, 0.5, 0.25, 0.0 };
+
     /// <summary>Is <paramref name="a"/> the better defect? NaN ranks below every value including infinity:
     /// a bare <c>&lt;</c> would let an unusable solve survive against a usable one, since every comparison
     /// with NaN is false. Equal defects keep the incumbent, so the search stays
     /// deterministic.</summary>
     internal static bool BetterDefect(double a, double b) => a < b || (double.IsNaN(b) && !double.IsNaN(a));
+
+    /// <summary>Is solve a the better of two for one bone, b being the incumbent? One inside the defect
+    /// gate beats one outside it; two outside it compare by defect. Two inside it are both exact and
+    /// compare by gain: one inside the gain gate beats one outside it, two inside it compare outright, and
+    /// two outside it change hands only for <see cref="SlimGainStep"/>. Equal solves keep the
+    /// incumbent.</summary>
+    internal static bool BetterSolve(double defectA, double gainA, double defectB, double gainB)
+    {
+        bool a = !FailsSlimGate(defectA), b = !FailsSlimGate(defectB);
+        if (a != b) return a;
+        if (!a) return BetterDefect(defectA, defectB);
+        bool quietA = !FailsGainGate(gainA), quietB = !FailsGainGate(gainB);
+        if (quietA != quietB) return quietA;
+        return quietA ? BetterDefect(gainA, gainB)
+            : gainA < SlimGainStep * gainB || (double.IsNaN(gainB) && !double.IsNaN(gainA));
+    }
 
     /// <summary>The per-bone column-cap search levels, widest first (divisor of the selection size for the
     /// determinacy bound). See <see cref="PoolMath.LocalPInvRows"/>.</summary>
@@ -7482,7 +7751,9 @@ public sealed partial class MigotoEmitter
         if (classificationOnly)
             return new OperatorArt(Array.Empty<float>(), outputRows.Select(b => weak[b]).ToArray(),
                 outputRows.Select(b => tie[b]).ToArray(), outputRows.Select(b => hashes[b]).ToArray(),
-                outputRows, Array.Empty<string>(), null, null, n);
+                outputRows, Array.Empty<string>(), null, null, n,
+                outputRows.Select(_ => -1).ToArray(), outputRows.Select(_ => -1).ToArray(),
+                Array.Empty<TieGroup>());
 
         // Only retained outputs and the sound rows their rigid ties consume participate in the slim
         // search and its diagnostics. Every local solve still sees the full source column set.
@@ -7492,10 +7763,14 @@ public sealed partial class MigotoEmitter
                 .Where(b => weak[b] && tie[b] >= 0)
                 .Select(b => tie[b]))
             .Distinct().OrderBy(b => b).ToArray();
-        var slim = SlimOperator(load, nb, kStart, kCap, weak, pinv, slimRowsNeeded);
+        // A wardrobe member never ties, so a bone of its own that stays over the gain gate takes the dense
+        // rows; a pool part's or tier's keeps its quietest exact selection, since a tie would trade rounding
+        // for a wrong row.
+        var slim = SlimOperator(load, nb, kStart, kCap, weak, pinv, slimRowsNeeded, widenNoisy: !tieSlimFailures);
         var picked = slim.Picked;
         var slimRows = slim.Rows;
         var slimErr = slim.Err;
+        var slimGain = slim.Gain;
         var denseWidth = slim.DenseWidth;
 
         // A sound bone no slim selection holds would ship every vertex of the mesh, and a recover row lasts
@@ -7519,6 +7794,7 @@ public sealed partial class MigotoEmitter
                         picked[t] = extra.Picked[t];
                         slimRows[t] = extra.Rows[t];
                         slimErr[t] = extra.Err[t];
+                        slimGain[t] = extra.Gain[t];
                         denseWidth[t] = extra.DenseWidth[t];
                     }
                 }
@@ -7549,15 +7825,32 @@ public sealed partial class MigotoEmitter
             slimRows[b] = slimRows[tie[b]];
         }
 
+        // A tied bone's own vertices still say where the game put them. Where they do, the tie's rows gain a
+        // tail that carries the bone from its stand-in's motion to that (see CorrectTies). A wardrobe
+        // member's tied rows are written nowhere, so they take none.
+        var correction = tieSlimFailures
+            ? CorrectTies(load, nb, outputRows, b => (weak[b] || slimTie[b] >= 0) && tie[b] >= 0, tie, weak,
+                picked, slimRows, denseWidth,
+                missing => SlimOperator(load, nb, kStart, kCap, weak, pinv, missing), KCap)
+            : TieCorrection.None(nb);
+        foreach (int b in outputRows)
+        {
+            if (!correction.Corrected[b]) continue;
+            picked[b] = picked[b].Concat(correction.TailVerts[b]).ToArray();
+            slimRows[b] = Enumerable.Range(0, 4)
+                .Select(r => slimRows[b][r].Concat(correction.TailRows[b][r]).ToArray()).ToArray();
+        }
+        bool anyCorrected = outputRows.Any(b => correction.Corrected[b]);
+
         // Slim ships when it is SMALLER, and that is the only verdict left: a bone the anchor-local solve
         // cannot hold rides a tie or widens to the whole mesh by itself, so no bone's conditioning can
-        // decline the part.
+        // decline the part. A corrected tie exists only as a selection, so a mesh carrying one ships slim.
         // Slim ships three buffers — 4 float rows of `width` per bone, the anchor indices those coefficients
         // are meaningless without, and the two-uint offset entry that locates both.
         long slimBytes = 8L * outputRows.Length;
         foreach (int b in outputRows) slimBytes += (16L + 4L) * picked[b].Length;
         long denseBytes = 16L * outputRows.Length * n;
-        bool shipsSlim = slimBytes < denseBytes;
+        bool shipsSlim = slimBytes < denseBytes || anyCorrected;
 
         foreach (int b in outputRows)
         {
@@ -7569,7 +7862,8 @@ public sealed partial class MigotoEmitter
             // the reported number is the dense residual — the verdict that produced the tie; the bone's
             // slim defect describes rows the tie overwrites, so it never ships
             diagnostics.Add($"{name}: bone {BoneName(bonePaths, hashes[b])} recovers ill-conditioned from this mesh "
-                    + $"(err {err[b]:g2}) — tied rigidly to co-riding bone {BoneName(bonePaths, hashes[best])}{width}");
+                    + $"(err {err[b]:g2}) — tied rigidly to co-riding bone {BoneName(bonePaths, hashes[best])}{width}"
+                    + CorrectionNote(correction, b));
         }
         foreach (int b in outputRows)
             if (weak[b] && tie[b] < 0)
@@ -7580,7 +7874,11 @@ public sealed partial class MigotoEmitter
             if (slimTie[b] >= 0)
                 diagnostics.Add($"{name}: no small set of vertices recovers bone {BoneName(bonePaths, hashes[b])} "
                         + $"(defect {slimErr[b]:g2} at K={slim.LastK}), so it is tied rigidly to co-riding bone "
-                        + $"{BoneName(bonePaths, hashes[slimTie[b]])}");
+                        + $"{BoneName(bonePaths, hashes[slimTie[b]])}" + CorrectionNote(correction, b));
+        foreach (int b in outputRows)
+            if (slim.Noisy[b] && slimTie[b] < 0)
+                diagnostics.Add($"{name}: bone {BoneName(bonePaths, hashes[b])} is recovered with {slimGain[b]:g3} times "
+                        + $"its input's rounding, over the limit of {SlimGainGate:g3} (K={slim.LastK})");
 
         float[] op;
         uint[]? sel;
@@ -7620,20 +7918,23 @@ public sealed partial class MigotoEmitter
         }
         return new OperatorArt(op, outputRows.Select(b => weak[b] || slimTie[b] >= 0).ToArray(),
             outputRows.Select(b => tie[b]).ToArray(), outputRows.Select(b => hashes[b]).ToArray(),
-            outputRows, diagnostics, sel, off, n);
+            outputRows, diagnostics, sel, off, n,
+            outputRows.Select(b => correction.Corrected[b] ? correction.TieWidth[b] : -1).ToArray(),
+            outputRows.Select(b => correction.Corrected[b] ? correction.GroupOf[b] : -1).ToArray(),
+            correction.Groups);
     }
 
-    /// <summary>Whether the slim search holds <paramref name="bone"/> on this mesh, searched on its own. The
-    /// search escalates each failing bone to the cap on its own account and solves it at each level from the
-    /// bone and the level alone, so this is the verdict the full solve reaches for the bone beside any others.
-    /// A dense-weak bone is never held.</summary>
+    /// <summary>Whether the slim search holds <paramref name="bone"/> on this mesh inside both of its gates,
+    /// searched on its own. The search escalates each failing bone to the cap on its own account and solves
+    /// it at each level from the bone and the level alone, so this is the verdict the full solve reaches for
+    /// the bone beside any others. A dense-weak bone is never held.</summary>
     static bool HoldsSlim(StreamsLoad load, bool[] denseWeak, int bone)
     {
         if (denseWeak[bone]) return false;
         int n = load.P.GetLength(0);
         var slim = SlimOperator(load, load.Nb, Math.Max(1, Math.Min(KStart, n)), Math.Max(1, Math.Min(KCap, n)),
             denseWeak, densePinv: null, new[] { bone });
-        return !FailsSlimGate(slim.Err[bone]);
+        return !FailsSlimGate(slim.Err[bone]) && !FailsGainGate(slim.Gain[bone]);
     }
 
     /// <summary>Pack the per-bone selections and rows into the ragged triple the mod ships: bone b's block
@@ -7666,31 +7967,40 @@ public sealed partial class MigotoEmitter
 
     /// <summary>One part's per-bone slim selections and rows, before assembly. <see cref="Picked"/>[b] is
     /// the bone's anchor vertices (its row width), <see cref="Rows"/>[b] its four operator rows over them,
-    /// <see cref="Err"/>[b] the defect of the solve those rows came from, and <see cref="DenseWidth"/>[b]
-    /// whether the bone gave up on a narrow selection and took every vertex. <see cref="LastK"/> is the
-    /// escalation level the search stopped at.</summary>
-    sealed record SlimSolve(int[][] Picked, double[][][] Rows, double[] Err, bool[] DenseWidth, int LastK);
+    /// <see cref="Err"/>[b] the defect and <see cref="Gain"/>[b] the noise gain of the solve those rows came
+    /// from, <see cref="DenseWidth"/>[b] whether the bone gave up on a narrow selection and took every
+    /// vertex, and <see cref="Noisy"/>[b] whether it kept a narrow selection that is exact but over the gain
+    /// gate. <see cref="LastK"/> is the escalation level the search stopped at.</summary>
+    sealed record SlimSolve(int[][] Picked, double[][][] Rows, double[] Err, double[] Gain, bool[] DenseWidth,
+        bool[] Noisy, int LastK);
 
     /// <summary>The slim operator: per bone, up to K anchor vertices (weight-ranked, spread in bind space)
     /// and a local mass-restricted solve, gated on each bone's LEFT-INVERSE DEFECT (see
-    /// <see cref="PoolMath.LocalPInvRows"/>). A bone failing at its level retries once with DISCRIMINATOR
-    /// rows appended (see <see cref="PoolMath.SelectDiscriminatorRows"/>) before K escalates. K doubles from
+    /// <see cref="PoolMath.LocalPInvRows"/>) and on its NOISE GAIN (<see cref="PoolMath.RowGain"/>). At each
+    /// level a bone solves over its best-weighted anchors; a solve outside the defect gate retries once with
+    /// DISCRIMINATOR rows appended (see <see cref="PoolMath.SelectDiscriminatorRows"/>). One inside the
+    /// defect gate but outside the gain gate goes on through the wider pools of <see cref="AnchorPools"/>
+    /// in order and stops at the first solve inside both. K doubles from
     /// <paramref name="kStart"/> to <paramref name="kCap"/>, re-solving ONLY the dense-sound bones still
-    /// failing; a bone keeps whichever solve has the smaller defect with its (possibly smaller) selection,
-    /// and dense-weak bones solve once at kStart. A dense-sound bone still failing at the cap takes the
-    /// DENSE width — every vertex, identity selection, the dense operator's own rows — instead of costing
-    /// the rest of the part its slim widths. A bone with no support at all takes a single zero-coefficient
-    /// row, which recovers the zero palette row the dense operator gives it. With no
-    /// <paramref name="densePinv"/> the search only answers: failing bones keep their best slim attempt and
-    /// <see cref="SlimSolve.Err"/> says they failed.</summary>
+    /// outside a gate; a bone keeps its best solve (<see cref="BetterSolve"/>) with its (possibly smaller)
+    /// selection, and dense-weak bones solve once at kStart. A dense-sound bone still outside the DEFECT
+    /// gate at the cap takes the DENSE width — every vertex, identity selection, the dense operator's own
+    /// rows — instead of costing the rest of the part its slim widths. One inside it but outside the GAIN
+    /// gate keeps its quietest slim solve, which is exact; with <paramref name="widenNoisy"/> it takes the
+    /// dense width too, whose rows no selection is quieter than. A bone with no support at all takes a
+    /// single zero-coefficient row, which recovers the zero palette row the dense operator gives it. With
+    /// no <paramref name="densePinv"/> the search only answers: failing bones keep their best slim attempt
+    /// and <see cref="SlimSolve.Err"/> and <see cref="SlimSolve.Gain"/> say they failed.</summary>
     static SlimSolve SlimOperator(StreamsLoad load, int nb, int kStart, int kCap, bool[] denseWeak,
-        PoolMath.PInvFactors? densePinv, IReadOnlyList<int> activeRows)
+        PoolMath.PInvFactors? densePinv, IReadOnlyList<int> activeRows, bool widenNoisy = false)
     {
         int n = load.P.GetLength(0);
         var picked = new int[nb][];
         var rows = new double[nb][][];
         var err = new double[nb];
+        var gain = new double[nb];
         var denseWidth = new bool[nb];
+        var noisy = new bool[nb];
 
         // per-bone cap search, widest first: some bones need every strong co-bone kept, others condition
         // better with fewer near-dependent columns. First level that passes, else the best defect —
@@ -7707,46 +8017,62 @@ public sealed partial class MigotoEmitter
             }
             return (bestRows!, bestErr);
         }
+        bool Fails(int b) => FailsSlimGate(err[b]) || FailsGainGate(gain[b]);
 
         int k = kStart;
-        // One bone's level: its own selection, its own solve, its own slot in the three result arrays. No
-        // bone reads another's, so the outcome is the same whatever order the level runs in. It runs SERIALLY
+        // One bone's level: its own selections, its own solves, its own slot in the result arrays. No bone
+        // reads another's, so the outcome is the same whatever order the level runs in. It runs SERIALLY
         // under the caller's fan-out over parts, which is what the CPU limit bounds — a parallel loop nested
         // inside a capped one multiplies past that bound rather than composing with it.
         void SolveBone(int b)
         {
-            bool needs = picked[b] is null || (!denseWeak[b] && FailsSlimGate(err[b]));
+            bool needs = picked[b] is null || (!denseWeak[b] && Fails(b));
             if (!needs) return;
-            var pk = PoolMath.SelectAnchorRows(load.P, load.W, load.BI, b, k);
-            if (pk.Length == 0)
+            int[]? previous = null;
+            foreach (double? floor in AnchorPools)
             {
-                picked[b] = new[] { 0 };
-                rows[b] = new[] { new double[1], new double[1], new double[1], new double[1] };
-                err[b] = double.PositiveInfinity;
-                return;
-            }
-            var (bestRows, bestErr) = Solve(b, pk);
-            if (FailsSlimGate(bestErr))
-            {
-                // the defect of a failing bone is usually its co-bones' contribution, which its own
-                // vertices cannot separate out. Rows that pin the co-bones without carrying the bone can,
-                // and cost only their own width.
-                var disc = PoolMath.SelectDiscriminatorRows(load.P, load.W, load.BI, b, pk, nb, k);
-                if (disc.Length > 0)
+                var pk = PoolMath.SelectAnchorRows(load.P, load.W, load.BI, b, k, floor);
+                if (pk.Length == 0)
                 {
-                    var wide = pk.Concat(disc).ToArray();
-                    Array.Sort(wide);
-                    var (dRows, dErr) = Solve(b, wide);
-                    if (BetterDefect(dErr, bestErr)) { bestRows = dRows; bestErr = dErr; pk = wide; }
+                    picked[b] = new[] { 0 };
+                    rows[b] = new[] { new double[1], new double[1], new double[1], new double[1] };
+                    err[b] = double.PositiveInfinity;
+                    gain[b] = double.PositiveInfinity;
+                    return;
                 }
-            }
-            // a wider K that solves this bone WORSE keeps its narrower selection: the reported defect
-            // and the rows it describes must be the same solve
-            if (picked[b] is null || BetterDefect(bestErr, err[b]))
-            {
-                rows[b] = bestRows;
-                err[b] = bestErr;
-                picked[b] = pk;
+                // a bone with no more candidates than the level takes them all from every pool
+                if (previous is not null && pk.AsSpan().SequenceEqual(previous)) continue;
+                previous = pk;
+                var (bestRows, bestErr) = Solve(b, pk);
+                if (FailsSlimGate(bestErr))
+                {
+                    // the defect of a failing bone is usually its co-bones' contribution, which its own
+                    // vertices cannot separate out. Rows that pin the co-bones without carrying the bone can,
+                    // and cost only their own width.
+                    var disc = PoolMath.SelectDiscriminatorRows(load.P, load.W, load.BI, b, pk, nb, k);
+                    if (disc.Length > 0)
+                    {
+                        var wide = pk.Concat(disc).ToArray();
+                        Array.Sort(wide);
+                        var (dRows, dErr) = Solve(b, wide);
+                        if (BetterDefect(dErr, bestErr)) { bestRows = dRows; bestErr = dErr; pk = wide; }
+                    }
+                }
+                double bestGain = PoolMath.RowGain(load.P, load.W, load.BI, b, bestRows);
+                // a wider K or pool that solves this bone WORSE keeps its earlier selection: the reported
+                // defect and gain and the rows they describe must be the same solve
+                if (picked[b] is null || BetterSolve(bestErr, bestGain, err[b], gain[b]))
+                {
+                    rows[b] = bestRows;
+                    err[b] = bestErr;
+                    gain[b] = bestGain;
+                    picked[b] = pk;
+                }
+                // a dense-weak bone's rows are replaced by its tie's, so one solve states its defect
+                if (denseWeak[b] || !Fails(b)) return;
+                // The wider pools answer the gain gate alone. A bone its best-weighted anchors leave outside
+                // the defect gate has co-bones to separate, which a wider level does and a wider pool does not.
+                if (floor is null && FailsSlimGate(bestErr)) return;
             }
         }
 
@@ -7754,7 +8080,7 @@ public sealed partial class MigotoEmitter
         {
             foreach (int b in activeRows) SolveBone(b);
             bool ok = true;
-            foreach (int b in activeRows) if (!(denseWeak[b] || !FailsSlimGate(err[b]))) { ok = false; break; }
+            foreach (int b in activeRows) if (!(denseWeak[b] || !Fails(b))) { ok = false; break; }
             if (ok || k >= kCap) break;
             // A failing bone escalates to the cap on its own account, even past its own candidate count: its
             // discriminator budget grows with K, and a wider discriminator set is what separates a bone its
@@ -7763,12 +8089,19 @@ public sealed partial class MigotoEmitter
             k = Math.Min(k * 2, kCap);             // never overshoot the cap (nor the vertex count)
         }
 
-        // a dense-sound bone the local solve never held widens to the whole mesh, taking the dense
-        // operator's own rows — the ones the gate is calibrated against. Only this bone pays for it.
+        // a dense-sound bone the local solve never held inside the defect gate widens to the whole mesh,
+        // taking the dense operator's own rows — the ones the gate is calibrated against. Only this bone
+        // pays for it.
         var identity = (int[]?)null;
         foreach (int b in activeRows)
         {
-            if (densePinv is null || denseWeak[b] || !FailsSlimGate(err[b])) continue;
+            if (denseWeak[b] || !Fails(b)) continue;
+            bool exact = !FailsSlimGate(err[b]);
+            if (densePinv is null || (exact && !widenNoisy))
+            {
+                noisy[b] = exact;
+                continue;
+            }
             if (identity is null)
             {
                 identity = new int[n];
@@ -7780,7 +8113,7 @@ public sealed partial class MigotoEmitter
             rows[b] = dr;
             denseWidth[b] = true;
         }
-        return new SlimSolve(picked, rows, err, denseWidth, k);
+        return new SlimSolve(picked, rows, err, gain, denseWidth, noisy, k);
     }
 
     // ---- mesh-dump readers -------------------------------------------------------------------------

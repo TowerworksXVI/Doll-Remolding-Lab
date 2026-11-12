@@ -6,6 +6,7 @@ using Remold.Core.Bundles;
 using Remold.Core.Model;
 using Remold.Core.Tables;
 using Remold.Core.Tests.Support;
+using Remold.Core.Text;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -145,4 +146,39 @@ public class RosterBlacklistTests
         new(CharId: 1, Name: name, Family: "", GunId: 0, DormModelConfigId: 0,
             Outfits: new List<Outfit>())
         { DisplayName = display };
+}
+
+/// <summary>The blacklist under another UI language. These change the process's UI language, so they run with
+/// the other tests that do.</summary>
+[Collection("UiCulture")]
+public class RosterBlacklistLanguageTests
+{
+    /// <summary>The blacklist reads the weapon group's key, the internal name, which a bracketed or translated
+    /// display name never changes.</summary>
+    [Fact]
+    public void A_blacklisted_weapon_group_stays_out_under_the_pseudolocale()
+    {
+        try
+        {
+            Catalog.Apply(Catalog.Pseudo);
+            var weapons = new[]
+            {
+                new WeaponRoster.WeaponEntry(1, 2, "Player/HelenaSSR01/HelenaSSR01_WL", 5, "Blocked key"),
+                new WeaponRoster.WeaponEntry(2, 2, "Player/VesnaSSR01/VesnaSSR01_WL", 5, "Allowed"),
+            };
+            var playable = new[]
+            {
+                new Character(CharId: 1, Name: "Helena", Family: "", GunId: 0, DormModelConfigId: 0,
+                    Outfits: new List<Outfit>()) { DisplayName = "[X]" },
+                new Character(CharId: 2, Name: "Vesna", Family: "", GunId: 0, DormModelConfigId: 0,
+                    Outfits: new List<Outfit>()) { DisplayName = "[Mirel]" },
+            };
+
+            var allowed = Assert.Single(WeaponRoster.BuildWeaponsByCharacter(weapons, playable));
+
+            Assert.Equal("Vesna_Weapons", allowed.Name);
+            Assert.Equal("[Mirel]", allowed.DisplayName);
+        }
+        finally { Catalog.Apply(Catalog.English); }
+    }
 }

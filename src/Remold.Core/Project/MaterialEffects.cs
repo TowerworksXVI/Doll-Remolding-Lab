@@ -20,20 +20,38 @@ public sealed record MaterialEffectOperation(string EffectId, IReadOnlyList<stri
 /// <summary>Effect identities and how authored values relate to them.</summary>
 public static class MaterialEffectCatalog
 {
-    public static IReadOnlyList<MaterialEffectDefinition> Definitions { get; } =
+    /// <summary>Every effect, its label in the UI language. Built once per language, so a label always
+    /// follows the language in force. An effect is recorded by its id, never by its label.</summary>
+    public static IReadOnlyList<MaterialEffectDefinition> Definitions
+    {
+        get
+        {
+            var built = _definitions;
+            if (built?.Tag == Text.Catalog.CurrentTag) return built.List;
+            built = new BuiltDefinitions(Text.Catalog.CurrentTag, Build());
+            _definitions = built;
+            return built.List;
+        }
+    }
+
+    private sealed record BuiltDefinitions(string Tag, IReadOnlyList<MaterialEffectDefinition> List);
+
+    private static BuiltDefinitions? _definitions;
+
+    private static IReadOnlyList<MaterialEffectDefinition> Build() =>
         Array.AsReadOnly(new[]
         {
-            new MaterialEffectDefinition("stocking", "Stocking tint"),
-            new MaterialEffectDefinition("body-anisotropy", "Body anisotropy"),
-            new MaterialEffectDefinition("glitter", "Glitter"),
-            new MaterialEffectDefinition("detail", "Detail"),
-            new MaterialEffectDefinition("internal-volume", "Internal volume"),
-            new MaterialEffectDefinition("matcap", "Matcap", "internal-volume"),
-            new MaterialEffectDefinition("hair-highlight", "Hair highlight"),
-            new MaterialEffectDefinition("fur", "Fur shells"),
-            new MaterialEffectDefinition("outline", "Outline"),
-            new MaterialEffectDefinition("eye-add", "Eye additive layer"),
-            new MaterialEffectDefinition("eye-multiply", "Eye multiply layer"),
+            new MaterialEffectDefinition("stocking", CoreStrings.ShadingEffectStocking),
+            new MaterialEffectDefinition("body-anisotropy", CoreStrings.ShadingEffectBodyAnisotropy),
+            new MaterialEffectDefinition("glitter", CoreStrings.ShadingEffectGlitter),
+            new MaterialEffectDefinition("detail", CoreStrings.ShadingEffectDetail),
+            new MaterialEffectDefinition("internal-volume", CoreStrings.ShadingEffectInternalVolume),
+            new MaterialEffectDefinition("matcap", CoreStrings.ShadingEffectMatcap, "internal-volume"),
+            new MaterialEffectDefinition("hair-highlight", CoreStrings.ShadingEffectHairHighlight),
+            new MaterialEffectDefinition("fur", CoreStrings.ShadingEffectFur),
+            new MaterialEffectDefinition("outline", CoreStrings.ShadingEffectOutline),
+            new MaterialEffectDefinition("eye-add", CoreStrings.ShadingEffectEyeAdd),
+            new MaterialEffectDefinition("eye-multiply", CoreStrings.ShadingEffectEyeMultiply),
         });
 
     public static MaterialEffectDefinition? Definition(string? id) =>

@@ -81,9 +81,7 @@ public sealed class GenericTextureAuthoringTests : IDisposable
 
         var exception = Assert.Throws<AuthoredRefusalException>(() => Build(fixture));
 
-        Assert.Equal("Detail color and Detail mask on 'c_vesna01_body_lod0' change the same original "
-            + "texture 'tex_body_d' and cannot take two different pictures through this route. "
-            + "Give both slots the same picture, or leave one unchanged.", exception.Message);
+        Assert.Equal(CoreStrings.BuildTwoPicturesOneTexture(CoreStrings.MapDetailColor, CoreStrings.MapDetailMask, "c_vesna01_body_lod0", "tex_body_d"), exception.Message);
     }
 
     [Fact]
@@ -114,9 +112,7 @@ public sealed class GenericTextureAuthoringTests : IDisposable
 
         var exception = Assert.Throws<AuthoredRefusalException>(() => Build(fixture));
 
-        Assert.Equal("Detail color on 'c_vesna01_body_lod0' cannot be changed safely. "
-            + "No measured texture-register coverage exists for _DetailAlbedo. "
-            + "Update the app's game data, or leave this picture out.", exception.Message);
+        Assert.Equal(CoreStrings.BuildPictureUnsafe(CoreStrings.MapDetailColor, "c_vesna01_body_lod0", "_DetailAlbedo"), exception.Message);
     }
 
     [Fact]

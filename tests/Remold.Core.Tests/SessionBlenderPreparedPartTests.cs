@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Remold.App;
 using Remold.App.ViewModels;
 using Remold.Core.Bundles;
 using Remold.Core.Export;
@@ -9,6 +10,7 @@ using Remold.Core.Mesh;
 using Remold.Core.Model;
 using Remold.Core.Project;
 using Remold.Core.Tests.Support;
+using Remold.Core.Text;
 using Xunit;
 
 namespace Remold.Core.Tests;
@@ -172,10 +174,9 @@ public class SessionBlenderPreparedPartTests
             install.Prepared(Body), null));
 
         Assert.False(File.Exists(install.Prepared(Body)));   // nothing stock landed where the edit belonged
-        string refusal = MainWindowViewModel.EditGeometryUnreadable(new[] { "body" });
-        Assert.Contains("body", refusal);
-        Assert.Contains("was not opened", refusal);
-        Assert.Contains("body and cloth",
+        Assert.Equal(Strings.EditGeometryUnreadable_One("body"),
+            MainWindowViewModel.EditGeometryUnreadable(new[] { "body" }));
+        Assert.Equal(Strings.EditGeometryUnreadable_Other(Catalog.List(new[] { "body", "cloth" })),
             MainWindowViewModel.EditGeometryUnreadable(new[] { "body", "cloth" }));
     }
 

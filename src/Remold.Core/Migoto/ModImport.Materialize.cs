@@ -306,8 +306,7 @@ public static partial class ModImport
             EditRows For(string? editId, string character, string outfit, string mesh)
             {
                 if (string.IsNullOrWhiteSpace(editId))
-                    throw new InvalidDataException(
-                        $"the change on '{mesh}' names no edit, so it cannot be read back");
+                    throw ReasonRefusal(CoreStrings.ImportReasonChangeNamesNoEdit(mesh));
                 if (byId.TryGetValue(editId!, out var found)) return found;
                 var created = new EditRows
                 {
@@ -426,7 +425,7 @@ public static partial class ModImport
             // The record states a hide as a verb, not as a binding, so the exact objects behind it come from
             // the install the import is read on — the same resolve an older project's conversion takes.
             var resolved = OnInstall(rows.Part)
-                ?? throw new InvalidDataException(PartGoneReason(rows.Part.RendererSlot));
+                ?? throw ReasonRefusal(PartGoneReason(rows.Part.RendererSlot));
             string slotId = $"slot-hidden-{Segment(rows.EditId)}";
             var slot = new TargetSlot
             {
@@ -452,7 +451,7 @@ public static partial class ModImport
                 .FirstOrDefault(state => string.Equals(state.EditDefinitionId, rows.EditId,
                     StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(state.Label))?.Label;
             if (!string.IsNullOrWhiteSpace(recorded)) return recorded!;
-            return hide ? "Hidden" : AuthoredEditSession.NewEditLabel(_project, rows.Part, null);
+            return hide ? CoreStrings.DefaultHideName : AuthoredEditSession.NewEditLabel(_project, rows.Part, null);
         }
 
         /// <summary>The key groups this edit is placed by. An edit that ships no change of its own takes them
@@ -521,8 +520,7 @@ public static partial class ModImport
         private (string Owner, RepairData.KeyGroupRecord? Recovered) OwnerOf(RepairData.StockRampRecord pick)
         {
             string named = pick.Intent?.EditDefinitionId is { Length: > 0 } id ? id
-                : throw new InvalidDataException(
-                    $"the toon ramp on '{pick.Mesh}' names no edit, so it cannot be read back");
+                : throw ReasonRefusal(CoreStrings.ImportReasonRampNamesNoEdit(pick.Mesh));
             var part = new TargetPart { Subject = pick.Character, Outfit = pick.Outfit, RendererSlot = pick.Mesh };
             var gate = RampGate(pick);
             if (gate.Position is not { } position)
@@ -531,8 +529,7 @@ public static partial class ModImport
                 // showed, and only a record on the part can say which positions the edit answers.
                 if (gate.Flagged && !PartGroups(part).Any(group => group.States.Any(state =>
                         string.Equals(state.EditDefinitionId, named, StringComparison.Ordinal))))
-                    throw new InvalidDataException($"the toon ramp on '{pick.Mesh}' · '{pick.Material}' is used "
-                        + "in several states, and neither the record nor the mod's mod.ini says which");
+                    throw ReasonRefusal(CoreStrings.ImportReasonRampStatesUnsaid(pick.Mesh, pick.Material));
                 return (named, null);
             }
             var onPart = PartGroups(part).FirstOrDefault(group => Gates(group.Key, position.Variable));
@@ -621,8 +618,7 @@ public static partial class ModImport
                 }
             }
             if (positions.Count > 1)
-                throw new InvalidDataException($"the toon ramp on '{pick.Mesh}' · '{pick.Material}' is used "
-                    + "in more than one key state, and the record doesn't say which one it belongs to");
+                throw ReasonRefusal(CoreStrings.ImportReasonRampKeyStateUnsaid(pick.Mesh, pick.Material));
             return new RampGateAnswer(positions.Count == 1 ? new KeyPosition(positions.First().Variable,
                 positions.First().State) : null, flagged);
         }
@@ -654,8 +650,7 @@ public static partial class ModImport
                     (known.GroupId, known.Key!, known.StateCount, known.StartState, known.Persist);
             else
             {
-                string unreadable = $"the toon ramp on '{pick.Mesh}' · '{pick.Material}' is switched by a key "
-                    + "the mod's mod.ini doesn't declare";
+                string unreadable = CoreStrings.ImportReasonRampKeyUndeclared(pick.Mesh, pick.Material);
                 var lines = File.ReadAllLines(Path.Combine(_mod.Folder, ModIniName))
                     .Select(line => line.Trim()).ToList();
                 string? Within(string section, string pattern)
@@ -666,12 +661,12 @@ public static partial class ModImport
                         if (Regex.Match(line, pattern) is { Success: true } match) return match.Groups[1].Value;
                     return null;
                 }
-                string binding = Within($"Key_{variable}", @"^key\s*=\s*(.+)$") ?? throw new InvalidDataException(unreadable);
+                string binding = Within($"Key_{variable}", @"^key\s*=\s*(.+)$") ?? throw ReasonRefusal(unreadable);
                 key = ModKeys.Normalize(binding.StartsWith("no_modifiers ", StringComparison.Ordinal)
                         ? binding["no_modifiers ".Length..] : binding)
-                    ?? throw new InvalidDataException(unreadable);
+                    ?? throw ReasonRefusal(unreadable);
                 count = int.Parse(Within($"CommandListKey_{variable}", $@"^if \${Regex.Escape(variable)} == (\d+)$")
-                    ?? throw new InvalidDataException(unreadable), CultureInfo.InvariantCulture);
+                    ?? throw ReasonRefusal(unreadable), CultureInfo.InvariantCulture);
                 var declared = lines.Select(line => Regex.Match(line,
                         $@"^global\s+(persist\s+)?\${Regex.Escape(variable)}\s*=\s*(\d+)$"))
                     .FirstOrDefault(match => match.Success);
@@ -680,8 +675,7 @@ public static partial class ModImport
                 groupId = $"key-{variable}";
             }
             if (position >= count)
-                throw new InvalidDataException($"the toon ramp on '{pick.Mesh}' · '{pick.Material}' is used in "
-                    + "a state its key doesn't have");
+                throw ReasonRefusal(CoreStrings.ImportReasonRampStateMissing(pick.Mesh, pick.Material));
             var states = Enumerable.Range(0, count).Select(index =>
             {
                 var named = known?.States.FirstOrDefault(state => state.State == index);
@@ -704,8 +698,8 @@ public static partial class ModImport
                     string.Equals(binding.Input, "ramp", StringComparison.Ordinal)
                     && string.Equals(binding.Target.Domain, "game", StringComparison.Ordinal)
                     && string.Equals(binding.Target.Material?.Name, pick.Material, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidDataException($"the toon ramp on '{pick.Mesh}' · '{pick.Material}' belongs to "
-                    + "an edit the record doesn't describe, and the record has no toon ramp on that material");
+                ?? throw ReasonRefusal(
+                    CoreStrings.ImportReasonRampEditUndescribed(pick.Mesh, pick.Material));
             string assetId = $"asset-ramp-{Segment(owner)}";
             for (int n = 2; _assets.ContainsKey(assetId); n++) assetId = $"asset-ramp-{Segment(owner)}-{n}";
             _assets.Add(assetId, new RepairData.IntentAssetRecord(assetId, "ramp",
@@ -780,7 +774,7 @@ public static partial class ModImport
                 if (_slots.ContainsKey(slotId)) continue;
                 var source = DescribedSource(binding.EffectiveGameAsset)
                     ?? InstalledSource(binding.EffectiveGameAsset)
-                    ?? throw new InvalidDataException(UndescribedSourcePartReason(part.RendererSlot));
+                    ?? throw ReasonRefusal(UndescribedSourcePartReason(part.RendererSlot));
                 var input = FromRecordName<TargetInputKind>(binding.Input, "target input");
                 var slot = new TargetSlot
                 {
@@ -1098,8 +1092,7 @@ public static partial class ModImport
             // dropped ships geometry in a space nothing states.
             var recorded = RestBake.FromList(change.BakedRest, out bool restRefused);
             if (restRefused)
-                throw new InvalidDataException(
-                    $"the rest pose recorded for '{rows.Part.RendererSlot}' can't be read");
+                throw ReasonRefusal(CoreStrings.ImportReasonUnreadableRest(rows.Part.RendererSlot));
             // The shipped positions are what the BUILD compiled, and the build states the donor in the
             // union's space first: it takes a recorded rest back OFF a file stated in scene-rest space, and
             // stands a file up that states none. Writing the file the build would consume again means
@@ -1162,8 +1155,8 @@ public static partial class ModImport
                 int want = geometry.Verts * strides[stream];
                 var bytes = File.ReadAllBytes(Shipped(shipped[stream]));
                 if (bytes.Length < want)
-                    throw new InvalidDataException(
-                        $"'{shipped[stream]}' holds {bytes.Length} bytes and the record needs {want}");
+                    throw ReasonRefusal(
+                        CoreStrings.ImportReasonFileTooShort(shipped[stream], bytes.Length, want));
                 bytes.AsSpan(0, want).CopyTo(blob.AsSpan(starts[stream], want));
             }
 
@@ -1334,8 +1327,7 @@ public static partial class ModImport
         {
             DdsWriter.BC7_UNORM or DdsWriter.BC7_UNORM_SRGB => ATTextureFormat.BC7,
             DdsWriter.R8G8B8A8_UNORM or DdsWriter.R8G8B8A8_UNORM_SRGB => ATTextureFormat.RGBA32,
-            _ => throw new InvalidDataException(
-                $"'{file}' is tagged with a texture format this app cannot read"),
+            _ => throw ReasonRefusal(CoreStrings.ImportReasonTextureFormat(file)),
         };
 
         private string WriteValue(ProjectAsset asset)

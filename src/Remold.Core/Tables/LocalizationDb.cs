@@ -30,12 +30,42 @@ public sealed class LocalizationDb
     private const int Lang_TextId = 1;   // LangPackageTable*: text-id
     private const int Lang_String = 2;   //                    localized string
 
+    /// <summary>The game's English locale token.</summary>
+    public const string EnglishLocale = "Enus";
+
+    /// <summary>The game's Simplified Chinese locale token.</summary>
+    public const string SimplifiedChineseLocale = "Cn";
+
+    /// <summary>The game locale whose names the Pick tree shows for a UI language: the game's own Chinese
+    /// names when the UI is Simplified Chinese, English for every other language.</summary>
+    public static string GameLocale(string uiTag) =>
+        uiTag == Remold.Core.Text.Catalog.SimplifiedChinese ? SimplifiedChineseLocale : EnglishLocale;
+
+    /// <summary>The name of a locale's text table, as <see cref="GameDatabase.TablePath"/> takes it.</summary>
+    public static string TableName(string locale) => $"LangPackageTable{locale}Data";
+
+    /// <summary><paramref name="wanted"/> when the install has its text table, else English, with
+    /// <paramref name="missingTable"/> naming the table that was not there. English is never substituted
+    /// away: when its own table is missing the load fails as it always has.</summary>
+    public static string AvailableLocale(string wanted, Func<string, bool> hasTable, out string? missingTable)
+    {
+        missingTable = null;
+        if (wanted == EnglishLocale) return wanted;
+        string table = TableName(wanted);
+        bool present;
+        try { present = hasTable(table); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { present = false; }
+        if (present) return wanted;
+        missingTable = table;
+        return EnglishLocale;
+    }
+
     /// <summary>Load one locale's text map, resolved through the database's locale-folder probe like
     /// every other table read. <paramref name="locale"/> is the token in the filename:
     /// <c>Enus Cn Zhtc Jajp Kokr Dede Eses Frfr Ptpt Thth Vtvi</c>.</summary>
     public static LocalizationDb Load(GameDatabase db, string locale = "Enus")
     {
-        var path = db.TablePath($"LangPackageTable{locale}Data");
+        var path = db.TablePath(TableName(locale));
         var map = new Dictionary<long, string>(400_000);
         foreach (var row in TableFile.ReadRows(path))
         {
@@ -104,7 +134,7 @@ public sealed class LocalizationDb
 
     private static IReadOnlyList<TableIdentity> RosterTableIdentities(GameDatabase db, string locale)
     {
-        var names = new[] { $"LangPackageTable{locale}Data" }
+        var names = new[] { TableName(locale) }
             .Concat(RosterTextFields.Select(spec => spec.Table));
         var identities = new List<TableIdentity>();
         foreach (string name in names)

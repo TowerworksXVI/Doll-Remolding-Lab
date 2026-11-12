@@ -1,3 +1,4 @@
+using Remold.App;
 using System;
 using System.IO;
 using Remold.App.ViewModels;
@@ -72,7 +73,7 @@ public class SettingsLoaderRowTests : IDisposable
     [Fact]
     public void APathThatIsNotThere_IsNamedOnTheRow()
     {
-        Assert.Equal(SettingsValidation.LoaderNotThere,
+        Assert.Equal(Strings.SettingsLoaderNotThere,
             SettingsValidation.MigotoLoaderExe(Path.Combine(_root, "gone", "Run.exe")));
     }
 
@@ -110,6 +111,6 @@ public class SettingsLoaderRowTests : IDisposable
         var saved = LabSettings.Load();
         Assert.Equal(exe, saved.MigotoLoaderExe);
         Assert.Equal("towerworks", saved.Author);
-        Assert.Equal("3DMigoto · texture mods won't show", vm.MigotoStatus.Text);
+        Assert.Equal(Strings.StatusMigotoNoTextureHook, vm.MigotoStatus.Text);
     }
 }

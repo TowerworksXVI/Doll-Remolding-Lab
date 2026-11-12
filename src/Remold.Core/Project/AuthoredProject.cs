@@ -778,7 +778,7 @@ public static class AuthoredProjectValidator
             string signature = StateSignature(states[0]);
             if (states.Skip(1).All(state => string.Equals(signature, StateSignature(state),
                     StringComparison.Ordinal)))
-                warnings.Add($"{PlacementNames.Group(group)} switches nothing.");
+                warnings.Add(CoreStrings.PlanGroupSwitchesNothing(PlacementNames.Group(group)));
         }
         return warnings;
     }
@@ -1003,22 +1003,18 @@ public static class AuthoredProjectSerializer
     /// <summary>What an open says about a project file it cannot read at all. The three ways a file fails
     /// that read — not JSON, no version in it, nothing in it — are one thing to the person opening it, and
     /// none of them has an action in this app.</summary>
-    public const string DamagedProject = "This mod's project file is damaged and cannot be read.";
 
     /// <summary>What an open says about a project file written by a version this one does not read, naming
     /// the mod by its folder where the file is known. Said by app version rather than by the number in the
     /// file, which names nothing the modder can act on.</summary>
     public static string NewerProject(string? mod) => mod is null
-        ? "This mod was made with a newer version of Doll Remolding Lab. Update the app to open it."
-        : $"'{mod}' was made with a newer version of Doll Remolding Lab. Update the app to open it.";
+        ? CoreStrings.ProjectNewer
+        : CoreStrings.ProjectNewerNamed(mod);
 
     /// <summary>The name a refusal gives the mod whose manifest is <paramref name="file"/>: its folder's.</summary>
     internal static string ModNameOf(string file) =>
         Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(file))) is { Length: > 0 } name ? name : file;
 
-    /// <summary>What an open says when the folder holds no project file. The path is named because the
-    /// modder chose it, and the recent-mods list adds its own line when the whole folder is gone.</summary>
-    public static string MissingProject(string file) => $"There is no project file at {file}.";
 
     /// <param name="mod">the mod's name for a refusal (<see cref="NewerProject"/>); null where the json
     /// came from no file.</param>
@@ -1027,12 +1023,12 @@ public static class AuthoredProjectSerializer
         int schema = ReadSchema(json);
         if (!AuthoredProject.IsAuthored(schema))
             throw new InvalidDataException(schema > AuthoredProject.CurrentSchema
-                ? NewerProject(mod) : DamagedProject);
+                ? NewerProject(mod) : CoreStrings.ProjectDamaged);
 
         AuthoredProject? project;
         try { project = JsonSerializer.Deserialize<AuthoredProject>(json, Json); }
-        catch (JsonException e) { throw new InvalidDataException(DamagedProject, e); }
-        if (project is null) throw new InvalidDataException(DamagedProject);
+        catch (JsonException e) { throw new InvalidDataException(CoreStrings.ProjectDamaged, e); }
+        if (project is null) throw new InvalidDataException(CoreStrings.ProjectDamaged);
         // An earlier authored schema lacks only fields that are optional in the current one, so it is the
         // current schema as it stands.
         project.Schema = AuthoredProject.CurrentSchema;
@@ -1076,7 +1072,7 @@ public static class AuthoredProjectSerializer
     public static AuthoredProject Load(string path)
     {
         string file = Directory.Exists(path) ? ModProject.ManifestPathFor(path) : path;
-        if (!File.Exists(file)) throw new FileNotFoundException(MissingProject(file), file);
+        if (!File.Exists(file)) throw new FileNotFoundException(CoreStrings.ProjectMissing(file), file);
         var project = Deserialize(File.ReadAllText(file), ModNameOf(file));
         project.RootDir = Path.GetDirectoryName(Path.GetFullPath(file));
         return project;
@@ -1127,10 +1123,10 @@ public static class AuthoredProjectSerializer
             if (doc.RootElement.ValueKind != JsonValueKind.Object
                 || !doc.RootElement.TryGetProperty("schema", out var schema)
                 || !schema.TryGetInt32(out int value))
-                throw new InvalidDataException(DamagedProject);
+                throw new InvalidDataException(CoreStrings.ProjectDamaged);
             return value;
         }
-        catch (JsonException e) { throw new InvalidDataException(DamagedProject, e); }
+        catch (JsonException e) { throw new InvalidDataException(CoreStrings.ProjectDamaged, e); }
     }
 
     /// <summary>Refuse a project the validator will not stand behind, saying the one thing an open or a save
@@ -1141,7 +1137,7 @@ public static class AuthoredProjectSerializer
     {
         var errors = AuthoredProjectValidator.Errors(project);
         if (errors.Count > 0)
-            throw new InvalidDataException(DamagedProject, new InvalidDataException(
+            throw new InvalidDataException(CoreStrings.ProjectDamaged, new InvalidDataException(
                 "authored project is invalid: " + string.Join("; ", errors)));
     }
 
@@ -1166,7 +1162,7 @@ public static class AuthoredProjectSerializer
     public static int SchemaOf(string path)
     {
         string file = Directory.Exists(path) ? ModProject.ManifestPathFor(path) : path;
-        if (!File.Exists(file)) throw new FileNotFoundException(MissingProject(file), file);
+        if (!File.Exists(file)) throw new FileNotFoundException(CoreStrings.ProjectMissing(file), file);
         return ReadSchema(File.ReadAllText(file));
     }
 

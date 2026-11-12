@@ -81,7 +81,7 @@ public partial class MainWindowViewModel
     /// says so as a first save does.</summary>
     /// <returns>False, having said so on <paramref name="status"/>, when the mod could not be saved; the
     /// caller then hands nothing out.</returns>
-    private bool KeepRoundTripId(IProgress<string> status, string handedTo)
+    private bool KeepRoundTripId(IProgress<string> status, bool blender)
     {
         if (!_roundTripIdUnsaved) return true;
         try
@@ -95,13 +95,14 @@ public partial class MainWindowViewModel
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             AppLog.Write("Couldn't save the mod's round-trip id", e);
-            status.Report(RoundTripIdNotSaved(handedTo));
+            status.Report(RoundTripIdNotSaved(blender));
             return false;
         }
     }
 
-    internal static string RoundTripIdNotSaved(string handedTo) =>
-        $"Couldn't save the mod, so {handedTo} wasn't opened. {SaveFailedSteer}";
+    internal static string RoundTripIdNotSaved(bool blender) =>
+        (blender ? Strings.RoundTripIdNotSavedBlender : Strings.RoundTripIdNotSavedImageEditor)
+        + " " + Strings.SaveFailedSteer;
 
     private void ForgetRoundTrips()
     {
@@ -140,8 +141,7 @@ public partial class MainWindowViewModel
         catch (Exception e)
         {
             AppLog.Write("The image-editor save watch couldn't restart", e);
-            EditPage.ReportStatus($"Stopped watching for saves from the image editor: {Reason(e)} "
-                + "Open the mod again to apply them.");
+            EditPage.ReportStatus(Strings.PictureWatchStopped(Reason(e)));
         }
     }
 
@@ -177,7 +177,7 @@ public partial class MainWindowViewModel
         catch (Exception e) when (e is not OutOfMemoryException)
         {
             AppLog.Write("Couldn't apply an image editor's save", e);
-            EditPage.ReportStatus($"Couldn't apply the image editor's save: {Reason(e)}");
+            EditPage.ReportStatus(Strings.PictureSaveApplyFailed(Reason(e)));
         }
     }
 
@@ -201,7 +201,7 @@ public partial class MainWindowViewModel
         try { saved = PictureIdentity(ingress.Outbound); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            status.Report($"Couldn't apply the image editor's save: {Reason(e)}");
+            status.Report(Strings.PictureSaveApplyFailed(Reason(e)));
             return;
         }
         if (string.Equals(saved, ingress.LandedIdentity, StringComparison.Ordinal))
@@ -287,7 +287,7 @@ public partial class MainWindowViewModel
         string outbound = Path.Combine(folder, PictureSaveWatcher.SavedFile);
         if (record is null || !File.Exists(outbound))
         {
-            EditPage.ReportStatus(PictureRoundTripUnreadable);
+            EditPage.ReportStatus(Strings.PictureRoundTripUnreadable);
             return null;
         }
         var ingress = new PictureIngress(record.Slot, EditSession, outbound, record.Label, record.Source,
@@ -302,10 +302,6 @@ public partial class MainWindowViewModel
         _pictureRoundTrips[folder] = ingress;
         return ingress;
     }
-
-    internal const string PictureRoundTripUnreadable =
-        "Couldn't apply the image editor's save: the app no longer knows which map it belongs to. "
-        + "Use Open on the card again.";
 
     private static void SavePictureRecord(PictureIngress ingress) =>
         RoundTripStore.WriteAtomically(Path.Combine(ingress.Folder, PictureRecordFile),
@@ -386,8 +382,7 @@ public partial class MainWindowViewModel
             catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
             {
                 AppLog.Write("The round-trip arrival watch couldn't restart", failure);
-                EditPage.ReportStatus("Stopped watching for saves meant for other mods. "
-                    + "Their changes are still applied when you open them.");
+                EditPage.ReportStatus(Strings.ArrivalWatchStopped);
             }
         });
         watcher.EnableRaisingEvents = true;
@@ -415,9 +410,9 @@ public partial class MainWindowViewModel
                 return;
             _arrivalReported[key] = now;
             if (modRoot is null)
-                ReportArrival(blender ? BlenderSendUnplaced : PictureSaveUnplaced);
+                ReportArrival(blender ? Strings.BlenderSendUnplaced : Strings.PictureSaveUnplaced);
             else if (!File.Exists(ModProject.ManifestPathFor(modRoot)))
-                ReportArrival(blender ? BlenderSendForMissingMod : PictureSaveForMissingMod);
+                ReportArrival(blender ? Strings.BlenderSendForMissingMod : Strings.PictureSaveForMissingMod);
             else
                 ReportArrival(blender ? BlenderReturnModClosed(ModNameAt(modRoot))
                     : PictureSaveModClosed(ModNameAt(modRoot)));
@@ -430,31 +425,13 @@ public partial class MainWindowViewModel
     private void ReportArrival(string line)
     {
         if (ShowHome)
-            MergeNoticeIntoCell(new NoticeMessage(ArrivalNoticeId, "Save waiting", line, ProjectScoped: true,
+            MergeNoticeIntoCell(new NoticeMessage(ArrivalNoticeId, Strings.SaveWaitingNotice, line, ProjectScoped: true,
                 Severity: NoticeSeverity.Info));
         else
             EditPage.ReportStatus(line);
     }
 
     internal const string ArrivalNoticeId = "round-trip.arrival";
-
-    /// <summary>What a save for a mod that is no longer where the app last saw it says. A mod moved outside
-    /// the app takes its round trips with it the next time it is opened from its new folder.</summary>
-    internal const string PictureSaveForMissingMod =
-        "The image editor saved a picture for a mod that was moved or deleted. "
-        + "If it was moved, open it from its new folder to apply the picture.";
-
-    internal const string BlenderSendForMissingMod =
-        "Blender sent back changes for a mod that was moved or deleted. "
-        + "If it was moved, open it from its new folder to apply them.";
-
-    /// <summary>What a save into a round-trip folder that no longer names its mod says: the folder was
-    /// cleared after a week unused and the editor, still open, wrote into it again.</summary>
-    internal const string BlenderSendUnplaced =
-        "Blender sent back changes the app can no longer place. Open the part in Blender again.";
-
-    internal const string PictureSaveUnplaced =
-        "The image editor saved a picture the app can no longer place. Use Open on the card again.";
 
     /// <summary>The name a mod that is not open goes by, read from its own manifest: the same name
     /// <see cref="ClosedModName(AuthoredProjectDocument)"/> gives a mod the app has just closed.</summary>
@@ -473,7 +450,7 @@ public partial class MainWindowViewModel
         {
             // A mod whose manifest cannot be read is still named, the way the app names an unnamed one.
         }
-        return UntitledMod;
+        return Strings.UntitledModDisplay;
     }
 
     // ---- the mod folder --------------------------------------------------------
@@ -485,19 +462,16 @@ public partial class MainWindowViewModel
     private string? _folderRenameFailedFor;
 
     internal static NoticeMessage FolderNotRenamedNotice(string wanted, string kept) =>
-        new(FolderNotRenamedNoticeId, "Folder not renamed",
-            $"Couldn't rename the mod folder to '{wanted}'. A file in it may be open in another program, "
-            + "or the folder may be read-only. Close any program using a file in the folder, or make the "
-            + $"folder writable. The mod is saved in '{kept}'. The next save tries again.",
+        new(FolderNotRenamedNoticeId, Strings.FolderNotRenamedNotice,
+            Strings.FolderNotRenamedDetail(wanted, kept),
             ProjectScoped: true);
 
     /// <summary>What the Blender send a pre-update Blender left in the mod folder says.</summary>
     internal const string LegacyBlenderSendNoticeId = "project.legacy-blender-send";
 
     internal static NoticeMessage LegacyBlenderSendNotice() =>
-        new(LegacyBlenderSendNoticeId, "Blender changes not applied",
-            "Couldn't apply the file sent back from Blender: it came from a Blender window opened before "
-            + "this update. Open the part in Blender again.",
+        new(LegacyBlenderSendNoticeId, Strings.LegacyBlenderSendNotice,
+            Strings.LegacyBlenderSendDetail,
             ProjectScoped: true);
 
     /// <summary>Clear out the round-trip folder older versions kept inside the mod. A Blender send one left

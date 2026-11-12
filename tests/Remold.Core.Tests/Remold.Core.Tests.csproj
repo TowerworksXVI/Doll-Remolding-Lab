@@ -36,5 +36,15 @@
     <!-- the shipped shader slot catalog, so its committed shape is under test -->
     <None Include="..\..\data\charps_slots.json" Link="data\charps_slots.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- the string catalogs' resx files, neutral and translated, so the accessors and translations are
+         checked against the committed source -->
+    <None Include="..\..\src\Remold.Core\Text\*.resx" Link="catalog\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\Remold.App\Text\*.resx" Link="catalog\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the catalog grammar the generator reads by, so the tests check the resx against the same rules -->
+    <Compile Include="..\..\tools\GenStrings\ResxCatalog.cs" Link="Support\ResxCatalog.cs" />
   </ItemGroup>
 </Project>

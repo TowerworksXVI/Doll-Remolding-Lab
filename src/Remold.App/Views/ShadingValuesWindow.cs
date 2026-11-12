@@ -14,8 +14,6 @@ namespace Remold.App.Views;
 /// <summary>Edits material values and enabled effects together. Disabled effects keep their values.</summary>
 public sealed class ShadingValuesWindow : Window
 {
-    internal const string CopiedValueUnreadable = "Couldn't read the copied value.";
-
     internal sealed record DialogRow(EditShadingField Field, string Initial, bool Copied,
         string? Problem);
     internal sealed record DialogInput(EditShadingField Field, string Initial, bool Copied,
@@ -83,7 +81,7 @@ public sealed class ShadingValuesWindow : Window
         IReadOnlyList<EditShadingEffect> effects)
     {
         _effectSelection = new EffectSelection(effects);
-        Title = "Advanced shading";
+        Title = Strings.ShadingValuesTitle;
         Width = 620;
         MaxHeight = 640;
         SizeToContent = SizeToContent.Height;
@@ -107,14 +105,14 @@ public sealed class ShadingValuesWindow : Window
                 Width = 170,
                 FontSize = 12,
                 Text = state.Initial,
-                Watermark = field.OriginalValue is null ? "original (not stated)" : "original",
+                Watermark = field.OriginalValue is null ? Strings.ShadingOriginalNotStatedWatermark : Strings.ShadingOriginalWatermark,
                 VerticalAlignment = VerticalAlignment.Center,
             };
             ToolTip.SetTip(box, field.Kind == MaterialValueKind.Color
                 ? field.Semantic.EndsWith("_ST", StringComparison.Ordinal)
-                    ? "Four numbers: horizontal scale, vertical scale, horizontal offset, vertical offset."
-                    : "Four numbers: red, green, blue, alpha."
-                : $"One number. Original materials use {Trim(field.ObservedMin)} to {Trim(field.ObservedMax)}.");
+                    ? Strings.ShadingTipScaleOffset
+                    : Strings.ShadingTipColor
+                : Strings.ShadingTipNumber(Trim(field.ObservedMin), Trim(field.ObservedMax)));
             var problem = new TextBlock
             {
                 FontSize = 11, Foreground = amber, IsVisible = state.Problem is not null,
@@ -132,7 +130,7 @@ public sealed class ShadingValuesWindow : Window
             };
             var original = new TextBlock
             {
-                Text = field.OriginalValue is null ? "original: not stated" : $"original: {field.OriginalValue}",
+                Text = field.OriginalValue is null ? Strings.ShadingOriginalNotStated : Strings.ShadingOriginal(field.OriginalValue),
                 FontSize = 11, Foreground = dim, VerticalAlignment = VerticalAlignment.Center,
                 TextWrapping = TextWrapping.Wrap, MaxWidth = 130,
             };
@@ -166,7 +164,7 @@ public sealed class ShadingValuesWindow : Window
                 IsChecked = effect.IsEnabled, MinHeight = 28 };
             var edited = new TextBlock { Text = "✎", Foreground = Brush("HudAccentBrush"),
                 VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
-            ToolTip.SetTip(edited, "Edited values");
+            ToolTip.SetTip(edited, Strings.EditShadingEdited);
             _effectControls.Add(effect.Id, (enabled, edited));
             enabled.IsCheckedChanged += (_, _) =>
             {
@@ -192,15 +190,15 @@ public sealed class ShadingValuesWindow : Window
         {
             var values = new StackPanel { Spacing = 8 };
             if (effects.Count > 0)
-                values.Children.Add(new TextBlock { Text = "Other values", FontSize = 12, Foreground = text });
+                values.Children.Add(new TextBlock { Text = Strings.ShadingOtherValues, FontSize = 12, Foreground = text });
             foreach (var state in ordinary) AddField(values, state);
             list.Children.Add(values);
         }
         RefreshEffectControls();
 
-        var apply = new Button { Content = "Apply", IsDefault = true, Padding = new Thickness(16, 6) };
+        var apply = new Button { Content = Strings.Apply, IsDefault = true, Padding = new Thickness(16, 6) };
         apply.Click += (_, _) => Apply();
-        var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6) };
+        var cancel = new Button { Content = Strings.Cancel, IsCancel = true, Padding = new Thickness(16, 6) };
         cancel.Click += (_, _) => Close(null);
 
         Content = new StackPanel
@@ -213,12 +211,12 @@ public sealed class ShadingValuesWindow : Window
                     TextWrapping = TextWrapping.Wrap },
                 new TextBlock
                 {
-                    Text = "An empty box keeps the original value. Disabled effects keep their saved values.",
+                    Text = Strings.ShadingValuesHint,
                     FontSize = 11, Foreground = dim,
                 },
                 new TextBlock
                 {
-                    Text = EditPageVm.AddsFirstEdit, IsVisible = addsFirstEdit,
+                    Text = Strings.EditAddsFirstEdit, IsVisible = addsFirstEdit,
                     FontSize = 11, Foreground = dim,
                 },
                 new ScrollViewer { Content = list, MaxHeight = 460 },
@@ -271,7 +269,7 @@ public sealed class ShadingValuesWindow : Window
         {
             bool has = authored.TryGetValue(field.Semantic, out string? current);
             return new DialogRow(field, has ? current ?? "" : "", copied.Contains(field.Semantic),
-                unreadableCopies.Contains(field.Semantic) ? CopiedValueUnreadable : null);
+                unreadableCopies.Contains(field.Semantic) ? Strings.ShadingCopiedValueUnreadable : null);
         }).ToList();
 
     internal static DialogApply ApplyRows(IEnumerable<DialogInput> rows)
@@ -292,9 +290,9 @@ public sealed class ShadingValuesWindow : Window
                     out string canonical))
             {
                 problems[row.Field.Semantic] = row.Field.Kind == MaterialValueKind.Color
-                    ? "Not four numbers."
+                    ? Strings.ShadingNotFourNumbers
                     : row.Field.Semantic == MaterialValueSemantics.UseGiFlatten
-                        ? "Not 0 or 1." : "Not a number.";
+                        ? Strings.ShadingNotZeroOrOne : Strings.ShadingNotANumber;
                 matchesOriginal = false;
                 continue;
             }
